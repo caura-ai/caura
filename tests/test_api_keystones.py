@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import pytest
 
+from common.governance.ruleset_hash import rule_set_hash
+from core_api.agent_ids import INSIGHTER_AGENT_ID
 from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
 from tests.conftest import get_test_auth
 from tests.conftest import uid as _uid
@@ -234,6 +236,90 @@ async def test_set_then_list_round_trip(client):
     )
     rules = get_resp.json()
     assert any(r["doc_id"] == doc_id for r in rules), rules
+
+
+async def test_the_envelope_names_the_rules_it_returns(client):
+    """g1.10: ``rule_set_hash`` is the hash of the envelope's items, on rows as
+    storage writes them (bucketed weights, its own timestamps), and an edit
+    moves it, so whoever holds the old set can tell it's stale."""
+    tenant_id, headers = get_test_auth(_ks_tenant())  # bare standalone admin
+    url = f"/api/v1/keystones?tenant_id={tenant_id}&envelope=true"
+
+    def expected(items: list[dict]) -> str:
+        # By hand from the hash's definition in common/governance/
+        # ruleset_hash.py, not through the row mapping the route itself uses.
+        return rule_set_hash(
+            [
+                {
+                    "doc_id": item["doc_id"],
+                    "content": item["data"]["content"],
+                    "scope": item["data"]["scope"],
+                    "weight": item["data"]["weight"],
+                    "updated_at": item["updated_at"],
+                }
+                for item in items
+            ]
+        )
+
+    empty = await client.get(url, headers=headers)
+    assert empty.status_code == 200, empty.text
+    assert empty.json()["rule_set_hash"] == expected([])
+
+    tag = _uid()
+    for doc_id in (f"ks-a-{tag}", f"ks-b-{tag}"):
+        resp = await _set_keystone(client, headers, tenant_id, doc_id=doc_id)
+        assert resp.status_code == 200, resp.text
+    before = (await client.get(url, headers=headers)).json()
+    assert before["count"] == 2
+    assert [item["data"]["weight"] for item in before["items"]] == [50, 50]  # "med"
+    assert before["rule_set_hash"] == expected(before["items"])
+
+    resp = await _set_keystone(
+        client, headers, tenant_id, doc_id=f"ks-a-{tag}", content="Changed."
+    )
+    assert resp.status_code == 200, resp.text
+    after = (await client.get(url, headers=headers)).json()
+    assert after["rule_set_hash"] == expected(after["items"])
+    assert after["rule_set_hash"] != before["rule_set_hash"]
+
+
+async def test_retired_service_input_targets_canonical_agent_rule(client):
+    tenant_id, headers = get_test_auth(_ks_tenant())
+    tag = _uid()
+    fleet_id = f"fleet-{tag}"
+    retired = "memclaw-insighter"  # legacy-name-ok: supported client input alias
+    await _seed_trusted_agent(
+        client,
+        tenant_id,
+        headers,
+        INSIGHTER_AGENT_ID,
+        fleet_id,
+    )
+
+    set_resp = await _set_keystone(
+        client,
+        _author_headers(headers, retired),
+        tenant_id,
+        doc_id=f"ks-{tag}",
+        scope="agent",
+        fleet_id=fleet_id,
+        agent_id=retired,
+    )
+
+    assert set_resp.status_code == 200, set_resp.text
+    assert set_resp.json()["data"]["agent_id"] == INSIGHTER_AGENT_ID
+
+    listed = await client.get(
+        "/api/v1/keystones",
+        params={
+            "tenant_id": tenant_id,
+            "fleet_id": fleet_id,
+            "agent_id": retired,
+        },
+        headers=headers,
+    )
+    assert listed.status_code == 200, listed.text
+    assert any(row["doc_id"] == f"ks-{tag}" for row in listed.json())
 
 
 # ---------------------------------------------------------------------------

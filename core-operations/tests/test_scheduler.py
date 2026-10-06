@@ -384,3 +384,28 @@ class TestSecondsUntilNextUtcHalfPast:
         buggy = seconds_until_next_utc_top_of_hour(now=now) + 1800
         assert buggy == 85 * 60, "the old formula's error, for the record"
         assert seconds_until_next_utc_half_past(now=now) != buggy
+
+
+def test_seconds_until_next_utc_hour_multiple_lands_on_the_anchored_slots():
+    from core_operations.scheduler import seconds_until_next_utc_hour_multiple
+
+    now = datetime(2026, 10, 1, 2, 0, 0, tzinfo=UTC)
+    # Exactly on a slot rolls a full period forward (strict future).
+    assert seconds_until_next_utc_hour_multiple(6, anchor_hour=2, now=now) == 6 * 3600
+    assert seconds_until_next_utc_hour_multiple(6, anchor_hour=2, now=now - timedelta(minutes=1)) == 60
+    assert seconds_until_next_utc_hour_multiple(6, anchor_hour=2, now=now + timedelta(minutes=30)) == (
+        5.5 * 3600
+    )
+    # Hourly is the next top of hour, whatever the anchor.
+    assert seconds_until_next_utc_hour_multiple(1, anchor_hour=7, now=now + timedelta(minutes=45)) == 15 * 60
+
+
+def test_seconds_until_next_utc_hour_multiple_validates_range():
+    from core_operations.scheduler import seconds_until_next_utc_hour_multiple
+
+    with pytest.raises(ValueError):
+        seconds_until_next_utc_hour_multiple(0)
+    with pytest.raises(ValueError):
+        seconds_until_next_utc_hour_multiple(25)
+    with pytest.raises(ValueError):
+        seconds_until_next_utc_hour_multiple(6, anchor_hour=24)

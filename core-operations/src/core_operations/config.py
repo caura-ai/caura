@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import ValidationInfo, field_validator
+from pydantic import ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from common.storage_auth import read_shared_secret_file
 
 
 class Settings(BaseSettings):
@@ -17,11 +19,10 @@ class Settings(BaseSettings):
     log_format_json: bool = False
     log_file: str = ""
 
-    # When True, the scheduler skips registration and start. OSS standalone
-    # deployments should not deploy core-operations at all; this flag is a
-    # defensive short-circuit so that an accidentally-started instance
-    # exits cleanly rather than firing cron jobs against a single-tenant
-    # standalone DB.
+    # When True, the scheduler skips registration and start: the off switch.
+    # The stock compose stack runs this service against its standalone core-api
+    # and leaves this unset there (M-109) — the fanout serves one tenant the same
+    # way it serves many. Set it on this service to stop every tick.
     #
     # 09/02 L-45 — was ``standalone``, which binds the env var ``STANDALONE``.
     # Nothing sets that name. The variable every operator actually sets is
@@ -65,6 +66,10 @@ class Settings(BaseSettings):
     # endpoints, which do the org enumeration and Pub/Sub publish.
     core_api_url: str = "http://oss-core-api:8000"
     core_api_admin_api_key: str = ""
+    # Read only when ``core_api_admin_api_key`` is blank (M-109). The compose
+    # stack's admin-key-init writes this file and core-api reads the same one, so
+    # the bundled scheduler needs no key set by hand; an operator's key wins.
+    core_api_admin_api_key_file: str = ""
 
     # All lifecycle crons are wall-clock aligned to a fixed UTC hour
     # rather than a boot-relative interval: each runs once a day at its
@@ -156,6 +161,14 @@ class Settings(BaseSettings):
         if not 0 <= v <= 23:
             raise ValueError(f"{info.field_name} must be in 0..23 (UTC hour)")
         return v
+
+    @model_validator(mode="after")
+    def _resolve_core_api_admin_api_key(self) -> Settings:
+        if not self.core_api_admin_api_key and self.core_api_admin_api_key_file:
+            self.core_api_admin_api_key = read_shared_secret_file(
+                self.core_api_admin_api_key_file, env_name="CORE_API_ADMIN_API_KEY_FILE"
+            )
+        return self
 
     @field_validator("agent_digest_weekly_run_at_weekday")
     @classmethod

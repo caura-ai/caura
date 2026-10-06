@@ -4,34 +4,23 @@ How Caura (formerly MemClaw) performs on the two most-cited public agent-memory 
 **LoCoMo** and **LongMemEval** — plus the fleet-shaped dimensions those
 single-agent benchmarks can't measure.
 
-> **TL;DR** — On accuracy, Caura sits inside the leading cluster (Caura,
-> Mem0, Zep land in a narrow band). Where we push hardest, and where it
-> compounds at fleet scale, is **latency, token efficiency, and governance
-> correctness**.
+> **TL;DR** — The approved results below cover accuracy and token efficiency.
+> Production fleet decisions also require workload-specific latency and
+> governance validation; no current public production-latency figure is claimed.
 
 ## Results
 
-|  | LoCoMo | LongMemEval | Search latency |
-|---|---|---|---|
-| Accuracy (LLM-judge) | **77.6%** | **92.2%** | — |
-| Token savings vs full context | **96.6%** | **79.2%** | — |
-| Latency | — | — | **23 ms p50 · 27 ms p95** (warm) |
+<!-- BEGIN GENERATED: evidence-benchmarks -->
+- **LoCoMo accuracy:** Caura scored 77.9% (1,199/1,540) under its documented LoCoMo semantic-judge protocol using the retrieval-augmented agentic-v1 pipeline.
+- **LongMemEval reference judge:** Caura answered 461 of 500 LongMemEval_S questions correctly (92.2%) under the benchmark's GPT-4o reference judge.
+- **LongMemEval secondary judge:** The same 500 frozen LongMemEval_S answers scored 90.2% (451/500) under the secondary Gemini 3.5 Flash-Lite judge.
+- **LongMemEval token efficiency:** On LongMemEval_S, the median compact retrieved context was 22,410 tokens versus a 107,706-token full haystack: 79.2% context-only savings; counting every reader call yields 75.4%.
 
-LoCoMo and LongMemEval both measure one agent, one user, one long
-conversation — the single-chatbot shape. Accuracy across the leading systems
-clusters in a narrow band, so the meaningful differences show up on the other
-axes.
-
-**Numbers are point-in-time and move when we re-run.** The LongMemEval column is
-the 2026-09-15 run (461 of 500 under the benchmark's reference judge, GPT-4o with
-the official prompts; 90.2% under a stricter second judge, Gemini 3.5 Flash-Lite;
-Gemini 3.8 Flash answering; token savings are the 22.4k-token median context
-against the 108k-token median haystack). Its harness, saved contexts and
-per-question verdicts are public at
-[caura-ai/caura-longmemeval](https://github.com/caura-ai/caura-longmemeval), and
-the write-up is at [caura.ai/blog/caura-longmemeval](https://caura.ai/blog/caura-longmemeval).
-The LoCoMo column is still the 2026-04-19 run. The canonical, current version
-lives in the blog write-up linked below.
+Only active, approved claims appear here. Control, withdrawn, and withheld
+records remain in the evidence registry and are excluded from promotional copy.
+See [`evidence/claims.json`](evidence/claims.json) and
+[`EVIDENCE.md`](EVIDENCE.md). Do not hand-edit this block.
+<!-- END GENERATED: evidence-benchmarks -->
 
 ## What we measure, and how
 
@@ -43,8 +32,9 @@ lives in the blog write-up linked below.
   same prompt with the full prior conversation inlined (the "no memory system"
   baseline). The ratio, not the absolute count, is what scales into your bill.
 - **Search latency** — p50 / p95 of `POST /api/v1/search` against a warm
-  pgvector cache, single-tenant. Cold-cache p50 is higher; we publish warm
-  because that's the steady state under real load.
+  pgvector cache under a stated load profile. No current public latency figure
+  is approved; a future claim must publish its raw result or reproducible
+  harness with the hardware, request count, and concurrency.
 
 ## What these benchmarks can't measure
 
@@ -78,6 +68,17 @@ so you can reproduce the methodology against your own Caura instance:
    [LongMemEval](https://arxiv.org/abs/2410.10813) are publicly available.
 3. **Ingest** — for each conversation, write its turns with
    `POST /api/v1/memories` (one memory per turn / fact).
+   **Then wait for the store to settle before querying.** Embedding, LLM
+   enrichment and atomic-fact fan-out can finish long after the write returns
+   (always so for `POST /api/v1/memories/bulk` on a deferred deployment), and
+   a store measured mid-flight scores differently from the same store later.
+   Poll `GET /api/v1/memories/stats?tenant_id=…` (optionally `agent_id` /
+   `fleet_id`) until it returns `"settled": true`; `pending` breaks the
+   outstanding work down by `embedding` / `enrichment` / `fanout`. Contradiction
+   marks carry no row marker and land a few seconds after the last of those, so
+   allow a short grace period after the flip. A `pending` count that stops
+   shrinking means stranded work (e.g. a disabled embed backfill), not a store
+   that is still converging.
 4. **Query** — for each benchmark question, call `POST /api/v1/search` and pass
    the retrieved memories to your answering LLM.
 5. **Score** — judge each answer against the benchmark's expected answer with an
@@ -85,10 +86,13 @@ so you can reproduce the methodology against your own Caura instance:
 6. **Latency** — measure p50/p95 of `POST /api/v1/search` under your expected
    concurrency against a warm cache.
 
-> The end-to-end accuracy/token harness isn't bundled yet — the datasets are
-> large and publicly hosted, and the runner is being prepared for open release.
-> Until then the steps above describe the exact methodology. Operator-scale
-> guidance and caveats live in [`docs/performance.md`](docs/performance.md).
+> The benchmark runners live in the pinned public
+> [LoCoMo](https://github.com/caura-ai/yanki-locomo/tree/254737614b228ecc4a272e4f17dbb9197c5fb146)
+> and
+> [LongMemEval](https://github.com/caura-ai/caura-longmemeval/tree/3b1e293aacc652694822ab4062c15fef73536335)
+> harnesses. Use the exact commits and configurations recorded in the evidence
+> registry; operator-scale guidance and caveats live in
+> [`docs/performance.md`](docs/performance.md).
 
 ### Reranking, specifically
 

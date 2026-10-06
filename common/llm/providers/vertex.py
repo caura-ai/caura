@@ -32,7 +32,10 @@ import threading
 import time
 from typing import Any
 
-from common.llm.constants import LLM_JSON_MAX_OUTPUT_TOKENS
+from common.llm.constants import (
+    GOOGLE_GENAI_REQUEST_TIMEOUT_SECONDS,
+    LLM_JSON_MAX_OUTPUT_TOKENS,
+)
 from common.llm.providers._json_shape import unwrap_singleton_array
 from common.llm.providers._shape_error import ProviderResponseShapeError
 from common.llm.providers._truncation import raise_if_truncated
@@ -133,10 +136,13 @@ class VertexLLMProvider:
                         "project": self._project_id,
                         "location": self._location,
                     }
+                    # ``HttpOptions.timeout`` is in MILLISECONDS.
+                    http_options: dict = {
+                        "timeout": int(GOOGLE_GENAI_REQUEST_TIMEOUT_SECONDS * 1000)
+                    }
                     if self._location in _MULTI_REGION_LOCATIONS:
-                        client_kwargs["http_options"] = types.HttpOptions(
-                            base_url=_BARE_VERTEX_BASE_URL
-                        )
+                        http_options["base_url"] = _BARE_VERTEX_BASE_URL
+                    client_kwargs["http_options"] = types.HttpOptions(**http_options)
                     self._client = genai.Client(**client_kwargs)
         return self._client
 

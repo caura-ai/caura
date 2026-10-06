@@ -84,11 +84,10 @@ def test_pem_scrub_terminates_fast_on_begin_without_end():
 
 def test_acquire_lock_closes_fd_when_flock_fails(monkeypatch):
     """A flock failure must not leak the just-opened file handle."""
+    import errno as errno_mod
     import fcntl as real_fcntl
 
     from caura_client.interviewer import cli as cli_mod
-
-    import errno as errno_mod
 
     def failing_flock(handle, flags):
         raise OSError(errno_mod.EAGAIN, "locked by someone else")
@@ -169,26 +168,26 @@ def test_run_closes_lock_handle_deterministically(tmp_path, monkeypatch):
     from caura_client.interviewer import cli as cli_mod
 
     lock_file = tmp_path / "test.lock"
-    handle = open(lock_file, "w")
-    monkeypatch.setattr(cli_mod, "_acquire_lock", lambda: handle)
+    with lock_file.open("w") as handle:
+        monkeypatch.setattr(cli_mod, "_acquire_lock", lambda: handle)
 
-    project_dir = tmp_path / "proj"
-    project_dir.mkdir()
-    transcript = project_dir / "abc.jsonl"
-    transcript.write_text("", encoding="utf-8")
+        project_dir = tmp_path / "proj"
+        project_dir.mkdir()
+        transcript = project_dir / "abc.jsonl"
+        transcript.write_text("", encoding="utf-8")
 
-    rc = cli_mod.main(
-        [
-            "run",
-            "--transcript", str(transcript),
-            "--all-projects",
-            "--api-key", "k",
-            "--tenant-id", "t",
-            "--dry-run",
-        ]
-    )
-    assert rc == 0
-    assert handle.closed  # released in the finally, not by refcount luck
+        rc = cli_mod.main(
+            [
+                "run",
+                "--transcript", str(transcript),
+                "--all-projects",
+                "--api-key", "k",
+                "--tenant-id", "t",
+                "--dry-run",
+            ]
+        )
+        assert rc == 0
+        assert handle.closed  # released in the finally, not by refcount luck
 
 
 def test_status_survives_vanished_transcript(tmp_path, monkeypatch):

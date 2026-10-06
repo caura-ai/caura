@@ -42,8 +42,12 @@ Failure modes:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import uuid
 from collections.abc import Callable
+from datetime import datetime
+from functools import partial
 from types import SimpleNamespace
 
 import httpx
@@ -54,6 +58,7 @@ from common.enrichment import EnrichmentResult, enrich_memory
 from common.events.base import Event
 from common.events.factory import get_event_bus
 from common.events.lifecycle_archive_request import LifecycleArchiveRequest
+from common.events.lifecycle_handlers import claim_audit_row, release_cancelled_claim, write_success
 from common.events.memory_embed_request import MemoryEmbedRequest
 from common.events.memory_embedded_publisher import publish_memory_embedded
 from common.events.memory_enrich_request import MemoryEnrichRequest
@@ -698,29 +703,36 @@ async def handle_enrich_request(event: Event) -> None:
         request.caller_owned_metadata_keys,
     )
 
-    # The sync/async gap, now HALF closed. ``memory_service.py`` fans
-    # ``atomic_facts`` out into child memories on the synchronous path; this
-    # worker does not, so fast-mode multi-claim content still yields fewer
-    # memories than the same content written in strong mode.
+    # The sync/async fan-out gap is CLOSED, and this is the handoff point.
+    # ``atomic_facts`` rides into the row's metadata in the patch above; the
+    # worker does not create the children itself, because its storage client
+    # has no create-memory call and a second copy of ``fan_out_atomic_facts``
+    # is exactly what A70 set out to avoid. It publishes
+    # ``Topics.Memory.ENRICHED`` below instead, and core-api's
+    # ``handle_memory_enriched`` runs ``_fan_out_persisted_atomic_facts``,
+    # which calls the same ``fan_out_atomic_facts`` the synchronous path uses
+    # and then clears the marker. Deferred multi-claim content DOES yield child
+    # memories (A70 step 2b, #1430, 2026-09-09).
     #
-    # What changed: the facts are no longer DISCARDED. They ride into the row's
-    # metadata above, so the gap is now recoverable from stored data instead of
-    # requiring the LLM to be re-run. Fan-out stays in core-api, which already
-    # consumes ``Topics.Memory.ENRICHED`` and already owns the dedup /
-    # visibility / weight rules a child must inherit.
+    # A WARNING here asserted the opposite — that fan-out was "not yet
+    # implemented on the async path" and secondary facts "will NOT appear as
+    # child memories" — for the fifteen days after #1430 landed. Its stated
+    # justification was that the string stayed greppable so "that count is what
+    # the A75 proof gate needs to size this". reg-a75 was closed on 2026-09-10
+    # WITHOUT BEING RUN, its harness having lived in a private repo nobody could
+    # reach, so no gate has consumed the count since before the claim went
+    # stale; nothing else in the tree greps the string. Retired rather than
+    # re-worded: there is no residual gap here to warn about.
     #
-    # Still WARNING, not ERROR: the gap is real but expected, and paging on
-    # every multi-fact write would bury on-call without an actionable fix. The
-    # string stays greppable so the exposure remains countable — that count is
-    # what the A75 proof gate needs to size this.
-    if result.atomic_facts:
-        logger.warning(
-            "enrich-request for memory %s produced %d atomic_facts; persisted to "
-            "metadata but child-memory fan-out is not yet implemented on the async "
-            "path — secondary facts will NOT appear as child memories YET",
-            request.memory_id,
-            len(result.atomic_facts),
-        )
+    # What IS still worth having is the size of the deferred fan-out
+    # population, which pm-0918-c-04 could not measure because its corpus
+    # predates A70 — see docs/atomic-fact-fanout/pm-c04-fanout-rate-findings.md.
+    # That survives as a field on the "enrich-request processed" INFO line
+    # below, not as a record of its own. Every way this handoff can still fail
+    # to produce children already logs at its own site, and more precisely than
+    # a count here could: the publish failure below, and on the core-api side a
+    # fan-out exception (marker deliberately left for retry), a governance drop,
+    # or the per-tenant ``atomic_fact_fanout_enabled`` switch.
 
     # Per-tenant slot scoped to the PATCH only; matches the embed
     # consumer above. The LLM enrichment call upstream is the
@@ -763,6 +775,10 @@ async def handle_enrich_request(event: Event) -> None:
             "provider": request.enrichment_provider or "platform",
             "memory_type": result.memory_type,
             "llm_ms": result.llm_ms,
+            # Always emitted, including the 0 case, so the denominator is
+            # available too: "how many deferred writes produced facts at all"
+            # needs the writes that produced none.
+            "atomic_facts": len(result.atomic_facts or []),
         },
     )
 
@@ -777,7 +793,14 @@ class _SuppressionAdapter(SuppressionStorageAdapter):
     + enrich handlers use to reach the storage client.
     """
 
-    async def set_tenant_suppression(self, *, tenant_id: str, action: str, updated_by: str | None) -> None:
+    async def set_tenant_suppression(
+        self,
+        *,
+        tenant_id: str,
+        action: str,
+        updated_by: str | None,
+        occurred_at: datetime | None = None,
+    ) -> None:
         if _storage_client_factory is None:
             raise RuntimeError("consumer.configure() must run before register_consumers()")
         client = _storage_client_factory()
@@ -786,6 +809,7 @@ class _SuppressionAdapter(SuppressionStorageAdapter):
             tenant_id=tenant_id,
             action=action,
             updated_by=updated_by,
+            occurred_at=occurred_at,
         )
 
 
@@ -854,35 +878,42 @@ async def handle_embed_backfill_request(event: Event) -> None:
         )
         return
 
-    # Mark the row in_progress before the sweep, as the shared ``_run_action``
-    # does. A per-org sweep can run for a while, and without this an operator
-    # inspecting the row mid-run cannot tell "actively sweeping" from "message
-    # not picked up yet" — both read as the fanout's initial ``pending``.
-    #
-    # Best-effort, matching ``_run_action``: bookkeeping must not decide whether
-    # the work happens. Letting this raise would nack before the sweep even
-    # started, skipping an op the operator asked for because a status write
-    # failed — and the sweep is idempotent, so doing it with a stale row is
-    # strictly better than not doing it.
-    try:
-        await update_lifecycle_audit_row(
-            get_storage_client(),
-            request.audit_id,
-            org_id=request.org_id,
-            status="in_progress",
-        )
-    except Exception:
-        logger.warning(
-            "embed-backfill audit in_progress update failed; continuing",
-            exc_info=True,
-            extra={"org_id": request.org_id, "audit_id": request.audit_id},
-        )
+    # Claim the row before the sweep, through the same claim as the shared
+    # ``_run_action`` (L-05). Mid-run the row reads ``in_progress``, so an
+    # operator can tell "actively sweeping" from "message not picked up yet".
+    # And a second delivery does not sweep alongside this one: the sweep is
+    # idempotent over rows, but each run publishes an embed request for every
+    # row still NULL, so two at once double the provider calls for the backlog.
+    # A redelivery of a finished sweep is acked; a live conflict or a failed
+    # claim write nacks.
+    audit_write = partial(update_lifecycle_audit_row, get_storage_client())
+    claim_token = uuid.uuid4().hex
+    if not await claim_audit_row(
+        audit_write,
+        request.audit_id,
+        org_id=request.org_id,
+        action="embed-backfill",
+        claim_token=claim_token,
+    ):
+        return
 
     try:
         report = await run_embedding_backfill(
             tenant_id=request.org_id,
             max_inflight=settings.embed_backfill_max_inflight,
         )
+    except asyncio.CancelledError:
+        # L-231: a deploy mid-sweep outlasts the bus's stop grace, and ``except
+        # Exception`` below does not see the cancel, so the row stayed claimed
+        # for the lease and its redelivery nacked on the claim until then.
+        await release_cancelled_claim(
+            audit_write,
+            request.audit_id,
+            org_id=request.org_id,
+            action="embed-backfill",
+            claim_token=claim_token,
+        )
+        raise
     except Exception as exc:
         # Finalise the audit row before re-raising. The fanout pre-creates it
         # as ``pending`` specifically so a row that never advances reads as a
@@ -900,12 +931,12 @@ async def handle_embed_backfill_request(event: Event) -> None:
         # still leaving the row unfinalised. The original failure is the one
         # worth propagating, so a bookkeeping failure only gets logged.
         try:
-            await update_lifecycle_audit_row(
-                get_storage_client(),
+            await audit_write(
                 request.audit_id,
                 org_id=request.org_id,
                 status="failure",
                 error_message=str(exc)[:500],
+                claim_token=claim_token,
             )
         except Exception:
             logger.exception(
@@ -916,17 +947,19 @@ async def handle_embed_backfill_request(event: Event) -> None:
 
     # The count nobody could get before: "how many rows were unembedded" was
     # only answerable by querying AlloyDB directly, because the coverage
-    # endpoint is internal-ingress and no metric carried it.
-    await update_lifecycle_audit_row(
-        get_storage_client(),
+    # endpoint is internal-ingress and no metric carried it. Retried in place
+    # under the claim, since a nack would re-run the whole sweep.
+    await write_success(
+        audit_write,
         request.audit_id,
         org_id=request.org_id,
-        status="success",
+        action="embed-backfill",
         stats={
             "scanned": report.scanned,
             "published": report.published,
             "skipped_missing": report.skipped_missing,
         },
+        claim_token=claim_token,
     )
     logger.info(
         "embed-backfill sweep processed",

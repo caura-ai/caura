@@ -1,0 +1,499 @@
+{
+  "$schema": "./claims.schema.json",
+  "registry_version": 1,
+  "updated_at": "2026-10-06",
+  "claims": [
+    {
+      "id": "locomo_caura_retrieval_accuracy_2026_09",
+      "title": "Caura retrieval-augmented LoCoMo accuracy",
+      "status": "active",
+      "role": "headline",
+      "metric": "accuracy",
+      "benchmark": "LoCoMo",
+      "measurement_at": "2026-09-22",
+      "last_verified_at": "2026-10-05",
+      "approved_wording": "Caura scored 77.9% (1,199/1,540) under its documented LoCoMo semantic-judge protocol using the retrieval-augmented agentic-v1 pipeline.",
+      "scope": "All 1,540 scored LoCoMo questions in categories 1-4.",
+      "evaluation": {
+        "population": "LoCoMo category 1-4 questions",
+        "sample_size": 1540,
+        "numerator": 1199,
+        "denominator": 1540,
+        "dataset": "LoCoMo locomo10.json",
+        "dataset_version": "snap-research/locomo public dataset; exact dataset hash documented by the harness",
+        "sampling_notes": "All scored category 1-4 questions; adversarial category 5 is reported separately and excluded from this headline.",
+        "null_reason": null
+      },
+      "answering_model": {
+        "applicable": true,
+        "provider": "Google Gemini",
+        "model": "gemini-3.8-flash",
+        "immutable_snapshot": null,
+        "notes": "The public run records this model name but no provider-issued immutable snapshot identifier."
+      },
+      "judge": {
+        "applicable": true,
+        "provider": "Google Gemini",
+        "model": "gemini-3.8-flash",
+        "immutable_snapshot": null,
+        "notes": "Three seeded votes per frozen answer; the public run records no provider-issued immutable snapshot identifier."
+      },
+      "configuration": {
+        "description": "agentic-v1 retrieval and answer pipeline on the settled caura-balanced-50-v3-20260910 store",
+        "parameters": { "top_k": 30, "chunk_characters": 4000, "judge_votes": 3, "thinking_tokens": 2048 }
+      },
+      "code_commit": {
+        "repository": "https://github.com/caura-ai/yanki-locomo",
+        "commit": "254737614b228ecc4a272e4f17dbb9197c5fb146",
+        "null_reason": null
+      },
+      "methodology_url": "https://github.com/caura-ai/yanki-locomo/blob/254737614b228ecc4a272e4f17dbb9197c5fb146/README.md",
+      "raw_result_url": null,
+      "reproducible_harness_url": "https://github.com/caura-ai/yanki-locomo/tree/254737614b228ecc4a272e4f17dbb9197c5fb146",
+      "evidence_gap": null,
+      "measurements": [
+        { "label": "LLM-judge semantic accuracy", "value": 77.9, "unit": "percent", "display": "77.9%", "measurement_at": "2026-09-22" }
+      ],
+      "sources": [
+        { "label": "Pinned public harness", "url": "https://github.com/caura-ai/yanki-locomo/tree/254737614b228ecc4a272e4f17dbb9197c5fb146", "kind": "harness" },
+        { "label": "LoCoMo dataset", "url": "https://github.com/snap-research/locomo", "kind": "dataset" }
+      ],
+      "caveats": [
+        "This is the Caura retrieval-augmented result, not the full-context control.",
+        "The semantic-judge protocol is not the original LoCoMo token-F1 metric.",
+        "The answering model and semantic judge are both recorded as gemini-3.8-flash; this is not an independent-model judge result.",
+        "The repository documents the summary but does not currently commit the full question-level result artifact."
+      ],
+      "withdrawal": null,
+      "withholding": null
+    },
+    {
+      "id": "locomo_full_context_control_2026_09",
+      "title": "LoCoMo full-context reader baseline",
+      "status": "withheld",
+      "role": "control",
+      "metric": "accuracy",
+      "benchmark": "LoCoMo",
+      "measurement_at": "2026-09-28",
+      "last_verified_at": "2026-10-06",
+      "approved_wording": null,
+      "scope": "The same 1,540 LoCoMo category 1-4 questions with the full conversation supplied instead of Caura-retrieved context.",
+      "evaluation": {
+        "population": "LoCoMo category 1-4 questions",
+        "sample_size": 1540,
+        "numerator": 1344,
+        "denominator": 1540,
+        "dataset": "LoCoMo locomo10.json",
+        "dataset_version": "sha256:79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+        "sampling_notes": "Uniform full-context arm over all category 1-4 questions; category 5 is excluded from this score.",
+        "null_reason": null
+      },
+      "answering_model": {
+        "applicable": true,
+        "provider": "OpenAI",
+        "model": "gpt-5-mini",
+        "immutable_snapshot": null,
+        "notes": "The committed result records gpt-5-mini and temperature 1 but no provider-issued immutable snapshot identifier."
+      },
+      "judge": {
+        "applicable": true,
+        "provider": "OpenAI",
+        "model": "gpt-4o",
+        "immutable_snapshot": null,
+        "notes": "Single-pass rejudge of the saved answers; no provider-issued immutable snapshot identifier was recorded."
+      },
+      "configuration": {
+        "description": "The complete LoCoMo conversation was placed in the reader prompt; the harness fullcontext arm performed no Caura retrieval.",
+        "parameters": { "arm": "fullcontext", "no_derive": true, "reader_temperature": 1, "judge_passes": 1 }
+      },
+      "code_commit": {
+        "repository": "https://github.com/caura-ai/caura-locomo",
+        "commit": "c55d3a3fe8df01533690c7f2e6874e6a0e67c9be",
+        "null_reason": null
+      },
+      "methodology_url": "https://github.com/caura-ai/caura-locomo/blob/c55d3a3fe8df01533690c7f2e6874e6a0e67c9be/REPRODUCE.md",
+      "raw_result_url": "https://github.com/caura-ai/caura-locomo/blob/c55d3a3fe8df01533690c7f2e6874e6a0e67c9be/outputs/uniform/results_judge_gpt-4o.json",
+      "reproducible_harness_url": "https://github.com/caura-ai/caura-locomo/tree/c55d3a3fe8df01533690c7f2e6874e6a0e67c9be",
+      "evidence_gap": "Benchmark-owner confirmation and H1 approval of the final public wording are pending.",
+      "measurements": [
+        { "label": "LLM-judge semantic accuracy", "value": 87.27, "unit": "percent", "display": "87.27%", "measurement_at": "2026-09-28" }
+      ],
+      "sources": [
+        { "label": "Pinned harness description", "url": "https://github.com/caura-ai/caura-locomo/blob/c55d3a3fe8df01533690c7f2e6874e6a0e67c9be/README.md", "kind": "methodology" },
+        { "label": "Pinned reproduction instructions", "url": "https://github.com/caura-ai/caura-locomo/blob/c55d3a3fe8df01533690c7f2e6874e6a0e67c9be/REPRODUCE.md", "kind": "harness" },
+        { "label": "Committed GPT-4o result artifact", "url": "https://github.com/caura-ai/caura-locomo/blob/c55d3a3fe8df01533690c7f2e6874e6a0e67c9be/outputs/uniform/results_judge_gpt-4o.json", "kind": "artifact" }
+      ],
+      "caveats": [
+        "This is a full-context reader baseline, not a Caura memory-system score.",
+        "The harness records no Caura retrieval in this arm.",
+        "The public artifact was committed on 2026-09-28; the benchmark owner must confirm the exact execution date before activation."
+      ],
+      "withdrawal": null,
+      "withholding": {
+        "at": "2026-10-06",
+        "reason": "Awaiting benchmark-owner confirmation and H1 approval of final public wording."
+      }
+    },
+    {
+      "id": "locomo_token_savings_2026_04",
+      "title": "Historical LoCoMo token-savings claim",
+      "status": "withdrawn",
+      "role": "historical",
+      "metric": "token_savings",
+      "benchmark": "LoCoMo",
+      "measurement_at": "2026-04-19",
+      "last_verified_at": "2026-10-05",
+      "approved_wording": null,
+      "scope": "April 2026 LoCoMo configuration only.",
+      "evaluation": {
+        "population": "April 2026 LoCoMo run",
+        "sample_size": null,
+        "numerator": null,
+        "denominator": null,
+        "dataset": "LoCoMo",
+        "dataset_version": null,
+        "sampling_notes": "The old public copy did not retain sufficient sample metadata.",
+        "null_reason": "The underlying run artifact and exact denominator were not published."
+      },
+      "answering_model": {
+        "applicable": true,
+        "provider": "Unrecorded",
+        "model": "Unrecorded",
+        "immutable_snapshot": null,
+        "notes": "Applicable to the historical run, but neither the model nor an immutable snapshot was recorded in durable public evidence."
+      },
+      "judge": {
+        "applicable": false,
+        "provider": null,
+        "model": null,
+        "immutable_snapshot": null,
+        "notes": "A judge is not part of the token-count calculation."
+      },
+      "configuration": {
+        "description": "Historical April configuration; exact retrieval parameters were not preserved in public evidence.",
+        "parameters": {}
+      },
+      "code_commit": {
+        "repository": null,
+        "commit": null,
+        "null_reason": "The exact execution commit was not recorded."
+      },
+      "methodology_url": "https://caura.ai/blog/caura-benchmarks",
+      "raw_result_url": null,
+      "reproducible_harness_url": null,
+      "evidence_gap": "No raw result or exact-configuration reproducible harness is publicly available; retained only so the withdrawal is machine-readable.",
+      "measurements": [
+        { "label": "Withdrawn token-savings value", "value": 96.6, "unit": "percent", "display": "96.6%", "measurement_at": "2026-04-19" }
+      ],
+      "sources": [
+        { "label": "Historical benchmark article", "url": "https://caura.ai/blog/caura-benchmarks", "kind": "methodology" }
+      ],
+      "caveats": ["Do not quote this value as current or combine it with the September LoCoMo accuracy result."],
+      "withdrawal": {
+        "at": "2026-09-22",
+        "reason": "It was not re-derived for the September top-k 30, 4,000-character-chunk configuration."
+      },
+      "withholding": null
+    },
+    {
+      "id": "longmemeval_reference_accuracy_2026_09_15",
+      "title": "LongMemEval accuracy under the reference judge",
+      "status": "active",
+      "role": "headline",
+      "metric": "accuracy",
+      "benchmark": "LongMemEval",
+      "measurement_at": "2026-09-15",
+      "last_verified_at": "2026-10-05",
+      "approved_wording": "Caura answered 461 of 500 LongMemEval_S questions correctly (92.2%) under the benchmark's GPT-4o reference judge.",
+      "scope": "All 500 LongMemEval_S questions with one configuration across all six question types.",
+      "evaluation": {
+        "population": "LongMemEval_S",
+        "sample_size": 500,
+        "numerator": 461,
+        "denominator": 500,
+        "dataset": "longmemeval_s_cleaned.json",
+        "dataset_version": "xiaowu0162/longmemeval-cleaned version recorded by the pinned harness",
+        "sampling_notes": "All 500 questions; no category filter or held-out subset.",
+        "null_reason": null
+      },
+      "answering_model": {
+        "applicable": true,
+        "provider": "Google Gemini",
+        "model": "gemini-3.8-flash",
+        "immutable_snapshot": null,
+        "notes": "The artifact records the model name but no provider-issued immutable snapshot."
+      },
+      "judge": {
+        "applicable": true,
+        "provider": "OpenAI",
+        "model": "gpt-4o",
+        "immutable_snapshot": "gpt-4o-2024-08-06",
+        "notes": "Official LongMemEval task-specific prompts, temperature 0."
+      },
+      "configuration": {
+        "description": "Opaque turn-level store, compact context, raw turns only, chronological ordering, agentic-v1 reader pipeline.",
+        "parameters": { "search_candidates": 150, "context_budget_characters": 150000, "sibling_expansion": true, "context_format": "compact" }
+      },
+      "code_commit": {
+        "repository": "https://github.com/caura-ai/caura-longmemeval",
+        "commit": "3b1e293aacc652694822ab4062c15fef73536335",
+        "null_reason": null
+      },
+      "methodology_url": "https://github.com/caura-ai/caura-longmemeval/blob/3b1e293aacc652694822ab4062c15fef73536335/REPRODUCE.md",
+      "raw_result_url": "https://github.com/caura-ai/caura-longmemeval/blob/3b1e293aacc652694822ab4062c15fef73536335/outputs/caura-500-opaque-compact/eval_results.json",
+      "reproducible_harness_url": "https://github.com/caura-ai/caura-longmemeval/tree/3b1e293aacc652694822ab4062c15fef73536335",
+      "evidence_gap": null,
+      "measurements": [
+        { "label": "Reference-judge accuracy", "value": 92.2, "unit": "percent", "display": "92.2%", "measurement_at": "2026-09-15" }
+      ],
+      "sources": [
+        { "label": "Pinned primary verdicts", "url": "https://github.com/caura-ai/caura-longmemeval/blob/3b1e293aacc652694822ab4062c15fef73536335/outputs/caura-500-opaque-compact/eval_results.json", "kind": "artifact" },
+        { "label": "LongMemEval paper", "url": "https://arxiv.org/abs/2410.10813", "kind": "dataset" }
+      ],
+      "caveats": ["Reader prompts were iterated against failures on this benchmark; this is not a held-out evaluation."],
+      "withdrawal": null,
+      "withholding": null
+    },
+    {
+      "id": "longmemeval_secondary_accuracy_2026_09_15",
+      "title": "LongMemEval accuracy under the secondary judge",
+      "status": "active",
+      "role": "supporting",
+      "metric": "accuracy",
+      "benchmark": "LongMemEval",
+      "measurement_at": "2026-09-15",
+      "last_verified_at": "2026-10-05",
+      "approved_wording": "The same 500 frozen LongMemEval_S answers scored 90.2% (451/500) under the secondary Gemini 3.5 Flash-Lite judge.",
+      "scope": "The same 500 saved answers as the reference-judge result.",
+      "evaluation": {
+        "population": "LongMemEval_S frozen headline answers",
+        "sample_size": 500,
+        "numerator": 451,
+        "denominator": 500,
+        "dataset": "longmemeval_s_cleaned.json",
+        "dataset_version": "same pinned dataset as the reference-judge result",
+        "sampling_notes": "Same answers, alternate judge only.",
+        "null_reason": null
+      },
+      "answering_model": {
+        "applicable": true,
+        "provider": "Google Gemini",
+        "model": "gemini-3.8-flash",
+        "immutable_snapshot": null,
+        "notes": "Same frozen answers as the reference-judge result; provider snapshot not recorded."
+      },
+      "judge": {
+        "applicable": true,
+        "provider": "Google Gemini",
+        "model": "gemini-3.5-flash-lite",
+        "immutable_snapshot": null,
+        "notes": "Official task-specific prompts; provider snapshot not recorded."
+      },
+      "configuration": {
+        "description": "Identical frozen answers and official prompts; secondary judge substituted only.",
+        "parameters": { "questions": 500, "answers_frozen": true }
+      },
+      "code_commit": {
+        "repository": "https://github.com/caura-ai/caura-longmemeval",
+        "commit": "3b1e293aacc652694822ab4062c15fef73536335",
+        "null_reason": null
+      },
+      "methodology_url": "https://github.com/caura-ai/caura-longmemeval/blob/3b1e293aacc652694822ab4062c15fef73536335/REPRODUCE.md",
+      "raw_result_url": "https://github.com/caura-ai/caura-longmemeval/blob/3b1e293aacc652694822ab4062c15fef73536335/outputs/caura-500-opaque-compact/eval_results_gemini35flashlite.json",
+      "reproducible_harness_url": "https://github.com/caura-ai/caura-longmemeval/tree/3b1e293aacc652694822ab4062c15fef73536335",
+      "evidence_gap": null,
+      "measurements": [
+        { "label": "Secondary-judge accuracy", "value": 90.2, "unit": "percent", "display": "90.2%", "measurement_at": "2026-09-15" }
+      ],
+      "sources": [
+        { "label": "Pinned secondary verdicts", "url": "https://github.com/caura-ai/caura-longmemeval/blob/3b1e293aacc652694822ab4062c15fef73536335/outputs/caura-500-opaque-compact/eval_results_gemini35flashlite.json", "kind": "artifact" }
+      ],
+      "caveats": ["This is a robustness result and must not replace the reference-judge headline."],
+      "withdrawal": null,
+      "withholding": null
+    },
+    {
+      "id": "longmemeval_token_savings_2026_09_15",
+      "title": "LongMemEval compact-context token savings",
+      "status": "active",
+      "role": "headline",
+      "metric": "token_savings",
+      "benchmark": "LongMemEval",
+      "measurement_at": "2026-09-15",
+      "last_verified_at": "2026-10-05",
+      "approved_wording": "On LongMemEval_S, the median compact retrieved context was 22,410 tokens versus a 107,706-token full haystack: 79.2% context-only savings; counting every reader call yields 75.4%.",
+      "scope": "Median token counts across all 500 headline questions, using the answering model's tokenizer.",
+      "evaluation": {
+        "population": "LongMemEval_S headline run",
+        "sample_size": 500,
+        "numerator": null,
+        "denominator": null,
+        "dataset": "longmemeval_s_cleaned.json",
+        "dataset_version": "same pinned dataset as the headline accuracy result",
+        "sampling_notes": "Medians over every question; token savings is derived from token counts, not correct-answer counts.",
+        "null_reason": "Numerator and denominator are not question counts for this metric; the token measurements below are the inputs."
+      },
+      "answering_model": {
+        "applicable": true,
+        "provider": "Google Gemini",
+        "model": "gemini-3.8-flash",
+        "immutable_snapshot": null,
+        "notes": "Its tokenizer produced the recorded counts; provider snapshot not recorded."
+      },
+      "judge": {
+        "applicable": false,
+        "provider": null,
+        "model": null,
+        "immutable_snapshot": null,
+        "notes": "Judging does not participate in token counting."
+      },
+      "configuration": {
+        "description": "Compact context layout from the caura-500-opaque saved retrieval pass.",
+        "parameters": { "context_format": "compact", "questions": 500, "tokenizer": "Gemini reader tokenizer" }
+      },
+      "code_commit": {
+        "repository": "https://github.com/caura-ai/caura-longmemeval",
+        "commit": "3b1e293aacc652694822ab4062c15fef73536335",
+        "null_reason": null
+      },
+      "methodology_url": "https://github.com/caura-ai/caura-longmemeval/blob/3b1e293aacc652694822ab4062c15fef73536335/REPRODUCE.md",
+      "raw_result_url": "https://github.com/caura-ai/caura-longmemeval/blob/3b1e293aacc652694822ab4062c15fef73536335/outputs/caura-500-opaque-compact/context_tokens.json",
+      "reproducible_harness_url": "https://github.com/caura-ai/caura-longmemeval/tree/3b1e293aacc652694822ab4062c15fef73536335",
+      "evidence_gap": null,
+      "measurements": [
+        { "label": "Context token savings", "value": 79.2, "unit": "percent", "display": "79.2%", "measurement_at": "2026-09-15" },
+        { "label": "All-reader-call token savings", "value": 75.4, "unit": "percent", "display": "75.4%", "measurement_at": "2026-09-15" },
+        { "label": "Median retrieved context", "value": 22410, "unit": "tokens", "display": "22,410 tokens", "measurement_at": "2026-09-15" },
+        { "label": "Median all-reader-call total", "value": 26482, "unit": "tokens", "display": "26,482 tokens", "measurement_at": "2026-09-15" },
+        { "label": "Median full haystack", "value": 107706, "unit": "tokens", "display": "107,706 tokens", "measurement_at": "2026-09-15" }
+      ],
+      "sources": [
+        { "label": "Pinned token artifact", "url": "https://github.com/caura-ai/caura-longmemeval/blob/3b1e293aacc652694822ab4062c15fef73536335/outputs/caura-500-opaque-compact/context_tokens.json", "kind": "artifact" }
+      ],
+      "caveats": ["79.2% is context-only; the all-reader-call comparison is 75.4%."],
+      "withdrawal": null,
+      "withholding": null
+    },
+    {
+      "id": "search_latency_warm_single_tenant_2026_04_19",
+      "title": "Warm-cache single-tenant search latency",
+      "status": "withheld",
+      "role": "headline",
+      "metric": "search_latency",
+      "benchmark": null,
+      "measurement_at": "2026-04-19",
+      "last_verified_at": "2026-10-05",
+      "approved_wording": null,
+      "scope": "Claimed POST /api/v1/search latency against a warm pgvector cache under single-tenant load.",
+      "evaluation": {
+        "population": "April 19 reference latency run",
+        "sample_size": null,
+        "numerator": null,
+        "denominator": null,
+        "dataset": null,
+        "dataset_version": null,
+        "sampling_notes": "Request count, concurrency, hardware, and raw percentile series are not public.",
+        "null_reason": "The public article is not a raw result or reproducible harness."
+      },
+      "answering_model": { "applicable": false, "provider": null, "model": null, "immutable_snapshot": null, "notes": "Search latency does not include an answering model." },
+      "judge": { "applicable": false, "provider": null, "model": null, "immutable_snapshot": null, "notes": "Search latency does not use a judge." },
+      "configuration": {
+        "description": "Warm cache and single tenant are known; all other load and hardware parameters are unrecorded publicly.",
+        "parameters": { "cache": "warm", "tenancy": "single tenant", "endpoint": "POST /api/v1/search" }
+      },
+      "code_commit": { "repository": null, "commit": null, "null_reason": "The exact benchmark code commit was not recorded." },
+      "methodology_url": "https://caura.ai/blog/caura-benchmarks",
+      "raw_result_url": null,
+      "reproducible_harness_url": null,
+      "evidence_gap": "No raw latency result or reproducible latency harness is publicly available.",
+      "measurements": [
+        { "label": "Withheld p50", "value": 23, "unit": "milliseconds", "display": "23 ms", "measurement_at": "2026-04-19" },
+        { "label": "Withheld p95", "value": 27, "unit": "milliseconds", "display": "27 ms", "measurement_at": "2026-04-19" }
+      ],
+      "sources": [
+        { "label": "Article-only methodology", "url": "https://caura.ai/blog/caura-benchmarks", "kind": "methodology" }
+      ],
+      "caveats": ["Do not publish these latency values until a raw result or reproducible harness is available."],
+      "withdrawal": null,
+      "withholding": { "at": "2026-10-05", "reason": "Article-only evidence does not satisfy the public evidence contract." }
+    },
+    {
+      "id": "etoro_agent_count",
+      "title": "eToro production agent count",
+      "status": "withheld",
+      "role": "adoption",
+      "metric": "adoption",
+      "benchmark": null,
+      "measurement_at": null,
+      "last_verified_at": "2026-10-05",
+      "approved_wording": null,
+      "scope": "Previously promoted as 300+ production AI agents at eToro.",
+      "evaluation": { "population": "eToro deployment", "sample_size": null, "numerator": null, "denominator": null, "dataset": null, "dataset_version": null, "sampling_notes": "No dated export or reproducible query is public.", "null_reason": "Adoption count lacks dated reproducible evidence." },
+      "answering_model": { "applicable": false, "provider": null, "model": null, "immutable_snapshot": null, "notes": "No model participates in an adoption count." },
+      "judge": { "applicable": false, "provider": null, "model": null, "immutable_snapshot": null, "notes": "No judge participates in an adoption count." },
+      "configuration": { "description": "Production adoption count; no evaluation configuration applies.", "parameters": {} },
+      "code_commit": { "repository": null, "commit": null, "null_reason": "No code commit proves a live adoption count." },
+      "methodology_url": null,
+      "raw_result_url": null,
+      "reproducible_harness_url": null,
+      "evidence_gap": "No dated public source or reproducible export supports the count.",
+      "measurements": [{ "label": "Withheld reported agents", "value": 300, "unit": "agents", "display": "300+", "measurement_at": null }],
+      "sources": [{ "label": "First-party case study containing the count", "url": "https://caura.ai/use-cases/etoro-company-brain", "kind": "case_study" }],
+      "caveats": ["Remove this number from current promotional copy until independently or reproducibly evidenced."],
+      "withdrawal": null,
+      "withholding": { "at": "2026-10-05", "reason": "No dated reproducible source is available." }
+    },
+    {
+      "id": "etoro_memory_count",
+      "title": "eToro production memory count",
+      "status": "withheld",
+      "role": "adoption",
+      "metric": "adoption",
+      "benchmark": null,
+      "measurement_at": null,
+      "last_verified_at": "2026-10-05",
+      "approved_wording": null,
+      "scope": "Previously promoted as 26,500+ memories at eToro.",
+      "evaluation": { "population": "eToro deployment", "sample_size": null, "numerator": null, "denominator": null, "dataset": null, "dataset_version": null, "sampling_notes": "No dated export or reproducible query is public.", "null_reason": "Adoption count lacks dated reproducible evidence." },
+      "answering_model": { "applicable": false, "provider": null, "model": null, "immutable_snapshot": null, "notes": "No model participates in an adoption count." },
+      "judge": { "applicable": false, "provider": null, "model": null, "immutable_snapshot": null, "notes": "No judge participates in an adoption count." },
+      "configuration": { "description": "Production adoption count; no evaluation configuration applies.", "parameters": {} },
+      "code_commit": { "repository": null, "commit": null, "null_reason": "No code commit proves a live adoption count." },
+      "methodology_url": null,
+      "raw_result_url": null,
+      "reproducible_harness_url": null,
+      "evidence_gap": "No dated public source or reproducible export supports the count.",
+      "measurements": [{ "label": "Withheld reported memories", "value": 26500, "unit": "memories", "display": "26,500+", "measurement_at": null }],
+      "sources": [{ "label": "First-party case study containing the count", "url": "https://caura.ai/use-cases/etoro-company-brain", "kind": "case_study" }],
+      "caveats": ["Remove this number from current promotional copy until independently or reproducibly evidenced."],
+      "withdrawal": null,
+      "withholding": { "at": "2026-10-05", "reason": "No dated reproducible source is available." }
+    },
+    {
+      "id": "etoro_skill_count",
+      "title": "eToro shared skill count",
+      "status": "withheld",
+      "role": "adoption",
+      "metric": "adoption",
+      "benchmark": null,
+      "measurement_at": null,
+      "last_verified_at": "2026-10-05",
+      "approved_wording": null,
+      "scope": "Previously promoted as 1,372 shared skills at eToro.",
+      "evaluation": { "population": "eToro deployment", "sample_size": null, "numerator": null, "denominator": null, "dataset": null, "dataset_version": null, "sampling_notes": "No dated export or reproducible query is public.", "null_reason": "Adoption count lacks dated reproducible evidence." },
+      "answering_model": { "applicable": false, "provider": null, "model": null, "immutable_snapshot": null, "notes": "No model participates in an adoption count." },
+      "judge": { "applicable": false, "provider": null, "model": null, "immutable_snapshot": null, "notes": "No judge participates in an adoption count." },
+      "configuration": { "description": "Production adoption count; no evaluation configuration applies.", "parameters": {} },
+      "code_commit": { "repository": null, "commit": null, "null_reason": "No code commit proves a live adoption count." },
+      "methodology_url": null,
+      "raw_result_url": null,
+      "reproducible_harness_url": null,
+      "evidence_gap": "No dated public source or reproducible export supports the count.",
+      "measurements": [{ "label": "Withheld reported skills", "value": 1372, "unit": "skills", "display": "1,372", "measurement_at": null }],
+      "sources": [{ "label": "First-party case study containing the count", "url": "https://caura.ai/use-cases/etoro-company-brain", "kind": "case_study" }],
+      "caveats": ["Remove this number from current promotional copy until independently or reproducibly evidenced."],
+      "withdrawal": null,
+      "withholding": { "at": "2026-10-05", "reason": "No dated reproducible source is available." }
+    }
+  ]
+}

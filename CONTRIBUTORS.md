@@ -9,7 +9,7 @@ If you've contributed and don't see your name, please open a PR adding yourself 
 The [caura-ai](https://github.com/orgs/caura-ai/people) organisation, alphabetical by handle:
 
 - [Arkady Mankovsky](https://github.com/arkash20) ([@arkash20](https://github.com/arkash20))
-- [Eldad Dahan](https://github.com/Eldad-Caura) ([@Eldad-Caura](https://github.com/Eldad-Caura))
+- [Eldad Dahan](https://github.com/eldad-caura-ai) ([@eldad-caura-ai](https://github.com/eldad-caura-ai))
 - [Erni Avraham](https://github.com/erni-a) ([@erni-a](https://github.com/erni-a))
 - [Eyal Blyachman](https://github.com/eyal-bl) ([@eyal-bl](https://github.com/eyal-bl))
 - [@eyal-mar](https://github.com/eyal-mar)

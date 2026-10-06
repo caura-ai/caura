@@ -832,3 +832,26 @@ async def test_memory_stats_with_agent_id_includes_own_scope_agent(client):
     # as author + visibility identity), so bob's scope_agent row is
     # excluded and alice sees both her own.
     assert stats["total"] == 2
+
+
+async def test_memory_stats_normalizes_a_retired_service_identity(client):
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fleet = f"stats-alias-fleet-{tag}"
+
+    await _write_memory(
+        client,
+        tenant_id,
+        headers,
+        f"canonical service memory [{tag}]",
+        agent_id="caura-insighter",
+        fleet_id=fleet,
+    )
+
+    resp = await client.get(
+        f"/api/v1/memories/stats?tenant_id={tenant_id}&fleet_id={fleet}"
+        "&agent_id=memclaw-insighter",  # legacy-name-ok: supported input alias
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["total"] == 1

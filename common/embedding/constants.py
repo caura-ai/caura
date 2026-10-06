@@ -73,8 +73,16 @@ OPENAI_REQUEST_TIMEOUT_SECONDS: float = read_float_env(
 # ``EMBEDDING_PROVIDER_MAX_RETRIES``, which now holds it at zero so this
 # number means what it says. A 429 is no longer retried at any layer —
 # see ``EmbeddingBackendBusy``.
-EMBEDDING_RETRY_ATTEMPTS: int = int(os.environ.get("EMBEDDING_RETRY_ATTEMPTS", "2"))
-EMBEDDING_RETRY_DELAY_S: float = float(os.environ.get("EMBEDDING_RETRY_DELAY_S", "1.0"))
+#
+# ``read_*_env``, not bare ``int(...)`` / ``float(...)``, for the same
+# reason as ``OPENAI_REQUEST_TIMEOUT_SECONDS`` above: a garbage value
+# ("2x", "1s") raised ``ValueError`` out of the module body, crash-looping
+# every service importing ``common.embedding`` with a traceback naming
+# neither variable. ``read_int_env``'s default floor of 1 is right here:
+# ``_run_with_retry`` loops ``range(1, attempts + 1)``, so 0 would make no
+# provider call at all and fail every embed.
+EMBEDDING_RETRY_ATTEMPTS: int = read_int_env("EMBEDDING_RETRY_ATTEMPTS", 2)
+EMBEDDING_RETRY_DELAY_S: float = read_float_env("EMBEDDING_RETRY_DELAY_S", 1.0)
 
 
 # httpx pool sizing for the embedding-side OpenAI client (CAURA-627).

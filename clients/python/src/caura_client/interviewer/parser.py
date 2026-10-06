@@ -46,7 +46,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .discovery import HARNESS_CLAUDE_CODE, HARNESS_CURSOR
 from .scrub import scrub
@@ -112,7 +112,7 @@ def _event_from_line(
     seq: int,
     project: str,
     max_event_chars: int,
-) -> Optional[ParsedEvent]:
+) -> ParsedEvent | None:
     line_type = row.get("type")
     if line_type not in ("user", "assistant"):
         return None
@@ -165,7 +165,7 @@ _MONTH_ABBR = {
 }
 
 
-def _parse_cursor_timestamp(raw: str) -> Optional[str]:
+def _parse_cursor_timestamp(raw: str) -> str | None:
     """Cursor's human-formatted tag → ISO 8601, or None if unparseable.
 
     Locale-independent, and defensive about the out-of-range fields the
@@ -246,7 +246,7 @@ class _CursorDialect:
 
     def event_from_line(
         self, row: dict[str, Any], seq: int, max_event_chars: int
-    ) -> Optional[ParsedEvent]:
+    ) -> ParsedEvent | None:
         role = row.get("role")
         if role not in ("user", "assistant"):
             return None

@@ -24,6 +24,7 @@ from typing import Any
 from starlette.types import ASGIApp as ASGIApplication
 from starlette.types import Receive, Scope, Send
 
+from core_api import request_phase
 from core_api.constants import is_mcp_path
 from core_api.errors import REQUEST_BUDGET_EXCEEDED, make_error_payload
 
@@ -83,11 +84,17 @@ class RequestTimeoutMiddleware:
             await send(message)
 
         started_at = time.monotonic()
+        # Armed HERE and nowhere deeper: this middleware sits OUTSIDE
+        # SlowAPI's ``BaseHTTPMiddleware``, which runs the rest of the app in
+        # a separate task. A recorder created below that split would be bound
+        # in a context copy this frame never sees. See ``request_phase``.
+        phases, phase_token = request_phase.begin(self.timeout_seconds)
         try:
             async with asyncio.timeout(self.timeout_seconds):
                 await self.app(scope, receive, _send)
         except TimeoutError:
             elapsed = round(time.monotonic() - started_at, 3)
+            attribution = phases.snapshot()
             # Structured, not interpolated. The 2026-09-17 incident was
             # triaged from a log line that carried the path and nothing
             # else, so "which route, how long, how often" could not be
@@ -99,6 +106,13 @@ class RequestTimeoutMiddleware:
                     "elapsed_seconds": elapsed,
                     "method": scope.get("method", "?"),
                     "path": scope["path"],
+                    # The one field that turns this line from "a request on
+                    # /search was slow" into "the embedding hop was slow".
+                    # Flat and top-level so it is groupable in the log
+                    # backend without unpacking a nested object.
+                    "phase": attribution["phase"],
+                    "phases_cancelled": attribution["phases_cancelled"],
+                    "phases_completed": attribution["phases_completed"],
                 },
             )
             if response_started:
@@ -110,13 +124,20 @@ class RequestTimeoutMiddleware:
                 REQUEST_BUDGET_EXCEEDED,
                 (
                     f"Request exceeded the {self.timeout_seconds}s server budget and was "
-                    f"cancelled. No upstream reported a failure — this deadline is ours. "
-                    f"Retry; if it recurs on the same route, the handler is the slow part."
+                    f"cancelled"
+                    + (f" while running {attribution['phase']}" if attribution["phase"] else "")
+                    + ". No upstream reported a failure — this deadline is ours. "
+                    "Retry; if it recurs on the same route, the handler is the slow part."
                 ),
                 details={
                     "budget_seconds": self.timeout_seconds,
                     "elapsed_seconds": elapsed,
                     "path": scope["path"],
+                    # Attribution, not decoration: without it a stalled
+                    # embedding provider and a stalled storage read are the
+                    # same 504, and the only lead an operator has is the
+                    # wall-clock number that every one of them shares.
+                    **attribution,
                 },
             )
             body = json.dumps(payload).encode()
@@ -143,3 +164,5 @@ class RequestTimeoutMiddleware:
                     "more_body": False,
                 }
             )
+        finally:
+            request_phase.end(phase_token)

@@ -8,6 +8,18 @@ import pytest
 
 from tests.conftest import get_test_auth, uid
 
+_TEST_ORIGINS = ("http://localhost",)
+
+
+@pytest.fixture(autouse=True)
+def _allow_test_installer_origins(monkeypatch):
+    """These tests name example API hosts on purpose. Installers now only embed
+    an ``api_url`` that is this server's own origin or operator-allowlisted
+    (``INSTALLER_ALLOWED_API_URLS``), so allowlist the hosts used here."""
+    from core_api.config import settings
+
+    monkeypatch.setattr(settings, "installer_allowed_api_urls", ",".join(_TEST_ORIGINS))
+
 
 async def _write_memory(
     client,
@@ -276,8 +288,20 @@ async def test_install_script_escapes_malicious_api_url(client):
             "api_key": "mc_testkey123456",
         },
     )
-    assert resp.status_code == 200
-    script = resp.text
+    # A URL that is not this server's origin is refused outright now.
+    assert resp.status_code == 400, resp.text
+
+    # The generator itself still quotes hostile input (defence in depth).
+    from core_api.routes.plugin import _generate_install_script
+
+    script = _generate_install_script(
+        api_url="https://evil.com; rm -rf /",
+        api_key="mc_testkey123456",
+        fleet_id="test-fleet",
+        tenant_id="t",
+        node_name="",
+        tls_bootstrap="verify",
+    )
     # The malicious URL must be single-quoted by shlex.quote() — not bare
     assert "CAURA_API_URL='https://evil.com; rm -rf /'" in script
     # Bare (unquoted) interpolation into curl must NOT appear

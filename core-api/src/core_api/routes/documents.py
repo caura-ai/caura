@@ -7,18 +7,31 @@ from datetime import datetime
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from common.embedding import get_embedding
+from common.embedding import embedding_configured, get_embedding
 from core_api import openapi_responses as _oar
+from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_DOC_SEARCH_TOP_K, MAX_DOC_SEARCH_TOP_K
-from core_api.middleware.idempotency import IDEMPOTENCY_HEADER, idempotency_for
+from core_api.errors import AUTH_AGENT_TRUST_TOO_LOW, coded_detail
+from core_api.middleware.idempotency import (
+    IDEMPOTENCY_HEADER,
+    IdempotencyGuard,
+    idempotency_for,
+    release_claim_on_error,
+)
 from core_api.middleware.rate_limit import write_limit
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
-from core_api.services.agent_service import enforce_delete
+from core_api.services.agent_service import (
+    broker_owned_agent_id,
+    enforce_delete,
+    enforce_document_overwrite,
+    enforce_fleet_write,
+)
 from core_api.services.audit_service import log_action, log_cross_tenant_read
+from core_api.services.interview_service import refuse_system_collection
 
 # Skill Factory SF-002 — imported at module scope (rather than lazily
 # inside the handler) so a broken import surfaces at server startup
@@ -86,6 +99,45 @@ _SKILL_SLUG_RE = re.compile(r"^(?:forge/|agent/)?[a-z0-9][a-z0-9._-]{0,99}$")
 SKILLS_ROLLBACK_COLLECTION = "skills_rollback"
 
 
+# ax-0917-m-13 — field names that hold the PAYLOAD on the memories surface (or
+# are the obvious guess for one), none of which are fields on a document.
+#
+# The two stores took different words for the same idea and never said so: a
+# memory is written as ``{"content": ...}`` and a document as
+# ``{"collection", "doc_id", "data"}``, where ``data`` is a free-form JSON
+# object holding the whole payload. An agent that had already used
+# ``POST /memories`` sent ``{"title": ..., "content": ...}`` here and got the
+# generic unknown-field 422 plus "Field required" for three fields it had never
+# been told about — an error that says what is wrong with the body and nothing
+# about what a right one looks like.
+#
+# This list only changes the MESSAGE. Deliberately NAMED rather than a category
+# (same discipline as ``SERVER_OWNED_MEMORY_FIELDS``): an unrecognised key that
+# is not on it is still just a typo and keeps the ordinary unknown-field 422,
+# which is the correct answer for a typo.
+#
+# And deliberately not an alias into ``data``. Accepting ``content`` at the top
+# level would not rescue the body that motivated this — ``collection`` and
+# ``doc_id`` have no safe default (see ``_explain_document_shape``), so such a
+# request still fails and still needs to be told the shape. It would buy a
+# second spelling for the payload on a store whose own history says extra
+# spellings of a body field cannot be made correct (CAURA-717, see
+# ``core_api.services.doc_indexing``), plus a precedence rule for a caller that
+# sends both.
+_FIELDS_THAT_BELONG_IN_DATA = (
+    "content",
+    "text",
+    "body",
+    "title",
+    "summary",
+    "memory_type",
+    "metadata",
+)
+
+# Named once because the message below lists whichever of them are absent.
+_DOCUMENT_REQUIRED_FIELDS = ("collection", "doc_id", "data")
+
+
 # ── Schemas ──
 
 
@@ -93,18 +145,132 @@ class DocWriteRequest(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
     fleet_id: str | None = None
-    collection: str = Field(min_length=1, max_length=200)
-    doc_id: str = Field(min_length=1, max_length=500)
-    data: dict
+    # ax-0917-m-14 — who is writing. There was no field for this at all, and
+    # the body is ``extra="forbid"``, so a caller that tried to send one got a
+    # 422. The probe that found this put ``owner`` inside ``data`` instead,
+    # which does not survive: ``data`` is replaced wholesale on every upsert,
+    # so the attribution lasts only as long as each writer remembers to
+    # re-send it, and no query can find it without knowing the convention.
+    #
+    # Omit it and an agent-scoped credential fills it in from its own
+    # identity. A tenant-scoped key has no agent to name, so the document is
+    # stored with no author rather than a guessed one.
+    agent_id: str | None = Field(
+        default=None,
+        description=(
+            "Agent recorded as the author of this version. Omit it and an "
+            "agent-scoped credential supplies its own identity. Replaced on "
+            "each upsert, since an upsert replaces the document."
+        ),
+    )
+    collection: str = Field(
+        min_length=1,
+        max_length=200,
+        description=(
+            "Namespace grouping related documents, e.g. 'runbooks'. Chosen by "
+            "the caller; created on first write. Part of the upsert key."
+        ),
+    )
+    doc_id: str = Field(
+        min_length=1,
+        max_length=500,
+        description=(
+            "Your own stable id for this document within the collection. "
+            "Together with 'collection' it is the upsert key: writing the same "
+            "pair again REPLACES the stored document rather than adding one, "
+            "which is what makes a retry safe. No server-generated default — "
+            "minting an id would turn every write into a new row."
+        ),
+    )
+    data: dict = Field(
+        description=(
+            "The document itself, as a free-form JSON object. This is where "
+            "the payload goes — there is no top-level 'content' or 'title' "
+            "field on a document. Replaced wholesale on each upsert. "
+            "data['summary'], when present, is the string that gets embedded "
+            "and is the only thing POST /documents/search can match on."
+        ),
+    )
     # C34 — opt out of the server-side catastrophic-shrink guard, which
     # refuses to replace a substantial document with a near-empty one. A
     # truncated payload from a failed read looks exactly like an intentional
     # wipe; that is how the shared task checklist was destroyed on
-    # 2026-08-27. Callers who genuinely mean to gut a document set this.
+    # 2026-08-27. Callers who genuinely mean to gut a document set this. An
+    # agent-scoped credential needs trust >= 3 to set it (the delete bar).
     force: bool = False
     # Embed source is no longer caller-chosen. Server reads data["summary"]
     # (and, for collection="skills", falls back to data["description"] for
     # back-compat). See core_api.services.doc_indexing.
+
+    @model_validator(mode="before")
+    @classmethod
+    def _explain_document_shape(cls, data):
+        """ax-0917-m-13 — answer a memories-shaped body with the document shape.
+
+        Fires only when the body borrows a name from
+        ``_FIELDS_THAT_BELONG_IN_DATA``. Every other invalid body keeps the 422
+        it already had, per-field ``loc`` included.
+
+        WHY THE MESSAGE IS THE FIX, and not a default or an alias. The naive
+        body cannot be made to succeed, because the two fields it is missing
+        are the two that cannot be invented:
+
+        * ``doc_id`` — the write is an upsert idempotent on
+          ``(collection, doc_id)``. A server-minted id would silently convert
+          it into create-every-time: the same call issued twice would leave two
+          rows, a retry after a timeout would duplicate rather than converge,
+          and the C34 shrink guard in ``postgres_service.document_upsert``
+          (which compares a write against the row it is about to replace) would
+          have nothing to compare against. That is a change to what the
+          endpoint MEANS, sold as a convenience.
+        * ``collection`` — a default is a shared namespace, and the doc_id
+          inside it is the upsert key, so two callers who both accept the
+          default and pick the same obvious doc_id silently overwrite each
+          other's document.
+
+        So the request fails either way and the only open question is what it
+        is told. It is told the shape, with a body it can send — the same move
+        as the ``NO_SUCH_ROUTE`` 404, which answers a wrong path by naming the
+        real ones instead of just "not that".
+
+        ``mode="before"`` sees the raw payload, which is what this needs: by
+        the time ``extra="forbid"`` has run, the request is already several
+        errors that individually name fields and collectively explain nothing.
+        """
+        if not isinstance(data, dict):
+            return data
+        borrowed = [k for k in _FIELDS_THAT_BELONG_IN_DATA if k in data]
+        if not borrowed:
+            return data
+
+        names = ", ".join(f"'{k}'" for k in borrowed)
+        subject = f"{names} is not a field" if len(borrowed) == 1 else f"{names} are not fields"
+        pronoun = "It belongs" if len(borrowed) == 1 else "They belong"
+        missing = [f for f in _DOCUMENT_REQUIRED_FIELDS if f not in data]
+
+        message = (
+            f"{subject} on a document. {pronoun} inside 'data'. "
+            "A document is 'collection' + 'doc_id' + 'data': 'collection' groups related "
+            "documents, 'doc_id' is your own stable id for this one, and the two together "
+            "are the upsert key — writing the same pair again REPLACES the stored document. "
+            "'data' is a free-form JSON object holding the whole payload, which is why no "
+            "payload field is declared on this body."
+        )
+        if missing:
+            message += f" This body is also missing: {', '.join(missing)}."
+        message += (
+            " Minimal valid body: "
+            '{"collection": "notes", "doc_id": "my-note", "data": {"title": "...", '
+            '"content": "...", "summary": "one line describing this document"}}.'
+            " Only data['summary'] is embedded, so a document written without one is stored "
+            "and readable by id but is never returned by POST /documents/search."
+        )
+        if "content" in borrowed:
+            message += (
+                " If you meant to store a fact rather than a document, that is "
+                "POST /memories, which does take a top-level 'content'."
+            )
+        raise ValueError(message)
 
 
 class DocQueryRequest(TenantScopedBody):
@@ -181,6 +347,10 @@ class DocOut(BaseModel):
     # served; ``null`` strictly widens what this endpoint can return.
     created_at: datetime | None
     updated_at: datetime | None
+    # ax-0917-m-14. NULL on every row written before the column existed, and on
+    # any write by a credential with no agent identity to record. Both mean the
+    # same thing and it is the truthful one: nobody knows who wrote this.
+    agent_id: str | None = None
 
 
 # ── Helpers ──
@@ -209,6 +379,7 @@ def _dict_to_out(d: dict) -> DocOut:
         collection=d.get("collection", ""),
         doc_id=d.get("doc_id", ""),
         data=d.get("data", {}),
+        agent_id=d.get("agent_id"),
         created_at=d.get("created_at"),
         updated_at=d.get("updated_at"),
     )
@@ -245,15 +416,101 @@ async def upsert_document(
     auth: AuthContext = Depends(get_auth_context),
     idempotency_key: str | None = Header(None, alias=IDEMPOTENCY_HEADER),
 ):
-    """Upsert a document. If collection+doc_id exists, data is replaced."""
+    """Upsert a document. If collection+doc_id exists, data is replaced.
+
+    ax-0917-m-15 — this write ALSO mints a memory carrying the document's
+    data, so the body becomes reachable by ``caura_recall`` / ``POST
+    /memories/search``. The two stores are not cross-searched and only
+    ``data["summary"]`` is embedded on the document row, so without the mint
+    a document's body is reachable by meaning nowhere.
+
+    Independent of ``indexed``: a document with no ``summary`` is invisible to
+    ``POST /documents/search`` and still mints. The mint is skipped for
+    ``collection="skills"`` (staged → active approval lifecycle), for
+    ``_``-prefixed system collections, for a ``data`` that renders empty, and
+    for one over the memory size limit. ``DELETE /documents/{doc_id}``
+    un-mints it. Never fails the write.
+
+    Agent-scoped credentials are held to the agent trust ladder: an agent
+    awaiting approval (trust 0) is refused, a cross-fleet ``fleet_id`` needs
+    trust >= 3 (an omitted one resolves to the agent's home fleet), and so
+    does replacing a document whose stored author is a different agent, or
+    sending ``force=true``. A document with no recorded author is unowned and
+    stays writable. Tenant keys are unaffected. The interview service's own
+    collections are refused to every credential.
+    """
+    # ax-0917-m-14 — a caller must not write a document under a name that is
+    # not its own. REFUSE rather than silently substitute: an agent credential
+    # that names a peer has made a claim, and quietly rewriting it means the
+    # caller never learns its attribution was wrong. ``enforce_self_agent``
+    # fires only for a credential that HAS an identity, so a tenant-scoped key
+    # may still name any of its agents — the same latitude ``POST /memories``
+    # gives — and omitting the field always passes.
+    auth.enforce_self_agent(body.agent_id)
+    # Equal whenever both are set, by the gate above. The ``or`` is what fills
+    # the field in for an agent credential that did not bother to name itself.
+    raw_author = auth.agent_id or body.agent_id
+    author = canonical_service_agent_id(raw_author) if raw_author is not None else None
     auth.enforce_tenant(body.tenant_id)
     auth.enforce_read_only()
     auth.enforce_usage_limits()
+    refuse_system_collection(body.collection)
+    # M-123: an install credential has no identity for the check above to bind,
+    # so its ``agent_id`` is a claim. Held to the broker ownership boundary the
+    # other REST writes apply: a name another install owns becomes this
+    # install's own ``broker:`` identity, as the document's author and in the
+    # skills write context. The memory minted from the document is attributed
+    # to ``auth.agent_id`` instead (the doc indexer, for a credential with no
+    # identity), so it never carried the claim.
+    if auth.is_install_credential and author is not None:
+        author = await broker_owned_agent_id(author, auth.install_uuid, body.tenant_id)
+    # Agent credentials get the trust ladder every other agent write gets.
+    # Tenant keys / sessions carry no trust level and keep their tenant-wide
+    # authority (the same split ``DELETE /documents/{doc_id}`` draws).
+    if auth.tenant_id and auth.agent_id and author is not None:
+        # Fleet policy, as on ``POST /memories`` and MCP ``caura_doc``: a
+        # cross-fleet ``fleet_id`` needs trust >= 3. Also registers the agent
+        # on first contact. An omitted ``fleet_id`` resolves to the agent's
+        # home fleet, so the document (and the memory minted from it) scopes
+        # like an MCP write instead of landing fleet-less.
+        write_agent = await enforce_fleet_write(body.tenant_id, author, body.fleet_id)
+        # M-89: an agent awaiting approval reaches no store, as on
+        # ``POST /memories``; the write would also mint a memory as it.
+        if write_agent.get("trust_level", 0) == 0:
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    AUTH_AGENT_TRUST_TOO_LOW,
+                    f"Agent '{author}' is not approved. Contact tenant admin to set trust_level >= 1.",
+                ),
+            )
+        if not body.fleet_id and write_agent.get("fleet_id"):
+            body.fleet_id = write_agent["fleet_id"]
+        # Replacing a document a different agent authored, or forcing past
+        # the shrink guard, needs the trust ``DELETE /documents`` needs.
+        await enforce_document_overwrite(
+            body.tenant_id,
+            author,
+            collection=body.collection,
+            doc_id=body.doc_id,
+            force=body.force,
+        )
     _idem = await idempotency_for(request, body.tenant_id, idempotency_key)
     if _idem and (_replay := _idem.cached_replay):
         _body, _status = _replay
         return JSONResponse(content=_body, status_code=_status)
+    # A failure after the claim releases it, so a retry sees the real error
+    # rather than "still in progress" until the pending claim times out.
+    async with release_claim_on_error(_idem):
+        return await _upsert_document_claimed(body, auth, author, _idem)
 
+
+async def _upsert_document_claimed(
+    body: DocWriteRequest,
+    auth: AuthContext,
+    author: str | None,
+    _idem: IdempotencyGuard | None,
+) -> DocOut:
     # Skills slug rule — doc_id becomes a directory name on plugin-side
     # reconciliation, so it must be filesystem-safe. Note: the slug
     # rule is permissive enough to allow ``forge/<slug>`` / ``agent/<slug>``
@@ -293,7 +550,7 @@ async def upsert_document(
             # external source='forge' attempt.
             is_internal_forge = False
             sf_ctx = SkillWriteContext(
-                caller_agent_id=auth.agent_id,
+                caller_agent_id=author,
                 is_admin=auth.is_org_admin,
                 is_internal_forge=is_internal_forge,
                 description_max_bytes=int(sf_settings.get("description_max_bytes", 160)),
@@ -410,7 +667,10 @@ async def upsert_document(
         # below if it returns None, so it must not sit on the reduced
         # deferred budget. See EMBEDDING_INTERACTIVE_RESERVED_SLOTS.
         embedding = await get_embedding(source, tenant_config, background=False)
-        if embedding is None:
+        # No provider configured is not a provider failure: store the document
+        # unindexed (``indexed=False``) rather than with a stand-in vector, or
+        # refuse a write that no retry could ever fix.
+        if embedding is None and embedding_configured(tenant_config):
             raise HTTPException(
                 status_code=502,
                 detail=(
@@ -428,6 +688,7 @@ async def upsert_document(
                     "collection": body.collection,
                     "doc_id": body.doc_id,
                     "data": body.data,
+                    "agent_id": author,
                     # C34 — explicit opt-out of the catastrophic-shrink guard.
                     "force": body.force,
                     "embedding": embedding,
@@ -455,6 +716,7 @@ async def upsert_document(
                     "collection": body.collection,
                     "doc_id": body.doc_id,
                     "data": body.data,
+                    "agent_id": author,
                     # C34 — explicit opt-out of the catastrophic-shrink guard.
                     "force": body.force,
                 }
@@ -686,9 +948,13 @@ async def delete_document(
     collection: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Delete a document by collection + doc_id."""
+    """Delete a document by collection + doc_id.
+
+    Also un-mints the memory the write minted — see ``POST /documents``.
+    """
     auth.enforce_tenant(tenant_id)
     auth.enforce_read_only()
+    refuse_system_collection(collection)
     # Bulk/destructive parity with memory deletes: an agent credential needs
     # admin-trust (>= 3) to delete documents (which carry customer records /
     # configs). Tenant/user credentials (no X-Agent-ID) are unaffected.

@@ -169,7 +169,11 @@ async def _run_path_a_semantic(*, verdict: bool) -> list[list]:
 
 
 def _sc_for_path_c(
-    *, cand_status: str, overlap: bool, new_supersedes: str | None
+    *,
+    cand_status: str,
+    overlap: bool,
+    new_supersedes: str | None,
+    cand_triple: bool = True,
 ) -> AsyncMock:
     new_mem = _new_mem(
         ts="2026-04-29T12:00:00+00:00",
@@ -179,6 +183,10 @@ def _sc_for_path_c(
     cand_mem = _cand(
         ts="2026-04-29T10:00:00+00:00", object_value="Tel Aviv", status=cand_status
     )
+    if not cand_triple:
+        # A verdict Path A's semantic judge made on a row with no triple, so the
+        # deterministic RDF rule has nothing to re-apply (L-27).
+        cand_mem.update(subject_entity_id=None, predicate=None, object_value=None)
     sc = _base_sc()
 
     async def get_memory(mid: str, tenant_id: str, **_kw) -> dict | None:
@@ -206,15 +214,19 @@ def _sc_for_path_c(
     return sc
 
 
-async def _run_path_c(*, verdict: bool, retraction: bool) -> list[list]:
+async def _run_path_c(
+    *, verdict: bool, retraction: bool, cand_triple: bool = True
+) -> list[list]:
     # retraction scenario: new already supersedes cand (a prior Path-A verdict),
     # cand is outdated, no fresh overlap — only the retraction re-judge runs.
     # Retraction only fires on a candidate still in the ``conflicted`` state
-    # Path A produced (see _attempt_entity_retraction guard).
+    # Path A produced (see _attempt_entity_retraction guard), and not on a pair
+    # the deterministic RDF rule would convict again (L-27).
     sc = _sc_for_path_c(
         cand_status="conflicted" if retraction else "active",
         overlap=not retraction,
         new_supersedes=CAND_ID if retraction else None,
+        cand_triple=cand_triple,
     )
     with (
         patch(
@@ -245,7 +257,12 @@ SCENARIOS = {
     "path_a_semantic_no_conflict": lambda: _run_path_a_semantic(verdict=False),
     "path_c_forward_conflict": lambda: _run_path_c(verdict=True, retraction=False),
     "path_c_forward_no_conflict": lambda: _run_path_c(verdict=False, retraction=False),
-    "path_c_retraction": lambda: _run_path_c(verdict=False, retraction=True),
+    "path_c_retraction": lambda: _run_path_c(
+        verdict=False, retraction=True, cand_triple=False
+    ),
+    "path_c_retraction_of_an_rdf_verdict": lambda: _run_path_c(
+        verdict=False, retraction=True
+    ),
 }
 
 

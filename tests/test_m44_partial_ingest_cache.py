@@ -133,7 +133,7 @@ async def test_preview_refuses_a_partial_cache_and_re_extracts(
         "metadata_": {"source": "ingest", "doc_hash": "h"},
     }
 
-    async def _lookup(tenant_id, doc_hash):
+    async def _lookup(tenant_id, doc_hash, **_scope):
         return [prior]
 
     async def _incomplete(tenant_id, run_id):

@@ -21,6 +21,25 @@ async def create_or_update_agent(request: Request) -> dict:
     return orm_to_dict(agent, AGENT_FIELDS)
 
 
+@router.post("/create-only")
+async def create_agent_without_upsert(request: Request) -> dict:
+    """Materialise a missing agent without changing an existing identity.
+
+    The uniqueness constraint decides the race atomically. Agent-key
+    provisioning must use this route so stale existence checks cannot turn
+    initial trust/fleet hints into updates of an existing agent.
+    """
+    body: dict = await request.json()
+    tenant_id = body.get("tenant_id")
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise HTTPException(status_code=422, detail="tenant_id is required")
+    try:
+        agent, created = await _svc.agent_create_only(tenant_id, body)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {**orm_to_dict(agent, AGENT_FIELDS), "created": created}
+
+
 @router.get("/{agent_id}")
 async def get_agent(agent_id: str, tenant_id: str) -> dict:
     agent = await _svc.agent_get_by_id(agent_id, tenant_id)

@@ -17,6 +17,7 @@ from httpx import AsyncClient
 from sqlalchemy import text
 
 from common.constants import VECTOR_DIM
+from core_storage_api.config import settings
 
 # The transactional session (commits on success), used by the one test that has
 # to age rows directly — no endpoint sets ``created_at``.
@@ -89,7 +90,7 @@ class TestHealth:
         resp = await client.get(f"{PREFIX}/healthz")
         assert resp.status_code == 200
 
-    async def test_debug_pg_locks_returns_shape(self, client: AsyncClient) -> None:
+    async def test_debug_pg_locks_returns_shape(self, client: AsyncClient, monkeypatch) -> None:
         """GET /_debug/pg_locks returns the expected snapshot shape.
 
         CAURA-686: the endpoint is wired up and runs the
@@ -97,8 +98,9 @@ class TestHealth:
         the test DB without raising. ``rows`` may be empty when no
         contention is happening (the normal case during a unit
         test); the contract pinned here is the response shape,
-        not the row count.
+        not the row count. The route is opt-in (L-75), so this turns it on.
         """
+        monkeypatch.setattr(settings, "core_storage_debug_endpoints", True)
         resp = await client.get(f"{PREFIX}/_debug/pg_locks")
         assert resp.status_code == 200
         body = resp.json()
@@ -703,22 +705,12 @@ class TestMemories:
         tenant_id: str,
         fleet_id: str,
     ) -> None:
-        """H-04: the tie case, which is the COMMON one rather than an edge.
+        """H-04: duplicates written in one transaction resolve stably to the oldest.
 
-        ``created_at`` is ``server_default=now()`` and Postgres fixes ``now()`` for
-        the whole transaction, so duplicates inserted together — which is exactly
-        how the auto-chunk path writes its children, one ``create_memories`` call —
-        share ``created_at`` to the microsecond. Ordering by ``created_at`` alone
-        then leaves the pick to the query plan, so "returns the oldest, stably"
-        would hold only by luck.
-
-        HONEST LIMIT: this test does NOT fail if the ``Memory.id`` tie-break is
-        removed. Instability is plan-dependent, and on a table this small Postgres
-        returns heap order, which happens to be stable and insertion-ordered. So
-        treat this as an assertion about the intended OUTCOME — ties exist, the
-        answer is stable, and it is the tie-break winner — not as proof that the
-        unordered form is broken. The guarantee comes from the ORDER BY being
-        total, which no fixture can force Postgres to violate on demand.
+        One multi-row INSERT used to give every row the same ``now()``, so the
+        pick fell to the ``Memory.id`` tie-break. Bulk rows are now stamped in
+        batch order, so the first row written is the oldest and the pick is it,
+        every time. The ``Memory.id`` tie-break stays for rows that genuinely tie.
         """
         content = f"same-txn duplicate {_uid()}"
         content_hash = hashlib.sha256(content.encode()).hexdigest()
@@ -736,15 +728,16 @@ class TestMemories:
         inserted = [e["id"] for e in resp.json() if e["was_inserted"]]
         assert len(inserted) == 3, f"expected 3 live duplicates, got {resp.json()}"
 
-        # Prove the premise rather than assuming it: if these rows did NOT share
-        # created_at, the assertions below would pass on ordinary chronological
-        # ordering and prove nothing about the tie-break.
-        stamps = set()
+        # One bulk insert used to give every row the same ``now()``, leaving the
+        # pick to the ``Memory.id`` tie-break. Rows are now stamped in batch
+        # order, so the duplicates are ordered and the oldest is the first one
+        # written. Check that premise, then that the pick is stable and is it.
+        stamps = []
         for mid in inserted:
             row = await client.get(f"{PREFIX}/memories/{mid}", params={"tenant_id": tenant_id})
             assert row.status_code == 200, row.text
-            stamps.add(row.json()["created_at"])
-        assert len(stamps) == 1, f"expected one shared created_at, got {stamps}"
+            stamps.append(row.json()["created_at"])
+        assert stamps == sorted(stamps) and len(set(stamps)) == len(stamps), stamps
 
         params = {
             "tenant_id": tenant_id,
@@ -757,10 +750,9 @@ class TestMemories:
             assert r.status_code == 200, r.text
             picks.append(r.json()["id"])
 
-        # Same answer every time, and it is the tie-break winner (lowest id among
-        # the tied rows) rather than whatever the plan produced this run.
+        # Same answer every time, and it is the first row written.
         assert len(set(picks)) == 1, f"unstable pick across calls: {picks}"
-        assert picks[0] == min(inserted)
+        assert picks[0] == inserted[0]
 
     async def test_update_path_gate_also_reports_duplicates(
         self,
@@ -797,7 +789,9 @@ class TestMemories:
         ]
         resp = await client.post(f"{PREFIX}/memories/bulk", json=items)
         assert resp.status_code == 200, resp.text
-        inserted = sorted(e["id"] for e in resp.json() if e["was_inserted"])
+        # Input order: one bulk insert now stamps ``created_at`` in batch order,
+        # so the first item written is the oldest.
+        inserted = [e["id"] for e in resp.json() if e["was_inserted"]]
         assert len(inserted) == 3
 
         with caplog.at_level(logging.WARNING, logger="core_storage_api.services.postgres_service"):

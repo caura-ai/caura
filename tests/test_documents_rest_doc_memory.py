@@ -107,6 +107,8 @@ def _auth():
     class _Auth:
         tenant_id = "t1"
         agent_id = "agent-a"
+        is_install_credential = False
+        install_uuid = None
 
         def enforce_tenant(self, _t):
             return None
@@ -116,6 +118,25 @@ def _auth():
 
         def enforce_usage_limits(self):
             return None
+
+        def enforce_self_agent(self, requested_agent_id, **_kw):
+            """Mirrors the real gate's shape closely enough to catch a route
+            that stops calling it, without reimplementing the 403 — these
+            tests are about minting the doc-memory, not about authz.
+
+            Not a bare no-op: if the route ever passed the RESOLVED author
+            here instead of the body value, the gate could never fire in
+            production and nothing in this file would notice. Raising on a
+            real mismatch keeps that honest (``tests/test_ax_m14_document_
+            author.py`` owns the behaviour itself)."""
+            if (
+                self.agent_id
+                and requested_agent_id is not None
+                and requested_agent_id != self.agent_id
+            ):
+                raise AssertionError(
+                    f"enforce_self_agent should have refused {requested_agent_id!r}"
+                )
 
     return _Auth()
 

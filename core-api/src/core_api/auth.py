@@ -5,7 +5,8 @@ from fastapi import HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 
 from core_api import errors
-from core_api.agent_ids import AgentIdentity
+from core_api.agent_ids import AgentIdentity, canonical_service_agent_id
+from core_api.audit_actor import SURFACE_HEADER, actor_detail, parse_surface
 from core_api.config import settings
 from core_api.constants import API_KEY_HEADER
 from core_api.errors import coded_detail
@@ -52,6 +53,7 @@ class AuthContext:
         org_id: str | None = None,
         org_role: str | None = None,
         agent_id: AgentIdentity | None = None,
+        agent_id_verified: bool = False,
         is_read_only: bool = False,
         is_install_credential: bool = False,
         install_uuid: str | None = None,
@@ -59,14 +61,46 @@ class AuthContext:
         capabilities: set[str] | None = None,
         # Back-compat alias — older callers still pass ``scopes``.
         scopes: set[str] | None = None,
+        surface: str | None = None,
     ):
         self.tenant_id = tenant_id
         self.is_demo = is_demo
         self.is_admin = is_admin
+        # The person the gateway vouched for (``X-User-ID``), set on Path 4
+        # behind the gateway secret only; None everywhere else. For the audit
+        # trail: see ``core_api.audit_actor``.
         self.user_id = user_id
+        # The allow-listed ``X-Caura-Surface``: which Caura client sent the
+        # request. The client's own claim, so metrics and audit only. No gate
+        # may read it.
+        self.surface = surface
         self.org_id = org_id
         self.org_role = org_role  # "admin" | "member" | None
         self.agent_id = agent_id  # enterprise: set from X-Agent-ID header
+        # PROVENANCE of ``agent_id``, not its presence: True only where the
+        # identity was ESTABLISHED for the request rather than asserted by the
+        # caller. Today exactly one path can say yes — Path 4, where the
+        # gateway resolved the credential and injected ``X-Agent-ID`` behind
+        # the ``X-Gateway-Secret`` perimeter check.
+        #
+        # WHY IT IS A SEPARATE FIELD and not something a reader can infer from
+        # ``agent_id``. ``auth.py`` builds that attribute from the same raw
+        # header on Path 2 as on Path 4, so its truthiness answers "did the
+        # caller name an agent", which is a different question from "is that
+        # name trustworthy". Every gate that only needs the first question
+        # keeps reading ``agent_id`` and is unaffected; a gate whose decision
+        # turns on the second must read THIS. ``routes/keystones`` is the one
+        # such gate today (oss-0922-m-03) — its trust floor was skipping the
+        # anti-spoof bump for a shared-key holder because presence read as
+        # proof. See ``docs/plans/rest-mcp-agent-identity-asymmetry.md``.
+        #
+        # Deliberately NOT "did the caller send a gateway secret": on a
+        # deployment that configures none, Path 4 already trusts the identity
+        # headers by design, and making this field disagree with that posture
+        # would restrict OSS without closing a privilege boundary that exists.
+        # That is a separate decision, recorded as the strict variant in the
+        # doc above.
+        self.agent_id_verified = agent_id_verified
         # Set by the enterprise gateway when the org has exceeded plan limits
         # after a subscription cancellation. Blocks creates/updates but allows
         # deletes (so users can reduce usage) and reads.
@@ -133,6 +167,10 @@ class AuthContext:
         if not self.is_cross_tenant_read or not self.tenant_id:
             return []
         return [t for t in self.readable_tenant_ids if t != self.tenant_id]
+
+    def audit_actor(self) -> dict[str, str | None]:
+        """The ``user_id`` and ``surface`` keys for a write's audit ``detail``."""
+        return actor_detail(self.user_id, self.surface)
 
     def enforce_read_only(self) -> None:
         """Raise 403 if the caller is not allowed to mutate state.
@@ -259,6 +297,26 @@ class AuthContext:
                 ),
             )
 
+    def enforce_not_org_member(self, action: str) -> None:
+        """Raise 403 if the gateway stamped the caller ``X-Org-Role: member``.
+
+        Org settings and agent trust, fleet and deletion are org-admin
+        surfaces, like the Skills Inbox actions ``is_org_admin`` gates (L-72).
+        This refuses only an explicit member, not "anyone short of
+        ``is_org_admin``": a caller with no org role (the CAURA_API_KEY path,
+        a gateway credential stamped without one) keeps the access
+        ``enforce_not_agent_credential`` gives it.
+        """
+        if self.org_role == "member":
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    errors.AUTH_ORG_ADMIN_REQUIRED,
+                    f"Org members cannot {action}; ask an org admin.",
+                    action=action,
+                ),
+            )
+
     def enforce_self_agent(
         self,
         requested_agent_id: str | None,
@@ -305,7 +363,11 @@ class AuthContext:
         the verified identity win instead of refusing. It is not a missing
         caller of this gate; the routes behind it want an override.
         """
-        if self.agent_id and requested_agent_id is not None and requested_agent_id != self.agent_id:
+        if (
+            self.agent_id
+            and requested_agent_id is not None
+            and canonical_service_agent_id(requested_agent_id) != canonical_service_agent_id(self.agent_id)
+        ):
             raise HTTPException(
                 status_code=403,
                 detail=coded_detail(
@@ -352,7 +414,7 @@ class AuthContext:
         # PRESERVED here (pinned by test_auth_context.py), because
         # ``enforce_self_agent`` treats it as an assertion and refuses it.
         # Collapsing it to None would read as "no assertion" instead.
-        return AgentIdentity(resolved) if resolved is not None else None
+        return AgentIdentity(canonical_service_agent_id(resolved)) if resolved is not None else None
 
     def enforce_tenant(self, requested_tenant: str | None) -> None:
         """Raise if the caller may not write to ``requested_tenant``.
@@ -527,11 +589,49 @@ def _stash_request_tenant(request: Request, tenant_id: str) -> None:
         pass
 
 
+def _set_rate_limit_key(request: Request, value: str) -> None:
+    """Name the request's rate-limit bucket after what auth verified (L-69).
+
+    The limiter buckets by this value, hashed, and by client IP when auth named
+    none: a header nothing checked must not name a bucket, or a fresh made-up
+    value per request is a fresh budget per request. Guarded like
+    ``_stash_request_tenant``; failure here must never break auth.
+    """
+    try:
+        request.state.rate_limit_key = value
+    except AttributeError:
+        pass
+
+
+def _gateway_rate_limit_key(request: Request, tenant_id: str) -> str:
+    """The bucket for a request the gateway authenticated (Path 4 behind the secret).
+
+    Core-api cannot tell which credential the gateway accepted: its auth
+    subrequest tries a JWT bearer, then the session cookie, then ``X-API-Key``,
+    and forwards all of them unchanged. So a credential names the bucket only
+    when it is the request's sole one (``X-API-Key`` or ``Authorization``, and no
+    cookie), since the gateway can only have accepted that. Otherwise the bucket
+    is the identity the gateway set, which it overwrites on every request like
+    ``X-Agent-ID`` and ``X-Org-Role``: tenant, user, agent and install.
+    """
+    api_key = request.headers.get("x-api-key") or ""
+    authorization = request.headers.get("authorization") or ""
+    if not request.headers.get("cookie") and bool(api_key) != bool(authorization):
+        bearer = authorization[len("Bearer ") :] if authorization.startswith("Bearer ") else ""
+        if api_key or bearer:
+            return f"credential:{api_key or bearer}"
+    identity = [request.headers.get(h) or "" for h in ("x-user-id", "x-agent-id", "x-install-uuid")]
+    return "identity:" + "|".join([tenant_id, *identity])
+
+
 async def get_auth_context(
     request: Request,
     key: str | None = Security(api_key_header),
 ) -> AuthContext:
     ctx = await _resolve_auth_context(request, key)
+    # On every path, unlike the identity headers: it names the client, not the
+    # caller, and nothing may trust it. An unknown value is dropped, never 4xx.
+    ctx.surface = parse_surface(request.headers.get(SURFACE_HEADER))
     # Anonymous heartbeat: count the client family (by User-Agent prefix)
     # once the caller is authenticated. One prefix match, and a no-op unless
     # the heartbeat policy enabled the counter at boot — the raw header is
@@ -574,13 +674,25 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
 
     # ── Path 1: Admin API key ──
     if key and admin_key and hmac.compare_digest(key, admin_key):
+        _set_rate_limit_key(request, f"credential:{key}")
         set_current_tenant(None)  # Admin — RLS bypass
         return AuthContext(tenant_id=None, is_admin=True)
 
     # ── Path 2: CAURA_API_KEY gate (optional, for network-exposed OSS) ──
-    mclaw_key = settings.memclaw_api_key
+    #
+    # Every ``AuthContext`` below leaves ``agent_id_verified`` at its default
+    # of False, and that is the substance of this path rather than an
+    # omission: the shared key proves the caller may REACH this deployment,
+    # not which agent it is — it is tenant-wide and binds no agent identity.
+    # ``agent_id`` is still plumbed, because the caller naming itself is
+    # useful and several gates (``enforce_delete``,
+    # ``enforce_not_agent_credential``) only FIRE when it is set, so clearing
+    # it here would loosen them. The MCP plane states the same conclusion at
+    # ``mcp_server.py:448`` and keeps ``via_gateway`` False for it.
+    mclaw_key = settings.memclaw_api_key  # legacy-name-ok: live compatibility field
     if mclaw_key:
         if key and hmac.compare_digest(key, mclaw_key):
+            _set_rate_limit_key(request, f"credential:{key}")
             # Valid Caura key — resolve tenant from standalone or header
             if settings.is_standalone:
                 from core_api.standalone import get_standalone_tenant_id
@@ -656,6 +768,10 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
                     remediation="Route the request through the public gateway host.",
                 ),
             )
+        if gw_secret:
+            # Through the gateway. Without a secret these headers are the
+            # caller's own and name no bucket, so the limiter falls back to IP.
+            _set_rate_limit_key(request, _gateway_rate_limit_key(request, tenant_id))
         await _block_if_suppressed(tenant_id)
         # Cross-tenant credentials carry a list of readable tenants via
         # ``X-Readable-Tenant-IDs``. The home tenant was just checked
@@ -689,6 +805,14 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
         # them and API keys stay unable to act on admin-only routes.
         org_role_raw = (request.headers.get("x-org-role") or "").strip().lower()
         org_role = org_role_raw if org_role_raw in ("admin", "member") else None
+        # The person behind a dashboard session or JWT. The gateway sets
+        # ``X-User-ID`` from its /_auth subrequest on every request, and sends
+        # none for an API key of any kind. Stricter than the headers above,
+        # which this path trusts with or without a secret: the value is only
+        # recorded in the audit trail, and the trail must not name a person on
+        # the caller's word. Without the secret nothing shows the gateway set
+        # it, so it is dropped, as the rate-limit bucket drops it.
+        user_id = ((request.headers.get("x-user-id") or "").strip() or None) if gw_secret else None
         set_current_tenant(tenant_id)
         _stash_request_tenant(request, tenant_id)
         # When the gateway plumbs a multi-tenant read set, expose it to the
@@ -704,8 +828,15 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
             set_readable_tenants(None)
         return AuthContext(
             tenant_id=tenant_id,
+            user_id=user_id,
             org_role=org_role,
             agent_id=agent_id,
+            # The only path that may claim it: the gateway resolved the
+            # credential and injected ``X-Agent-ID`` itself, behind the
+            # perimeter check above (and it overwrites any client-supplied
+            # value via proxy_set_header, the same reason X-Org-Role is read
+            # on this branch alone).
+            agent_id_verified=True,
             is_read_only=is_read_only,
             is_install_credential=is_install_credential,
             install_uuid=install_uuid,

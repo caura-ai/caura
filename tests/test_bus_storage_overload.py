@@ -23,6 +23,12 @@ def storage_app(monkeypatch):
             "settings": SimpleNamespace(core_storage_role="reader"),
             "db_connect_args": lambda url: {},
         },
+        # Enterprise-only package: a reader mount never builds a store or router.
+        "caura_bus_platform": {},
+        "caura_bus_platform.routes": {"storage_router": None},
+        "caura_bus_platform.settings": {"settings": SimpleNamespace()},
+        "caura_bus_platform.store": {"Store": None},
+        "caura_bus_platform.timing": {"TimingMiddleware": None},
     }.items():
         module = ModuleType(name)
         module.__dict__.update(values)

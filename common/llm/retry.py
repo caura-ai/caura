@@ -31,9 +31,18 @@ from common.llm.constants import (
     LLM_RETRY_DELAY_S,
     LLM_RETRY_JITTER_FRACTION,
 )
+from common.llm.providers._unsupported import UnsupportedStructuredOutputError
 from common.provider_names import ProviderName
 
 logger = logging.getLogger(__name__)
+
+# Never retried, whatever the caller passes as ``non_retryable``. Unlike the
+# types that argument exists for (see its docstring), these are deterministic
+# for EVERY caller: they depend on configuration alone, so a retry only buys
+# the backoff sleep before the same error (oss-0915-m-01).
+_ALWAYS_NON_RETRYABLE: tuple[type[BaseException], ...] = (
+    UnsupportedStructuredOutputError,
+)
 
 T = TypeVar("T")
 
@@ -268,10 +277,10 @@ async def _call_with_retry_impl(
             last_exc = exc
             # ``isinstance(exc, ())`` is False, so an empty tuple makes this a
             # no-op for every caller that has not opted in.
-            if isinstance(exc, non_retryable):
+            if isinstance(exc, non_retryable + _ALWAYS_NON_RETRYABLE):
                 logger.warning(
                     "%s attempt %d/%d failed (%s: %s); NOT retrying — "
-                    "caller declared this type deterministic",
+                    "this type is deterministic",
                     label,
                     attempt + 1,
                     max_attempts,
@@ -595,5 +604,12 @@ async def call_with_fallback(
         )
 
     # --- Step 3: Fake function as last resort ---
-    logger.warning("All LLM providers failed for %s, using fake fallback", label)
+    # Name the primary provider: ``label`` is usually the consumer, and without
+    # the provider this line could not tell a misconfigured provider apart from
+    # an outage (oss-0915-m-01 — every anthropic call degraded here).
+    logger.warning(
+        "All LLM providers failed for %s (primary provider '%s'), using fake fallback",
+        label,
+        primary_provider_name,
+    )
     return fake_fn()

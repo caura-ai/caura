@@ -215,6 +215,10 @@ class ExecuteScoredSearch:
             search_data["filter_agent_id"] = data["filter_agent_id"]
         if data.get("caller_agent_id"):
             search_data["caller_agent_id"] = data["caller_agent_id"]
+            # The caller's HOME tenant: its own ``scope_agent`` rows live there
+            # and nowhere else (agent ids are unique per tenant only).
+            if data.get("caller_tenant_id"):
+                search_data["caller_tenant_id"] = data["caller_tenant_id"]
         if data.get("memory_type_filter"):
             search_data["memory_type_filter"] = data["memory_type_filter"]
         if data.get("status_filter"):

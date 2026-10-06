@@ -670,13 +670,41 @@ class TestTickVerdict:
         assert stats["skipped_internal_error"] == 0
 
     @pytest.mark.asyncio
-    async def test_io_errors_alone_do_not_fail_the_tick(self):
-        """Storage having a bad day is exactly what the tick is meant to survive —
-        and unlike a wiring bug, a retry genuinely might help."""
+    async def test_io_errors_alongside_other_outcomes_do_not_fail_the_tick(self):
+        """A storage hiccup on some clusters is exactly what the tick is meant to
+        survive: the rest of the tick reached a verdict on its clusters."""
         stats = await self._tick(
-            self._forge_result(candidates_skipped_io_error=2), self._NO_PROMOTIONS
+            self._forge_result(
+                clusters_attempted=2,
+                candidates_written=1,
+                candidates_skipped_io_error=1,
+            ),
+            self._NO_PROMOTIONS,
         )
-        assert stats["skipped_io_error"] == 2
+        assert stats["skipped_io_error"] == 1
+
+        stats = await self._tick(
+            self._forge_result(
+                clusters_attempted=2,
+                candidates_skipped_io_error=1,
+                candidates_skipped_existing=1,
+            ),
+            self._NO_PROMOTIONS,
+        )
+        assert stats["skipped_io_error"] == 1
+
+    @pytest.mark.asyncio
+    async def test_every_attempt_failing_on_io_fails_the_tick_for_retry(self):
+        """An LLM outage lands every cluster in the I/O bucket. Reporting that as
+        a success let the 23h dedup gate skip every retry tick for the day, so it
+        must fail -- retryably, since unlike a wiring bug a retry can help."""
+        with pytest.raises(RuntimeError) as exc:
+            await self._tick(
+                self._forge_result(clusters_attempted=2, candidates_skipped_io_error=2),
+                self._NO_PROMOTIONS,
+            )
+        assert not isinstance(exc.value, PermanentOpError)
+        assert "skipped_io_error" in str(exc.value)
 
 
 @pytest.mark.unit

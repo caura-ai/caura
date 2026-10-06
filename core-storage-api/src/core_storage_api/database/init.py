@@ -17,6 +17,26 @@ logger = logging.getLogger(__name__)
 # See ``init_database``'s stamp decision for why this specific name.
 _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 
+# Evidence that the chain reached HEAD, not merely that it ran. The sentinel
+# above proves 019 ran; stamping certifies every migration through head, so on
+# its own it would certify 020 onwards over a database that may have stopped
+# anywhere after 019 — a selective restore, or an operator who dropped
+# ``alembic_version`` to clear a wedged upgrade. The probe is an object the head
+# migration creates; for 060 that is the ``entities.created_at`` column. An index
+# probe must check the index is VALID, since an interrupted CONCURRENTLY build
+# leaves an invalid one. The probe need not be migration-only — the sentinel
+# already rules out a ``create_all`` schema — but it must not exist before head.
+# It is checked against the script head at boot, so a stale entry refuses rather
+# than stamps. Each new migration updates both values;
+# ``test_the_head_fingerprint_names_the_current_head`` fails until it does. A
+# head with no object of its own may set the probe to ``None``, which makes the
+# stamp branch refuse — the safe answer when there is nothing to check.
+_HEAD_FINGERPRINT_REVISION = "060"
+_HEAD_FINGERPRINT_SQL: str | None = (
+    "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+    "WHERE table_schema = 'public' AND table_name = 'entities' AND column_name = 'created_at')"
+)
+
 _engine: AsyncEngine | None = None
 _read_engine: AsyncEngine | None = None
 
@@ -46,10 +66,16 @@ def _schema_is_at_head(connection: Connection, head: str | None) -> bool:
     return current is not None and current == head
 
 
-def schema_bootstrap_action(*, has_tables: bool, has_alembic_version: bool, has_chain_evidence: bool) -> str:
+def schema_bootstrap_action(
+    *,
+    has_tables: bool,
+    has_alembic_version: bool,
+    has_chain_evidence: bool,
+    has_head_evidence: bool,
+) -> str:
     """What to do with a database before serving: ``upgrade``, ``stamp`` or ``refuse``.
 
-    A pure function of the three probes so the decision can be read — and
+    A pure function of the four probes so the decision can be read — and
     tested — without a database. It used to be two branches inline, and the
     branch that mattered was the one with no evidence behind it.
 
@@ -65,14 +91,22 @@ def schema_bootstrap_action(*, has_tables: bool, has_alembic_version: bool, has_
 
     So ``stamp`` now requires evidence that the chain really ran, and the
     absence of evidence is a refusal rather than a guess.
+
+    And evidence that it ran to HEAD. The sentinel alone proves only migration
+    019, so a chain-built database that stopped earlier than head and lost its
+    version row was stamped at head too, skipping every migration in between
+    for good — with the ORM then selecting columns that were never added.
+    ``has_head_evidence`` is the head migration's own fingerprint; without it
+    the true revision is unknown, and the operator has to say which it is.
     """
     if has_alembic_version or not has_tables:
         # Either Alembic already tracks this database, or it is empty. Both are
         # the ordinary path: run whatever is pending, which may be everything.
         return "upgrade"
-    if has_chain_evidence:
-        # Chain-built but missing its version row — e.g. a dump restored
-        # without ``alembic_version``. Stamping records what the schema shows.
+    if has_chain_evidence and has_head_evidence:
+        # Chain-built through head but missing its version row — e.g. a dump
+        # restored without ``alembic_version``. Stamping records what the
+        # schema shows.
         return "stamp"
     return "refuse"
 
@@ -126,16 +160,19 @@ async def init_database() -> None:
     """Run all pending Alembic migrations to initialize/update the database schema.
 
     What happens to an existing database is decided by
-    :func:`schema_bootstrap_action`, which this calls with three probes:
+    :func:`schema_bootstrap_action`, which this calls with four probes:
 
     * ``alembic_version`` present, or no tables at all → ``upgrade``, the
       ordinary path.
-    * tables but no ``alembic_version``, and the chain's sentinel table is
-      present → ``stamp`` head. The schema was built by the chain and merely
-      lost its version row.
-    * tables but no ``alembic_version`` and no sentinel → ``refuse``, raising
-      ``RuntimeError``. An operator who is sure the schema is current can
-      stamp it deliberately.
+    * tables but no ``alembic_version``, the chain's sentinel table present,
+      and the head migration's fingerprint present → ``stamp`` head. The
+      schema was built by the chain through head and merely lost its version
+      row.
+    * tables but no ``alembic_version`` and either probe missing → ``refuse``,
+      raising ``RuntimeError``. Without the sentinel the schema was not built
+      by the chain; without the fingerprint it was, but nothing says how far.
+      The operator stamps the revision the database really is at, and the next
+      boot runs the rest.
 
     This used to stamp head on the first case alone — any database with a
     ``memories`` table. That certified a schema which may never have run the
@@ -276,6 +313,12 @@ async def init_database() -> None:
                     ),
                     {"name": _CHAIN_SENTINEL_TABLE},
                 )
+                # The head fingerprint is only meaningful for the head it was
+                # written for: a stale entry proves nothing about this head, so
+                # it counts as no evidence and the stamp branch refuses.
+                has_head_evidence = False
+                if _HEAD_FINGERPRINT_SQL is not None and schema_head == _HEAD_FINGERPRINT_REVISION:
+                    has_head_evidence = bool(await work_conn.scalar(text(_HEAD_FINGERPRINT_SQL)))
                 # End the implicit read tx so Alembic owns transaction lifecycle
                 # on this connection — required for ``autocommit_block``.
                 await work_conn.commit()
@@ -284,6 +327,7 @@ async def init_database() -> None:
                     has_tables=bool(has_tables),
                     has_alembic_version=bool(has_alembic),
                     has_chain_evidence=bool(has_chain_evidence),
+                    has_head_evidence=has_head_evidence,
                 )
 
                 def _run_upgrade(connection: Connection) -> None:
@@ -291,6 +335,24 @@ async def init_database() -> None:
                     if action == "upgrade":
                         command.upgrade(alembic_cfg, "head")
                         return
+                    if action == "refuse" and has_chain_evidence:
+                        # Built by the chain, so the database is not foreign —
+                        # but it carries nothing that says how far the chain
+                        # got. Stamping head would skip whatever lies between
+                        # its real revision and head, permanently; guessing a
+                        # lower revision would re-run migrations already
+                        # applied. Only the operator knows which it is.
+                        raise RuntimeError(
+                            "Refusing to stamp Alembic at head: this database was built by the "
+                            f"migration chain (it has '{_CHAIN_SENTINEL_TABLE}') but has no "
+                            "'alembic_version', and it lacks the object the head migration "
+                            f"({schema_head}) creates, so it cannot be shown to be at head. "
+                            "Stamping head would skip every migration it has not run. Find the "
+                            "revision it was really at (the alembic_version of the database it "
+                            "was copied from, or the release it last ran), stamp that with "
+                            "'alembic stamp <revision>' from the repository root, and restart: "
+                            "the remaining migrations then run on boot."
+                        )
                     if action == "refuse":
                         # REFUSE rather than stamp. Stamping says "every
                         # migration through head has been applied here", and
@@ -316,9 +378,9 @@ async def init_database() -> None:
                             "from the repository root, the same way AGENT-INSTALL.md runs "
                             "'alembic upgrade head'."
                         )
-                    # Chain-built but missing its version row (e.g. restored
-                    # without ``alembic_version``): stamping is recording what
-                    # the evidence already shows.
+                    # Chain-built through head but missing its version row
+                    # (e.g. restored without ``alembic_version``): stamping is
+                    # recording what the evidence already shows.
                     logger.info("Existing chain-built schema with no alembic_version — stamping at head")
                     command.stamp(alembic_cfg, "head")
 

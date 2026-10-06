@@ -189,7 +189,17 @@ def test_anthropic_and_openai_keys_detected():
     assert PIICategory.API_KEY in _cats(
         "key sk-ant-api03-AbCdEf123456GhIjKl789 rotated"
     )
-    assert PIICategory.API_KEY in _cats("export OPENAI=sk-proj1234567890ABCDEFghij now")
+    # Real current-format keys: a type segment, then ``-`` / ``_`` in the body.
+    # (This used to pin ``sk-proj1234…`` — a hyphen-less shape OpenAI never
+    # issues, which is why the hyphenated miss went unnoticed.)
+    assert PIICategory.API_KEY in _cats(
+        "export OPENAI=sk-proj-Ab3dEf6hIj9kLm2nOp5q_Rs8tUv-Wx1yZa4bCd7 now"
+    )
+    assert PIICategory.API_KEY in _cats(
+        "svc sk-svcacct-Qw3rTy6uIo9pAs2dFg5hJk8l_Zx1 ok"
+    )
+    # The legacy hyphen-less body still matches.
+    assert PIICategory.API_KEY in _cats("old sk-Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4z key")
 
 
 # ── Generic secret: group-1 masking keeps the field name ─────────────

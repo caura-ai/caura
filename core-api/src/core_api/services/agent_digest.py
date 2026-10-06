@@ -21,7 +21,7 @@ from typing import Any
 
 from common.llm import call_with_fallback
 from core_api.clients.storage_client import get_storage_client
-from core_api.services.organization_settings import get_settings_for_display
+from core_api.services.organization_settings import AGENT_DIGEST_CADENCE_PERIODS, get_settings_for_display
 from core_api.services.report_corpus import (
     NON_COHESIVE_TITLE_REGEX,
     is_cohesive,
@@ -450,12 +450,26 @@ async def run_agent_digest(period: str = "day") -> dict:
     org_ids = await list_tenants_with_agent_digest_enabled()
     now = datetime.now(UTC)
     org_sem = asyncio.Semaphore(_ORG_CONCURRENCY)
+    off_cadence = 0
 
     async def _one(org_id: str) -> dict | None:
+        nonlocal off_cadence
         async with org_sem:
             settings = await get_settings_for_display(org_id)
             config = settings.get("agent_digest") or {}
             if not config.get("enabled"):  # enumeration already filters; re-check
+                return None
+            # M-113: core-operations fires a day and a week run regardless, so
+            # the org's cadence decides which of them it takes.
+            cadence = config.get("cadence") or "daily"
+            periods = AGENT_DIGEST_CADENCE_PERIODS.get(cadence) if isinstance(cadence, str) else None
+            if periods is None:
+                # Stored before PUT checked the value (a non-string included,
+                # which a lookup cannot hash): run on the declared default.
+                logger.warning("agent_digest: org %s has unknown cadence %r; running daily", org_id, cadence)
+                periods = AGENT_DIGEST_CADENCE_PERIODS["daily"]
+            if period not in periods:
+                off_cadence += 1
                 return None
             return await generate_for_org(org_id, period, config, now=now)
 
@@ -477,12 +491,13 @@ async def run_agent_digest(period: str = "day") -> dict:
             agent_skipped += res.get("skipped", 0)
             agent_errors += res.get("errored", 0)
     logger.info(
-        "agent_digest run: period=%s orgs=%d completed=%d failed=%d "
+        "agent_digest run: period=%s orgs=%d completed=%d failed=%d off_cadence=%d "
         "digests=%d agent_listed=%d agent_skipped=%d agent_errors=%d",
         period,
         len(org_ids),
         completed,
         failed,
+        off_cadence,
         digests,
         agent_listed,
         agent_skipped,
@@ -497,6 +512,7 @@ async def run_agent_digest(period: str = "day") -> dict:
         "agent_listed": agent_listed,
         "agent_skipped": agent_skipped,
         "agent_errors": agent_errors,
+        "off_cadence": off_cadence,
     }
 
 

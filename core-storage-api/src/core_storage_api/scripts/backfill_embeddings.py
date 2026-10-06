@@ -204,7 +204,7 @@ _TARGETS: tuple[_TableSpec, ...] = (
         content_column="content",
         has_deleted_at=True,
         # The DATABASE column is ``metadata``. ``metadata_`` is the Python
-        # attribute name on the ORM model — ``mapped_column("metadata", JSONB)``
+        # attribute name on the ORM model — ``mapped_column("metadata", JSON)``
         # renames it because ``metadata`` collides with SQLAlchemy's own
         # ``Base.metadata``. This script emits raw SQL, so it needs the
         # database's name. Carrying the ORM's spelling here meant
@@ -298,8 +298,8 @@ async def _iter_rows(
                     f"_TableSpec.table={spec.table!r}; got metadata_column=None"
                 )
             # No ``? 'retrieval_hint'`` existence test. ``?`` is jsonb-only and
-            # this column is ``json`` (the migration chain creates it that way
-            # regardless of the model declaring JSONB), so it raised
+            # this column is ``json`` (migration 001 creates it that way; the
+            # model declared JSONB until CAURA-595 was reconciled), so it raised
             # UndefinedFunctionError: operator does not exist: json ? unknown.
             # It was also redundant — the COALESCE below already excludes an
             # absent key: ``->>`` yields NULL for a missing key and for a NULL
@@ -717,8 +717,10 @@ async def _amain(argv: list[str]) -> int:
     # Preflight: refuse a live run whose rows would be "repaired" with fake
     # vectors. Two roads lead there — ``EMBEDDING_PROVIDER=fake`` set
     # explicitly, and provider ``openai`` with no key resolving anywhere
-    # (the registry then degrades to ``FakeEmbeddingProvider``, logging a
-    # warning per call but never failing). Either way the poisoned rows
+    # (the registry then returns ``UnconfiguredEmbeddingProvider``, a
+    # ``FakeEmbeddingProvider`` whose vectors ``get_embedding`` refuses to
+    # hand back for storage — so a live run would only fail every row). In
+    # the explicit-fake case the poisoned rows
     # stop being NULL, so the selector never revisits them: permanent
     # damage, hence a hard refusal rather than a warning. Overridable with
     # ``--allow-fake-provider`` for dev/test databases.

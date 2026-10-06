@@ -13,12 +13,43 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
+from sqlalchemy.dialects.postgresql import JSON, JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.constants import VECTOR_DIM
 from common.models.base import Base
+
+#: Row-state predicate for "this live memory still has background work coming".
+#: Each disjunct is a durable marker the async write path sets and clears on the
+#: row itself, so it survives process restarts (no in-memory counter):
+#:
+#: * ``embedding IS NULL`` -- the vector has not landed. core-worker's embed
+#:   PATCH (or the backfill sweep) fills it.
+#: * ``enrichment_pending = true`` -- set by the fast single-write path and by
+#:   the deferred bulk path; the worker's enrich PATCH writes ``false`` into
+#:   both homes. ``_system`` wins over the legacy top-level key, as it does in
+#:   ``extract_system_metadata``.
+#: * ``atomic_facts`` is set and not JSON ``null`` -- the worker persisted
+#:   facts that core-api's ENRICHED consumer has not fanned out into child rows
+#:   yet; the consumer overwrites the key with JSON ``null`` once it has
+#:   (``->>`` yields SQL NULL for that).
+#:
+#: Only ``->`` / ``->>`` are used: the migrated ``metadata`` column is ``json``
+#: (migration 001) while ``create_all`` builds it ``jsonb``, and these operators
+#: are the ones both types share.
+#:
+#: Shared verbatim by ``ix_memories_pending_work`` below and by the storage
+#: query that counts pending work, so the planner can match the partial index.
+PENDING_EMBEDDING_SQL = "embedding IS NULL"
+PENDING_ENRICHMENT_SQL = (
+    "COALESCE(metadata -> '_system' ->> 'enrichment_pending', "
+    "metadata ->> 'enrichment_pending') = 'true'"
+)
+PENDING_FANOUT_SQL = "(metadata ->> 'atomic_facts') IS NOT NULL"
+PENDING_WORK_SQL = (
+    f"({PENDING_EMBEDDING_SQL} OR {PENDING_ENRICHMENT_SQL} OR {PENDING_FANOUT_SQL})"
+)
 
 
 class Memory(Base):
@@ -36,7 +67,9 @@ class Memory(Base):
     weight: Mapped[float] = mapped_column(Float, server_default=text("0.5"))
     source_uri: Mapped[str | None] = mapped_column(Text)
     run_id: Mapped[str | None] = mapped_column(Text)
-    metadata_: Mapped[dict | None] = mapped_column("metadata", JSONB)
+    # ``json``, not JSONB: migration 001 creates it that way (CAURA-595), and
+    # ``test_models_match_the_migrated_schema`` holds the model to the schema.
+    metadata_: Mapped[dict | None] = mapped_column("metadata", JSON)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )
@@ -232,4 +265,43 @@ class Memory(Base):
             "tenant_id",
             postgresql_where=text("deleted_at IS NOT NULL"),
         ),
+        # Backs the ``pending`` / ``settled`` block of ``GET /memories/stats``
+        # (lme-0929-m-03). Partial on ``PENDING_WORK_SQL``, so it holds only
+        # rows with background work outstanding: empty for a settled store,
+        # and the count costs O(pending rows) instead of a tenant-wide scan.
+        # Created CONCURRENTLY in migration 053 with the same predicate.
+        Index(
+            "ix_memories_pending_work",
+            "tenant_id",
+            postgresql_where=text(f"deleted_at IS NULL AND {PENDING_WORK_SQL}"),
+        ),
     )
+
+
+# Backs the derived-row lookup every memory delete runs (B25: M-52, M-53).
+# Auto-chunk and atomic-fact children link to their parent only through
+# ``metadata.parent_memory_id``; partial on live rows that have one, so it holds
+# derived rows only. Created CONCURRENTLY in migration 058 with the same key and
+# predicate. Declared after the class rather than in ``__table_args__`` because
+# its key is a JSON operator on ``Memory.metadata_``, which has to exist first.
+Index(
+    "ix_memories_parent_memory_id",
+    Memory.tenant_id,
+    Memory.metadata_["parent_memory_id"].astext,
+    postgresql_where=text(
+        "deleted_at IS NULL AND (metadata ->> 'parent_memory_id') IS NOT NULL"
+    ),
+)
+
+
+# Backs the ingest doc-hash lookup every preview runs (L-193): live ingest rows,
+# keyed on the document's content hash. Created CONCURRENTLY in migration 059
+# with the same key and predicate. Declared after the class rather than in
+# ``__table_args__`` because its key is a JSON operator on ``Memory.metadata_``,
+# which has to exist first.
+Index(
+    "ix_memories_ingest_doc_hash",
+    Memory.tenant_id,
+    Memory.metadata_["doc_hash"].astext,
+    postgresql_where=text("deleted_at IS NULL AND (metadata ->> 'source') = 'ingest'"),
+)

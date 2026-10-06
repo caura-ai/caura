@@ -90,6 +90,7 @@ async def _resolve_forge_config(org_id: str) -> ForgeConfig:
         min_distinct_agents=int(forge.get("min_distinct_agents", _d.min_distinct_agents)),
         freshness_window_days=int(forge.get("freshness_window_days", _d.freshness_window_days)),
         max_writes_per_run=int(forge.get("max_writes_per_run", _d.max_writes_per_run)),
+        max_clusters_per_run=int(forge.get("max_clusters_per_run", _d.max_clusters_per_run)),
         body_max_bytes=int(sf.get("body_max_bytes", _d.body_max_bytes)),
         description_max_bytes=int(sf.get("description_max_bytes", _d.description_max_bytes)),
         cluster_entity_jaccard_threshold=float(
@@ -378,6 +379,8 @@ async def run_forge_cron_tick(
             freshness_window_days=cfg.freshness_window_days,
             now=now,
             auto_promote_clean=auto_promote_clean,
+            body_max_bytes=cfg.body_max_bytes,
+            description_max_bytes=cfg.description_max_bytes,
         )
     except Exception as exc:
         logger.exception(
@@ -429,6 +432,14 @@ async def run_forge_cron_tick(
         # alerting on.
         "skipped_internal_error": forge_result.candidates_skipped_internal_error,
         "skipped_existing": forge_result.candidates_skipped_existing,
+        # Clusters this tick actually distilled. Below ``clusters_eligible``
+        # means the run stopped before the end of the order, and because that
+        # order is deterministic the unreached tail is the same tail next tick
+        # — the shape oss-0814 L-13 was about. The run logs a WARNING when it
+        # is the attempt ceiling (rather than a full write budget) that cut the
+        # run short; this key is what makes the same thing queryable from here.
+        "clusters_attempted": forge_result.clusters_attempted,
+        "clusters_eligible": forge_result.clusters_eligible,
         # 09/02 L-34. Without this, a promotion half that raises every tick
         # returns the same zeros as one with nothing to promote — the mining
         # counters above still look healthy, so the tick reads fine.
@@ -476,6 +487,31 @@ async def run_forge_cron_tick(
             f"across {forge_result.clusters_eligible} eligible cluster(s) "
             f"(tenant={tenant_id} fleet={fleet_id} run={run_label}) — a code/wiring "
             f"bug; see candidates_skipped_internal_error and the tracebacks above"
+        )
+
+    # Every cluster this tick attempted ended in the I/O bucket and nothing was
+    # written: the tick did no mining at all. An LLM outage takes exactly this
+    # shape -- ``_refuse_fake`` raises per cluster and ``run_forge_distill``
+    # files each one under ``skipped_io_error`` -- and so does a storage outage.
+    # Returning normally finalised the audit row as a success, which the 23h
+    # dedup gate then read as "already done", so the oversampled schedule's
+    # later ticks all skipped and the outage cost the whole day.
+    #
+    # A plain raise, not ``PermanentOpError``: unlike a wiring bug this is the
+    # case a retry can fix, so the runner records a failure and nacks.
+    # Narrower than "wrote nothing": a tick whose clusters were skipped for any
+    # other reason (poisoned, Sentinel, existing, unparseable) reached a verdict
+    # on them, and failing it would retry work that will be skipped again.
+    attempted = forge_result.clusters_attempted
+    if (
+        attempted
+        and not forge_result.candidates_written
+        and forge_result.candidates_skipped_io_error == attempted
+    ):
+        raise RuntimeError(
+            f"forge tick wrote no candidates: all {attempted} attempted cluster(s) "
+            f"failed on I/O or LLM errors (tenant={tenant_id} fleet={fleet_id} "
+            f"run={run_label}); see skipped_io_error and the tracebacks above"
         )
 
     return stats

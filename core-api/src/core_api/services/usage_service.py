@@ -28,9 +28,11 @@ and ``enforce_usage_limits()`` turns into a 403 at ~22 write routes. So a hook
 returning ``allowed=False`` blocks nothing here, by design — the decision it
 would express is already travelling a different way.
 
-What the result IS used for: the ``X-RateLimit-Limit`` /
-``X-RateLimit-Remaining`` response headers on three routes. Everything else
-discards it.
+What the result IS used for: the ``X-Usage-Limit`` / ``X-Usage-Remaining``
+response headers on three routes, via ``set_usage_headers`` below. Everything
+else discards it. Those headers were called ``X-RateLimit-*`` until this
+module grew ``set_usage_headers``; see the note beside the constants for why
+that name could not stay.
 
 Implementation guidance for the platform side: enqueue and return ``None``.
 This runs on the write path, and this codebase has twice moved off per-request
@@ -43,9 +45,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, get_args
+from typing import TYPE_CHECKING, Literal, get_args
 
 from core_api.services.hooks import get_hooks
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
 
@@ -287,12 +292,13 @@ def enforces_mcp_plan_limits() -> bool:
     ``plan_limit_gated(op)`` is still consulted at the call site. This flag is
     the deploy-time gate; that table remains the policy record.
 
-    INTERACTS WITH ``meters_mcp_bulk_write``. Over-plan mode is computed from
-    counters the MCP batch path does not move while that flag is off, so
-    enabling this one alone enforces a limit against counters this surface
-    barely contributes to. Enforcement will still fire — the counters are
-    per-org and REST moves them — but a quiet ``mcp_plan_limit_would_refuse``
-    log beforehand is not evidence the blast radius is small.
+    INTERACTS WITH ``meters_mcp_bulk_write``, which is now ON, so the batch path
+    does move the counters over-plan mode is computed from. That removes one
+    reason a quiet ``mcp_plan_limit_would_refuse`` log was not evidence the
+    blast radius is small. It does not remove the decisive one: nothing stamps
+    an org read-only from usage growth in the first place, so the log is quiet
+    for reasons that have nothing to do with how many tenants are over plan.
+    Read ``_check_plan_limit``'s docstring before enabling this.
     """
     from core_api.config import settings
 
@@ -307,10 +313,16 @@ def meters_mcp_bulk_write() -> bool:
     unit per item. Same tenant, same N memories, different bill.
 
     Gated for the same reason as ``recall_operation`` above, and more sharply:
-    that one bills the wrong counter, this one bills nothing. Turning it on
-    starts charging for writes that have been free, so it is a billing decision
-    rather than a deploy side effect — see the setting's comment for why the
-    first refusal a tenant sees will come from REST.
+    that one bills the wrong counter, this one billed nothing. ON by default
+    since caura-ai/caura#1638 — the decision recorded there was to close the
+    measurement gap before deciding on ``enforce_mcp_plan_limits``, and this is
+    the half of it that lives in this repo.
+
+    Enabling it charges for writes that were free, so tenants that batch over
+    MCP consume quota they did not before. It refuses nobody: the meter only
+    records (``allowed`` has no reader here, see ``_meter``), and the flag that
+    enforcement travels on is not set by usage growth at all — the setting's
+    comment in ``config.py`` carries that verification.
 
     ``charges_write_quota("bulk_create")`` is still consulted at the call site.
     This flag is the deploy-time gate; that table remains the policy record, so
@@ -348,3 +360,54 @@ async def bulk_check_and_increment(
 ) -> UsageCheckResult:
     """Record a bulk write of ``count`` items as a single metered call."""
     return await _meter(tenant_id, "write", count)
+
+
+# ── Publishing the counters: headers of their own ───────────────────────────
+#
+# These are the PERIOD QUOTA — "you may write N this billing period, M left" —
+# and they are deliberately NOT called ``X-RateLimit-*``.
+#
+# That name belongs to something else on this API. slowapi owns
+# ``X-RateLimit-Limit`` / ``-Remaining`` / ``-Reset`` for the per-second
+# throttle (``middleware/rate_limit.py``, ``headers_enabled=True``), and that
+# meaning is the one README and ``docs/api-reference.md`` publish: a client
+# reads them to back off BEFORE it is throttled. The quota headers used to
+# reuse the same two names, so a metered route answered with both — slowapi
+# appends rather than sets, so the response carried ``X-RateLimit-Limit``
+# twice, e.g. ``None`` then ``10``. HTTP says a client may join repeated
+# headers with a comma, and httpx/requests/fetch all do, so the value a caller
+# actually read back was ``"None, 10"``: not an integer, so ``int(...)`` raises
+# and any back-off arithmetic built on it fails. The throttle signal was
+# unusable on exactly the routes most likely to be throttled — ``POST
+# /memories`` and ``POST /search``.
+#
+# Two different quantities cannot share one header name, so the one with no
+# published contract moved. ``X-RateLimit-*`` now means the throttle and only
+# the throttle.
+USAGE_LIMIT_HEADER = "X-Usage-Limit"
+USAGE_REMAINING_HEADER = "X-Usage-Remaining"
+
+
+def set_usage_headers(response: Response, usage: UsageCheckResult | None) -> None:
+    """Publish period-quota counters on ``response`` — when there are any.
+
+    Absent headers mean "no quota to report", which is the honest answer for
+    the OSS default (no meter wired, ``_allowed()`` → ``limit=None``) and for a
+    platform meter that recorded the usage without handing counters back.
+
+    The call sites previously wrote ``str(usage.get("limit", "unlimited"))``,
+    and that default is unreachable: ``UsageCheckResult.get`` is
+    ``getattr(self, key, default)``, so a field that EXISTS and is ``None``
+    returns ``None`` rather than falling back — ``dict.get`` semantics, applied
+    to a dataclass whose fields all exist. Every unmetered response therefore
+    advertised the literal string ``"None"`` as its limit. Omitting beats
+    emitting either ``"None"`` or ``"unlimited"``: both are non-numeric values
+    in a numeric header, so both break the same ``int(...)`` the caller has to
+    write.
+    """
+    if usage is None:
+        return
+    if usage.limit is not None:
+        response.headers[USAGE_LIMIT_HEADER] = str(usage.limit)
+    if usage.remaining is not None:
+        response.headers[USAGE_REMAINING_HEADER] = str(usage.remaining)

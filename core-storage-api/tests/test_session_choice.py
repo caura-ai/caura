@@ -73,6 +73,13 @@ _DOCUMENTED_READ_YOUR_WRITES = {"entity_resolve_duplicates"}
 # docstring above already records as unsafe. The second pass follows
 # core-api's storage client across the HTTP boundary and finds the rest.
 _MUST_STAY_ON_THE_WRITER = {
+    "memory_assert_pointers_in_tenant": (
+        "routers/memories.py::batch_update_status and update_memory_status "
+        "check every supersedes_id before writing any row. The pointer can name "
+        "a memory written moments earlier (two contradicting writes in quick "
+        "succession); under lag that row reads as absent and a valid request "
+        "is refused with a 422."
+    ),
     "entity_resolve_duplicates": (
         "Its own docstring: the merge loop re-reads rows it mutates, inside "
         "SAVEPOINTs an HTTP boundary cannot express."
@@ -255,12 +262,43 @@ def test_the_writer_session_population_is_pinned() -> None:
     ``document_get_by_doc_id`` holds the writer for the same reason, and the two
     document lookups must not disagree about staleness — that would make the
     ``id`` path unreliable while the ``doc_id`` path was not.
+
+    138 -> 139 (pure 64 -> 65): ``memory_assert_pointers_in_tenant`` is new and
+    only selects, on the writer by design — see its ``_MUST_STAY_ON_THE_WRITER``
+    entry — so the convertible count below does not move.
+
+    139 -> 140 (pure unchanged): ``idempotency_release`` is new and DELETEs a
+    still-pending Idempotency-Key claim, so it is a write, not a backlog entry.
+
+    140 -> 141 (pure unchanged at 65): ``fleet_release_node`` is new (M-85). It
+    clears a node's binding with ``sql_update``, so it is a write and belongs on
+    the writer.
+
+    141 -> 142 (pure unchanged at 65): ``fleet_claim_interview_request`` is new
+    (M-86). It spends an interview request with ``sql_update``, a write.
+
+    142 -> 143 (pure unchanged at 65): ``organization_settings_encrypt_api_keys``
+    is new (M-99). It swaps keys with ``sql_update`` and audits with
+    ``pg_insert``, so it is a write.
+
+    143 -> 144 (pure unchanged at 65): ``memory_reset_dedup_checked`` is new
+    (M-38). It clears the crystallizer's dedup stamps with ``sql_update``, a
+    write.
+
+    144 -> 145 (pure unchanged at 65): ``entity_merge`` is new (L-46). It locks
+    the entity ``with_for_update`` and assigns the merged attributes, a write.
+
+    145 -> 143 (pure unchanged at 65): ``memory_soft_delete_by_ids``,
+    ``memory_soft_delete_by_filter`` and ``memory_soft_delete_by_run`` no longer
+    open a session. They share ``_soft_delete`` (M-52, M-53), which opens the
+    one writer session and soft-deletes the rows and their derived rows with
+    ``sql_update``, a write.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 137, f"{len(methods)} methods open a writer session"
-    assert len(pure) == 64, f"{len(pure)} of them show no write marker"
+    assert len(methods) == 143, f"{len(methods)} methods open a writer session"
+    assert len(pure) == 65, f"{len(pure)} of them show no write marker"
 
 
 @pytest.mark.parametrize(

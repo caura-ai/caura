@@ -170,3 +170,31 @@ async def test_patch_retries_on_connect_error_then_succeeds() -> None:
     )
 
     assert client.patch.await_count == 2
+
+
+# ── Suppression upsert carries the event time ────────────────────────
+
+
+async def test_suppression_upsert_sends_event_time() -> None:
+    """Storage orders suppress/restore by the event's own time, so the
+    body must carry it — a redelivered stale event is then ignored rather
+    than applied on arrival. Omitted when the caller has none."""
+    from datetime import UTC, datetime
+
+    client = MagicMock(spec=httpx.AsyncClient)
+    client.post = AsyncMock(return_value=_ok_response({}))
+    when = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
+
+    await storage_client.upsert_tenant_suppression(
+        client, tenant_id="t1", action="restore", updated_by="corr", occurred_at=when
+    )
+    await storage_client.upsert_tenant_suppression(client, tenant_id="t2", action="suppress", updated_by=None)
+
+    first, second = (c.kwargs["json"] for c in client.post.await_args_list)
+    assert first == {
+        "tenant_id": "t1",
+        "action": "restore",
+        "updated_by": "corr",
+        "occurred_at": "2026-09-01T10:00:00+00:00",
+    }
+    assert "occurred_at" not in second

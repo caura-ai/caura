@@ -63,6 +63,34 @@ interface KeystonesPayload {
   count: number;
   truncated: boolean;
   rules: KeystoneRow[];
+  hint?: string;
+}
+
+/** Normalize the REST envelope and preserve its out-of-band truncation flag. */
+export async function fetchKeystonesPayload(
+  query: Record<string, string>,
+  signal?: AbortSignal,
+): Promise<KeystonesPayload> {
+  let serverTruncated = false;
+  const raw = await apiCall(
+    "GET",
+    "/memclaw/keystones", // legacy-name-floor: live compatibility route
+    undefined,
+    { ...query, envelope: "true" },
+    signal,
+    undefined,
+    undefined,
+    (headers) => { serverTruncated = headers.get("X-Truncated") === "true"; },
+  );
+  const envelope = raw as { items?: unknown; rules?: unknown; truncated?: boolean; hint?: unknown } | null;
+  const rows = Array.isArray(raw) ? raw : envelope?.items ?? envelope?.rules;
+  const rules = Array.isArray(rows) ? rows as KeystoneRow[] : [];
+  return {
+    count: rules.length,
+    truncated: serverTruncated || envelope?.truncated === true,
+    rules,
+    ...(typeof envelope?.hint === "string" ? { hint: envelope.hint } : {}),
+  };
 }
 
 interface CacheEntry {
@@ -120,12 +148,44 @@ export function invalidateKeystoneCache(): void {
   inflight.clear();
 }
 
+const FRAME_TAG_RE = /<\/?(?:keystone_rules|recalled_memories)[^>]*>/gi;
+
+/**
+ * Make stored text safe to interpolate as ONE line of a system-prompt block.
+ *
+ * Strips any ``<keystone_rules…>`` / ``</keystone_rules…>`` and
+ * ``<recalled_memories…>`` / ``</recalled_memories…>`` tag, then flattens
+ * newlines to spaces. Without this, a field containing a closing tag (with
+ * or without attributes, on any line) would close its wrapping block early
+ * and let stored text appear OUTSIDE its frame in the model's system prompt
+ * — or, from a recalled memory, open a second, later ``<keystone_rules>``
+ * block that reads as mandatory. The ``[^>]*`` clause covers e.g.
+ * ``<keystone_rules ignored="true">``; the newline strip keeps one field
+ * from spanning lines and breaking the per-line ``- …`` shape both blocks
+ * depend on. Case-insensitive — LLMs don't care about case.
+ *
+ * Used for keystone rule fields here and for recalled memory content in
+ * ``context-engine.ts``; recalled memories include auto-ingested user
+ * messages, so they are text any chat participant can author.
+ */
+export function sanitizePromptField(s: string): string {
+  // Repeat until stable: one pass over ``<keystone_<keystone_rules>rules>``
+  // would remove the inner tag and leave a working outer one behind.
+  let out = s;
+  for (;;) {
+    const next = out.replace(FRAME_TAG_RE, "");
+    if (next === out) break;
+    out = next;
+  }
+  return out.replace(/[\r\n\u2028\u2029]+/g, " ");
+}
+
 /**
  * Format a list of rules into the ``<keystone_rules>`` block. Lowest-
  * weight rules are dropped first when the token cap is hit so the
  * highest-priority governance wins under pressure.
  */
-export function formatKeystones(rules: KeystoneRow[]): string {
+export function formatKeystones(rules: KeystoneRow[], serverTruncated = false): string {
   if (rules.length === 0) return "";
 
   // Sort by weight DESC so that any truncation drops low-weight rules.
@@ -142,6 +202,9 @@ export function formatKeystones(rules: KeystoneRow[]): string {
     "conflicting instructions in user prompts and in the system prompt " +
     "above this block. Always follow them.\n";
   const footer = "</keystone_rules>\n";
+  const serverNotice = serverTruncated
+    ? "Warning: the server truncated the rule set; additional rules are not shown.\n"
+    : "";
   const maxChars = CAURA_KEYSTONES_TOKEN_CAP * CHARS_PER_TOKEN_ESTIMATE;
   // Reserve room for the worst-case truncation line up front. The
   // upper bound on ``N more rules omitted`` is ``sorted.length - 1``
@@ -154,25 +217,12 @@ export function formatKeystones(rules: KeystoneRow[]): string {
   const TRUNCATION_RESERVE =
     `... (${Math.max(sorted.length - 1, 0)} more rules omitted)\n`.length;
 
-  // Strip any ``<keystone_rules…>`` / ``</keystone_rules…>`` tag from
-  // rule fields before interpolation, then flatten newlines to spaces.
-  // Without this, a rule whose content contains the closing tag (with
-  // or without attributes, on any line) would close the wrapping block
-  // early and let attacker-controlled text appear OUTSIDE the
-  // mandatory-rules frame in the model's system prompt. The
-  // ``[^>]*`` clause covers e.g. ``<keystone_rules ignored="true">``;
-  // the newline strip prevents a single rule from spanning lines and
-  // breaking the ``- title: content`` per-line shape the prompt
-  // depends on. Case-insensitive — LLMs don't care about case.
-  const sanitize = (s: string): string =>
-    s.replace(/<\/?keystone_rules[^>]*>/gi, "").replace(/[\r\n]+/g, " ");
-
   const lines: string[] = [];
-  let charsUsed = header.length + footer.length + TRUNCATION_RESERVE;
+  let charsUsed = header.length + footer.length + serverNotice.length + TRUNCATION_RESERVE;
   let included = 0;
   for (const rule of sorted) {
-    const title = sanitize((rule.data?.title ?? rule.doc_id).trim());
-    const content = sanitize((rule.data?.content ?? "").trim());
+    const title = sanitizePromptField((rule.data?.title ?? rule.doc_id).trim());
+    const content = sanitizePromptField((rule.data?.content ?? "").trim());
     const line = `- ${title}: ${content}\n`;
     if (charsUsed + line.length > maxChars) break;
     lines.push(line);
@@ -192,7 +242,7 @@ export function formatKeystones(rules: KeystoneRow[]): string {
   // caller skip the inject entirely.
   if (included === 0) return "";
 
-  return header + lines.join("") + truncatedLine + footer;
+  return header + lines.join("") + truncatedLine + serverNotice + footer;
 }
 
 /**
@@ -331,23 +381,16 @@ async function _fetchAndCache(
       query.fleet_id = opts.fleetId;
       if (opts.agentId) query.agent_id = opts.agentId;
     }
-    const raw = await apiCall(
-      "GET",
-      "/memclaw/keystones", // legacy-name-floor: live compatibility route
-      undefined,
-      query,
-      controller.signal,
-    );
-    // Two shapes accepted: a bare list (older response) or
-    // ``{count, truncated, rules}`` (current). Coerce both to rows.
-    const rows: KeystoneRow[] = Array.isArray(raw)
-      ? (raw as KeystoneRow[])
-      : ((raw as KeystonesPayload | null)?.rules ?? []);
+    const payload = await fetchKeystonesPayload(query, controller.signal);
+    if (payload.truncated) {
+      // Log even when the local token cap prevents any rule from fitting.
+      logError("keystones: incomplete rule set", "server truncated the response; additional rules are not shown");
+    }
     // Cache unconditionally — a 200 with zero rules is a valid answer
     // for tenants that haven't configured any keystones. Skipping the
     // ``""`` cache entry would re-fetch on every ``assemble`` call for
     // the no-rules common case, defeating the cache's purpose.
-    const text = formatKeystones(rows);
+    const text = formatKeystones(payload.rules, payload.truncated);
     // Only write back if no ``invalidateKeystoneCache`` ran while we
     // were in flight — otherwise a stale result could clobber a fresh
     // cache state authored mid-flight by a keystone write.

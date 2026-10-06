@@ -39,19 +39,28 @@ def _enable_limiter_for_rate_tests():
 
 
 class _FakeRequest:
-    def __init__(self, headers: dict[str, str], client_host: str = "127.0.0.1"):
+    def __init__(
+        self,
+        headers: dict[str, str],
+        client_host: str = "127.0.0.1",
+        *,
+        rate_limit_key: str | None = None,
+    ):
         self.headers = headers
         self.client = type("C", (), {"host": client_host})()
         # slowapi's get_remote_address looks at scope too; emulate it.
         self.scope = {"client": (client_host, 0)}
         # _key_func seeds request.state.view_rate_limit (the fail-open default);
-        # a real Starlette request always has .state.
+        # a real Starlette request always has .state. ``rate_limit_key`` is what
+        # auth names the bucket after, when it verified something (L-69).
         self.state = SimpleNamespace()
+        if rate_limit_key is not None:
+            self.state.rate_limit_key = rate_limit_key
 
 
-async def test_key_func_prefers_api_key_over_ip():
-    # API-key path produces a `key:<32-hex>` token, not the raw key.
-    req = _FakeRequest(headers={"x-api-key": "mc_abcdef12345678_secret"})
+async def test_key_func_buckets_by_what_auth_named():
+    # Produces a `key:<32-hex>` token, not the raw credential.
+    req = _FakeRequest(headers={}, rate_limit_key="credential:mc_abcdef12345678_secret")
     out = _key_func(req)
     assert out.startswith("key:")
     assert len(out) == len("key:") + 32
@@ -59,18 +68,25 @@ async def test_key_func_prefers_api_key_over_ip():
     assert "mc_abcdef" not in out
 
 
-async def test_key_func_accepts_bearer_auth():
-    req = _FakeRequest(headers={"authorization": "Bearer mc_bearertoken_abcde"})
-    out = _key_func(req)
-    assert out.startswith("key:")
-    assert "bearertoken" not in out
-
-
 async def test_key_func_different_keys_yield_different_buckets():
     # Keys sharing a 16-char prefix used to collide; hashing fixes that.
-    a = _FakeRequest(headers={"x-api-key": "mc_samentenantid_A"})
-    b = _FakeRequest(headers={"x-api-key": "mc_samentenantid_B"})
+    a = _FakeRequest(headers={}, rate_limit_key="credential:mc_samentenantid_A")
+    b = _FakeRequest(headers={}, rate_limit_key="credential:mc_samentenantid_B")
     assert _key_func(a) != _key_func(b)
+
+
+async def test_key_func_ignores_a_key_header_auth_did_not_verify():
+    """L-69. Standalone checks no key, and the header-trust path without a
+    gateway secret trusts headers anyone can send, so a key header there is the
+    caller's choice. Bucketing by it gave each fresh value a fresh budget."""
+    req = _FakeRequest(
+        headers={
+            "x-api-key": "mc_made_up_per_request",
+            "authorization": "Bearer mc_made_up_too",
+        },
+        client_host="198.51.100.9",
+    )
+    assert _key_func(req) == "ip:198.51.100.9"
 
 
 async def test_key_func_falls_back_to_ip_without_api_key():
@@ -83,7 +99,7 @@ async def test_key_func_seeds_fail_open_default_without_clobbering():
     first call, but — since slowapi calls it once per applied limit — must NOT
     reset a value a prior limit's hit() already wrote (else multi-limit routes
     drop X-RateLimit headers on a partial Redis outage)."""
-    req = _FakeRequest(headers={"x-api-key": "mc_multi_limit_probe"})
+    req = _FakeRequest(headers={}, rate_limit_key="credential:mc_multi_limit_probe")
     # First call (before any hit) seeds the fail-open default.
     _key_func(req)
     assert req.state.view_rate_limit is None
@@ -148,6 +164,30 @@ async def test_search_rate_limit_returns_429_after_budget(client):
         concurrency=50,
     )
     assert 429 in codes, f"expected at least one 429 among {codes}"
+
+
+async def test_varying_the_key_header_does_not_escape_the_limit(client):
+    """L-69. The suite runs standalone, where no key is checked: a burst that
+    sends a different made-up key on every request still shares one budget.
+
+    Only the limiter's own 429 counts. The per-tenant concurrency bulkhead also
+    answers 429 when 50 in-flight searches outrun its slots, whatever the key."""
+    body = {"tenant_id": "default", "query": "hello"}
+    details: list[str] = []
+
+    def _search(key: str):
+        headers = {"x-api-key": key}
+
+        async def _post():
+            resp = await client.post("/api/v1/search", json=body, headers=headers)
+            if resp.status_code == 429:
+                details.append(resp.json()["detail"])
+            return resp
+
+        return _post
+
+    await _burst([_search(f"mc_fresh_{i}") for i in range(100)], concurrency=50)
+    assert any(d.startswith("Rate limit exceeded") for d in details), details
 
 
 async def test_write_rate_limit_returns_429_after_budget(client):

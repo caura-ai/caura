@@ -46,9 +46,16 @@ def _code_only(src: str) -> str:
 
 
 def _relation_loop_source() -> str:
-    """The upsert loop plus everything the old cascade skipped."""
+    """The relation-upsert stage plus everything the old cascade skipped.
+
+    09/02 L-37 moved this from a sequential ``for rel in graph.relations:``
+    loop to a bounded ``asyncio.gather`` over a per-relation ``_upsert_one``.
+    The guarantees below are unchanged — one relation's failure still costs
+    only that relation, and the stages after it still run — so these anchor on
+    the per-relation unit instead of the loop keyword.
+    """
     src = _code_only(inspect.getsource(w.process_entity_extraction))
-    start = src.index("for rel in graph.relations:")
+    start = src.index("async def _upsert_one(")
     return src[start:]
 
 
@@ -66,9 +73,9 @@ def test_a_failed_relation_does_not_skip_the_predicate_writeback():
     the guard has to sit BEFORE the write-back in the same function, or a throw
     still jumps past it."""
     src = _code_only(inspect.getsource(w.process_entity_extraction))
-    assert src.index("for rel in graph.relations:") < src.index("predicate_writeback")
+    assert src.index("async def _upsert_one(") < src.index("predicate_writeback")
     loop_to_writeback = src[
-        src.index("for rel in graph.relations:") : src.index("predicate_writeback")
+        src.index("async def _upsert_one(") : src.index("predicate_writeback")
     ]
     assert "except Exception:" in loop_to_writeback
 
@@ -84,11 +91,16 @@ def test_partial_failure_is_counted_not_just_logged_per_item():
 def test_successful_relations_still_counted_when_a_sibling_fails():
     """``rel_count`` must increment only on success, so the completion log does
     not report relations that were never written."""
-    loop = _relation_loop_source()
-    body = loop[: loop.index("predicate_writeback")]
-    # the increment sits inside the try, after the await
-    assert body.index("await upsert_relation(") < body.index("rel_count += 1")
-    assert body.index("rel_count += 1") < body.index("except Exception:")
+    body = _relation_loop_source()[
+        : _relation_loop_source().index("predicate_writeback")
+    ]
+    # Success is signalled by ``return True`` immediately after the await and
+    # INSIDE the try; the failure path returns False from the handler. The
+    # counts are then derived from the gathered outcomes, so a relation that
+    # never landed cannot be counted as written.
+    assert body.index("await upsert_relation(") < body.index("return True")
+    assert body.index("return True") < body.index("except Exception:")
+    assert "o is True" in body, "rel_count must be derived from the outcomes"
 
 
 def test_the_guard_is_inside_the_loop_not_around_it():
@@ -98,8 +110,8 @@ def test_the_guard_is_inside_the_loop_not_around_it():
     REVERTED and asserts nothing.
 
     The load-bearing property: a ``try:`` opens BEFORE the awaited upsert and
-    inside the loop body, so one failure costs one relation instead of the
-    remaining relations plus every stage after the loop. Path C's survival is
+    inside the PER-RELATION unit, so one failure costs one relation instead of
+    the remaining relations plus every stage after it. Path C's survival is
     covered behaviourally below, which is the assertion that actually fails
     without the guard.
     """
@@ -107,6 +119,23 @@ def test_the_guard_is_inside_the_loop_not_around_it():
     body = loop[: loop.index("predicate_writeback")]
     assert "try:" in body
     assert body.index("try:") < body.index("await upsert_relation(")
+
+
+def test_the_fan_out_is_bounded():
+    """09/02 L-37. The upserts run concurrently now; unbounded, one memory with
+    a large graph would open a connection per relation to core-storage-api."""
+    src = _code_only(inspect.getsource(w.process_entity_extraction))
+    assert "asyncio.Semaphore(" in src
+    assert "async with rel_sem:" in src
+
+
+def test_a_sibling_cancellation_cannot_lose_a_landed_relation():
+    """``return_exceptions=True`` is a backstop: ``_upsert_one`` swallows its
+    own failures, but a bug in the endpoint resolution above the try would
+    otherwise cancel the in-flight siblings and discard relations that had
+    already succeeded."""
+    src = _code_only(inspect.getsource(w.process_entity_extraction))
+    assert "return_exceptions=True" in src
 
 
 # ── behavioural: the cascade itself ───────────────────────────────────────

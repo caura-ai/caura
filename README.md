@@ -34,10 +34,10 @@ Agents write plain text. Caura turns it into searchable, governed, self-improvin
 
 **One loop, three pillars: write, recall, compound** — every interaction makes the next one smarter.
 
-**Optimized for fleets.** One agent works, and that's where most teams start — nothing below changes for a single-agent setup. What Caura adds is headroom: scoped memory, cross-agent outcome propagation, and fleet-wide trust tiers are there from the first write, and they keep paying off as agents multiply. Public agent-memory benchmarks (LoCoMo, LongMemEval) measure one agent, one user, one long conversation — the single-chatbot shape — so they score the on-ramp rather than the axes that compound with agent count: latency, token efficiency, and governance. That second shape is what we see in production: dozens or thousands of agents working on behalf of one company, sharing what they learn under governance. See [Performance](#performance) for the numbers, or read the [benchmarks write-up](https://caura.ai/blog/caura-benchmarks).
+**Built for fleets.** One agent works, and that's where most teams start — nothing below changes for a single-agent setup. What Caura adds is headroom: scoped memory, cross-agent outcome propagation, and fleet-wide trust tiers are there from the first write, and they keep paying off as agents multiply. Public agent-memory benchmarks (LoCoMo, LongMemEval) measure one agent, one user, one long conversation — the single-chatbot shape. Fleet governance and workload-specific latency still need validation in the environment where they matter. See the generated [Performance](#performance) block and [evidence registry](EVIDENCE.md) for approved benchmark results, or read the [benchmarks write-up](https://caura.ai/blog/caura-benchmarks).
 
-> **In production at eToro (NASDAQ: ETOR):** 300+ AI agents on one governed
-> memory — 26,500+ memories, 1,372 shared skills, 23 ms p50 search.
+> **Production case study:** eToro uses Caura as a governed shared-memory layer
+> for its AI-agent work.
 > [Architecture deep-dive →](https://caura.ai/blog/etoro-company-brain/)
 
 <p align="center">
@@ -54,13 +54,13 @@ Agents write plain text. Caura turns it into searchable, governed, self-improvin
 
 ### Try it locally — no API key, no signup
 
-The fastest way to see Caura work. Standalone mode runs single-tenant with auth bypassed — start Caura, write a memory, and find it again. (It boots with dummy embeddings so there's nothing to configure; add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
+The fastest way to see Caura work. Standalone mode runs single-tenant with auth bypassed — start Caura, write a memory, and find it again. (With no key there's nothing to configure: memories are stored without embeddings and found by keyword. Add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
 
 ```bash
 git clone https://github.com/caura-ai/caura.git
 cd caura
 cp .env.example .env && echo "IS_STANDALONE=true" >> .env   # single-tenant, no API key
-docker compose up -d --wait                                 # Postgres + pgvector + Redis + API (~30s)
+docker compose up -d --wait                                 # Postgres + pgvector + Redis + API + scheduler (~30s)
 ```
 
 <!-- readme-quickstart-ci:start -->
@@ -155,9 +155,10 @@ tool call; the gateway rejects the reserved `mcp-agent` default on that path.
 
 ### Self-Hosted (Open Source)
 
-Docker Compose starts PostgreSQL + pgvector, Redis, the storage service, and the
-REST/MCP API. The keyless example above is the shortest path; add a provider for
-semantic recall.
+Docker Compose starts PostgreSQL + pgvector, Redis, the storage service, the
+REST/MCP API, and the `core-operations` lifecycle scheduler (nightly expiry,
+archival, purge and crystallization). The keyless example above is the shortest
+path; add a provider for semantic recall.
 
 <a id="prerequisites"></a>
 <a id="1-clone-and-configure"></a>
@@ -189,7 +190,10 @@ agent prompts and trust levels. Already have nodes running? Keeping them current
 The plugin talks only to the Caura server you configure (`CAURA_API_URL`) and
 identifies itself on every request with
 `User-Agent: openclaw-plugin/<version> (node/<major>)`, which the server's
-self-hosted heartbeat uses to count connected plugin installs.
+self-hosted heartbeat uses to count connected plugin installs. It will not send
+`CAURA_API_KEY` over plain `http://` to anything but loopback: point
+`CAURA_API_URL` at `https://`, or set `CAURA_ALLOW_INSECURE_HTTP=true` in the
+plugin `.env` to accept cleartext on a trusted private network.
 
 ### Python client
 
@@ -329,17 +333,17 @@ via issue or PR.
 
 Benchmarked against the two most-cited public agent-memory benchmarks. Full results, methodology, and how to reproduce them live in [`BENCHMARKS.md`](BENCHMARKS.md); operator-scale context is in [`docs/performance.md`](docs/performance.md); the full write-up is on the blog.
 
-|  | LoCoMo | LongMemEval | Search latency |
-|---|---|---|---|
-| Accuracy (LLM-judge) | **77.6%** | **92.2%** | — |
-| Token savings vs full context | **96.6%** | **79.2%** | — |
-| Latency | — | — | **23 ms p50 · 27 ms p95** |
+<!-- BEGIN GENERATED: evidence-benchmarks -->
+- **LoCoMo accuracy:** Caura scored 77.9% (1,199/1,540) under its documented LoCoMo semantic-judge protocol using the retrieval-augmented agentic-v1 pipeline.
+- **LongMemEval reference judge:** Caura answered 461 of 500 LongMemEval_S questions correctly (92.2%) under the benchmark's GPT-4o reference judge.
+- **LongMemEval secondary judge:** The same 500 frozen LongMemEval_S answers scored 90.2% (451/500) under the secondary Gemini 3.5 Flash-Lite judge.
+- **LongMemEval token efficiency:** On LongMemEval_S, the median compact retrieved context was 22,410 tokens versus a 107,706-token full haystack: 79.2% context-only savings; counting every reader call yields 75.4%.
 
-Accuracy sits inside the leading cluster across the field (Mem0, Zep, Caura — scores cluster in a narrow band). The axes we push hardest are latency and token efficiency, because those are the ones that compound as agent count grows — a few hundred ms of search latency disappears behind one LLM call, but bills millions of times a day across a fleet.
-
-> Single-agent benchmarks can't measure cross-agent recall, outcome propagation between agents, fleet-scoped visibility, or governance-aware retrieval. Those are the questions that decide whether a memory system is *deployable* inside a company. See [`docs/performance.md`](docs/performance.md#what-these-benchmarks-cant-measure).
-
-Source: [Fast, Token-Efficient, and Built for Fleets](https://caura.ai/blog/caura-benchmarks) (2026-04-19).
+Only active, approved claims appear here. Control, withdrawn, and withheld
+records remain in the evidence registry and are excluded from promotional copy.
+See [`evidence/claims.json`](evidence/claims.json) and
+[`EVIDENCE.md`](EVIDENCE.md). Do not hand-edit this block.
+<!-- END GENERATED: evidence-benchmarks -->
 
 ---
 
@@ -547,16 +551,16 @@ bash /tmp/install-caura-skill.sh
 
 | Query param | Effect |
 |---|---|
-| (none) | Install the **memclaw** skill for both Claude Code and Codex (default) |
+| (none) | Install the default Caura tool-reference skill for both Claude Code and Codex |
 | `?agent=claude-code` | Only Claude Code → `~/.claude/skills/<skill>/SKILL.md` |
 | `?agent=codex` | Only Codex → `~/.agents/skills/<skill>/SKILL.md` |
-| `?skill=company-brain` | Install the optional **Company Brain** posture skill instead of memclaw (see below; combine with `?agent=`) |
+| `?skill=company-brain` | Install the optional **Company Brain** posture skill instead of the default skill (see below; combine with `?agent=`) |
 
 #### Verify
 
 ```bash
-ls -la ~/.claude/skills/memclaw/SKILL.md       # Claude Code
-ls -la ~/.agents/skills/memclaw/SKILL.md       # Codex
+ls -la ~/.claude/skills/memclaw/SKILL.md       # Claude Code; legacy-name-floor: installed default-skill path
+ls -la ~/.agents/skills/memclaw/SKILL.md       # Codex; legacy-name-floor: installed default-skill path
 ```
 
 Restart your agent after installing — skills are loaded at startup.
@@ -567,10 +571,10 @@ installs; skip this step.
 
 #### Optional: the Company Brain skill
 
-`memclaw` teaches the agent the tools. **`company-brain`** is a thin,
+The default skill teaches the agent the tools. **`company-brain`** is a thin,
 concept-first *posture* skill that layers on top: it frames the agent as one
 mind in a shared **Company Brain** and defers all tool mechanics back to the
-`memclaw` skill. Install it alongside `memclaw` when you want that framing:
+tool-reference skill. Install the two together when you want that framing:
 
 ```bash
 curl -s "https://caura.ai/api/v1/install-skill?skill=company-brain" | bash
@@ -579,7 +583,7 @@ curl -s "https://caura.ai/api/v1/install-skill?skill=company-brain" | bash
 It installs to `~/.claude/skills/company-brain/SKILL.md` (Claude Code) and/or
 `~/.agents/skills/company-brain/SKILL.md` (Codex), and obeys the same
 `?agent=` filter. The default install (no `?skill=`) is unchanged — it
-installs `memclaw` only.
+installs the default tool-reference skill only.
 
 ---
 
@@ -592,9 +596,14 @@ The recommended way to run Caura is via Docker Compose (see [Quick Start](#quick
 Each release publishes multi-arch (linux/amd64, linux/arm64) images to [GitHub Container Registry](https://github.com/orgs/caura-ai/packages):
 
 ```
-ghcr.io/caura-ai/caura-memclaw-core-api:v2.5.0
-ghcr.io/caura-ai/caura-memclaw-core-storage-api:v2.5.0
+ghcr.io/caura-ai/caura-memclaw-core-api:v2.5.0 # legacy-name-floor: published GHCR repository name
+ghcr.io/caura-ai/caura-memclaw-core-storage-api:v2.5.0 # legacy-name-floor: published GHCR repository name
+ghcr.io/caura-ai/caura-core-operations:v2.5.0
 ```
+
+`caura-core-operations`, the lifecycle scheduler, is newer than the other two and
+is published under the new name, so releases before it joined the stack have no
+image for it.
 
 Tags follow SemVer with floating aliases — `:v1`, `:v1.0`, `:v1.0.0`, plus `:latest` for the latest stable release. Pull them in your own compose file or Kubernetes manifests instead of building from source.
 
@@ -745,6 +754,11 @@ Every response from a rate-limited route carries `X-RateLimit-Limit`, `X-RateLim
 otherwise, so a multi-instance deployment without Redis limits each instance separately. A Redis
 outage fails open: requests pass through un-throttled rather than erroring.
 
+`X-RateLimit-*` is the per-second throttle and nothing else. A deployment with a usage meter wired
+reports the separate per-period plan quota as `X-Usage-Limit` / `X-Usage-Remaining` on
+`POST /memories`, `POST /memories/bulk` and `POST /search`; OSS standalone has no quota, so those
+headers are absent there.
+
 Add limiting at your reverse proxy (nginx, Caddy, Cloudflare) as well if you need per-IP DDoS
 floors or limits the application layer can't see.
 
@@ -792,8 +806,8 @@ The full engine — storage, 12 MCP tools, plugin, audit trail — is Apache
 governance for teams that don't want to operate infrastructure.
 
 **Who runs Caura in production?**
-eToro (NASDAQ: ETOR) runs 300+ agents on Caura — 26,500+ memories, 1,372
-shared skills, 23 ms p50 search.
+eToro (NASDAQ: ETOR) uses Caura as a governed shared-memory layer for its
+AI-agent work.
 [Case study →](https://caura.ai/blog/etoro-company-brain/)
 
 ---
