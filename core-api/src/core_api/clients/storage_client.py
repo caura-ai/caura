@@ -28,6 +28,8 @@ _DUPLICATE_FALLBACK_DETAIL = "Duplicate memory exists"
 # memory exists", which would be an actively wrong description of a failure that
 # has nothing to do with duplicates.
 _PERMANENT_FALLBACK_DETAIL = "storage refused the write; a retry cannot clear it"
+# Storage's per-request cap on POST /memories/bulk-get (a longer list is a 422).
+_BULK_GET_MAX_IDS = 1000
 
 
 class DuplicateMemoryError(Exception):
@@ -1489,22 +1491,27 @@ class CoreStorageClient:
         ids: list[str],
         tenant_id: str,
     ) -> list[dict | None]:
-        """Fetch many memories in one round-trip; order matches input ``ids``.
+        """Fetch many memories; order matches input ``ids``.
 
         Missing rows — deleted, nonexistent, or belonging to another tenant —
         come back as ``None`` in the same slot rather than being dropped from
         the list. Lets callers zip the response back to their original id list.
-        Capped at 1000 ids server-side; callers needing more must chunk
-        client-side.
+        Storage caps one request at 1000 ids, so a longer list goes out in
+        chunks of that size, one after another (M-41: the graph evidence filter
+        sent every id at once and answered 500 past the cap).
 
         ``tenant_id`` is required. As an optional argument it was the client
         half of GHSA-wgvw-28pq-jc36, and one of the two call sites did in fact
         omit it.
         """
-        payload: dict[str, Any] = {"ids": ids, "tenant_id": tenant_id}
-        return await self._post(  # type: ignore[return-value]
-            "/memories/bulk-get", payload, read=True
-        )
+        rows: list[dict | None] = []
+        for start in range(0, len(ids), _BULK_GET_MAX_IDS):
+            payload: dict[str, Any] = {"ids": ids[start : start + _BULK_GET_MAX_IDS], "tenant_id": tenant_id}
+            chunk: list[dict | None] = await self._post(  # type: ignore[assignment]
+                "/memories/bulk-get", payload, read=True
+            )
+            rows.extend(chunk)
+        return rows
 
     # =====================================================================
     # Fix 2 Phase 2 — fleet/admin discovery, detail, bulk mutations
