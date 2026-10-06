@@ -7,6 +7,11 @@ kept the per-memory lock for its full hour (swallowing the back-channel
 re-delivery that might have succeeded) and wrote no ``contradiction_stranded``
 row, leaving the memory unchecked with no trace. An abstaining run must release
 its lock and be recorded exactly like a run that raised.
+
+L-226: a judge switched off on purpose (``contradiction_provider=none``) is not
+an outage. ``call_with_fallback`` goes straight to the ``fake_fn`` for it, and
+counting that abstain wrote a ``contradiction_stranded`` row on every write
+that had a candidate, noise that hid the real outages.
 """
 
 from __future__ import annotations
@@ -203,3 +208,51 @@ async def test_an_abstain_outside_a_detection_run_is_harmless() -> None:
     report into; the abstain must still just return its verdict."""
     assert cd._skip_contradiction_pairwise() == (False, cd._CONF_FALLBACK)
     assert cd._skip_contradiction_batch(2) == [{}, {}]
+
+
+# ── a judge switched off on purpose (L-226) ───────────────────────────────
+
+
+@pytest.mark.parametrize("candidates", [1, 2], ids=["pairwise", "batch"])
+async def test_a_judge_switched_off_is_not_an_outage(monkeypatch, candidates) -> None:
+    """The real ``call_with_fallback``: for ``none`` it calls no provider."""
+    memory = _row()
+    sc = MagicMock()
+    sc.find_similar_candidates = AsyncMock(
+        return_value=[
+            _row(content=f"Alice lives in city {i}") for i in range(candidates)
+        ]
+    )
+    sc.batch_update_status = AsyncMock()
+    with ExitStack() as stack:
+        release, log_sc = _env(stack, sc, monkeypatch)
+        monkeypatch.setattr(cd.settings, "contradiction_provider", "none")
+        await cd.detect_contradictions_async(
+            uuid.UUID(memory["id"]),
+            TENANT,
+            "f1",
+            memory["content"],
+            _VEC,
+            new_memory=memory,
+        )
+
+    release.assert_not_awaited()
+    log_sc.add_task_failure.assert_not_awaited()
+    sc.batch_update_status.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("provider", "counted"), [("none", 0), ("openai", 3)])
+async def test_only_an_outage_abstain_is_counted(provider, counted) -> None:
+    """Every judge call site builds its ``fake_fn`` here, Path C's retraction
+    re-judge included. ``openai`` stands for a real provider that failed."""
+    holder = cd._JudgeAbstentions()
+    token = cd._judge_abstentions.set(holder)
+    try:
+        pairwise = cd._pairwise_fake_fn(provider, "new", "old")()
+        batch = cd._batch_fake_fn(provider, "new", [{}, {}])()
+    finally:
+        cd._judge_abstentions.reset(token)
+
+    assert pairwise == (False, cd._CONF_FALLBACK)
+    assert batch == [{}, {}]
+    assert holder.count == counted

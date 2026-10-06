@@ -25,6 +25,7 @@ from typing import Any, NamedTuple
 from uuid import UUID
 
 from common.constants import predicate_cluster
+from common.provider_names import ProviderName
 from core_api.cache import cache_delete_if, cache_set_nx
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
@@ -1883,9 +1884,15 @@ def _skip_contradiction_batch(count: int) -> list[dict]:
 def _pairwise_fake_fn(provider_name, new_content: str, old_content: str):
     """The ``fake_fn`` for a per-candidate judge: heuristic if the operator asked
     for the fake provider, abstain otherwise. One place so a new call site cannot
-    pick the wrong side of :func:`deliberate_fake_provider` by omission."""
+    pick the wrong side of :func:`deliberate_fake_provider` by omission.
+
+    An abstain counts against the run only as an outage. Provider ``none`` asks
+    for the judge to be off, so its abstain is the same verdict, uncounted
+    (L-226): counting it wrote a ``contradiction_stranded`` row on every run."""
     if deliberate_fake_provider(provider_name):
         return lambda: (_fake_contradiction_check(new_content, old_content), _CONF_FALLBACK)
+    if provider_name == ProviderName.NONE:
+        return lambda: (False, _CONF_FALLBACK)
     return _skip_contradiction_pairwise
 
 
@@ -1899,6 +1906,8 @@ def _batch_fake_fn(provider_name, new_content: str, candidates: list[dict]):
             }
             for c in candidates
         ]
+    if provider_name == ProviderName.NONE:
+        return lambda: [{} for _ in candidates]
     return lambda: _skip_contradiction_batch(len(candidates))
 
 
