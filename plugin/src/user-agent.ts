@@ -8,6 +8,10 @@
  * body — and is sent only to ``CAURA_API_URL``. Every raw ``fetch()`` in the
  * plugin and the shared ``apiCall`` transport go through ``withUserAgent``
  * so new call sites inherit the header instead of re-deriving it.
+ *
+ * The same requests also carry ``X-Caura-Surface``, which core-api records
+ * as the ``surface`` of the audit rows they write (``core_api.audit_actor``).
+ * It is a label only: the server never authorizes on it.
  */
 
 import { PLUGIN_VERSION } from "./version.js";
@@ -28,12 +32,16 @@ export function buildUserAgent(nodeVersion: string | undefined): string {
 
 export const USER_AGENT = buildUserAgent(globalThis.process?.versions?.node);
 
+/** This plugin's value in core-api's closed ``SURFACES`` set. */
+export const SURFACE = "openclaw_plugin";
+
 /**
- * Return a headers object that carries ``User-Agent`` plus ``headers``.
- * Caller-supplied headers win, so a deliberate override stays possible.
+ * Return a headers object that carries ``User-Agent`` and
+ * ``X-Caura-Surface`` plus ``headers``. Caller-supplied headers win, so a
+ * deliberate override stays possible.
  */
 export function withUserAgent(
   headers: Record<string, string> = {},
 ): Record<string, string> {
-  return { "User-Agent": USER_AGENT, ...headers };
+  return { "User-Agent": USER_AGENT, "X-Caura-Surface": SURFACE, ...headers };
 }
