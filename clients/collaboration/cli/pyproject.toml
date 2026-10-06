@@ -1,0 +1,24 @@
+[project]
+name = "caura-bus-cli"
+version = "0.2.0"
+description = "Caura messaging CLI: doctor / replay / agents / threads / send / status"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Caura, Inc." }]
+dependencies = [
+    "caura-bus-core",
+    "typer>=0.12",
+]
+
+[project.scripts]
+caura-bus = "caura_bus_cli.main:app"
+
+[tool.uv.sources]
+caura-bus-core = { workspace = true }
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
