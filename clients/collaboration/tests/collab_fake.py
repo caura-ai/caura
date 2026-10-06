@@ -28,6 +28,7 @@ class Platform:
         self.calls: list[tuple[str, dict]] = []
         self.replies: dict[str, dict] = {}
         self.notices: list[dict] = []
+        self.lost_reply_responses = 0  # Commit replies but drop this many responses.
 
     # Human and infrastructure controls.
     def pause(self):
@@ -110,6 +111,9 @@ class Platform:
             if action == "reply":
                 key = request.headers["Idempotency-Key"]
                 if key in self.replies and self.state == "acked":
+                    if self.lost_reply_responses:
+                        self.lost_reply_responses -= 1
+                        raise httpx.ReadError("response lost", request=request)
                     return httpx.Response(202, json={**self.replies[key], "duplicate": True})
             if rejected := self._active(token):
                 return rejected
@@ -126,6 +130,9 @@ class Platform:
                 self.replies[key] = receipt
                 if body.get("ack", True):
                     self.state, self.token, self.live = "acked", None, False
+                if self.lost_reply_responses:
+                    self.lost_reply_responses -= 1
+                    raise httpx.ReadError("response lost after commit", request=request)
                 return httpx.Response(202, json=receipt)
             if action == "ack":
                 self.state, self.token, self.live = "acked", None, False
