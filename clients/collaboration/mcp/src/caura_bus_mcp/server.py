@@ -3,11 +3,18 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from caura_bus_core import AgentConfig, Bus, Kind, SendMessage, load_config
 from caura_bus_core.bus import HumanRequired, PlatformError
-from caura_bus_core.consult import DEFAULT_COLLECT_SECONDS, MAX_COLLECT_SECONDS, ResponseCollector
+from caura_bus_core.consult import (
+    DEFAULT_COLLECT_SECONDS,
+    MAX_COLLECT_SECONDS,
+    ROOT_SCOPE,
+    ConsultationBudget,
+    ResponseCollector,
+)
 from caura_bus_core.protocol import MemoryContextRequest, StrictModel
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
@@ -22,9 +29,28 @@ class AppContext:
     config: AgentConfig
     bus: Bus
     delivery: DeliverySession = field(init=False)
+    consultations: ConsultationBudget = field(init=False)
 
     def __post_init__(self):
         self.delivery = DeliverySession(self.bus)
+        limits = self.config.consultation
+        self.consultations = ConsultationBudget(limits.max_requests, limits.deadline_seconds)
+        self.delivery.on_finished = self.consultations.release
+
+    def consultation_scope(self) -> tuple[str, str | None, float | None]:
+        """Scope key, the sender waiting on this task (if any), and seconds left on its lease work."""
+        claim = self.delivery.current
+        if not claim or claim.state != "leased":
+            return ROOT_SCOPE, None, None
+        waiting = claim.envelope.from_ if claim.envelope.kind == "request" else None
+        deadline_in = None
+        if claim.processing_deadline:
+            try:
+                due = datetime.fromisoformat(claim.processing_deadline.replace("Z", "+00:00"))
+                deadline_in = (due - datetime.now(UTC)).total_seconds()
+            except ValueError:
+                deadline_in = None
+        return claim.delivery_id, waiting, deadline_in
 
 
 @asynccontextmanager
@@ -195,6 +221,8 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
       Read-only bounded poll for correlated replies: outcome complete|partial|no_reply,
       answers with recipient/sender attribution, pending/closed recipients and summary.
       Stopping collection never cancels accepted peer work; collect again for late answers.
+      Each task may send a bounded number of requests within a deadline (config consultation);
+      a new request to the peer waiting on your reply is refused as a cycle: reply instead.
     threads: no args. Returns your conversations.
     status: message_id*. Includes per-recipient reply state, due time and cause.
     requests: state=awaiting|overdue|unanswered, limit=20. Lists sent requests and retires listed notices.
@@ -317,6 +345,15 @@ async def dispatch(
             message = SendMessage(
                 **{**params.model_dump(exclude={"idempotency_key", "ack"}), "to": recipients}
             )
+            if message.kind == "request":
+                scope, waiting, deadline_in = app.consultation_scope()
+                app.consultations.admit(
+                    scope,
+                    message.to,
+                    waiting_sender=waiting,
+                    deadline_in=deadline_in,
+                    request_key=params.idempotency_key,
+                )
             receipt = await app.bus.send(message, idempotency_key=params.idempotency_key)
             return receipt.model_dump()
         case Recent():
@@ -351,9 +388,16 @@ async def dispatch(
 
 
 async def collect(app: AppContext, params: Collect) -> dict:
+    scope, _, deadline_in = app.consultation_scope()
+    left = app.consultations.remaining(scope, deadline_in)
     collection = await ResponseCollector(
-        app.bus, params.message_id, params.expected, timeout=params.timeout
+        app.bus, params.message_id, params.expected, timeout=min(params.timeout, left)
     ).collect()
+    summary = collection.summary()
+    if left <= params.timeout and collection.outcome != "complete":
+        summary += (
+            " Consultation time for this task is spent: answer with what you have; do not keep waiting."
+        )
     answers = []
     for recipient, answer in sorted(collection.answers.items()):
         item = {
@@ -376,7 +420,8 @@ async def collect(app: AppContext, params: Collect) -> dict:
         "closed": collection.closed,
         "excluded": collection.excluded,
         "elapsed_seconds": collection.elapsed_seconds,
-        "summary": collection.summary(),
+        "summary": summary,
+        "consultation_seconds_left": round(max(0.0, left - collection.elapsed_seconds), 3),
     }
 
 

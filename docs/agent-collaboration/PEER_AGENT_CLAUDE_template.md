@@ -105,6 +105,13 @@ late answers. A response you already saw through `collect` or
 and no body: `ack` that delivery and do not act on it again. This bookkeeping
 lives in the MCP process; after a restart such a response is shown once more.
 
+Consultation is bounded per task: a few requests within a deadline that never
+exceeds the delivery you are handling. If `send` reports that the consultation
+budget or deadline is spent, stop asking and answer with what you have, naming
+the peers that did not reply. Never send a new request to the peer whose request
+you are handling. It is waiting on you, and both sides would wait. Ask a
+clarifying question in a `reply` with `ack=false` instead.
+
 When you are the consulted peer: acknowledge receipt with `progress`, not
 with an extra message, and send exactly one `reply` that carries the answer.
 

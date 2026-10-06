@@ -327,3 +327,111 @@ async def collect_responses(
 ) -> Collection:
     """Collect correlated replies with a local bound; see :class:`ResponseCollector`."""
     return await ResponseCollector(bus, request_id, expected, **options).collect()
+
+
+class ConsultationLimitError(ValueError):
+    """A consultation would exceed this task's request count or deadline."""
+
+
+class ConsultationCycleError(ConsultationLimitError):
+    """A new request would go to the peer that is already waiting on this task."""
+
+
+@dataclass
+class _Scope:
+    started: float
+    deadline: float
+    sent: int = 0
+    keys: set[str] = field(default_factory=set)
+
+
+ROOT_SCOPE = "root"
+
+
+class ConsultationBudget:
+    """Bound how many requests one task may send and for how long it may consult.
+
+    A scope is one unit of work: a claimed delivery (keyed by delivery ID) or, with
+    nothing claimed, the agent's own turn (``ROOT_SCOPE``). A scope serving a claimed
+    delivery never outlives that delivery's processing deadline. The root scope
+    starts a fresh window once its deadline has passed, so a stuck root loop is
+    rate-bounded rather than permanently blocked.
+
+    One active lease does not prevent A→B→A deadlock: A can be collecting B's answer
+    while B asks A, and neither claims the other's request. A direct back-edge (a new
+    request to the sender of the request being handled) is refused immediately; longer
+    cycles end when each hop's count or deadline is spent, because collection is
+    clamped to the remaining scope time.
+    """
+
+    def __init__(self, max_requests: int = 4, deadline_seconds: float = 300, *, clock=monotonic):
+        if max_requests < 1 or deadline_seconds <= 0:
+            raise ValueError("consultation limits must be positive")
+        self.max_requests = max_requests
+        self.deadline_seconds = deadline_seconds
+        self.clock = clock
+        self._scopes: dict[str, _Scope] = {}
+
+    def _scope(self, key: str, deadline_in: float | None = None) -> _Scope:
+        now = self.clock()
+        scope = self._scopes.get(key)
+        if scope is None or (key == ROOT_SCOPE and now >= scope.deadline):
+            limit = self.deadline_seconds if deadline_in is None else min(self.deadline_seconds, deadline_in)
+            scope = self._scopes[key] = _Scope(started=now, deadline=now + max(0.0, limit))
+        elif deadline_in is not None:
+            scope.deadline = min(scope.deadline, now + max(0.0, deadline_in))
+        return scope
+
+    def admit(
+        self,
+        key: str,
+        recipients: Iterable[str],
+        *,
+        waiting_sender: str | None = None,
+        deadline_in: float | None = None,
+        request_key: str | None = None,
+    ) -> None:
+        """Record one request or raise a model-readable limit error.
+
+        Retrying the same ``request_key`` (an idempotent resend) is not counted again.
+        """
+        recipients = list(recipients)
+        if waiting_sender is not None and waiting_sender in recipients:
+            raise ConsultationCycleError(
+                f"consultation cycle: {waiting_sender} is waiting on your reply to its request, so a new "
+                "request to it would leave both sides waiting. Reply to its request instead (use "
+                "reply with ack=false to ask a clarifying question), or answer with what you have."
+            )
+        scope = self._scope(key, deadline_in)
+        if request_key is not None and request_key in scope.keys:
+            return
+        if scope.sent >= self.max_requests:
+            raise ConsultationLimitError(
+                f"consultation budget spent: {scope.sent} requests already sent for this task "
+                f"(limit {self.max_requests}). Stop consulting; answer with the replies you have "
+                "and say which peers did not respond."
+            )
+        if self.clock() >= scope.deadline:
+            raise ConsultationLimitError(
+                "consultation deadline passed for this task. Stop consulting; answer with the replies "
+                "you have and say which peers did not respond."
+            )
+        scope.sent += 1
+        if request_key is not None:
+            scope.keys.add(request_key)
+
+    def remaining(self, key: str, deadline_in: float | None = None) -> float:
+        """Seconds left to consult in this scope (the full window for an unused scope)."""
+        scope = self._scopes.get(key)
+        if scope is None or (key == ROOT_SCOPE and self.clock() >= scope.deadline):
+            limit = self.deadline_seconds if deadline_in is None else min(self.deadline_seconds, deadline_in)
+            return max(0.0, limit)
+        left = scope.deadline - self.clock()
+        if deadline_in is not None:
+            left = min(left, deadline_in)
+        return max(0.0, left)
+
+    def release(self, key: str) -> None:
+        """Forget a finished delivery's scope."""
+        if key != ROOT_SCOPE:
+            self._scopes.pop(key, None)
