@@ -41,6 +41,10 @@ docstring for why the hint stays blind to stored state.
 
 Surface the ``X-Truncated`` header from core-storage so callers can warn
 operators when rules are being silently dropped.
+
+The list's envelope also names the rules it returns by their rule-set hash
+(plan row g1.10), so the broker and the dashboard agree on which set is
+current.
 """
 
 from __future__ import annotations
@@ -52,6 +56,11 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Response
 from pydantic import Field
 
+from common.governance.ruleset_hash import (
+    RuleSetHashError,
+    rule_set_hash,
+    rules_from_keystone_rows,
+)
 from core_api import openapi_responses as _oar
 from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
@@ -290,6 +299,21 @@ def _surface_storage_error(exc: httpx.HTTPStatusError) -> HTTPException:
     return HTTPException(status_code=exc.response.status_code, detail=detail)
 
 
+def _rule_set_hash(rows: list[dict], tenant_id: str) -> str | None:
+    """Return the rule-set hash of the rules a list returns (plan row g1.10).
+
+    It covers exactly ``rows``, after the cap, because that is what the broker
+    receives and hashes on its side (``common/governance/ruleset_hash.py``
+    defines the hash). A set that can't be hashed without guessing gets
+    ``None`` and a warning, never an error: a session still needs its rules.
+    """
+    try:
+        return rule_set_hash(rules_from_keystone_rows(rows))
+    except RuleSetHashError as exc:
+        logger.warning("keystones: tenant %s's rule set has no hash: %s", tenant_id, exc)
+        return None
+
+
 # ── Routes ──
 
 
@@ -320,6 +344,9 @@ async def list_keystones(
     tenant's rules. Aggregate keystone view across the readable set
     isn't exposed here — agents should keep keystones explicitly per
     tenant for scope clarity.
+
+    The envelope's ``rule_set_hash`` names the rules in ``items``, so a
+    caller can tell whether a set it holds is still current.
     """
     auth.enforce_readable_tenant(tenant_id)
     if agent_id is not None:
@@ -344,6 +371,9 @@ async def list_keystones(
     # session-start fetch included) see zero change unless they ask.
     if envelope:
         body: dict = {"count": len(rows), "items": rows}
+        # g1.10: envelope only, like the hint below — the bare array can't
+        # grow a field.
+        body["rule_set_hash"] = _rule_set_hash(rows, tenant_id)
         if not rows:
             # F9 — parity with the MCP surface, which is where agents actually
             # read this. ENVELOPE ONLY: the bare array is still the default
