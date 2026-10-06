@@ -2,6 +2,7 @@
 
 import httpx
 import pytest
+
 from caura_bus_core import AgentConfig, Bus, PlatformError
 
 
