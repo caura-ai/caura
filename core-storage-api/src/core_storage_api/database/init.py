@@ -22,7 +22,7 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # its own it would certify 020 onwards over a database that may have stopped
 # anywhere after 019 — a selective restore, or an operator who dropped
 # ``alembic_version`` to clear a wedged upgrade. The probe is an object the head
-# migration creates; for 062 those are ``ix_memories_session`` and
+# migration creates; for 062 those were ``ix_memories_session`` and
 # ``ix_memories_held``, both, since one build can stop between them. An index
 # probe must check the index is VALID, since an interrupted CONCURRENTLY build
 # leaves an invalid one. The probe need not be migration-only — the sentinel
@@ -32,12 +32,18 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # ``test_the_head_fingerprint_names_the_current_head`` fails until it does. A
 # head with no object of its own may set the probe to ``None``, which makes the
 # stamp branch refuse — the safe answer when there is nothing to check.
-_HEAD_FINGERPRINT_REVISION = "062"
+#
+# 063 only drops ``ix_memories_recall_count``, so its probe is that index's
+# absence. 062's indexes stay in it: the absence alone also holds on an older
+# database the index was dropped from by hand.
+_HEAD_FINGERPRINT_REVISION = "063"
 _HEAD_FINGERPRINT_SQL: str | None = (
     "SELECT (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
     "WHERE n.nspname = 'public' AND c.relname IN ('ix_memories_session', 'ix_memories_held') "
-    "AND i.indisvalid) = 2"
+    "AND i.indisvalid) = 2 "
+    "AND NOT EXISTS (SELECT 1 FROM pg_indexes "
+    "WHERE schemaname = 'public' AND indexname = 'ix_memories_recall_count')"
 )
 
 _engine: AsyncEngine | None = None
@@ -348,8 +354,8 @@ async def init_database() -> None:
                         raise RuntimeError(
                             "Refusing to stamp Alembic at head: this database was built by the "
                             f"migration chain (it has '{_CHAIN_SENTINEL_TABLE}') but has no "
-                            "'alembic_version', and it lacks the object the head migration "
-                            f"({schema_head}) creates, so it cannot be shown to be at head. "
+                            "'alembic_version', and it lacks the change the head migration "
+                            f"({schema_head}) makes, so it cannot be shown to be at head. "
                             "Stamping head would skip every migration it has not run. Find the "
                             "revision it was really at (the alembic_version of the database it "
                             "was copied from, or the release it last ran), stamp that with "

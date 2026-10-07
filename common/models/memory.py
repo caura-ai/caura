@@ -128,7 +128,8 @@ class Memory(Base):
         nullable=False,
     )
 
-    # Recall tracking (incremented on agent-facing retrievals only)
+    # Recall tracking (incremented on agent-facing retrievals only). Neither
+    # column is indexed, so a bump can be a HOT update (M-111, migration 063).
     recall_count: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), nullable=False
     )
@@ -237,7 +238,6 @@ class Memory(Base):
             "supersedes_id",
             postgresql_where=text("supersedes_id IS NOT NULL"),
         ),
-        Index("ix_memories_recall_count", "recall_count"),
         Index("ix_memories_tenant_fleet", "tenant_id", "fleet_id"),
         # Backs the cursor-paginated list path (``list_by_filters`` +
         # the ``caura_list`` MCP tool) which orders by
