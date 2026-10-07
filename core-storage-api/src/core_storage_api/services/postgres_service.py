@@ -116,6 +116,7 @@ from common.models.organization_settings import OrganizationSettings, Organizati
 from common.models.recall_log import RecallCandidate, RecallEvent
 from common.models.tenant_usage_counter import TenantUsageCounter
 from common.organization_settings_merge import diff_settings, merge_settings_update
+from common.settings_version import SETTINGS_VERSION_KEY, version_of
 from core_storage_api.observability import PhaseTimer, db_measure
 from core_storage_api.schemas import MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.audit_chain import (
@@ -1663,6 +1664,19 @@ class DuplicateContentHashError(ValueError):
         self.fields: dict = fields or {}
 
 
+class SettingsChangedError(Exception):
+    """A live write was decided under organization settings that have since changed (g2.8).
+
+    core-api decided not to hold the write from settings it had cached, and the
+    settings row no longer matches them, so the decision may be wrong: see
+    ``common/settings_version.py``. Answered 409 by ``app``, and core-api decides
+    again. Nothing was written.
+
+    Not a ``ValueError``, unlike ``DuplicateContentHashError``: the entities
+    routes map ``ValueError`` to their own 409, and this is not a duplicate.
+    """
+
+
 def _fleet_scope(column, fleet_id: str | None):
     """Fleet predicate matching an index that groups on ``COALESCE(fleet_id, '')``.
 
@@ -2007,6 +2021,43 @@ class PostgresService:
                 if wanted.get(field, set()) - found:
                     raise _pointer_rejected(field)
 
+    @staticmethod
+    async def _assert_settings_unchanged(
+        session: AsyncSession, tenant_id: str, rows: Iterable[Mapping]
+    ) -> None:
+        """Refuse the write if any row was decided under settings other than the current ones.
+
+        A row claims the settings it was decided under by carrying
+        ``SETTINGS_VERSION_KEY``; core-api sets it on a write it let go live
+        after a hold decision (g2.8). Rows without it are not checked, and a
+        batch where none has it reads nothing.
+
+        Read in the inserting transaction, on its connection, by primary key: the
+        primary's answer for one more statement, with no request between the
+        services and no connection of its own.
+
+        Not locked: a settings change that commits between this read and the
+        insert's commit ran concurrently with the write, and the write may be
+        ordered before it. A write sent after the change committed reads it
+        here. Locking the row ``FOR SHARE`` would serialize them, at the price of
+        every live write taking a lock on one row per tenant.
+
+        Keyed on the memory's tenant, because core-api resolves the settings a
+        write is decided under by the write's ``tenant_id``.
+        """
+        claimed = {row[SETTINGS_VERSION_KEY] for row in rows if SETTINGS_VERSION_KEY in row}
+        if not claimed:
+            return
+        updated_at = (
+            await session.execute(
+                select(OrganizationSettings.updated_at).where(OrganizationSettings.org_id == tenant_id)
+            )
+        ).scalar_one_or_none()
+        if claimed != {version_of(updated_at)}:
+            raise SettingsChangedError(
+                "the organization settings changed after this write was decided; decide it again"
+            )
+
     async def memory_assert_pointers_in_tenant(self, tenant_id: str, rows: Iterable[Mapping]) -> None:
         """``_assert_pointers_in_tenant`` for a route that must refuse a whole
         batch before writing any of it (``/batch-update-status``). Writer
@@ -2019,6 +2070,7 @@ class PostgresService:
         try:
             async with get_session() as session:
                 await self._assert_pointers_in_tenant(session, data["tenant_id"], [data])
+                await self._assert_settings_unchanged(session, data["tenant_id"], [data])
                 memory = Memory(**self._filter_memory_fields(data))
                 session.add(memory)
                 await session.flush()
@@ -2230,6 +2282,8 @@ class PostgresService:
             # abort the whole multi-row statement with an FK violation (a 500),
             # or — for another tenant's id — land a cross-tenant edge.
             await self._assert_pointers_in_tenant(session, tenant_id, items)
+            # Before the INSERT too, and in its transaction: see the helper.
+            await self._assert_settings_unchanged(session, tenant_id, items)
             # The conflict target must mirror ``ix_memories_attempt_unique``
             # *expression-for-expression* — the planner only treats the
             # ON CONFLICT and the partial-unique index as matched if every
@@ -14419,17 +14473,33 @@ class PostgresService:
     # ══════════════════════════════════════════════════════════════════════
 
     async def organization_settings_get(self, org_id: str) -> dict:
-        """Return the org's raw override JSONB, or ``{}`` when no row exists.
+        """Return the org's raw override JSONB, or ``{}`` when no row exists."""
+        settings, _ = await self.organization_settings_read(org_id)
+        return settings
 
-        Read-only; safe on the reader replica. core-api fronts this with a
-        5-min TTL cache, so it's hit only on a cache miss.
+    async def organization_settings_read(self, org_id: str) -> tuple[dict, str]:
+        """The org's raw overrides and their version (``common.settings_version``).
+
+        Read from the PRIMARY. core-api reloads its cache through this right
+        after a settings change, and a replica that has not caught up would hand
+        it the settings from before the change to cache for five minutes. That
+        is why core-api sends this read to the writer service, but the writer
+        service has a replica too (``READ_DATABASE_URL``, the read pool on
+        staging and prod), and this read used to go there. core-api's cache is
+        what keeps it rare: one read per tenant per process per five minutes,
+        or per settings change.
         """
-        async with get_read_session() as session:
-            row = await session.execute(
-                select(OrganizationSettings.settings).where(OrganizationSettings.org_id == org_id)
-            )
-            settings = row.scalar_one_or_none()
-            return settings if isinstance(settings, dict) else {}
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    select(OrganizationSettings.settings, OrganizationSettings.updated_at).where(
+                        OrganizationSettings.org_id == org_id
+                    )
+                )
+            ).one_or_none()
+        if row is None:
+            return {}, version_of(None)
+        return (row.settings if isinstance(row.settings, dict) else {}), version_of(row.updated_at)
 
     async def organization_settings_update(
         self,

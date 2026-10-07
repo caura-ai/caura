@@ -108,7 +108,7 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/admin/fleets` | GET | List fleets across all tenants (admin key) |
 | `/admin/memories` | GET | List memories across all tenants with filters (admin key) |
 | `/admin/memories/stats` | GET | Memory counts by tenant/type/status (admin key) |
-| `/settings` | GET / PUT | Per-tenant configuration. `quarantine.below_trust` (0 to 4; unset or 0 holds nothing) holds every write from an agent below that trust level as `quarantined`, for a person to release or reject; `quarantine.below_trust_by_fleet` overrides it per fleet (`{fleet_id: level}`) |
+| `/settings` | GET / PUT | Per-tenant configuration. `quarantine.below_trust` (0 to 4; unset or 0 holds nothing) holds every write from an agent below that trust level as `quarantined`, for a person to release or reject; `quarantine.below_trust_by_fleet` overrides it per fleet (`{fleet_id: level}`). A raised level applies to every write sent after the change is saved, on every instance; a write caught between two quick changes gets a 503 to retry |
 | `/audit-log` | GET | Audit log entries |
 | `/mcp` | POST | MCP Streamable HTTP endpoint (mounted at app root, NOT under `/api/v1`) |
 

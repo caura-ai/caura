@@ -12,6 +12,7 @@ stands in for the gateway, as in ``test_agent_write_gate_parity.py``.
 
 from __future__ import annotations
 
+import copy
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -20,6 +21,7 @@ import pytest
 
 from common.constants import QUARANTINED_MEMORY_STATUS
 from common.enrichment import AtomicFact
+from common.settings_version import NO_SETTINGS, SETTINGS_CHANGED, SETTINGS_VERSION_KEY
 from core_api.pipeline.compositions.write import (
     build_enrichment_pipeline,
     build_fast_write_pipeline,
@@ -480,3 +482,322 @@ async def test_a_held_auto_chunked_writes_chunks_are_held_and_say_why():
     assert parent["status"] == QUARANTINED_MEMORY_STATUS
     assert [child["status"] for child in children] == [QUARANTINED_MEMORY_STATUS] * 2
     assert [child["metadata_"]["_system"]["hold"] for child in children] == [hold] * 2
+
+
+# ── A hold set where this process can't see it yet ──
+#
+# Each core-api process decides from settings it caches, and learns of a change
+# made elsewhere only when the broadcast reaches it (or its cache entry expires).
+# Storage checks the settings a live write was decided under and refuses it when
+# they have changed; the writer then decides again (``common.settings_version``).
+# On staging, a write 170 ms after the hold was set went live without this.
+
+
+async def _hold_behind_cache(sc, tenant: str, quarantine: dict) -> None:
+    """Set the hold the way another process does: in storage, not in our cache."""
+    from core_api.services.organization_settings import resolve_config
+
+    await resolve_config(tenant)  # this process caches what it knows now
+    await sc.update_org_settings(tenant, {"quarantine": quarantine})
+
+
+async def test_a_write_decided_before_a_hold_reached_this_process_is_held(
+    client, as_auth, sc
+):
+    from core_api.services.organization_settings import resolve_config
+
+    tenant = new_tenant_id()
+    await _agent(sc, tenant, "low", 1, "f1")
+    await _hold_behind_cache(sc, tenant, {"below_trust": 2})
+
+    row = await _row(sc, tenant, await _write(client, as_auth, tenant, "low", "f1"))
+
+    assert row["status"] == QUARANTINED_MEMORY_STATUS
+    assert _hold(row) == {"reason": "below_trust", "trust_level": 1, "below_trust": 2}
+    # And this process now knows the hold, so the next write is held at once.
+    _, version = await sc.get_org_settings_versioned(tenant)
+    assert (await resolve_config(tenant)).settings_version == version
+
+
+async def test_a_bulk_write_decided_before_a_hold_reached_this_process_is_held(
+    client, as_auth, sc
+):
+    tenant = new_tenant_id()
+    await _agent(sc, tenant, "low", 1, "f1")
+    await _hold_behind_cache(sc, tenant, {"below_trust_by_fleet": {"f1": 2}})
+
+    as_auth(tenant, agent_id="low")
+    resp = await client.post(
+        "/api/v1/memories/bulk",
+        json={
+            "tenant_id": tenant,
+            "agent_id": "low",
+            "fleet_id": "f1",
+            "items": [
+                {"content": f"first late claim {uuid.uuid4().hex}"},
+                {"content": f"second late claim {uuid.uuid4().hex}"},
+            ],
+        },
+        headers={"X-Bulk-Attempt-Id": f"late-{uuid.uuid4().hex}"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    ids = [result["id"] for result in resp.json()["results"]]
+    assert len(ids) == 2 and all(ids)
+    for memory_id in ids:
+        row = await _row(sc, tenant, memory_id)
+        assert row["status"] == QUARANTINED_MEMORY_STATUS
+        assert _hold(row) == {
+            "reason": "below_trust",
+            "trust_level": 1,
+            "below_trust": 2,
+        }
+
+
+async def test_a_write_the_new_settings_still_let_through_is_written_live(
+    client, as_auth, sc
+):
+    """Decided again, it goes live: the retry writes it, under the new version."""
+    tenant = new_tenant_id()
+    await _agent(sc, tenant, "mid", 2, "f1")
+    await _hold_behind_cache(sc, tenant, {"below_trust": 2})
+
+    row = await _row(sc, tenant, await _write(client, as_auth, tenant, "mid", "f1"))
+
+    assert row["status"] == "active"
+    assert _hold(row) is None
+
+
+# ── Deciding again, by path ──
+
+
+async def test_a_refused_auto_chunk_parent_is_decided_again_with_its_chunks():
+    """The parent's insert is refused once; held now, its chunks are held with it."""
+    from datetime import UTC, datetime
+    from unittest.mock import MagicMock, patch
+
+    from core_api.clients.storage_client import StorageSettingsChangedError
+    from core_api.schemas import MemoryCreate
+    from core_api.services import memory_service
+
+    hold = {"reason": "below_trust", "trust_level": 1, "below_trust": 2}
+    parent_row = {
+        "id": str(uuid.uuid4()),
+        "tenant_id": "t",
+        "fleet_id": "f1",
+        "agent_id": "low",
+        "memory_type": "fact",
+        "title": "t",
+        "content": "body",
+        "weight": 0.5,
+        "status": QUARANTINED_MEMORY_STATUS,
+        "visibility": "scope_team",
+        "recall_count": 0,
+        "created_at": datetime(2026, 10, 7, tzinfo=UTC),
+        "metadata_": {},
+        "embedding": None,
+        "deleted_at": None,
+    }
+    sent: list[dict] = []
+
+    async def _create(payload):
+        # A copy: the payload is changed in place before the retry.
+        sent.append(copy.deepcopy(payload))
+        if len(sent) == 1:
+            raise StorageSettingsChangedError("the organization settings changed")
+        return parent_row
+
+    sc = AsyncMock(name="storage_client")
+    sc.create_memory = AsyncMock(side_effect=_create)
+    sc.create_memories = AsyncMock(return_value=[])
+    sc.bulk_find_by_content_hashes = AsyncMock(return_value={})
+    data = MemoryCreate(
+        tenant_id="t", fleet_id="f1", agent_id="low", content="a long body " * 200
+    )
+    ctx = SimpleNamespace(
+        data={
+            "input": data,
+            "memory_fields": {
+                "memory_type": "fact",
+                "title": "t",
+                "weight": 0.5,
+                "status": "active",
+                "metadata": {},
+            },
+            "enrichment": None,
+            "embedding": [0.0],
+            "t0": 0.0,
+        },
+        tenant_config=ResolvedConfig(
+            {"entity_extraction": {"enabled": False}}, settings_version="v1"
+        ),
+    )
+    fresh = ResolvedConfig(
+        {"entity_extraction": {"enabled": False}, "quarantine": {"below_trust": 2}},
+        settings_version="v2",
+    )
+
+    async def _chunks(_content, _x, _cfg):
+        return [{"content": c, "suggested_type": "fact"} for c in ("one", "two")]
+
+    async def _embeddings(texts, _cfg, background=False):
+        return [[0.0] for _ in texts]
+
+    with (
+        patch.object(memory_service, "get_storage_client", lambda: sc),
+        patch.object(memory_service, "track_task", MagicMock()),
+        patch.object(memory_service, "get_embeddings_batch", new=_embeddings),
+        patch("core_api.services.ingest_service._chunk_content", new=_chunks),
+        patch(
+            "core_api.pipeline.steps.write.governance_decision.emit_governance_audit",
+            new=AsyncMock(),
+        ),
+        patch(
+            "core_api.services.organization_settings.reload_config",
+            new=AsyncMock(return_value=fresh),
+        ),
+        patch(
+            "core_api.pipeline.steps.write.hold_low_trust_write.hold_for",
+            new=AsyncMock(return_value=hold),
+        ),
+    ):
+        await memory_service._handle_auto_chunk_from_ctx(data, ctx)
+
+    first, second = sent
+    assert (first["status"], first[SETTINGS_VERSION_KEY]) == ("active", "v1")
+    assert second["status"] == QUARANTINED_MEMORY_STATUS
+    assert second["metadata_"]["_system"]["hold"] == hold
+    assert SETTINGS_VERSION_KEY not in second
+    children = sc.create_memories.await_args.args[0]
+    assert [child["status"] for child in children] == [QUARANTINED_MEMORY_STATUS] * 2
+    assert [child["metadata_"]["_system"]["hold"] for child in children] == [hold] * 2
+
+
+# ── The claim and the retry ──
+
+
+def _live(version: str | None = "v1") -> tuple[dict, ResolvedConfig]:
+    return {"metadata_": {}}, ResolvedConfig({}, settings_version=version)
+
+
+async def test_a_live_write_claims_the_settings_it_was_decided_under():
+    payload, config = _live()
+
+    write_hold.claim_settings(payload, config, is_inferred=False)
+
+    assert payload[SETTINGS_VERSION_KEY] == "v1"
+
+
+async def test_a_tenant_with_no_settings_claims_the_empty_version():
+    payload, config = _live(NO_SETTINGS)
+
+    write_hold.claim_settings(payload, config, is_inferred=False)
+
+    assert payload[SETTINGS_VERSION_KEY] == NO_SETTINGS
+
+
+@pytest.mark.parametrize(
+    ("metadata", "is_inferred", "version"),
+    [
+        ({"_system": {"hold": {"reason": "below_trust"}}}, False, "v1"),  # held
+        ({}, True, "v1"),  # the platform's own
+        ({}, False, None),  # settings from a storage that has no versions
+    ],
+)
+async def test_a_write_that_was_not_decided_live_claims_nothing(
+    metadata, is_inferred, version
+):
+    payload = {"metadata_": metadata, SETTINGS_VERSION_KEY: "stale"}
+
+    write_hold.claim_settings(
+        payload, ResolvedConfig({}, settings_version=version), is_inferred=is_inferred
+    )
+
+    assert SETTINGS_VERSION_KEY not in payload
+
+
+async def test_a_refused_insert_is_decided_again_under_fresh_settings_and_retried(
+    monkeypatch,
+):
+    from core_api.clients.storage_client import StorageSettingsChangedError
+
+    fresh = ResolvedConfig({}, settings_version="v2")
+    reload = AsyncMock(return_value=fresh)
+    monkeypatch.setattr("core_api.services.organization_settings.reload_config", reload)
+    insert = AsyncMock(side_effect=[StorageSettingsChangedError("changed"), "row"])
+    decide_again = AsyncMock()
+
+    assert await write_hold.insert_deciding_again("t", insert, decide_again) == "row"
+
+    reload.assert_awaited_once_with("t")
+    decide_again.assert_awaited_once_with(fresh)
+    assert insert.await_count == 2
+
+
+async def test_an_insert_that_is_not_refused_reloads_nothing(monkeypatch):
+    reload = AsyncMock()
+    monkeypatch.setattr("core_api.services.organization_settings.reload_config", reload)
+    decide_again = AsyncMock()
+
+    assert (
+        await write_hold.insert_deciding_again(
+            "t", AsyncMock(return_value="row"), decide_again
+        )
+        == "row"
+    )
+
+    reload.assert_not_awaited()
+    decide_again.assert_not_awaited()
+
+
+async def test_settings_that_change_again_mid_retry_ask_the_caller_to_retry(
+    monkeypatch,
+):
+    from fastapi import HTTPException
+
+    from core_api.clients.storage_client import StorageSettingsChangedError
+
+    monkeypatch.setattr(
+        "core_api.services.organization_settings.reload_config",
+        AsyncMock(return_value=ResolvedConfig({}, settings_version="v2")),
+    )
+    insert = AsyncMock(side_effect=StorageSettingsChangedError("changed"))
+
+    with pytest.raises(HTTPException) as caught:
+        await write_hold.insert_deciding_again("t", insert, AsyncMock())
+
+    assert caught.value.status_code == 503
+    assert insert.await_count == 2
+
+
+@pytest.mark.parametrize("method", ["create_memory", "create_memories"])
+async def test_the_client_tells_a_settings_change_from_a_duplicate(method):
+    """Both are a 409 from storage; only one is the caller's to resolve."""
+    from unittest.mock import patch
+
+    import httpx
+
+    from core_api.clients.storage_client import (
+        CoreStorageClient,
+        DuplicateMemoryError,
+        StorageSettingsChangedError,
+    )
+
+    def _refusal(body: dict) -> httpx.HTTPStatusError:
+        request = httpx.Request("POST", "http://storage/memories")
+        response = httpx.Response(status_code=409, json=body, request=request)
+        return httpx.HTTPStatusError("upstream", request=request, response=response)
+
+    payload = {"agent_id": "a", "tenant_id": "t"}
+    arg = payload if method == "create_memory" else [payload]
+    changed = _refusal(
+        {"detail": {"error": SETTINGS_CHANGED, "message": "decide it again"}}
+    )
+    duplicate = _refusal({"detail": "Duplicate memory exists: x"})
+
+    with patch.object(CoreStorageClient, "_post", new=AsyncMock(side_effect=changed)):
+        with pytest.raises(StorageSettingsChangedError, match="decide it again"):
+            await getattr(CoreStorageClient(), method)(arg)
+    with patch.object(CoreStorageClient, "_post", new=AsyncMock(side_effect=duplicate)):
+        with pytest.raises(DuplicateMemoryError):
+            await getattr(CoreStorageClient(), method)(arg)
