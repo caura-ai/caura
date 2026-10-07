@@ -101,10 +101,24 @@ async def _extraction_enabled(tenant_id: str) -> bool:
     return bool((await resolve_config(tenant_id)).entity_extraction_enabled)
 
 
-async def _rerun(memory: dict, tenant_id: str) -> None:
-    """Reset the memory's extraction and run it again, a few at a time."""
+async def _rerun(memory_id: str, tenant_id: str) -> None:
+    """Reset the memory's extraction and run it again, a few at a time.
+
+    The memory is read again once a slot is free, not taken from when the
+    re-run was scheduled, since it can wait behind others for many minutes. An
+    edit in that time runs its own extraction, and the worker drops a result
+    for text the row no longer holds, so resetting and extracting the old text
+    would leave the memory with no graph at all. Between this read and the
+    reset is one storage call: an edit would have to land and finish its own
+    extraction inside it.
+    """
     async with _rerun_slots():
-        memory_id = str(memory["id"])
+        memory = await live_memory(memory_id, tenant_id)
+        if memory is None:
+            logger.info(
+                "entity extraction re-run: memory %s is gone or held by its turn; nothing to do", memory_id
+            )
+            return
         await get_storage_client().reset_entity_artifacts(tenant_id, memory_id)
         await process_entity_extraction(
             UUID(memory_id),
@@ -116,12 +130,10 @@ async def _rerun(memory: dict, tenant_id: str) -> None:
         )
 
 
-def _schedule(memory: dict, tenant_id: str) -> None:
+def _schedule(memory_id: str, tenant_id: str) -> None:
     # ``entity_extraction``, like a write's run: a re-run that raises or is
     # cancelled records a row of that task, which the next sweep picks up.
-    track_task(
-        tracked_task(_rerun(memory, tenant_id), "entity_extraction", UUID(str(memory["id"])), tenant_id)
-    )
+    track_task(tracked_task(_rerun(memory_id, tenant_id), "entity_extraction", UUID(memory_id), tenant_id))
 
 
 async def schedule_rerun(memory: dict, tenant_id: str) -> int:
@@ -141,7 +153,7 @@ async def schedule_rerun(memory: dict, tenant_id: str) -> int:
         memory_id=str(memory["id"]),
     )
     marked = await sc.mark_task_failures_handled(tenant_id, [r["id"] for r in rows], RERUN) if rows else 0
-    _schedule(memory, tenant_id)
+    _schedule(str(memory["id"]), tenant_id)
     return marked
 
 
@@ -196,7 +208,7 @@ async def rerun_lost_extractions() -> dict:
             # Marked before it runs, so the next sweep does not pick it while it
             # is still in flight; its own outcome is a fresh row if it fails.
             if await sc.mark_task_failures_handled(tenant_id, ids, RERUN):
-                _schedule(memory, tenant_id)
+                _schedule(memory_id, tenant_id)
                 scheduled += 1
         except Exception:
             # One memory's error must not stop the rest of the sweep, or lose

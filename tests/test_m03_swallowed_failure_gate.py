@@ -342,7 +342,13 @@ def _rerun_of(stack: ExitStack, storage: MagicMock):
     stack.enter_context(
         patch.object(extraction_rerun, "get_storage_client", lambda: storage)
     )
-    return extraction_rerun._rerun(_row(), TENANT)
+    return extraction_rerun._rerun(_row()["id"], TENANT)
+
+
+def _rerun_read(stack: ExitStack):
+    sc = _storage()
+    sc.get_memory = AsyncMock(side_effect=_boom())
+    return _rerun_of(stack, sc), sc.get_memory
 
 
 def _rerun_reset(stack: ExitStack):
@@ -638,9 +644,10 @@ ROSTER: dict[str, dict[str, Any]] = {
         "scenarios": [Scenario("extraction", "entity_extraction", _extraction)],
     },
     "_rerun": {
-        # The re-run sweep's reset, then extraction (services.extraction_rerun).
+        # The re-run sweep's read, reset, then extraction (services.extraction_rerun).
         "wraps": {"_rerun"},
         "scenarios": [
+            Scenario("rerun-read", "entity_extraction", _rerun_read),
             Scenario("rerun-reset", "entity_extraction", _rerun_reset),
             Scenario("rerun-extraction", "entity_extraction", _rerun_extraction),
         ],

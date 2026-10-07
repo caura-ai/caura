@@ -257,6 +257,55 @@ async def test_the_sweep_re_runs_a_lost_extraction_and_marks_its_rows(sc, monkey
     assert (await er.rerun_lost_extractions())["memories"] == 0
 
 
+async def _scheduled_re_run(
+    sc, monkeypatch
+) -> tuple[str, str, list, AsyncMock, AsyncMock]:
+    """One lost extraction, swept and scheduled; its re-run not yet run."""
+    tenant = new_tenant_id()
+    await sc.update_org_settings(tenant, {"entity_extraction": {"enabled": True}})
+    memory = await _memory(sc, tenant, "Anna Bergstrom joined Acme Corp.")
+    await _failure(sc, tenant, memory, "entity_extraction_degraded")
+    scheduled: list = []
+    extract = AsyncMock()
+    reset = AsyncMock(wraps=sc.reset_entity_artifacts)
+    monkeypatch.setattr(sc, "list_active_tenants", AsyncMock(return_value=[tenant]))
+    monkeypatch.setattr(sc, "reset_entity_artifacts", reset)
+    monkeypatch.setattr(er, "process_entity_extraction", extract)
+    monkeypatch.setattr(er, "track_task", lambda coro: scheduled.append(coro))
+    assert (await er.rerun_lost_extractions())["scheduled"] == 1
+    return tenant, memory, scheduled, reset, extract
+
+
+async def test_a_re_run_extracts_the_text_the_memory_holds_when_its_turn_comes(
+    sc, monkeypatch
+):
+    """A re-run can wait behind others for minutes. An edit meanwhile runs its
+    own extraction, and the worker drops a result for text the row no longer
+    holds: resetting and extracting the old text would leave no graph."""
+    tenant, memory, scheduled, reset, extract = await _scheduled_re_run(sc, monkeypatch)
+    edited = "Anna Bergstrom left Acme Corp. for Globex."
+    await sc.update_memory(memory, tenant, {"content": edited})
+
+    for coro in scheduled:
+        await coro
+
+    reset.assert_awaited_once_with(tenant, memory)
+    extract.assert_awaited_once_with(
+        UUID(memory), tenant, None, "rerun-agent", edited, "fact"
+    )
+
+
+async def test_a_memory_deleted_while_its_re_run_waits_is_left_alone(sc, monkeypatch):
+    tenant, memory, scheduled, reset, extract = await _scheduled_re_run(sc, monkeypatch)
+    assert await sc.soft_delete_memory(memory, tenant)
+
+    for coro in scheduled:
+        await coro
+
+    reset.assert_not_awaited()
+    extract.assert_not_awaited()
+
+
 # ── The sweep's choices, in isolation ──
 
 
@@ -310,7 +359,7 @@ async def _sweep(sc, *, enabled: bool = True) -> tuple[dict, list]:
         patch.object(
             er,
             "_schedule",
-            side_effect=lambda memory, tenant: scheduled.append((tenant, memory["id"])),
+            side_effect=lambda memory_id, tenant: scheduled.append((tenant, memory_id)),
         ),
     ):
         counts = await er.rerun_lost_extractions()
@@ -424,22 +473,24 @@ async def test_a_memory_that_errors_does_not_stop_the_sweep_and_keeps_its_rows()
 async def test_a_re_run_resets_the_memorys_extraction_before_running_it():
     """Reset first, so a re-run replaces a partial or heuristic graph."""
     calls: list[str] = []
-    sc = MagicMock()
-    sc.reset_entity_artifacts = AsyncMock(side_effect=lambda *a: calls.append("reset"))
-    extract = AsyncMock(side_effect=lambda *a: calls.append("extract"))
     memory = {
         "id": str(uuid.uuid4()),
         "fleet_id": "f1",
         "agent_id": "a1",
         "content": "text",
         "memory_type": "fact",
+        "deleted_at": None,
     }
+    sc = MagicMock()
+    sc.get_memory = AsyncMock(return_value=memory)
+    sc.reset_entity_artifacts = AsyncMock(side_effect=lambda *a: calls.append("reset"))
+    extract = AsyncMock(side_effect=lambda *a: calls.append("extract"))
 
     with (
         patch.object(er, "get_storage_client", return_value=sc),
         patch.object(er, "process_entity_extraction", extract),
     ):
-        await er._rerun(memory, "t1")
+        await er._rerun(memory["id"], "t1")
 
     assert calls == ["reset", "extract"]
     extract.assert_awaited_once_with(
@@ -529,7 +580,7 @@ async def test_re_extracting_one_memory_marks_its_rows_and_schedules_it(
     memory = await _memory(sc, tenant, "Anna Bergstrom joined Acme Corp.")
     await _failure(sc, tenant, memory, "entity_extraction_degraded")
     scheduled: list = []
-    monkeypatch.setattr(er, "_schedule", lambda m, t: scheduled.append((t, m["id"])))
+    monkeypatch.setattr(er, "_schedule", lambda m, t: scheduled.append((t, m)))
 
     body = await lifecycle.re_extract_memory(
         UUID(memory), tenant_id=tenant, auth=MagicMock()
