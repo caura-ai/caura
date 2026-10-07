@@ -102,8 +102,10 @@ jobs:
             exit 1
           fi
 
+      # npm ci installs exactly the lockfile CI tests with; npm install may
+      # depart from it (L-64). tsc runs at publish, from prepublishOnly.
       - name: Install + build
-        run: npm install
+        run: npm ci
 
       - name: Publish
         run: npm publish --access public --provenance

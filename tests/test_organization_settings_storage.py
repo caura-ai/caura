@@ -202,13 +202,14 @@ async def test_cache_hit_avoids_storage_fetch(monkeypatch):
 
     calls = {"n": 0}
     sc = get_storage_client()
-    original_get = sc.get_org_settings
+    original_get = sc.get_org_settings_versioned
 
     async def counting_get(org_id):
         calls["n"] += 1
         return await original_get(org_id)
 
-    monkeypatch.setattr(sc, "get_org_settings", counting_get)
+    # The read the cache loads through; ``get_org_settings`` is not on its path.
+    monkeypatch.setattr(sc, "get_org_settings_versioned", counting_get)
 
     await get_raw_settings(tid)
     await get_raw_settings(tid)
@@ -271,12 +272,14 @@ async def test_get_raw_settings_skips_storage_fetch_on_cache_hit(monkeypatch):
     per detection event would be a hot-path regression. The cache hit should
     short-circuit before the storage client is even called."""
     tid = _tid()
-    ts_svc._settings_cache[tid] = {"enrichment": {"provider": "anthropic"}}
+    ts_svc._settings_cache[tid] = ts_svc._CachedSettings(
+        {"enrichment": {"provider": "anthropic"}}, None
+    )
 
     async def _fail_fetch(_org_id):
         raise AssertionError("storage must not be fetched on a cache hit")
 
-    monkeypatch.setattr(get_storage_client(), "get_org_settings", _fail_fetch)
+    monkeypatch.setattr(get_storage_client(), "get_org_settings_versioned", _fail_fetch)
 
     raw = await get_raw_settings(tid)
     assert raw == {"enrichment": {"provider": "anthropic"}}

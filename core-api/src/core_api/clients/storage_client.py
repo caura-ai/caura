@@ -14,6 +14,7 @@ import httpx
 from common import permanent_failure
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from common.http_retry import CONNECT_PHASE_MAX_ATTEMPTS, with_connect_phase_retry, with_retry
+from common.settings_version import SETTINGS_CHANGED
 from common.storage_auth import is_storage_shared_secret_rejection
 from core_api.clients.identity_token import evict as _evict_id_token
 from core_api.clients.identity_token import fetch_auth_header
@@ -122,6 +123,31 @@ def _storage_duplicate_fields(response: httpx.Response) -> dict:
     if not isinstance(body, dict):
         return {}
     return {k: body[k] for k in ("reason", "existing_id", "existing_status") if k in body}
+
+
+class StorageSettingsChangedError(Exception):
+    """Storage refused a live memory insert: the settings it was decided under changed (g2.8).
+
+    The write said which organization settings it was decided under, and the
+    settings row no longer matches (``common.settings_version``). Nothing was
+    written. Not the caller's to resolve, unlike ``DuplicateMemoryError``, the
+    other 409 these routes answer: the writer reloads the settings, decides the
+    hold again, and writes once more.
+    """
+
+
+def _storage_settings_changed(response: httpx.Response) -> StorageSettingsChangedError | None:
+    """The typed error for storage's ``SETTINGS_CHANGED`` 409, or ``None`` for a duplicate."""
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(detail, dict) or detail.get("error") != SETTINGS_CHANGED:
+        return None
+    message = detail.get("message")
+    return StorageSettingsChangedError(
+        message if isinstance(message, str) and message else "the organization settings changed"
+    )
 
 
 class StoragePointerRejectedError(permanent_failure.PermanentWriteFailure):
@@ -726,6 +752,8 @@ class CoreStorageClient:
             # own an HTTP contract translate it; see ``WriteMemoryRow``.
             if exc.response.status_code != 409:
                 raise
+            if (changed := _storage_settings_changed(exc.response)) is not None:
+                raise changed from exc
             raise DuplicateMemoryError(
                 _storage_detail(exc.response), _storage_duplicate_fields(exc.response)
             ) from exc
@@ -765,6 +793,8 @@ class CoreStorageClient:
             # batch was written, unlike the per-item outcomes a success returns.
             if exc.response.status_code != 409:
                 raise
+            if (changed := _storage_settings_changed(exc.response)) is not None:
+                raise changed from exc
             raise DuplicateMemoryError(
                 _storage_detail(exc.response), _storage_duplicate_fields(exc.response)
             ) from exc
@@ -3447,8 +3477,18 @@ class CoreStorageClient:
         re-caches the PRE-update settings for the full TTL, so a tightened
         governance control silently does not apply for five more minutes.
         """
-        result = await self._get(f"/organization-settings/{org_id}", read=False)
-        return (result or {}).get("settings", {})
+        settings, _ = await self.get_org_settings_versioned(org_id)
+        return settings
+
+    async def get_org_settings_versioned(self, org_id: str) -> tuple[dict, str | None]:
+        """``get_org_settings`` and the settings' version (``common.settings_version``).
+
+        The version is ``None`` from a storage that predates it; writes decided
+        under those settings then go unchecked, as they did before.
+        """
+        result = await self._get(f"/organization-settings/{org_id}", read=False) or {}
+        version = result.get("version")
+        return result.get("settings", {}), version if isinstance(version, str) else None
 
     async def update_org_settings(
         self, org_id: str, settings: dict, *, changed_by: str | None = None
