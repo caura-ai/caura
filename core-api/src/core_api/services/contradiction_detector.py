@@ -289,17 +289,31 @@ def _log_batch_status_result(result: dict | None, *, path: str, memory_id) -> No
 
 
 def _unlinked_pairs(
-    new_memory: dict, pairs: list[tuple[dict, str, float | None]], updates: dict[str, dict]
+    new_memory: dict,
+    pairs: list[tuple[dict, str, float | None]],
+    updates: dict[str, dict],
+    flushed: dict | None,
 ) -> list[tuple[dict, str, float | None]]:
-    """The confirmed pairs whose loser no chain edge in ``updates`` points at (M-34).
+    """The confirmed pairs whose loser no chain edge from this flush points at (M-34).
 
     ``supersedes_id`` is one column, so each loop wires ``new_memory`` to its first
     canonical loser only, and to none when it already supersedes a row; a flipped
     winner that already supersedes a row keeps that edge. Every such loser is
     demoted all the same, and with nothing pointing at it ``find_successors``
     cannot say what replaced it and retraction cannot reach it.
+
+    A planned edge counts only if it landed. ``flushed`` is the flush's answer: a
+    row in its ``skipped`` took no write, and one in ``edge_skipped`` lost the
+    ``expect_supersedes_null`` CAS to a concurrent writer and kept the pointer it
+    had, so the loser it was to point at may have none. Such a pair is recorded
+    too; if the other writer wired the same pair, the record repeats the edge, as
+    every record does with ``contradiction_write_conflict_record`` on.
     """
-    linked = {u["supersedes_id"] for u in updates.values() if u.get("supersedes_id")}
+    flushed = flushed or {}
+    lost = {*(flushed.get("skipped") or []), *(flushed.get("edge_skipped") or [])}
+    linked = {
+        u["supersedes_id"] for u in updates.values() if u.get("supersedes_id") and u["memory_id"] not in lost
+    }
     return [p for p in pairs if str(_pick_older(p[0], new_memory).get("id")) not in linked]
 
 
@@ -651,12 +665,13 @@ async def _rdf_conflict_pass(
                 direction,
             )
 
+        rdf_result = None
         if rdf_updates:
             rdf_result = await sc.batch_update_status(
                 {"updates": list(rdf_updates.values())}, tenant_id=tenant_id
             )
             _log_batch_status_result(rdf_result, path="RDF path", memory_id=memory_id)
-        unlinked = _unlinked_pairs(new_memory, _record_pairs, rdf_updates)
+        unlinked = _unlinked_pairs(new_memory, _record_pairs, rdf_updates, rdf_result)
 
     return _RdfPassResult(contradictions, _record_pairs, supersedes_id, ran, unlinked)
 
@@ -1207,6 +1222,7 @@ async def _detect(
                         direction,
                     )
 
+            sem_result = None
             if updates:
                 sem_result = await sc.batch_update_status(
                     {"updates": list(updates.values())}, tenant_id=tenant_id
@@ -1214,7 +1230,7 @@ async def _detect(
                 _log_batch_status_result(sem_result, path="semantic path", memory_id=memory_id)
             # ``_record_pairs`` holds only semantic pairs here: this path runs
             # only when the RDF pass found nothing.
-            _unlinked.extend(_unlinked_pairs(new_memory, _record_pairs, updates))
+            _unlinked.extend(_unlinked_pairs(new_memory, _record_pairs, updates, sem_result))
 
     # A55 1d / M-34 — the memory_conflicts records; see ``_record_conflicts``.
     # Never touches the status/supersedes effect above.
@@ -3724,6 +3740,7 @@ async def detect_contradictions_by_entities_async(
                     "canonical" if newer is new_memory else "flipped",
                 )
 
+        entity_result = None
         if updates:
             entity_result = await sc.batch_update_status(
                 {"updates": list(updates.values())}, tenant_id=tenant_id
@@ -3732,7 +3749,7 @@ async def detect_contradictions_by_entities_async(
         await _record_conflicts(
             new_memory,
             record_pairs,
-            _unlinked_pairs(new_memory, record_pairs, updates),
+            _unlinked_pairs(new_memory, record_pairs, updates, entity_result),
             tenant_id=tenant_id,
             tenant_config=tenant_config,
         )

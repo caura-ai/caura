@@ -501,7 +501,7 @@ async def find_successors(request: Request) -> list[dict]:
         from datetime import datetime
 
         valid_at = datetime.fromisoformat(valid_at)
-    memories = await _svc.memory_find_successors(
+    successors = await _svc.memory_find_successors(
         supersedes_ids=[UUID(sid) for sid in body["supersedes_ids"]],
         tenant_id=body["tenant_id"],
         fleet_ids=body.get("fleet_ids"),
@@ -512,7 +512,9 @@ async def find_successors(request: Request) -> list[dict]:
         valid_at=valid_at,
         strict_fleet_scoping=body.get("strict_fleet_scoping", False),
     )
-    return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+    # ``successor_of`` names the row each one replaced: its ``supersedes_id``,
+    # or for a contradiction's further loser the one its record names (M-34).
+    return [{**orm_to_dict(m, MEMORY_FIELDS), "successor_of": str(replaced)} for m, replaced in successors]
 
 
 @router.post("/similar-candidates")

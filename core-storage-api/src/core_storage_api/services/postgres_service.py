@@ -1590,6 +1590,44 @@ def _attach_agent_display_names(rows: Any) -> list[Memory]:
     return out
 
 
+def _recorded_winners(loser_ids: Sequence[UUID], tenant_id: str, *where: ColumnElement[bool]) -> list[Select]:
+    """Select ``(Memory, successor_of)``: the memory that beat each demoted memory
+    in ``loser_ids``, as only its ``memory_conflicts`` record names it (M-34).
+
+    ``supersedes_id`` is one column, so a contradiction wires its winner to one
+    loser only, and its other losers are named only by their records (#1815), on
+    either side: the older memory loses whichever one detection ran for. The
+    winner is the record's other side when it is the newer, as ``_pick_older``
+    decides it: created later, or on a tie the greater id. A dismissed record
+    names no winner, and a pair an edge also joins is left to the
+    ``supersedes_id`` lookups. ``where`` holds the winner to the caller's scope.
+    """
+    loser = aliased(Memory)
+    return [
+        select(Memory, loser.id.label("successor_of"))
+        .join(MemoryConflict, winner_side == Memory.id)
+        .join(loser, loser.id == loser_side)
+        .where(
+            MemoryConflict.tenant_id == tenant_id,
+            MemoryConflict.review_status != "dismissed",
+            loser_side.in_(loser_ids),
+            loser.tenant_id == tenant_id,
+            loser.deleted_at.is_(None),
+            loser.status.in_(CONTRADICTED_STATUSES),
+            or_(
+                Memory.created_at > loser.created_at,
+                and_(Memory.created_at == loser.created_at, Memory.id > loser.id),
+            ),
+            Memory.supersedes_id.is_distinct_from(loser.id),
+            *where,
+        )
+        for loser_side, winner_side in (
+            (MemoryConflict.old_memory_id, MemoryConflict.new_memory_id),
+            (MemoryConflict.new_memory_id, MemoryConflict.old_memory_id),
+        )
+    ]
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PostgresService
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4732,39 +4770,45 @@ class PostgresService:
         memory_type_filter: str | None = None,
         valid_at: datetime | None = None,
         strict_fleet_scoping: bool = False,
-    ) -> list[Memory]:
-        """Find active/confirmed memories that supersede the given memory IDs."""
+    ) -> list[tuple[Memory, UUID]]:
+        """Find the active/confirmed memories that replaced the given ones, each
+        with the id of the one it replaced.
+
+        A chain edge's winner names its loser in ``supersedes_id``. A
+        contradiction's further losers have no edge, so the winner their
+        ``memory_conflicts`` record names is found too (M-34), in the same scope.
+        """
+        scope: list[ColumnElement[bool]] = [
+            Memory.tenant_id == tenant_id,
+            Memory.status.in_(("active", "confirmed")),
+            Memory.deleted_at.is_(None),
+            _visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id),
+        ]
+        if fleet_ids:
+            scope.append(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
+        if filter_agent_id:
+            scope.append(Memory.agent_id == filter_agent_id)
+        if memory_type_filter:
+            scope.append(Memory.memory_type == memory_type_filter)
+        if valid_at:
+            scope.append(or_(Memory.ts_valid_start.is_(None), Memory.ts_valid_start <= valid_at))
+            scope.append(or_(Memory.ts_valid_end.is_(None), Memory.ts_valid_end >= valid_at))
+        display = Agent.display_name.label("agent_display_name")
         async with get_session() as session:
-            stmt = (
-                select(Memory, Agent.display_name.label("agent_display_name"))
+            edges = await session.execute(
+                select(Memory, display)
                 .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
-                .where(
-                    Memory.tenant_id == tenant_id,
-                    Memory.supersedes_id.in_(supersedes_ids),
-                    Memory.status.in_(("active", "confirmed")),
-                    Memory.deleted_at.is_(None),
-                )
+                .where(Memory.supersedes_id.in_(supersedes_ids), *scope)
             )
-            if fleet_ids:
-                stmt = stmt.where(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
-            stmt = stmt.where(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
-            if filter_agent_id:
-                stmt = stmt.where(Memory.agent_id == filter_agent_id)
-            if memory_type_filter:
-                stmt = stmt.where(Memory.memory_type == memory_type_filter)
-            if valid_at:
-                stmt = stmt.where(
-                    or_(
-                        Memory.ts_valid_start.is_(None),
-                        Memory.ts_valid_start <= valid_at,
-                    ),
-                ).where(
-                    or_(
-                        Memory.ts_valid_end.is_(None),
-                        Memory.ts_valid_end >= valid_at,
-                    ),
-                )
-            return _attach_agent_display_names((await session.execute(stmt)).all())
+            found: list[tuple[Memory, UUID]] = [
+                (m, m.supersedes_id) for m in _attach_agent_display_names(edges.all()) if m.supersedes_id
+            ]
+            for stmt in _recorded_winners(supersedes_ids, tenant_id, *scope):
+                named = stmt.add_columns(display).outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+                rows = (await session.execute(named)).all()
+                memories = _attach_agent_display_names((row[0], row[2]) for row in rows)
+                found.extend(zip(memories, (row[1] for row in rows), strict=True))
+        return found
 
     # ------------------------------------------------------------------
     # D) Contradiction detection
@@ -6776,21 +6820,23 @@ class PostgresService:
             ):
                 return None
 
-            supersessors = (
-                (
-                    await session.execute(
-                        select(Memory)
-                        .where(
-                            Memory.supersedes_id == memory_id,
-                            Memory.tenant_id == tenant_id,
-                            Memory.deleted_at.is_(None),
-                            Memory.status != QUARANTINED_MEMORY_STATUS,
-                        )
-                        .order_by(Memory.created_at.desc())
-                    )
-                )
+            not_gone = (
+                Memory.tenant_id == tenant_id,
+                Memory.deleted_at.is_(None),
+                Memory.status != QUARANTINED_MEMORY_STATUS,
+            )
+            supersessors = list(
+                (await session.execute(select(Memory).where(Memory.supersedes_id == memory_id, *not_gone)))
                 .scalars()
                 .all()
+            )
+            if memory.status in CONTRADICTED_STATUSES:
+                # M-34 — a contradiction's further losers have no edge, only
+                # the record naming the memory that beat them.
+                for stmt in _recorded_winners([memory_id], tenant_id, *not_gone):
+                    supersessors.extend((await session.execute(stmt)).scalars().all())
+            supersessors = sorted(
+                {m.id: m for m in supersessors}.values(), key=lambda m: m.created_at, reverse=True
             )
 
             older = None
