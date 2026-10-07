@@ -10,6 +10,17 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.25.2](https://github.com/caura-ai/caura/compare/backend-v3.25.1...backend-v3.25.2) (2026-10-07)
+
+
+### Bug Fixes
+
+* **settings:** drop sentinel.fail_on_critical, read by nothing (M-114) ([#1952](https://github.com/caura-ai/caura/issues/1952)) ([07dbe56](https://github.com/caura-ai/caura/commit/07dbe56840aad545fbd2c4dee5a9715277484802))
+* **skills-inbox:** let reject roll back an active skill (M-105) ([#1953](https://github.com/caura-ai/caura/issues/1953)) ([d1230d3](https://github.com/caura-ai/caura/commit/d1230d34dbd6b83afcb755f7eb9bdf35cfcb5133))
+* **storage:** let document search scan past other tenants (M-61) ([#1957](https://github.com/caura-ai/caura/issues/1957)) ([74080d8](https://github.com/caura-ai/caura/commit/74080d82e94cd3c615cc847fff474ba5781e8434))
+* **storage:** let entity ANN lookups scan past other tenants (M-61) ([#1955](https://github.com/caura-ai/caura/issues/1955)) ([9daa109](https://github.com/caura-ai/caura/commit/9daa1091960b312e75e6e1b2712f97f730d2a62a))
+* **storage:** let filtered ANN lookups scan past other tenants (M-61) ([#1951](https://github.com/caura-ai/caura/issues/1951)) ([4a52760](https://github.com/caura-ai/caura/commit/4a5276082eca946320f1d8a33083258fe6ec583c))
+
 ## [3.25.1](https://github.com/caura-ai/caura/compare/backend-v3.25.0...backend-v3.25.1) (2026-10-06)
 
 
