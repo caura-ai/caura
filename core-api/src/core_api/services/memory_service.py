@@ -2240,12 +2240,14 @@ async def create_memories_bulk(
 
     async def decide_again(config: ResolvedConfig) -> None:
         # One agent writes the batch, so one answer, applied as the loop above
-        # applies it. Only a live batch is refused, so there is no hold to undo.
+        # applies it: a write the broker's gate refused keeps the gate's hold.
+        # Only a live write is refused, so there is no hold to undo.
         hold = await hold_for(data.tenant_id, data.agent_id, data.fleet_id, config, is_inferred=is_inferred)
-        for _, mem_data in pending:
-            if hold is not None:
+        for i, mem_data in pending:
+            item_hold = gate_holds.get(i) or hold
+            if item_hold is not None:
                 mem_data["status"] = QUARANTINED_MEMORY_STATUS
-                mem_data["metadata_"].setdefault(SYSTEM_NAMESPACE, {})[HOLD_KEY] = hold
+                mem_data["metadata_"].setdefault(SYSTEM_NAMESPACE, {})[HOLD_KEY] = item_hold
             claim_settings(mem_data, config, is_inferred=is_inferred)
 
     # -- Bulk insert via storage client. The storage layer returns one

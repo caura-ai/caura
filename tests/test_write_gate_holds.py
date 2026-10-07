@@ -225,6 +225,32 @@ async def test_the_gates_account_names_the_hold_where_trust_holds_the_batch(
     )
 
 
+async def test_the_gates_account_survives_the_batch_being_decided_again(
+    client, as_auth, sc
+):
+    """The trust level is raised by another process, so storage refuses the
+    batch this one decided live and it is decided again (#1984): the write the
+    gate refused still names the gate, and the rest are held for trust."""
+    from core_api.services.organization_settings import resolve_config
+
+    tenant = new_tenant_id()
+    await resolve_config(tenant)  # this process caches no level
+    await sc.update_org_settings(tenant, {"quarantine": {"below_trust": 2}})
+    _as_broker(as_auth, tenant)
+    plain = _refused_write()
+    del plain["status"]
+
+    refused, captured = await _bulk(
+        client, tenant, _refused_write(write_gate=ACCOUNT), plain
+    )
+
+    assert _system(await _row(sc, tenant, refused["id"]))["hold"] == HOLD
+    assert (
+        _system(await _row(sc, tenant, captured["id"]))["hold"]["reason"]
+        == "below_trust"
+    )
+
+
 # ── The account's shape ──
 
 
