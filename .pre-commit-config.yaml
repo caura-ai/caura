@@ -12,6 +12,14 @@ repos:
       - id: ruff-check
         args: [--fix]
         files: '^(common|scripts|tests|core-(api|storage-api|operations|worker)/(src|tests))/'
+      # The Python client has its own CI gate (client-python-ci.yml runs
+      # ``ruff check src tests`` there) and its own [tool.ruff], which ruff
+      # picks up as the nearest config. CI does not format-check it, so no
+      # ruff-format hook for it.
+      - id: ruff-check
+        name: ruff-check (clients/python)
+        args: [--fix]
+        files: '^clients/python/(src|tests)/'
       - id: ruff-format
         files: '^(scripts|tests|core-(api|storage-api|operations|worker)/(src|tests))/'
       # In common/, CI format-checks only the three files vendored from

@@ -44,7 +44,8 @@ pre-commit install
 
 The hook is configured in `.pre-commit-config.yaml` and runs the ruff
 version the services pin over the trees CI checks: `common/`, `scripts/`,
-`tests/` and each service's `src/` and `tests/`. `mypy` is intentionally not in
+`tests/` and each service's `src/` and `tests/`, plus `ruff check` (not `ruff format`, which
+CI does not run there) on `clients/python/src/` and `clients/python/tests/`. `mypy` is intentionally not in
 the hook (it needs the real project venv to resolve workspace imports
 correctly) — CI runs it authoritatively, and you can run it locally via
 the command under "Run local checks" below.
