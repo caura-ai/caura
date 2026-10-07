@@ -344,6 +344,9 @@ jobs:
           fetch-depth: 1
 
       - name: Install Claude CLI
+        # A backstop for the script's own bound on each download, well inside the
+        # job's 20 minutes, so a dead package mirror fails here and not the review.
+        timeout-minutes: 10
         run: bash .github/scripts/install_review_sandbox.sh
 
       # Same script as the @claude retrigger job below — feed the real diff to
@@ -455,6 +458,8 @@ jobs:
 
       - name: Install Claude CLI
         if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
+        # As in claude-review above.
+        timeout-minutes: 10
         run: bash .github/scripts/install_review_sandbox.sh
 
       # Same script as the on-open claude-review job above.
