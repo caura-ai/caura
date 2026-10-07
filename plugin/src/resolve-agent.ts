@@ -3,18 +3,34 @@
  *
  * Resolution order:
  *   1. Explicit field from caller (context.agentId, config.agentId)
- *   2. Session key parsing — "agent:AGENT_NAME:CHANNEL:TARGET"
+ *   2. Session key parsing — "agent:AGENT_NAME:CHANNEL:TARGET". With no
+ *      ``agents.list``, ``main`` is the install's default agent (5).
  *   3. Config agent name (config.agentName, config.agent?.name)
  *   4. CAURA_AGENT_ID env var
- *   5. ``main-${installId}`` — install-disambiguated default so two
- *      OpenClaw installs sharing one tenant don't merge their memories
- *      into a single ``(tenant_id, agent_id="main")`` row. Pre-Task6
+ *   5. The install's default agent id, the one its heartbeat registers
+ *      (``getDefaultAgentId``): ``main-${installId}`` for a new install,
+ *      so two OpenClaw installs sharing one tenant don't merge their
+ *      memories into a single ``(tenant_id, agent_id="main")`` row;
+ *      ``main`` for an install from before install.json recorded it,
+ *      whose memories and recall already use it (M-107). Pre-Task6
  *      this was ``"unknown-agent"``, which is the same collision risk
  *      with worse semantics.
  */
 
 import { CAURA_AGENT_ID } from "./env.js";
-import { getInstallId } from "./install-id.js";
+import { listedAgents, readOpenClawConfig } from "./config.js";
+import { getDefaultAgentId } from "./install-id.js";
+
+/**
+ * The agent a session key names. With no ``agents.list``, OpenClaw's one
+ * agent is ``main``, which the heartbeat registers under the install's
+ * default agent id, so its turns write under that id too (M-107). A listed
+ * agent, ``main`` included, keeps its name on both paths.
+ */
+function sessionAgentId(name: string): string {
+  if (name !== "main" || listedAgents(readOpenClawConfig())) return name;
+  return getDefaultAgentId();
+}
 
 function resolveAgentIdInner(
   sources: Array<Record<string, unknown> | undefined | null>,
@@ -33,7 +49,7 @@ function resolveAgentIdInner(
     if (src.sessionKey && typeof src.sessionKey === "string") {
       const parts = (src.sessionKey as string).split(":");
       if (parts.length >= 2 && parts[0] === "agent" && parts[1]) {
-        return parts[1];
+        return sessionAgentId(parts[1]);
       }
     }
 
@@ -50,9 +66,9 @@ function resolveAgentIdInner(
     return CAURA_AGENT_ID;
   }
 
-  // Per-install fallback. Was ``"unknown-agent"`` pre-Task6 — every
-  // install collided on a single row.
-  const fallback = `main-${getInstallId()}`;
+  // The install's default agent, as the heartbeat registers it. Was
+  // ``"unknown-agent"`` pre-Task6 — every install collided on a single row.
+  const fallback = getDefaultAgentId();
   if (!quiet) {
     console.warn(
       `[caura] Could not resolve agent ID — using install-default '${fallback}'. ` +

@@ -51,6 +51,7 @@ import { CAURA_TOOLS } from "./tools.js";
 import {
   getPluginDir,
   getMissingTools,
+  listedAgents,
   readOpenClawConfig,
   isCauraFullyConfigured,
 } from "./config.js";
@@ -69,7 +70,7 @@ import {
   assertPromptLength,
 } from "./validation.js";
 import { logError } from "./logger.js";
-import { getInstallId } from "./install-id.js";
+import { getDefaultAgentId, getInstallId } from "./install-id.js";
 import { getDisplayName } from "./identity.js";
 import { reconcileSkills, type ReconcileSummary } from "./reconcile-skills.js";
 
@@ -474,8 +475,8 @@ export async function sendHeartbeat(): Promise<void> {
   let agents: Array<Record<string, unknown>> | undefined;
   try {
     const config = readOpenClawConfig() as Record<string, any> | null;
-    const agentList = config?.agents?.list;
-    if (Array.isArray(agentList) && agentList.length > 0) {
+    const agentList = listedAgents(config);
+    if (agentList) {
       // Operators who configured explicit ``agents.list`` keep their
       // chosen ids verbatim. ``display_name`` defaults to the
       // hostname-prefixed form when the entry has no explicit
@@ -499,12 +500,14 @@ export async function sendHeartbeat(): Promise<void> {
     } else {
       // No explicit list — synthesize a single default agent. Pre-Task6
       // this was hardcoded to ``"main"`` and collided with every other
-      // install. Now the internal id carries the install suffix; the
-      // human label uses the hostname.
+      // install. It registers under the install's default agent id, the
+      // one its turns write under (M-107): ``main-<installId>`` for a new
+      // install, ``main`` for one from before install.json recorded it.
+      // The human label uses the hostname.
       const defaultModel = config?.agents?.defaults?.model?.primary;
       agents = [
         {
-          agentId: `main-${installId}`,
+          agentId: getDefaultAgentId(),
           name: getDisplayName("main"),
           display_name: getDisplayName("main"),
           model: defaultModel || undefined,

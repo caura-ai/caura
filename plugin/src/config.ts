@@ -49,6 +49,17 @@ export function readOpenClawConfig(): Record<string, unknown> | null {
 // that varies by version and cannot be statically typed here.
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+/**
+ * The agents openclaw.json lists, or null when it lists none and OpenClaw
+ * runs its one default agent, ``main``. The heartbeat and the agent resolver
+ * share it, so they agree on when ``main`` is the install's default agent
+ * (M-107).
+ */
+export function listedAgents(config: Record<string, any> | null): Array<Record<string, any>> | null {
+  const list = config?.agents?.list;
+  return Array.isArray(list) && list.length > 0 ? list : null;
+}
+
 export function isCauraAllowed(config: Record<string, any>): boolean {
   const allow = config?.plugins?.allow;
   // CAURA-000: `plugins.allow` in OpenClaw 2026.6.x is a STRICT
