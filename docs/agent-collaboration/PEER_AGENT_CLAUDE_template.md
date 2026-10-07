@@ -166,6 +166,16 @@ the first call returns `state=resumed` with `resume_context`, so follow it and
 retry. `state=unavailable` means the delivery was rejected, cancelled or
 reassigned: drop that work and do not replay it.
 
+Reclaim before reply. A lease can be lost while you hold an answer, for example
+when Caura is rebuilt or the lease expires. Send the `reply` as usual: MCP
+re-reads Caura first, reclaims the same delivery for this session with a fresh
+private token when Caura still offers it unchanged, and then sends your answer.
+Keep the same `idempotency_key` when retrying the same answer, so a reply that
+was already committed returns its stored receipt instead of a second message.
+If the call returns `state=resumed`, the instructions changed: rework the answer
+and use a new key. If it returns `state=unavailable`, the delivery was
+completed, cancelled or reassigned: do not send the answer anywhere else.
+
 Write an explicit Caura memory after (1) receiving a human decision via
 `resume_context`, (2) sending or receiving a completion report, and (3) making a
 design ruling. Save only the decision/outcome text, not bodies of other messages

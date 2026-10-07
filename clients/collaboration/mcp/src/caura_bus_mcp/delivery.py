@@ -26,6 +26,8 @@ class DeliverySession:
         self.lock = asyncio.Lock()
         self.renewal: asyncio.Task | None = None
         self.reply_keys: set[tuple[str, str]] = set()
+        # (delivery_id, idempotency_key) replies sent, even if their result was lost.
+        self.reply_attempts: set[tuple[str, str]] = set()
         self.reply_deliveries: dict[str, tuple[str, str, str]] = {}
         # Responses already shown via collect/recent(reply_to) or an earlier wait.
         self.presented = PresentedResponses()
@@ -86,21 +88,36 @@ class DeliverySession:
             result = await self.bus.delivery_action(claim.delivery_id, "caura-stopped", token)
             claim.intervention = result["intervention"]
 
-    async def guard(self, delivery_id=None):
-        """Fence operations on paused work; ``delivery_id`` names the delivery the caller targets."""
+    async def guard(self, delivery_id=None, replay=False):
+        """Fence operations on paused or lost work before they reach Caura.
+
+        ``delivery_id`` names the delivery the caller targets. ``replay`` marks an
+        idempotent retry of a completion this session already sent, which Caura may
+        answer with its stored result even after the delivery left this session.
+        """
         claim = self.current
         if not claim:
             return
         if claim.state == "paused" and not claim.lease_token:
             # A human may have resolved the pause since it was observed. The local
             # copy cannot tell, so ask Caura instead of fencing every later call.
-            claim = await self._refresh(claim, delivery_id)
+            claim = await self._refresh(claim, delivery_id, replay)
             if claim is None:
                 return
         elif claim.lease_token:
-            result = await self.bus.delivery_action(claim.delivery_id, "observe", claim.lease_token)
-            claim = Claim.model_validate(result["delivery"])
-            self.current = claim
+            try:
+                result = await self.bus.delivery_action(claim.delivery_id, "observe", claim.lease_token)
+            except PlatformError as exc:
+                if exc.status not in {404, 409} or isinstance(exc.detail, dict):
+                    raise
+                # The lease was lost (expiry, platform rebuild). Reclaim before reusing
+                # an in-hand answer; the old token is never retried.
+                claim = await self._refresh(claim, delivery_id, replay)
+                if claim is None:
+                    return
+            else:
+                claim = Claim.model_validate(result["delivery"])
+                self.current = claim
         if claim.state == "paused":
             await self._observe_pause(claim)
             raise PlatformError(409, {"state": "paused", "delivery": self.public(claim)})
@@ -108,12 +125,13 @@ class DeliverySession:
             self.current = None
             self.on_finished(claim.delivery_id)
 
-    async def _refresh(self, stale, delivery_id):
-        """Re-read a paused claim through this session's authenticated wait.
+    async def _refresh(self, stale, delivery_id, replay=False):
+        """Re-read a paused or lease-lost claim through this session's authenticated wait.
 
-        Caura decides: a still-paused delivery stays paused, a resumed one is leased
-        to this session with a fresh private token, a rejected one never returns,
-        and a live lease held by another session is never taken over.
+        Caura decides: a still-paused delivery stays paused, a resumed or expired one
+        is leased to this session with a fresh private token, a rejected, cancelled or
+        completed one never returns, and a live lease held by another session is
+        never taken over.
         """
         async with self.lock:
             if self.current is stale:
@@ -123,14 +141,14 @@ class DeliverySession:
             else:
                 claim = self.current  # A concurrent call already refreshed it.
         same = claim is not None and claim.delivery_id == stale.delivery_id
-        if delivery_id == stale.delivery_id and not same:
+        if delivery_id == stale.delivery_id and not same and not replay:
             raise PlatformError(
                 409,
                 {
                     "state": "unavailable",
                     "delivery_id": stale.delivery_id,
-                    "detail": "Caura no longer offers this paused delivery to this session "
-                    "(rejected, cancelled or reassigned). Do not continue or replay its work; "
+                    "detail": "Caura no longer offers this delivery to this session (completed, "
+                    "rejected, cancelled or reassigned). Do not continue or replay its work; "
                     "call peer wait.",
                 },
             )

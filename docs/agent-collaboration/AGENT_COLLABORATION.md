@@ -231,6 +231,15 @@ and elapsed time so humans can assess repeatedly extended work.
   explicit ack. Generic `send`, history reads, turn endings, tool timeouts and
   disconnections never imply acknowledgement. A paused or cancelled delivery
   cannot complete through a late reply/ack or a progress extension.
+- **Reclaim before reply.** When a lease is lost mid-task (expiry, platform
+  rebuild), the stale token fails every lease operation. Before the stdio MCP
+  sends a reply, ack, progress or checkpoint for that work it re-reads Caura
+  through its authenticated session wait. It proceeds only on a fresh claim of
+  the same delivery, with no unseen human instructions, using the new private
+  token and the caller's unchanged idempotency key. Changed instructions return
+  `resumed`; a cancelled, completed or reassigned delivery returns
+  `unavailable`, and its in-hand answer is never replayed. A retry of a reply
+  this session already sent keeps its key, so Caura can return the stored receipt.
 
 ### What interruption promises
 
