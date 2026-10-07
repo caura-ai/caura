@@ -22,6 +22,7 @@ from sqlalchemy import text
 from common.constants import (
     LIVE_MEMORY_STATUSES,
     QUARANTINE_EXITS,
+    QUARANTINE_REJECTED,
     QUARANTINED_MEMORY_STATUS,
     SEARCH_KNOBS,
 )
@@ -306,7 +307,8 @@ async def test_release_and_reject_are_the_way_out(client, exit_status: str) -> N
     svc = PostgresService()
 
     assert await svc.memory_update_status(held, exit_status, tenant_id=tenant, release_hold=True) is True
-    assert await _status(held) == (exit_status, False)
+    # A rejected one is deleted too: no read returns it.
+    assert await _status(held) == (exit_status, exit_status == QUARANTINE_REJECTED)
     # Only a held memory leaves quarantine.
     assert await svc.memory_update_status(live, exit_status, tenant_id=tenant, release_hold=True) is False
 
@@ -371,15 +373,16 @@ async def test_no_delete_takes_a_held_memory_out_of_the_queue(client) -> None:
     assert await _status(other) == ("deleted", True)
 
 
-async def test_a_purge_or_a_delete_after_reject_removes_a_held_memory(client) -> None:
+async def test_a_reject_or_a_purge_removes_a_held_memory(client) -> None:
     """The ways out of the queue that the API reference names for a delete."""
     tenant = _tenant()
     svc = PostgresService()
 
     rejected = await _seed(tenant, status=QUARANTINED_MEMORY_STATUS)
-    assert await svc.memory_update_status(rejected, "cancelled", tenant_id=tenant, release_hold=True) is True
-    assert await svc.memory_soft_delete_by_ids(tenant, [rejected]) == 1
-    assert await _status(rejected) == ("deleted", True)
+    assert await svc.memory_update_status(rejected, QUARANTINE_REJECTED, tenant_id=tenant, release_hold=True)
+    assert await _status(rejected) == (QUARANTINE_REJECTED, True)
+    # Already deleted, so a delete finds nothing left to do.
+    assert await svc.memory_soft_delete_by_ids(tenant, [rejected]) == 0
 
     for purge in (lambda: svc.purge_fleet_data(tenant, _FLEET), lambda: svc.purge_tenant_data(tenant)):
         held = await _seed(tenant, status=QUARANTINED_MEMORY_STATUS)
@@ -421,7 +424,9 @@ async def test_a_held_writes_chunks_leave_quarantine_with_it(client, exit_status
         parent, exit_status, tenant_id=tenant, release_hold=True
     )
 
-    assert [await _status(m) for m in (parent, *chunks)] == [(exit_status, False)] * 3
+    assert [await _status(m) for m in (parent, *chunks)] == [
+        (exit_status, exit_status == QUARANTINE_REJECTED)
+    ] * 3
     assert await _status(other) == (QUARANTINED_MEMORY_STATUS, False)
 
 
@@ -442,4 +447,47 @@ async def test_a_rollback_cancels_a_held_writes_chunks_with_it(client) -> None:
     changed = await PostgresService().memory_rollback_session(tenant, "s-held")
 
     assert sorted(changed["cancelled"]) == sorted(str(m) for m in (parent, *chunks))
-    assert [await _status(m) for m in (parent, *chunks)] == [("cancelled", False)] * 3
+    assert [await _status(m) for m in (parent, *chunks)] == [(QUARANTINE_REJECTED, True)] * 3
+
+
+# ── A write a person turned down ──
+
+# Every read that leaves deleted rows out. The two that ask for deleted rows
+# return a rejected write as the deleted row it is.
+_LIVE_ROW_READS = {name: read for name, read in _ROW_READS.items() if "with deleted" not in name}
+
+
+@pytest.mark.parametrize("read", sorted(_LIVE_ROW_READS))
+async def test_no_read_returns_a_write_a_person_turned_down(client, read: str) -> None:
+    """Rejected, or held in a session that was rolled back, it never goes live.
+    Its status is ``cancelled``, which recall returns for an ordinary memory,
+    so the reject has to take it out of the reads itself."""
+    tenant = _tenant()
+    svc = PostgresService()
+    live = await _seed(tenant)
+    rejected = await _seed(tenant, status=QUARANTINED_MEMORY_STATUS)
+    rolled_back = await _seed(tenant, status=QUARANTINED_MEMORY_STATUS, metadata={"session_id": "s-gone"})
+    assert await svc.memory_update_status(rejected, QUARANTINE_REJECTED, tenant_id=tenant, release_hold=True)
+    assert (await svc.memory_rollback_session(tenant, "s-gone"))["cancelled"] == [str(rolled_back)]
+
+    found = _ids(await _LIVE_ROW_READS[read](svc, tenant, [live, rejected, rolled_back]))
+
+    assert str(live) in found, f"{read} returned nothing to compare against"
+    assert str(rejected) not in found, f"{read} returned a rejected write"
+    assert str(rolled_back) not in found, f"{read} returned a rolled-back held write"
+
+
+async def test_recall_still_returns_an_ordinary_cancelled_memory(client) -> None:
+    """Only a person's reject deletes. A memory enrichment calls cancelled
+    ("the offsite is cancelled"), or one a caller moves to cancelled, was never
+    held, and stays findable."""
+    tenant = _tenant()
+    svc = PostgresService()
+    enriched = await _seed(tenant, status=QUARANTINE_REJECTED)
+    moved = await _seed(tenant)
+    assert await svc.memory_update_status(moved, QUARANTINE_REJECTED, tenant_id=tenant) is True
+
+    found = _ids(await _ROW_READS["recall"](svc, tenant, [enriched, moved]))
+
+    assert {str(enriched), str(moved)} <= found
+    assert [await _status(m) for m in (enriched, moved)] == [(QUARANTINE_REJECTED, False)] * 2

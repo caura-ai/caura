@@ -26,16 +26,21 @@ LIVE_MEMORY_STATUSES = ("active", "confirmed", "pending")
 
 # A memory held for a person's review: written, but not live until a person
 # releases it (back to ``active``) or rejects it (``cancelled``). Nothing else
-# moves it, and nothing moves a written memory into it. Outside
-# ``LIVE_MEMORY_STATUSES``, so recall and the list defaults already leave it
-# out, and the reads that filter only on ``deleted_at IS NULL`` exclude it
-# explicitly: no agent, search, count, graph or background pass sees a held
-# memory, only a person reviewing it. Raw SQL in core-storage-api spells the
-# value out as ``'quarantined'``.
+# moves it, and nothing moves a written memory into it. Being outside
+# ``LIVE_MEMORY_STATUSES`` keeps it out of nothing on its own: search and
+# recall return most statuses, and many reads filter only on ``deleted_at IS
+# NULL``. So every read excludes it by name: no agent, search, count, graph or
+# background pass sees a held memory, only a person reviewing it. Raw SQL in
+# core-storage-api spells the value out as ``'quarantined'``.
 QUARANTINED_MEMORY_STATUS = "quarantined"
-# What a held memory may become: released (``active``) or rejected
-# (``cancelled``).
-QUARANTINE_EXITS = ("active", "cancelled")
+# A rejected held memory's status. A reject also soft-deletes it
+# (``deleted_at``): ``cancelled`` is a status enrichment gives ordinary
+# memories, and search and recall return it, so the status alone would let a
+# write a person turned down reach agents. A session rollback rejects the
+# session's held memories the same way.
+QUARANTINE_REJECTED = "cancelled"
+# What a held memory may become: released (``active``) or rejected.
+QUARANTINE_EXITS = ("active", QUARANTINE_REJECTED)
 
 # The two statuses contradiction detection writes on a losing row — and the only
 # two any retraction path may revert FROM. Anything else on a contradicted row

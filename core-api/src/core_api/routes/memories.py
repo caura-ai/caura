@@ -2144,8 +2144,9 @@ async def update_memory_status(
     """Update memory status (e.g., active → confirmed).
 
     A memory held for review leaves quarantine here, and only here: a person
-    releases it (``active``) or rejects it (``cancelled``). To anyone else it
-    is a 404, as on every other read.
+    releases it (``active``) or rejects it (``cancelled``). A reject also
+    deletes it, so no read returns it, search and recall included. To anyone
+    else a held memory is a 404, as on every other read.
     """
     auth.enforce_read_only()
     # Asked, not assumed. ``transition`` is not in ``PLAN_LIMIT_GATED_OPS``, so

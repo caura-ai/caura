@@ -66,6 +66,7 @@ from common.constants import (
     LIVE_MEMORY_STATUSES,
     NODE_PRINCIPAL_TENANT,
     QUARANTINE_EXITS,
+    QUARANTINE_REJECTED,
     QUARANTINED_MEMORY_STATUS,
     RECALL_BOOST_SCALE,
     RELATION_TYPE_WEIGHTS,
@@ -2703,7 +2704,10 @@ class PostgresService:
                 ``QUARANTINE_EXITS``. Without it a held row never matches, so no
                 other writer (contradiction detection, the near-duplicate
                 merge, the crystallizer, a caller's transition) can move one.
-                Its held auto-chunks move with it.
+                Its held auto-chunks move with it. A reject
+                (``QUARANTINE_REJECTED``) also soft-deletes them, so the write
+                a person turned down is out of every read, search and recall
+                included.
 
         Returns:
             True if the row was updated, False if the ``expected_supersedes_id``
@@ -2729,6 +2733,9 @@ class PostgresService:
             "status": status,
             "status_changed_at": datetime.now(UTC),
         }
+        rejected = release_hold and status == QUARANTINE_REJECTED
+        if rejected:
+            values["deleted_at"] = values["status_changed_at"]
         if unset_supersedes:
             values["supersedes_id"] = None
         elif supersedes_id is not None:
@@ -2770,7 +2777,7 @@ class PostgresService:
                 # g2.8 — a held write's auto-chunks are held with it, cut from
                 # its content, so they leave quarantine with it, the same way
                 # and in the same transaction.
-                await session.execute(
+                chunks = (
                     sql_update(Memory)
                     .where(
                         *derived_rows_where(tenant_id, [str(memory_id)]),
@@ -2778,6 +2785,9 @@ class PostgresService:
                     )
                     .values(status=status, status_changed_at=values["status_changed_at"])
                 )
+                if rejected:
+                    chunks = chunks.values(deleted_at=values["status_changed_at"])
+                await session.execute(chunks)
             return moved
 
     async def memory_list_held(
@@ -2827,8 +2837,8 @@ class PostgresService:
           wrote, or one a live row still supersedes or contradicts. The
           rolled-back row keeps its ``supersedes_id``, and its conflict records
           stay, as the record of what it replaced.
-        - Its held memories become ``cancelled``: a held memory leaves
-          quarantine only as ``active`` or ``cancelled`` (g2.7), and a
+        - Its held memories are rejected: ``cancelled`` and soft-deleted, as
+          a person's reject leaves them (``QUARANTINE_REJECTED``), since a
           rolled-back session's write is not released.
         - What it wrote that is already out of play (outdated, cancelled,
           archived, deleted) stays as it is, so a second rollback changes
@@ -2840,13 +2850,13 @@ class PostgresService:
         live = Memory.status.in_(LIVE_MEMORY_STATUSES)
         async with get_session() as session:
 
-            async def move(where: list[ColumnElement[bool]], status: str) -> list[str]:
-                result = await session.execute(
-                    sql_update(Memory)
-                    .where(*where)
-                    .values(status=status, status_changed_at=now)
-                    .returning(Memory.id)
-                )
+            async def move(
+                where: list[ColumnElement[bool]], status: str, *, delete: bool = False
+            ) -> list[str]:
+                update = sql_update(Memory).where(*where).values(status=status, status_changed_at=now)
+                if delete:
+                    update = update.values(deleted_at=now)
+                result = await session.execute(update.returning(Memory.id))
                 return [str(memory_id) for memory_id in result.scalars().all()]
 
             outdated = await move([*session_rows_where(tenant_id, session_id), live], "outdated")
@@ -2910,7 +2920,8 @@ class PostgresService:
                 )
             cancelled = await move(
                 [*session_rows_where(tenant_id, session_id), Memory.status == QUARANTINED_MEMORY_STATUS],
-                "cancelled",
+                QUARANTINE_REJECTED,
+                delete=True,
             )
             # And the auto-chunks held with them (g2.8), which carry no session
             # id of their own. One pass: a held row has no other derived rows,
@@ -2918,7 +2929,8 @@ class PostgresService:
             if cancelled:
                 cancelled += await move(
                     [*derived_rows_where(tenant_id, cancelled), Memory.status == QUARANTINED_MEMORY_STATUS],
-                    "cancelled",
+                    QUARANTINE_REJECTED,
+                    delete=True,
                 )
         return {"outdated": outdated, "restored": restored, "cancelled": cancelled}
 
