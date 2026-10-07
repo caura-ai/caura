@@ -65,7 +65,7 @@ fingerprinted by exact numbers. Every provider is a closed enum: provider
 | `product` | Always `caura-server`. | constant |
 | `deployment_id` | Random `uuid4`, generated on the first send after boot, stored once, rotatable. Not derived from hardware, hostname or MAC. | `organization_settings` row `__deployment__` |
 | `sent_at` | Clock at send, UTC. | clock |
-| `version` | The core-api version string. A leading `v` is stripped, so the pinning form `CAURA_VERSION=v3.17.0` reports `3.17.0`. A source checkout with none of the sources set reports `dev`, which the collector excludes from every headline metric: set `CAURA_VERSION` if you want a source install counted. | `CAURA_VERSION` env, `/app/VERSION`, package metadata, else `dev` |
+| `version` | The core-api version string. A leading `v` is stripped, so the pinning form `CAURA_VERSION=v3.17.0` reports `3.17.0`. A source checkout with none of the sources set reports `dev` (so does a value longer than 64 characters, the schema's cap), which the collector excludes from every headline metric: set `CAURA_VERSION` if you want a source install counted. | `CAURA_VERSION` env, `/app/VERSION`, package metadata, else `dev` |
 | `runtime.python` | Interpreter `major.minor`. No patch level. | `sys.version_info` |
 | `runtime.os`, `runtime.arch` | `platform.system()`, `platform.machine()`, lower-cased. No kernel version, no distro. | `platform` |
 | `runtime.deploy` | `docker` if `/app/VERSION` exists (the Dockerfile stamps it), else `source`. | filesystem |
@@ -85,7 +85,8 @@ fingerprinted by exact numbers. Every provider is a closed enum: provider
 
 Hostnames, IP addresses, tenant, agent, node or fleet names, emails, API
 keys or any secret value, model names, memory content or metadata, exact
-counts, the Sentry DSN, the storage URL, environment variable values. A test
+counts, the Sentry DSN, the storage URL, environment variable values (other
+than `CAURA_VERSION`, sent as `version` above). A test
 walks every built payload and asserts each leaf is an allowlisted key with a
 bucket, boolean or closed-enum value, and a second test builds a payload from
 deliberately poisoned settings and asserts none of the poison appears.

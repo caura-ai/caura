@@ -21,7 +21,9 @@ class Settings(BaseSettings):
     log_file: str = ""
 
     # Storage backend — the worker PATCHes embeddings to core-storage-api
-    # via this URL. Defaults to the local docker-compose service name.
+    # via this URL. The default is the service name caura-enterprise's
+    # docker-compose gives the OSS storage; this repo's compose does not run
+    # the worker, so set CORE_STORAGE_API_URL wherever you run it.
     core_storage_api_url: str = "http://oss-core-storage-api:8002"
     core_storage_shared_secret: SecretStr = Field(default=SecretStr(""), repr=False, exclude=True)
     core_storage_shared_secret_file: str = ""

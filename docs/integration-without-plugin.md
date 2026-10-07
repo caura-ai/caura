@@ -19,8 +19,10 @@
 
 Every long-lived integration should bind to a named agent identity rather than calling under a tenant-scoped credential. Two ways:
 
+Both are on the managed platform (caura.ai). A self-hosted core-api has no provisioning route: there, use the tenant-scoped (or standalone) key and pass an explicit `agent_id` on every call.
+
 - **Dashboard (recommended for humans):** `caura.ai/settings/organization/api-credentials` — single-card wizard, one-time raw-key reveal, manages cross-tenant + read-scope settings.
-- **API (for scripted provisioning, shown below):** `POST /api/v1/admin/agent-keys/provision` — atomic call that creates the Agent row eagerly so subsequent trust-elevation or fleet-assignment endpoints work immediately:
+- **API (for scripted provisioning, shown below):** `POST /api/v1/admin/agent-keys/provision` on the managed platform (caura.ai) — atomic call that creates the Agent row eagerly so subsequent trust-elevation or fleet-assignment endpoints work immediately:
 
 ```bash
 curl -X POST https://caura.ai/api/v1/admin/agent-keys/provision \
@@ -195,7 +197,7 @@ treat trust 1 as the floor for the *shape* rather than a guarantee for the call:
   this is what stops a trust-1 agent quietly replacing a fleet-wide rule with a
   private one.
 - **An unverified caller identity.** The self-author tier needs an agent-scoped
-  credential (`POST /admin/agent-keys/provision`), not an `X-Agent-ID` header
+  credential (`POST /admin/agent-keys/provision` on the managed platform), not an `X-Agent-ID` header
   sent alongside a tenant/admin key, so that an admin-key holder can't forge a
   rule in another agent's name.
 
@@ -342,7 +344,7 @@ separately. Time it yourself before choosing a timeout if you rely on it.
 
 ## Reference
 
-- `POST /api/v1/admin/agent-keys/provision` — atomic provisioning (this guide).
+- `POST /api/v1/admin/agent-keys/provision` — atomic provisioning on the managed platform (this guide).
 - `GET /api/v1/whoami` — identity probe.
 - `GET /api/v1/agents/{id}?tenant_id=...` — agent detail.
 - `PATCH /api/v1/agents/{id}/trust?tenant_id=...` — change trust level.
