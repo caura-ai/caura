@@ -3,14 +3,23 @@
 # Enable locally with: ``pip install pre-commit && pre-commit install``.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.4
+    # The ruff every service's uv.lock pins, so at least each pyproject's
+    # ruff floor.
+    rev: v0.16.10
     hooks:
-      - id: ruff
+      # The trees ci.yml lints and format-checks. ruff reads each file's
+      # nearest config, as it does in CI.
+      - id: ruff-check
         args: [--fix]
-        # Match CI scope: src/ only (CI ignores tests/, scripts/, etc.).
-        files: ^(core-api|core-storage-api)/src/
+        files: '^(common|scripts|tests|core-(api|storage-api|operations|worker)/(src|tests))/'
       - id: ruff-format
-        files: ^(core-api|core-storage-api)/src/
+        files: '^(scripts|tests|core-(api|storage-api|operations|worker)/(src|tests))/'
+      # In common/, CI format-checks only the three files vendored from
+      # caura-enterprise, and at ruff's defaults.
+      - id: ruff-format
+        name: ruff-format (vendored common/ files, ruff defaults)
+        args: [--isolated]
+        files: '^common/(__init__|structlog_config|serve)\.py$'
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0

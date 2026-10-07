@@ -244,6 +244,103 @@ async def test_redistribute_user_credential_unchanged(client, as_auth, sc):
     assert resp.status_code == 200, resp.text
 
 
+# The route's own gates, through the route (L-172). test_redistribute.py's
+# "integration" tests re-implemented the move inline and asserted their own
+# assignments, so none of them could fail whatever the route did.
+
+
+async def _seed_owned_memory(sc, tenant_id: str, agent_id: str, visibility: str) -> str:
+    row = await sc.create_memory(
+        {
+            "tenant_id": tenant_id,
+            "fleet_id": "test-fleet",
+            "agent_id": agent_id,
+            "content": f"redistribute me {_uid()}",
+            "memory_type": "fact",
+            "visibility": visibility,
+        }
+    )
+    return str(row["id"])
+
+
+async def _redistribute(client, tenant_id: str, caller: str, ids: list, target: str):
+    return await client.post(
+        f"/api/v1/memories/redistribute?tenant_id={tenant_id}&agent_id={caller}",
+        json={"memory_ids": ids, "target_agent_id": target},
+    )
+
+
+async def _owner(sc, tenant_id: str, memory_id: str) -> str:
+    return (await sc.get_memory(memory_id, tenant_id))["agent_id"]
+
+
+async def test_redistribute_refuses_a_caller_below_trust_3(client, as_auth, sc):
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "lead-agent", 2)
+    await _seed_agent(sc, tenant, "target-agent", 1)
+    memory_id = await _seed_owned_memory(sc, tenant, "old-agent", "scope_team")
+
+    as_auth(tenant, agent_id="lead-agent")
+    resp = await _redistribute(
+        client, tenant, "lead-agent", [memory_id], "target-agent"
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == errors.AUTH_AGENT_TRUST_TOO_LOW
+    assert await _owner(sc, tenant, memory_id) == "old-agent"
+
+
+async def test_redistribute_refuses_a_target_that_does_not_exist(client, as_auth, sc):
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "admin-agent", 3)
+    memory_id = await _seed_owned_memory(sc, tenant, "old-agent", "scope_team")
+
+    as_auth(tenant, agent_id="admin-agent")
+    resp = await _redistribute(
+        client, tenant, "admin-agent", [memory_id], "no-such-agent"
+    )
+    assert resp.status_code == 404, resp.text
+    assert "no-such-agent" in resp.json()["detail"]
+    assert await _owner(sc, tenant, memory_id) == "old-agent"
+
+
+async def test_redistribute_refuses_a_restricted_target(client, as_auth, sc):
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "admin-agent", 3)
+    await _seed_agent(sc, tenant, "restricted-agent", 0)
+    memory_id = await _seed_owned_memory(sc, tenant, "old-agent", "scope_team")
+
+    as_auth(tenant, agent_id="admin-agent")
+    resp = await _redistribute(
+        client, tenant, "admin-agent", [memory_id], "restricted-agent"
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == errors.AUTH_TARGET_AGENT_RESTRICTED
+    assert await _owner(sc, tenant, memory_id) == "old-agent"
+
+
+async def test_redistribute_moves_the_rows_and_promotes_scope_agent(
+    client, as_auth, sc
+):
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "admin-agent", 3)
+    await _seed_agent(sc, tenant, "target-agent", 1)
+    private = await _seed_owned_memory(sc, tenant, "old-agent", "scope_agent")
+    team = await _seed_owned_memory(sc, tenant, "old-agent", "scope_team")
+    owned = await _seed_owned_memory(sc, tenant, "target-agent", "scope_team")
+    missing = str(uuid.uuid4())
+
+    as_auth(tenant, agent_id="admin-agent")
+    ids = [private, team, owned, missing]
+    resp = await _redistribute(client, tenant, "admin-agent", ids, "target-agent")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert (body["moved"], body["promoted"], body["skipped"]) == (2, 1, 1)
+    assert body["errors"] == [missing]
+    for memory_id in (private, team):
+        row = await sc.get_memory(memory_id, tenant)
+        assert (row["agent_id"], row["visibility"]) == ("target-agent", "scope_team")
+
+
 # ---------------------------------------------------------------------------
 # S4 — STM write endpoints honor read-only / agent binding
 # ---------------------------------------------------------------------------

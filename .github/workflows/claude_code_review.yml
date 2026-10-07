@@ -134,7 +134,7 @@ permissions:
   issues: write
 
 env:
-  EXTRA_PROMPT: "This is a FastAPI + PostgreSQL (pgvector) backend with a TypeScript OpenClaw plugin. Uses requirements.txt (not uv/pyproject.toml). Tests are in tests/ directory."
+  EXTRA_PROMPT: "This is a FastAPI + PostgreSQL (pgvector) backend with a TypeScript OpenClaw plugin. Each service (core-api, core-storage-api, core-worker, core-operations) is a uv project: its pyproject.toml declares its dependencies, its committed uv.lock pins them, and its image installs that lock frozen, so a dependency change needs both files. The root requirements.txt is not what the images install. Tests live in tests/ and in each service's own tests: core-api/tests, core-storage-api/tests, core-worker/tests and core-operations/tests."
   REVIEW_PROMPT: |
     Do NOT review files under tests/ or test_* files — EXCEPT conftest.py
     and tests/_*.py shared fixtures/helpers, which you MUST review like
