@@ -24,7 +24,7 @@ google-genai>=2.23.0
 # fetch) — explicit here instead of relying on google-cloud-aiplatform's
 # transitive pull, so a future GCP-SDK cleanup can't silently break it.
 requests>=2.34.2
-openai>=3,<4
+openai>=3.24.0,<4
 python-dateutil>=2.9.0.post0,<3
 httpx>=0.28.1,<1
 httpx2>=2,<3
