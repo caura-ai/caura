@@ -11,6 +11,7 @@ all can't pass for one that hides the held row.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -46,14 +47,16 @@ async def _seed(
     content: str = "the release train leaves on fridays",
     agent: str = _AGENT,
     content_hash: str | None = None,
+    metadata: dict | None = None,
 ) -> uuid.UUID:
     memory_id = uuid.uuid4()
     async with get_session() as session:
         await session.execute(
             text(
                 "INSERT INTO memories (id, tenant_id, fleet_id, agent_id, memory_type, content, "
-                "content_hash, status, embedding, weight, visibility) "
-                "VALUES (:id, :t, :f, :a, 'fact', :c, :h, :s, CAST(:e AS vector), 0.5, 'scope_team')"
+                "content_hash, status, embedding, weight, visibility, metadata) "
+                "VALUES (:id, :t, :f, :a, 'fact', :c, :h, :s, CAST(:e AS vector), 0.5, 'scope_team', "
+                "CAST(:m AS jsonb))"
             ),
             {
                 "id": memory_id,
@@ -64,6 +67,7 @@ async def _seed(
                 "h": content_hash,
                 "s": status,
                 "e": str(_EMBEDDING),
+                "m": json.dumps(metadata) if metadata is not None else None,
             },
         )
     return memory_id
@@ -384,3 +388,58 @@ async def test_a_purge_or_a_delete_after_reject_removes_a_held_memory(client) ->
         async with get_session() as session:
             row = await session.execute(text("SELECT 1 FROM memories WHERE id = :id"), {"id": held})
             assert row.first() is None
+
+
+# ── A held write's auto-chunks (g2.8) ──
+
+
+async def _held_write_with_chunks(
+    tenant: str, metadata: dict | None = None
+) -> tuple[uuid.UUID, list[uuid.UUID]]:
+    parent = await _seed(
+        tenant, status=QUARANTINED_MEMORY_STATUS, content="the whole held write", metadata=metadata
+    )
+    chunks = [
+        await _seed(
+            tenant,
+            status=QUARANTINED_MEMORY_STATUS,
+            content=f"held chunk {n}",
+            metadata={"parent_memory_id": str(parent), "source": "auto_chunk"},
+        )
+        for n in range(2)
+    ]
+    return parent, chunks
+
+
+@pytest.mark.parametrize("exit_status", QUARANTINE_EXITS)
+async def test_a_held_writes_chunks_leave_quarantine_with_it(client, exit_status: str) -> None:
+    tenant = _tenant()
+    parent, chunks = await _held_write_with_chunks(tenant)
+    other = await _seed(tenant, status=QUARANTINED_MEMORY_STATUS, content="another held write")
+
+    assert await PostgresService().memory_update_status(
+        parent, exit_status, tenant_id=tenant, release_hold=True
+    )
+
+    assert [await _status(m) for m in (parent, *chunks)] == [(exit_status, False)] * 3
+    assert await _status(other) == (QUARANTINED_MEMORY_STATUS, False)
+
+
+async def test_the_queue_lists_a_held_write_once_not_its_chunks(client) -> None:
+    tenant = _tenant()
+    parent, _chunks = await _held_write_with_chunks(tenant)
+
+    rows, total = await PostgresService().memory_list_held(tenant)
+
+    assert [row.id for row in rows] == [parent]
+    assert total == 1
+
+
+async def test_a_rollback_cancels_a_held_writes_chunks_with_it(client) -> None:
+    tenant = _tenant()
+    parent, chunks = await _held_write_with_chunks(tenant, metadata={"session_id": "s-held"})
+
+    changed = await PostgresService().memory_rollback_session(tenant, "s-held")
+
+    assert sorted(changed["cancelled"]) == sorted(str(m) for m in (parent, *chunks))
+    assert [await _status(m) for m in (parent, *chunks)] == [("cancelled", False)] * 3

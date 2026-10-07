@@ -119,7 +119,9 @@ from core_api.services.memory_service import (
     soft_delete_memory,
     update_memory,
 )
+from core_api.services.release_replay import REPLAY_TASK, replay_released_write
 from core_api.services.system_metadata import extract_system_metadata
+from core_api.services.task_tracker import tracked_task
 from core_api.services.tenants import list_active_tenant_ids
 from core_api.services.trust_service import parse_trust_error, require_trust
 from core_api.services.usage_service import (
@@ -130,6 +132,7 @@ from core_api.services.usage_service import (
     recall_operation,
     set_usage_headers,
 )
+from core_api.tasks import track_task
 
 logger = logging.getLogger(__name__)
 
@@ -2174,6 +2177,13 @@ async def update_memory_status(
             status_code=409,
             detail="A held memory is released (status 'active') or rejected (status 'cancelled'), nothing else.",
         )
+    if held and (memory.get("metadata_") or {}).get("parent_memory_id"):
+        # g2.8 — an auto-chunk of a held write: it moves with that write, and
+        # the review queue lists only the write.
+        raise HTTPException(
+            status_code=409,
+            detail="This memory is part of a held write: release or reject that write instead.",
+        )
     # Cross-fleet / scope_agent row authorization for the authenticated agent
     # (no-op for tenant-scoped dashboard credentials, where auth.agent_id is None).
     if auth.agent_id:
@@ -2211,6 +2221,13 @@ async def update_memory_status(
         resource_id=memory_id,
         detail={"old_status": old_status, "new_status": status, **(auth.audit_actor() if held else {})},
     )
+    if held and status == "active":
+        # g2.8 — the work the held write skipped (enrichment, governance, its
+        # atomic facts, the near-duplicate merge, entities, contradictions)
+        # runs now, after the answer, as it does after a write.
+        track_task(
+            tracked_task(replay_released_write(str(memory_id), tenant_id), REPLAY_TASK, memory_id, tenant_id)
+        )
     return {"memory_id": str(memory_id), "old_status": old_status, "new_status": status}
 
 

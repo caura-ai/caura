@@ -335,11 +335,15 @@ def held_rows_where(tenant_id: str) -> list[ColumnElement[bool]]:
     Implies the predicate of the partial index ``ix_memories_held`` (migration
     062), keyed on ``(tenant_id, created_at, id)``, so the queue and its count
     read held rows only. Module-level for the same plan check.
+
+    A held write's auto-chunks are left out (g2.8): they are released or
+    rejected with it, so the queue lists the write once.
     """
     return [
         Memory.tenant_id == tenant_id,
         Memory.deleted_at.is_(None),
         Memory.status == QUARANTINED_MEMORY_STATUS,
+        Memory.metadata_["parent_memory_id"].astext.is_(None),
     ]
 
 
@@ -2661,6 +2665,7 @@ class PostgresService:
                 ``QUARANTINE_EXITS``. Without it a held row never matches, so no
                 other writer (contradiction detection, the near-duplicate
                 merge, the crystallizer, a caller's transition) can move one.
+                Its held auto-chunks move with it.
 
         Returns:
             True if the row was updated, False if the ``expected_supersedes_id``
@@ -2722,7 +2727,20 @@ class PostgresService:
                 stmt = stmt.where(Memory.supersedes_id == expected_supersedes_id)
             stmt = stmt.values(**values)
             result = await session.execute(stmt)
-            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
+            moved = (result.rowcount or 0) > 0  # type: ignore[attr-defined]
+            if moved and release_hold:
+                # g2.8 — a held write's auto-chunks are held with it, cut from
+                # its content, so they leave quarantine with it, the same way
+                # and in the same transaction.
+                await session.execute(
+                    sql_update(Memory)
+                    .where(
+                        *derived_rows_where(tenant_id, [str(memory_id)]),
+                        Memory.status == QUARANTINED_MEMORY_STATUS,
+                    )
+                    .values(status=status, status_changed_at=values["status_changed_at"])
+                )
+            return moved
 
     async def memory_list_held(
         self,
@@ -2856,6 +2874,14 @@ class PostgresService:
                 [*session_rows_where(tenant_id, session_id), Memory.status == QUARANTINED_MEMORY_STATUS],
                 "cancelled",
             )
+            # And the auto-chunks held with them (g2.8), which carry no session
+            # id of their own. One pass: a held row has no other derived rows,
+            # since nothing fans out of it until it is released.
+            if cancelled:
+                cancelled += await move(
+                    [*derived_rows_where(tenant_id, cancelled), Memory.status == QUARANTINED_MEMORY_STATUS],
+                    "cancelled",
+                )
         return {"outdated": outdated, "restored": restored, "cancelled": cancelled}
 
     async def memory_set_supersedes_if_null(

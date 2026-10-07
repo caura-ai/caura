@@ -73,6 +73,10 @@ PLATFORM_ONLY_KEYS: frozenset[str] = frozenset(
         "near_dup_skipped_reason",
         "near_duplicate_of",
         "near_duplicate_similarity",
+        # ``DetectNearDuplicate``'s decision to merge into ``near_duplicate_of``.
+        # A release replays it (g2.8), so a forged one would retire a memory the
+        # write never meant to replace.
+        "near_duplicate_merged",
         # Write mode and the pending flags consumers poll on.
         "write_mode",
         "enrichment_pending",

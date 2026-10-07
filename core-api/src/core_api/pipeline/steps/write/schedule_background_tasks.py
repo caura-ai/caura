@@ -55,8 +55,9 @@ async def _merge_near_duplicate(new_id: str, candidate_id: str, tenant_id: str) 
         return
     if linked is None:
         # Storage matched no row: the new one was deleted since, or it is held
-        # for review, which nothing but a person's release moves. Either way
-        # nothing stands in the candidate's place, so it stays current.
+        # for review, which nothing but a person's release moves (and a release
+        # makes this merge then). Either way nothing stands in the candidate's
+        # place now, so it stays current.
         logger.info(
             "near-duplicate merge: %s is gone or held; leaving %s current",
             new_id,
@@ -283,9 +284,8 @@ class ScheduleBackgroundTasks:
         # A held memory gets no children: they would be live rows carrying its
         # unreviewed claims. The fan-out does not read its parent back, unlike
         # the passes below, which skip a held row. ``HoldLowTrustWrite`` kept
-        # the facts on the row for a release to fan out.
-        # TODO(release replay): release only changes the status so far, so a
-        # released memory gets none of this work yet.
+        # the facts on the row, and a release runs all of this
+        # (``release_replay``).
         atomic_facts = getattr(enrichment, "atomic_facts", None) or []
         if atomic_facts and memory.get("status") != QUARANTINED_MEMORY_STATUS:
             from core_api.services.memory_service import _resolve_parent_weight, fan_out_atomic_facts

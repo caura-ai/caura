@@ -212,3 +212,64 @@ async def test_a_held_write_gets_no_children_until_released():
     """The atomic-fact children would be live rows carrying its claims."""
     assert "atomic_fact_fanout" in await _scheduled("active")
     assert "atomic_fact_fanout" not in await _scheduled(QUARANTINED_MEMORY_STATUS)
+
+
+# ── A release replays what the held write skipped (g2.8) ──
+
+
+@pytest.fixture
+def replays(monkeypatch):
+    found = {
+        "replay": MagicMock(return_value="replay-coroutine"),
+        "tracked": MagicMock(return_value="tracked-task"),
+        "track": MagicMock(),
+    }
+    monkeypatch.setattr(memories_routes, "replay_released_write", found["replay"])
+    monkeypatch.setattr(memories_routes, "tracked_task", found["tracked"])
+    monkeypatch.setattr(memories_routes, "track_task", found["track"])
+    return found
+
+
+async def test_a_release_replays_what_the_held_write_skipped(storage, replays):
+    storage["get"].return_value = _memory(QUARANTINED_MEMORY_STATUS)
+    memory_id = uuid.uuid4()
+
+    await memories_routes.update_memory_status(
+        memory_id, {"status": "active"}, tenant_id="t", auth=_PERSON
+    )
+
+    replays["replay"].assert_called_once_with(str(memory_id), "t")
+    assert replays["tracked"].call_args.args[:2] == (
+        "replay-coroutine",
+        "release_replay",
+    )
+    replays["track"].assert_called_once_with("tracked-task")
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [(QUARANTINED_MEMORY_STATUS, "cancelled"), ("active", "outdated")],
+    ids=["reject", "ordinary transition"],
+)
+async def test_nothing_else_replays(storage, replays, before, after):
+    storage["get"].return_value = _memory(before)
+
+    await _set_status(_PERSON, after)
+
+    replays["replay"].assert_not_called()
+    replays["track"].assert_not_called()
+
+
+async def test_a_held_writes_chunk_moves_only_with_it(storage, replays):
+    """Its auto-chunks are released or rejected with the write, and the queue
+    lists only the write."""
+    chunk = _memory(QUARANTINED_MEMORY_STATUS)
+    chunk["metadata_"] = {"parent_memory_id": str(uuid.uuid4()), "source": "auto_chunk"}
+    storage["get"].return_value = chunk
+
+    with pytest.raises(HTTPException) as refused:
+        await _set_status(_PERSON, "active")
+
+    assert refused.value.status_code == 409
+    storage["update"].assert_not_awaited()
+    replays["replay"].assert_not_called()

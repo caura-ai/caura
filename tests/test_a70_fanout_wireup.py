@@ -92,7 +92,7 @@ def test_it_never_raises_into_the_handler():
     """A fan-out failure must not nack the event: contradiction detection runs
     after it and is this handler's primary job."""
     src = inspect.getsource(c._fan_out_persisted_atomic_facts)
-    assert src.count("except Exception:") >= 2
+    assert src.count("except Exception") >= 2
 
 
 def test_an_unparseable_payload_is_dropped_not_retried_forever():
