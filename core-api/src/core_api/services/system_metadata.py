@@ -94,6 +94,11 @@ PLATFORM_ONLY_KEYS: frozenset[str] = frozenset(
         # release. Forged ones would come out as the agent's own claims, and a
         # held write's would go live without the review that held it (g2.8).
         "atomic_facts",
+        # The rules receipt the broker stamps on its writes. Kept, in
+        # ``_system``, only from an install credential's bulk write
+        # (``services/rules_receipt.py``); from anyone else it would vouch
+        # for itself.
+        "rules_receipt",
     }
 )
 

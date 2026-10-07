@@ -14,7 +14,7 @@ See also the [public API stability contract](public-api-stability.md) and the
 | Endpoint | Method | Description |
 |---|---|---|
 | `/memories` | POST | Write a memory. LLM enrichment + embedding + entity extraction + contradiction detection. `"persist": false` for extract-only preview. Stored `quarantined` when the organization holds its agent's writes (`quarantine` in `/settings`), as are `/memories/bulk` items |
-| `/memories/bulk` | POST | Write up to 100 memories. Batches embeddings, parallelizes enrichment, single transaction. Requires `X-Bulk-Attempt-Id` header (per-attempt idempotency); a retry with the same id resolves committed rows as `duplicate_attempt` instead of duplicating. Returns 200 (clean / all-error) or 207 Multi-Status (mixed) — read per-item `status` |
+| `/memories/bulk` | POST | Write up to 100 memories. Batches embeddings, parallelizes enrichment, single transaction. Requires `X-Bulk-Attempt-Id` header (per-attempt idempotency); a retry with the same id resolves committed rows as `duplicate_attempt` instead of duplicating. Returns 200 (clean / all-error) or 207 Multi-Status (mixed) — read per-item `status`. From the broker's install credential, an item's `metadata.rules_receipt` (`event_id`, `rule_set_hash`: the rules delivery its session was under) is kept as `system_metadata.rules_receipt`; anyone else's is dropped |
 | `/memories` | GET | List memories (filter by type, status, agent; paginate) |
 | `/memories/{id}` | GET | Full memory detail (embedding stats, entity links, RDF triple, temporal bounds) |
 | `/memories/{id}` | PATCH | Update content or metadata. Re-embeds if content changes |

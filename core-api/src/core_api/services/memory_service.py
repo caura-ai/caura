@@ -122,6 +122,7 @@ from core_api.services.governance_gate import (
 )
 from core_api.services.hooks import get_hooks
 from core_api.services.organization_settings import validate_search_profile
+from core_api.services.rules_receipt import RULES_RECEIPT_KEY, rules_receipt_from
 from core_api.services.system_metadata import (
     CALLER_OWNABLE_KEYS,
     SYSTEM_NAMESPACE,
@@ -1516,8 +1517,12 @@ async def create_memories_bulk(
     bulk_attempt_id: str,
     memory_type_is_agent_set: bool | None = None,
     is_inferred: bool = False,
+    trusted_receipts: bool = False,
 ) -> BulkMemoryResponse:
     """Create multiple memories with per-attempt idempotency (CAURA-602).
+
+    ``trusted_receipts`` keeps the rules receipt each item's metadata carries
+    (``rules_receipt``); only the bulk route sets it, for an install credential.
 
     Each item is bound to a stable ``client_request_id`` of the form
     ``f"{bulk_attempt_id}:{content_hash[:16]}"``. Storage's per-item unique
@@ -1570,6 +1575,14 @@ async def create_memories_bulk(
     # exactly that with ``memory_type_agent_set``; it now passes
     # ``memory_type_is_agent_set`` instead, which is a parameter and therefore
     # not reachable from a request body.
+    #
+    # g2.8 — the broker's rules receipts are taken out first, since the
+    # sanitation strips the key; ``trusted_receipts`` is only set for a broker.
+    receipts = (
+        {i: receipt for i, item in enumerate(items) if (receipt := rules_receipt_from(item.metadata))}
+        if trusted_receipts
+        else {}
+    )
     for item in items:
         if item.metadata:
             item.metadata = sanitize_caller_metadata(item.metadata)
@@ -2111,6 +2124,8 @@ async def create_memories_bulk(
         if hold is not None:
             status = QUARANTINED_MEMORY_STATUS
             metadata.setdefault(SYSTEM_NAMESPACE, {})[HOLD_KEY] = hold
+        if i in receipts:
+            metadata.setdefault(SYSTEM_NAMESPACE, {})[RULES_RECEIPT_KEY] = receipts[i]
 
         entity_link_dicts = [
             {"entity_id": str(link.entity_id), "role": link.role} for link in item.entity_links

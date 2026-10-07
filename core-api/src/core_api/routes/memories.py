@@ -1857,7 +1857,11 @@ async def _write_memories_bulk_inner(
     try:
         with request_phase.own_deadline(bulk_budget) as phases:
             result = await asyncio.wait_for(
-                create_memories_bulk(body, bulk_attempt_id=bulk_attempt_id),
+                # g2.8 — the rules receipts on the items are the broker's word,
+                # so only the broker's credential is taken at it.
+                create_memories_bulk(
+                    body, bulk_attempt_id=bulk_attempt_id, trusted_receipts=auth.is_install_credential
+                ),
                 timeout=bulk_budget,
             )
     except (TimeoutError, httpx.TimeoutException):
