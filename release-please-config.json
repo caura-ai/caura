@@ -66,6 +66,40 @@
           "path": "src/version.ts"
         }
       ]
+    },
+    "clients/collaboration": {
+      "release-type": "simple",
+      "package-name": "caura-bus",
+      "component": "collaboration-clients",
+      "changelog-path": "CHANGELOG.md",
+      "release-as": "0.3.0",
+      "extra-files": [
+        { "type": "generic", "path": "core/pyproject.toml" },
+        { "type": "generic", "path": "mcp/pyproject.toml" },
+        { "type": "generic", "path": "cli/pyproject.toml" },
+        { "type": "generic", "path": "adapter-sdk/pyproject.toml" },
+        { "type": "generic", "path": "README.md" },
+        {
+          "type": "toml",
+          "path": "uv.lock",
+          "jsonpath": "$.package[?(@.name.value=='caura-bus-core')].version"
+        },
+        {
+          "type": "toml",
+          "path": "uv.lock",
+          "jsonpath": "$.package[?(@.name.value=='caura-bus-mcp')].version"
+        },
+        {
+          "type": "toml",
+          "path": "uv.lock",
+          "jsonpath": "$.package[?(@.name.value=='caura-bus-cli')].version"
+        },
+        {
+          "type": "toml",
+          "path": "uv.lock",
+          "jsonpath": "$.package[?(@.name.value=='caura-bus-adapter-sdk')].version"
+        }
+      ]
     }
   },
   "changelog-sections": [

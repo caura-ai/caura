@@ -1,9 +1,11 @@
 """One opcode-based peer tool; every operation uses the authenticated Caura API."""
 
+import argparse
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from importlib.metadata import version as package_version
 from typing import Any, Literal
 
 from caura_bus_core import AgentConfig, Bus, Kind, SendMessage, load_config
@@ -489,7 +491,16 @@ async def collect(app: AppContext, params: Collect) -> dict:
     }
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="caura-bus-mcp",
+        description="Serve the Caura peer tool to one MCP host over stdio. "
+        "Configuration comes from CAURA_BUS_AGENT_CONFIG and CAURA_API_KEY.",
+    )
+    parser.add_argument(
+        "--version", action="version", version="caura-bus-mcp " + package_version("caura-bus-mcp")
+    )
+    parser.parse_args(argv)
     mcp.run()
 
 

@@ -1,0 +1,167 @@
+name: Publish collaboration clients to PyPI
+
+# Publishes the four collaboration client distributions from
+# clients/collaboration as ONE lockstep set: caura-bus-core, caura-bus-mcp,
+# caura-bus-cli and caura-bus-adapter-sdk. The three dependents pin
+# caura-bus-core to the exact same version, so a published set can never mix.
+#
+# VERSIONING. release-please owns the version (component
+# `collaboration-clients`, see release-please-config.json and RELEASING.md).
+# Merging the release PR creates the GitHub release `collaboration-clients-vX.Y.Z`;
+# that release event is what triggers this workflow. Nothing here bumps a
+# version, and no tag push or branch push can publish on its own.
+#
+# APPROVAL. Publication needs both (1) a merged release-please PR, which needs
+# review, and (2) approval on the `pypi-collaboration` environment, which must
+# be configured with required reviewers (one-time setup below). The build and
+# verification job runs without any publish credential; only the gated publish
+# job can mint the OIDC token PyPI accepts.
+#
+# PROVENANCE. Trusted publishing (OIDC, no stored token) with PEP 740
+# attestations: each file on PyPI carries a Sigstore attestation that names
+# this repository, this workflow and the release ref.
+#
+# One-time setup by a maintainer (not done by the PR that added this file):
+#   1. On PyPI, add a PENDING Trusted Publisher for EACH of caura-bus-core,
+#      caura-bus-mcp, caura-bus-cli and caura-bus-adapter-sdk: repo
+#      `caura-ai/caura`, workflow `publish-python-collaboration-clients.yml`,
+#      environment `pypi-collaboration`. (None of the four names exists on
+#      PyPI as of 2026-10-06; a pending publisher reserves it.)
+#   2. Create the GitHub environment `pypi-collaboration` with required
+#      reviewers and deployment restricted to `collaboration-clients-v*` tags.
+#      Referencing an environment that does not exist creates it WITHOUT
+#      protection, so do this before the first release.
+#
+# Recovery: re-run for an existing release with workflow_dispatch and its tag.
+# PyPI files are immutable; a version that is already published fails the
+# upload instead of being replaced (skip-existing is deliberately off).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re-)publish, e.g. collaboration-clients-v0.3.0"
+        required: true
+        type: string
+      publish:
+        description: "Upload to PyPI after verification (false = build and verify only)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Other release-please components (backend-v*, plugin-v*) release from the
+    # same repository; only this component's releases publish these packages.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'collaboration-clients-v')
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - name: The tag must name this component
+        run: |
+          if [[ "${TAG}" != collaboration-clients-v* ]]; then
+            echo "::error::tag ${TAG} is not a collaboration-clients release tag"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4
+        with:
+          version: "0.9.26"
+          python-version: "3.13"
+      - name: Every package must carry the tag's version
+        id: version
+        working-directory: clients/collaboration
+        run: |
+          VERSION="${TAG#collaboration-clients-v}"
+          for pkg in core mcp cli adapter-sdk; do
+            PKG_VERSION=$(python -c "import tomllib,sys; print(tomllib.load(open(sys.argv[1],'rb'))['project']['version'])" "$pkg/pyproject.toml")
+            if [[ "$PKG_VERSION" != "$VERSION" ]]; then
+              echo "::error::tag ${TAG} says ${VERSION} but $pkg/pyproject.toml says ${PKG_VERSION}"
+              exit 1
+            fi
+          done
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+      - name: Frozen lock, tests, build
+        working-directory: clients/collaboration
+        run: |
+          uv lock --check
+          uv sync --frozen --all-packages
+          uv run --no-sync pytest -q
+          rm -rf dist
+          uv build --all-packages
+      # Fresh virtualenv in an empty temp dir, wheels only, no workspace or
+      # sibling source tree: pins, pip check, import origin, every entrypoint.
+      - name: Artifacts install together and their entrypoints run
+        run: |
+          python3 -I clients/collaboration/scripts/verify_dist.py \
+            clients/collaboration/dist --expect-version "${{ steps.version.outputs.version }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: collaboration-clients-dist
+          path: clients/collaboration/dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: build
+    if: github.event_name == 'release' || inputs.publish
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-collaboration
+      url: https://pypi.org/project/caura-bus-core/${{ needs.build.outputs.version }}/
+    permissions:
+      id-token: write # PyPI trusted publishing + PEP 740 attestations
+    steps:
+      - name: The publish credential must be obtainable
+        run: |
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" ]]; then
+            echo "::error::No OIDC token-request context, so PyPI trusted publishing cannot authenticate. This job needs 'permissions: id-token: write'; there is no stored token to fall back on."
+            exit 1
+          fi
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: collaboration-clients-dist
+          path: dist/
+      # Core first: a dependent visible on PyPI before the core it pins would
+      # be uninstallable for the seconds in between.
+      - name: Stage caura-bus-core apart from its dependents
+        run: |
+          mkdir core-dist
+          mv dist/caura_bus_core-* core-dist/
+          ls core-dist dist
+      - name: Publish caura-bus-core
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: core-dist/
+          attestations: true
+      - name: Publish caura-bus-mcp, caura-bus-cli, caura-bus-adapter-sdk
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          attestations: true
+      - name: PyPI must serve all four at the release version
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          for name in caura-bus-core caura-bus-mcp caura-bus-cli caura-bus-adapter-sdk; do
+            for attempt in $(seq 1 10); do
+              if curl -fsSL --connect-timeout 5 --max-time 15 "https://pypi.org/pypi/${name}/${VERSION}/json" -o /dev/null; then
+                echo "PyPI serves ${name}==${VERSION}"
+                continue 2
+              fi
+              sleep $((attempt * 5))
+            done
+            echo "::error::published without error, but PyPI does not serve ${name}==${VERSION}"
+            exit 1
+          done
