@@ -264,7 +264,7 @@ async def _drive_bulk(
     )
     captured: dict[str, str | None] = {}
 
-    async def _create(body_, *, bulk_attempt_id=None, trusted_receipts=False):
+    async def _create(body_, *, bulk_attempt_id=None, from_broker=False):
         captured["agent_id"] = body_.agent_id
         raise _Sentinel()
 

@@ -133,6 +133,7 @@ from core_api.services.system_metadata import (
     set_system_value,
 )
 from core_api.services.task_tracker import record_task_failure, tracked_task
+from core_api.services.write_gate_hold import write_gate_hold_from
 from core_api.services.write_hold import HOLD_KEY, hold_for
 
 logger = logging.getLogger(__name__)
@@ -1517,12 +1518,15 @@ async def create_memories_bulk(
     bulk_attempt_id: str,
     memory_type_is_agent_set: bool | None = None,
     is_inferred: bool = False,
-    trusted_receipts: bool = False,
+    from_broker: bool = False,
 ) -> BulkMemoryResponse:
     """Create multiple memories with per-attempt idempotency (CAURA-602).
 
-    ``trusted_receipts`` keeps the rules receipt each item's metadata carries
-    (``rules_receipt``); only the bulk route sets it, for an install credential.
+    ``from_broker`` takes the batch at the broker's word: the rules receipt each
+    item's metadata carries (``rules_receipt``, g2.8) is kept, and an item may
+    ask to be held for review (``status: "quarantined"``, with the write gate's
+    account in ``write_gate``, g2.5). Only the bulk route sets it, for an
+    install credential.
 
     Each item is bound to a stable ``client_request_id`` of the form
     ``f"{bulk_attempt_id}:{content_hash[:16]}"``. Storage's per-item unique
@@ -1577,10 +1581,21 @@ async def create_memories_bulk(
     # not reachable from a request body.
     #
     # g2.8 — the broker's rules receipts are taken out first, since the
-    # sanitation strips the key; ``trusted_receipts`` is only set for a broker.
+    # sanitation strips the key; ``from_broker`` is only set for a broker.
     receipts = (
         {i: receipt for i, item in enumerate(items) if (receipt := rules_receipt_from(item.metadata))}
-        if trusted_receipts
+        if from_broker
+        else {}
+    )
+    # g2.5 — and so are the holds its write gate asks for: an item the gate
+    # refused comes ``quarantined``, with the gate's account of it.
+    gate_holds = (
+        {
+            i: write_gate_hold_from(item.metadata)
+            for i, item in enumerate(items)
+            if item.status == QUARANTINED_MEMORY_STATUS
+        }
+        if from_broker
         else {}
     )
     for item in items:
@@ -1619,10 +1634,12 @@ async def create_memories_bulk(
         for i, item in enumerate(items)
         if item.weight is not None and not (0.0 <= item.weight <= 1.0)
     }
+    # A held status is the broker's to ask for (g2.5), and no one else's.
+    statuses = (*MEMORY_STATUSES, QUARANTINED_MEMORY_STATUS) if from_broker else MEMORY_STATUSES
     status_errors: dict[int, str] = {
-        i: f"status must be one of: {', '.join(sorted(MEMORY_STATUSES))}"
+        i: f"status must be one of: {', '.join(sorted(statuses))}"
         for i, item in enumerate(items)
-        if item.status is not None and item.status not in MEMORY_STATUSES
+        if item.status is not None and item.status not in statuses
     }
     # memory_type is a plain str on BulkMemoryItem (not the typed MemoryType
     # enum used on single-write), so an unknown value reaches here instead of
@@ -2120,10 +2137,13 @@ async def create_memories_bulk(
 
         # Never from enrichment — see ``MergeEnrichmentFields``.
         status = item.status or "active"
-        # g2.8 — nor the caller's, for a batch held for review above.
-        if hold is not None:
+        # g2.8 — nor the caller's, for a batch held for review above. g2.5 — a
+        # write the broker's gate refused is held with the gate's account,
+        # which names the file and rule, in place of the batch's.
+        item_hold = gate_holds.get(i) or hold
+        if item_hold is not None:
             status = QUARANTINED_MEMORY_STATUS
-            metadata.setdefault(SYSTEM_NAMESPACE, {})[HOLD_KEY] = hold
+            metadata.setdefault(SYSTEM_NAMESPACE, {})[HOLD_KEY] = item_hold
         if i in receipts:
             metadata.setdefault(SYSTEM_NAMESPACE, {})[RULES_RECEIPT_KEY] = receipts[i]
 
