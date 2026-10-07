@@ -36,7 +36,7 @@ except ImportError:
         pass  # type: ignore[misc]
 
 
-from common.constants import VECTOR_DIM
+from common.constants import QUARANTINED_MEMORY_STATUS, VECTOR_DIM
 from common.embedding import (
     embedding_configured,
     get_embedding,
@@ -132,6 +132,7 @@ from core_api.services.system_metadata import (
     set_system_value,
 )
 from core_api.services.task_tracker import record_task_failure, tracked_task
+from core_api.services.write_hold import HOLD_KEY, hold_for
 
 logger = logging.getLogger(__name__)
 
@@ -1344,6 +1345,9 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         )
 
         child_payloads = []
+        # g2.8 — a held parent's chunks are held with it (``fields["status"]``
+        # below), and carry its hold record, so each says why it is held.
+        parent_hold = (parent_metadata.get(SYSTEM_NAMESPACE) or {}).get(HOLD_KEY)
         for fact, child_embedding in zip(facts, child_embeddings):
             child_ch = _content_hash(data.tenant_id, data.fleet_id, fact["content"])
             child_meta = {
@@ -1355,6 +1359,8 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
             # from the row they were cut out of.
             _inherit_governance_signals(child_meta, parent_metadata)
             _mark_child_embedding_pending(child_meta, child_embedding)
+            if parent_hold is not None:
+                child_meta.setdefault(SYSTEM_NAMESPACE, {})[HOLD_KEY] = parent_hold
             child_payloads.append(
                 {
                     "tenant_id": data.tenant_id,
@@ -1636,6 +1642,10 @@ async def create_memories_bulk(
     from core_api.services.organization_settings import resolve_config
 
     tenant_config = await resolve_config(data.tenant_id)
+    # g2.8 — one agent writes the whole batch, so one answer holds it or not.
+    hold = await hold_for(
+        data.tenant_id, data.agent_id, data.fleet_id, tenant_config, is_inferred=is_inferred
+    )
 
     # -- Batch embeddings + parallel enrichment (valid items only). Short
     # and oversized items are skipped so we don't spend provider budget on
@@ -2097,6 +2107,10 @@ async def create_memories_bulk(
 
         # Never from enrichment — see ``MergeEnrichmentFields``.
         status = item.status or "active"
+        # g2.8 — nor the caller's, for a batch held for review above.
+        if hold is not None:
+            status = QUARANTINED_MEMORY_STATUS
+            metadata.setdefault(SYSTEM_NAMESPACE, {})[HOLD_KEY] = hold
 
         entity_link_dicts = [
             {"entity_id": str(link.entity_id), "role": link.role} for link in item.entity_links

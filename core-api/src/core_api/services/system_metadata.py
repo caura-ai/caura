@@ -85,6 +85,11 @@ PLATFORM_ONLY_KEYS: frozenset[str] = frozenset(
         "child_count",
         # Enrichment output.
         "retrieval_hint",
+        # Facts awaiting their fan-out into child rows: the enrichment worker
+        # stores them for the ENRICHED consumer, and ``HoldLowTrustWrite`` for a
+        # release. Forged ones would come out as the agent's own claims, and a
+        # held write's would go live without the review that held it (g2.8).
+        "atomic_facts",
     }
 )
 

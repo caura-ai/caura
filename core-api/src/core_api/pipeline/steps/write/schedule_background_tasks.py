@@ -282,11 +282,10 @@ class ScheduleBackgroundTasks:
         # children must inherit (#808).
         # A held memory gets no children: they would be live rows carrying its
         # unreviewed claims. The fan-out does not read its parent back, unlike
-        # the passes below, which skip a held row.
-        # TODO(release replay): release only changes the status, so a released
-        # memory gets none of this work, and these facts are gone with the
-        # request. The path that first holds writes decides what a release
-        # replays; nothing holds them yet.
+        # the passes below, which skip a held row. ``HoldLowTrustWrite`` kept
+        # the facts on the row for a release to fan out.
+        # TODO(release replay): release only changes the status so far, so a
+        # released memory gets none of this work yet.
         atomic_facts = getattr(enrichment, "atomic_facts", None) or []
         if atomic_facts and memory.get("status") != QUARANTINED_MEMORY_STATUS:
             from core_api.services.memory_service import _resolve_parent_weight, fan_out_atomic_facts

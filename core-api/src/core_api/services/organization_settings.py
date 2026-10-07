@@ -44,6 +44,7 @@ from core_api.config import settings as global_settings
 from core_api.constants import (
     CRYSTALLIZER_DEDUP_THRESHOLD,
     CRYSTALLIZER_MIN_CLUSTER_SIZE,
+    MAX_TRUST_LEVEL,
 )
 from core_api.services.settings_crypto import (
     decrypt_api_key,
@@ -318,6 +319,20 @@ DEFAULT_SETTINGS: dict = {
     },
     "agents": {
         "require_agent_approval": None,
+    },
+    # g2.8 — hold a write for a person's review (status ``quarantined``) when
+    # its agent's trust level is below ``below_trust``. Unset or 0 holds
+    # nothing, the default: holding writes is a decision a tenant makes, never
+    # one it inherits. Releasing or rejecting a held write takes a signed-in
+    # person, so a deployment without one keeps what it holds until rolled
+    # back or purged.
+    "quarantine": {
+        "below_trust": None,
+        # Per-fleet overrides, ``{fleet_id: level}``: a listed fleet uses its
+        # own level, and 0 holds nothing there whatever the org-wide one.
+        # Declared empty so ``_check_keys`` takes any fleet id under it;
+        # ``_validate_quarantine_overrides`` checks the levels.
+        "below_trust_by_fleet": {},
     },
     # CAURA-444 — plugin auto-upgrade. When `auto_upgrade_enabled` is
     # true (the default), the heartbeat handler queues a `deploy`
@@ -797,6 +812,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "observability.search_recall_near_miss_sample_rate": (int, float),
     "chunking.auto_chunk_enabled": bool,
     "agents.require_agent_approval": bool,
+    "quarantine.below_trust": int,
     "entity_blocklist": list,
     "memclaw.auto_upgrade_enabled": bool,  # legacy-name-floor: floor
     "write.triple_emission_enabled": bool,
@@ -874,6 +890,8 @@ _LEAF_RANGES: dict[str, tuple[int, int]] = {
     # distill LLM call, and 1000 of them in one tick is already far past
     # any sane window's cluster count.
     "skills_factory.forge.max_clusters_per_run": (0, 1000),
+    # 0 holds nothing; one above the top trust level holds every agent's write.
+    "quarantine.below_trust": (0, MAX_TRUST_LEVEL + 1),
 }
 
 
@@ -891,6 +909,32 @@ def _validate_api_keys(payload: dict) -> None:
         if value is not None and not isinstance(value, str):
             raise ValueError(
                 f"Settings key 'api_keys.{name}' must be a string or null, got {type(value).__name__}"
+            )
+
+
+def _validate_quarantine_overrides(payload: dict) -> None:
+    """Raise ``ValueError`` for a per-fleet hold level that is not a level.
+
+    ``quarantine.below_trust_by_fleet`` declares no keys, since any fleet id may
+    appear under it, so neither ``_check_keys`` nor ``_validate_leaf_types``
+    looks at its values. ``null`` drops the fleet's override, as it does any
+    setting.
+    """
+    overrides = payload.get("quarantine", {}).get("below_trust_by_fleet")
+    if overrides is None:
+        return
+    if not isinstance(overrides, dict):
+        raise ValueError(
+            f"Settings key 'quarantine.below_trust_by_fleet' must be an object, got {type(overrides).__name__}"
+        )
+    lo, hi = _LEAF_RANGES["quarantine.below_trust"]
+    for fleet_id, level in overrides.items():
+        if level is None:
+            continue
+        if isinstance(level, bool) or not isinstance(level, int) or not lo <= level <= hi:
+            raise ValueError(
+                f"Settings key 'quarantine.below_trust_by_fleet.{fleet_id}' must be an int in [{lo}, {hi}], "
+                f"got {level!r}"
             )
 
 
@@ -1451,6 +1495,18 @@ class ResolvedConfig:
         val = self._ts.get("agents", {}).get("require_agent_approval")
         return bool(val) if val is not None else False
 
+    def quarantine_below_trust(self, fleet_id: str | None) -> int:
+        """The trust level below which a write in ``fleet_id`` is held (g2.8).
+
+        The fleet's own level when it has one, else the org-wide one. 0 holds
+        nothing, and so does a tenant that set neither.
+        """
+        section = self._ts.get("quarantine") or {}
+        level = (section.get("below_trust_by_fleet") or {}).get(fleet_id) if fleet_id is not None else None
+        if level is None:
+            level = section.get("below_trust")
+        return int(level or 0)
+
 
 def validate_search_profile(profile: dict) -> dict:
     """Validate and sanitise a search_profile dict against ``SEARCH_KNOBS``.
@@ -1739,6 +1795,7 @@ async def update_settings(
     _check_keys(new_settings, DEFAULT_SETTINGS)
     _validate_api_keys(new_settings)
     _validate_leaf_types(new_settings)
+    _validate_quarantine_overrides(new_settings)
     _validate_governance_enums(new_settings)
     _validate_agent_digest_cadence(new_settings)
     _validate_default_search_profile(new_settings)
