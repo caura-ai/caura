@@ -69,14 +69,21 @@ async def _memory(
     return str(memory_id)
 
 
-async def _audit(tenant: str, action: str, at: datetime, **detail: str) -> None:
+async def _audit(tenant: str, action: str, at: datetime, memory: str | None = None, **detail: str) -> None:
+    """An audit row on ``memory``, or on a memory that isn't there."""
     async with get_session() as db:
         await db.execute(
             text(
                 "INSERT INTO audit_log (tenant_id, action, resource_type, resource_id, detail, created_at) "
                 "VALUES (:t, :a, 'memory', :r, CAST(:d AS json), :at)"
             ),
-            {"t": tenant, "a": action, "r": uuid.uuid4(), "d": json.dumps(detail), "at": at},
+            {
+                "t": tenant,
+                "a": action,
+                "r": uuid.UUID(memory) if memory else uuid.uuid4(),
+                "d": json.dumps(detail),
+                "at": at,
+            },
         )
 
 
@@ -132,6 +139,27 @@ async def test_the_decisions_are_releases_rejects_and_the_held_writes_a_rollback
     counts = await _counts(client, tenant)
 
     assert (counts["released"], counts["rejected"], counts["rolled_back"]) == (2, 1, 1)
+
+
+async def test_a_rolled_back_write_counts_once_however_many_chunks_went_with_it(client) -> None:
+    """A rollback audits each held memory it rejects, the write's auto-chunks
+    included, and soft-deletes them all."""
+    tenant = _tenant()
+    at = _SINCE + timedelta(days=1)
+    write = await _memory(tenant, at, reason="write_gate", status="cancelled", deleted=True)
+    chunks = [
+        await _memory(tenant, at, reason="write_gate", status="cancelled", parent=write, deleted=True)
+        for _ in range(2)
+    ]
+    for memory in (write, *chunks):
+        await _audit(tenant, "session.rollback", at, memory=memory, new_status="cancelled")
+    # The same chunk ids in another tenant say nothing about this one's rows.
+    other = _tenant()
+    for memory in chunks:
+        await _audit(other, "session.rollback", at, memory=memory, new_status="cancelled")
+
+    assert (await _counts(client, tenant))["rolled_back"] == 1
+    assert (await _counts(client, other))["rolled_back"] == 2
 
 
 async def test_a_quiet_window_counts_nothing(client) -> None:

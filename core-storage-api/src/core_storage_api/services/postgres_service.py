@@ -2958,7 +2958,9 @@ class PostgresService:
         - ``released`` and ``rejected``: the ``quarantine.release`` and
           ``quarantine.reject`` audit rows in the window, and ``rolled_back``
           the held memories a ``session.rollback`` rejected in it. A decision
-          can be on a memory held before the window.
+          can be on a memory held before the window. A rollback also audits
+          each auto-chunk it rejects with its write; those rows are left out by
+          looking up their memory, which the rollback soft-deleted, not removed.
 
         The numbers a tenant's weekly pilot report takes from here. Read-only
         (reader replica).
@@ -2986,6 +2988,13 @@ class PostgresService:
                     and_(
                         AuditLog.action == SESSION_ROLLBACK_ACTION,
                         AuditLog.detail["new_status"].astext == QUARANTINE_REJECTED,
+                        ~select(Memory.id)
+                        .where(
+                            Memory.id == AuditLog.resource_id,
+                            Memory.tenant_id == AuditLog.tenant_id,
+                            Memory.metadata_["parent_memory_id"].astext.is_not(None),
+                        )
+                        .exists(),
                     ),
                 ),
             )
