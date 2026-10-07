@@ -329,7 +329,8 @@ class TestInjectSTMContext:
         assert results[0].metadata["source"] == "stm"
         assert results[0].metadata["stm_target"] == "notes"
         assert results[0].memory_type == "stm"
-        assert results[0].similarity == 1.0
+        # No vector was compared (L-14).
+        assert results[0].similarity is None
 
     @pytest.mark.asyncio
     async def test_skips_when_disabled(self):

@@ -320,12 +320,20 @@ def test_the_writer_session_population_is_pinned() -> None:
     144 -> 145 (pure unchanged at 65): ``task_mark_handled`` is new. It moves
     open ``background_task_log`` rows to a handled status with ``sql_update``,
     a write. Its sibling ``task_list_open_failures`` reads on the replica.
+
+    145 -> 141 (pure 65 -> 61): ``memory_find_successors``,
+    ``entity_fts_search``, ``entity_expand_graph`` and
+    ``entity_get_memory_ids_by_entity_ids`` read on the replica (L-190). Their
+    only callers are the search pipeline's ClassifyQuery, entity boost and
+    LoadAndSerialize, which read what earlier requests wrote, never their own
+    writes; core-api already sent three of them with ``read=True`` and now
+    sends the link lookup that way too.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 145, f"{len(methods)} methods open a writer session"
-    assert len(pure) == 65, f"{len(pure)} of them show no write marker"
+    assert len(methods) == 141, f"{len(methods)} methods open a writer session"
+    assert len(pure) == 61, f"{len(pure)} of them show no write marker"
 
 
 @pytest.mark.parametrize(
@@ -367,13 +375,14 @@ def test_every_method_that_must_stay_on_the_writer_still_looks_like_a_pure_read(
 def test_the_convertible_population_is_pinned() -> None:
     """What is left after the caller analysis, so a conversion has a target.
 
-    65 methods show no write marker. Eight of them must stay on the writer
+    61 methods show no write marker. Eight of them must stay on the writer
     anyway because of what CALLS them, and one is a private helper that
-    inherits its caller's session. The remaining 56 are the candidates — the number a
+    inherits its caller's session. The remaining 52 are the candidates — the number a
     conversion PR is allowed to move, and the only number in this file that
-    SHOULD go down.
+    SHOULD go down. 56 -> 52 with L-190's four search reads, converted after
+    the caller analysis recorded on the population test above.
 
-    One precondition applies to all 56 and is not visible from here: core-api's
+    One precondition applies to all 52 and is not visible from here: core-api's
     storage client already splits reads at the SERVICE level (``_read_prefix``)
     with a per-call ``read=False`` opt-out. Converting a method sends it to the
     DB replica regardless of which deployment served the request, so the
@@ -388,7 +397,7 @@ def test_the_convertible_population_is_pinned() -> None:
     assert pure >= _INTERNAL_HELPERS
 
     convertible = pure - set(_MUST_STAY_ON_THE_WRITER) - _INTERNAL_HELPERS
-    assert len(convertible) == 56, (
-        f"{len(convertible)} convertible candidates, expected 56 — "
+    assert len(convertible) == 52, (
+        f"{len(convertible)} convertible candidates, expected 52 — "
         "update this and say which way it moved and why"
     )

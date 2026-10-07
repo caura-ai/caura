@@ -2048,9 +2048,15 @@ class CoreStorageClient:
         # The returned memory ids get fetched next, so an unscoped call handed
         # this caller other tenants' rows to look up. Storage restricts each
         # link to rows with both ends in ``tenant_id``.
+        #
+        # ``read=True``, as the entity FTS and graph expansion beside it on
+        # the search path: it reads links earlier requests wrote, never its
+        # own, and sent to the writer it put a primary transaction on every
+        # entity-shaped search (L-190).
         result = await self._post(
             "/entities/memory-ids-by-entity-ids",
             {"entity_ids": entity_ids, "tenant_id": tenant_id},
+            read=True,
         )
         return result  # type: ignore[return-value]
 

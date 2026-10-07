@@ -5512,13 +5512,19 @@ async def _entity_boost_pipeline(
             if not matched_entity_ids:
                 return boosted_memory_ids, memory_boost_factor
 
-            # Graph expansion
+            # Graph expansion, per requested fleet as the pipeline expands
+            # (L-114); a multi-fleet request sent ``fleet_id`` None, so the walk
+            # crossed every fleet's relations. Imported here because the search
+            # steps import this module.
             if graph_expand and graph_max_hops > 0:
-                entity_hops = await expand_graph(
+                from core_api.pipeline.steps.search.classify_query import ClassifyQuery
+
+                entity_hops = await ClassifyQuery._expand_per_fleet(
+                    sc,
                     matched_entity_ids,
                     tenant_id,
-                    fleet_ids[0] if fleet_ids and len(fleet_ids) == 1 else None,
-                    max_hops=graph_max_hops,
+                    fleet_ids,
+                    graph_max_hops,
                     use_union=use_union,
                 )
             else:
@@ -6226,7 +6232,13 @@ async def _search_memories_legacy(
                 # composite, which exceeds 1.0 and is useless for threshold
                 # gating). Mirrors LoadAndSerialize in the pipeline path so both
                 # surfaces agree (test_search_pipeline_equivalence) — see F-14.
-                similarity=round(float(row["vec_sim"]), 4) if row.get("vec_sim") is not None else None,
+                # None for a row with no embedding, whose 0.0 is storage's
+                # sentinel, not a cosine (L-113).
+                similarity=(
+                    round(float(row["vec_sim"]), 4)
+                    if row.get("vec_sim") is not None and row.get("has_embedding", True) is not False
+                    else None
+                ),
             )
         )
 

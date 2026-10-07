@@ -52,6 +52,8 @@ _SCORE_FACTORS = (
     "recall_boost",
     "temporal_boost",
     "status_penalty",
+    # Set by RerankResults on the rows it reordered (L-115).
+    "rerank",
 )
 
 
@@ -105,9 +107,22 @@ def _score_parts(row) -> ScoreParts | None:
     keep the field absent instead of noisy.
     """
     values = {k: getattr(row, k, None) for k in _SCORE_FACTORS}
+    values["vec_sim"] = _vec_sim(row)
     if all(v is None for v in values.values()):
         return None
     return ScoreParts(**{k: (round(float(v), 4) if v is not None else None) for k, v in values.items()})
+
+
+def _vec_sim(row) -> float | None:
+    """The row's cosine, or None for a row with no embedding (L-113).
+
+    Storage scores a missing vector 0.0, a sentinel rather than a measurement,
+    and ``has_embedding`` says which one a row carries. Serialized as 0.0 it
+    read as "unrelated" to anyone holding ``similarity`` to a threshold.
+    """
+    if getattr(row, "has_embedding", True) is False:
+        return None
+    return getattr(row, "vec_sim", None)
 
 
 class LoadAndSerialize:
@@ -153,12 +168,21 @@ class LoadAndSerialize:
             data = ctx.data
             tenant_id = data["tenant_id"]
 
+            # L-43 — look where the search read. A cross-tenant key's stale rows
+            # come from every readable tenant, and so do their corrections;
+            # forwarded as ClassifyQuery forwards it to the by-id load.
+            readable_tenant_ids = data.get("readable_tenant_ids")
             sc = get_storage_client()
             try:
                 successors = await sc.find_successors(
                     {
                         "supersedes_ids": [str(oid) for oid in outdated_ids],
                         "tenant_id": tenant_id,
+                        "readable_tenant_ids": (
+                            readable_tenant_ids
+                            if readable_tenant_ids and readable_tenant_ids != [tenant_id]
+                            else None
+                        ),
                         "fleet_ids": data.get("fleet_ids"),
                         # C27 — a successor is injected straight into the result
                         # set, so an unscoped lookup here would reintroduce
@@ -291,8 +315,8 @@ class LoadAndSerialize:
                 # untuned global fallback; configured floors stay strict. Rank
                 # order is unchanged (rows are already ordered by ``score``
                 # upstream). None for FTS-only hits, which have no vector
-                # similarity.
-                similarity=(round(float(row.vec_sim), 4) if row.vec_sim is not None else None),
+                # similarity, and for rows with no embedding at all.
+                similarity=(round(float(sim), 4) if (sim := _vec_sim(row)) is not None else None),
                 # D12 — the composite that ordered this row, and its factors.
                 # The storage SQL has always computed these per row; this is the
                 # first place they survive serialization. None end-to-end for

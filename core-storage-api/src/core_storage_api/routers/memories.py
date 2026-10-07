@@ -511,6 +511,9 @@ async def find_successors(request: Request) -> list[dict]:
         memory_type_filter=body.get("memory_type_filter"),
         valid_at=valid_at,
         strict_fleet_scoping=body.get("strict_fleet_scoping", False),
+        # Where the search read, so its stale rows' corrections are found
+        # there too (L-43); absent reads the home tenant, as before.
+        readable_tenant_ids=body.get("readable_tenant_ids") or None,
     )
     # ``successor_of`` names the row each one replaced: its ``supersedes_id``,
     # or for a contradiction's further loser the one its record names (M-34).

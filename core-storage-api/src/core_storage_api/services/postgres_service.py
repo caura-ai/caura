@@ -16,7 +16,7 @@ import logging
 from collections import OrderedDict, defaultdict
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, NamedTuple
 from uuid import UUID
@@ -490,6 +490,42 @@ def _visibility_scope_clause(
         Memory.visibility == "scope_team",
         and_(*own_rows),
     )
+
+
+def _utc_day(column: Any) -> ColumnElement[Any]:
+    """The UTC calendar day of a ``timestamptz`` column (L-146).
+
+    A bare ``CAST(... AS DATE)`` takes the day in the session's ``TimeZone``,
+    which nothing pins, while every day it is compared with here is a UTC one,
+    so on a database set to another zone the two sides were a day apart near
+    midnight. ``memory_daily_durable_counts`` reads ``timezone('UTC', ...)`` for
+    the same reason.
+    """
+    return cast(func.timezone("UTC", column), Date)
+
+
+def _utc_day_of(valid_at: datetime | str) -> date:
+    """The UTC calendar day of ``valid_at``; a naive value means UTC (L-146).
+
+    ``valid_at.date()`` took the day in the value's own offset, so 01:00 at
+    +05:00 on 2 January was compared as 2 January though it is 1 January in UTC.
+    """
+    if isinstance(valid_at, datetime):
+        if valid_at.tzinfo is not None:
+            valid_at = valid_at.astimezone(UTC)
+        return valid_at.date()
+    return date.fromisoformat(str(valid_at)[:10])
+
+
+def _started_by(valid_at: datetime | str) -> ColumnElement[bool]:
+    """Undated, or valid from ``valid_at``'s UTC day or earlier.
+
+    The start filter at DAY granularity, so a memory written later on the day a
+    question was asked still answers it. One predicate for the scored search,
+    the by-id load and the successor lookup, which compared to the second and
+    so could not find a correction written later that day (L-43).
+    """
+    return or_(Memory.ts_valid_start.is_(None), _utc_day(Memory.ts_valid_start) <= _utc_day_of(valid_at))
 
 
 def _document_fleet_clause(collection: str | None, fleet_id: str) -> ColumnElement[bool]:
@@ -1111,6 +1147,13 @@ def _coverage_counts() -> _CoverageCounts:
     )
 
 
+# Links per entity that ``entity_get_memory_ids_by_entity_ids`` returns, newest
+# memory first (L-195). Four times core-api's GRAPH_MAX_BOOSTED_MEMORIES, the 50
+# memories its search callers keep, so a memory linked to several of the
+# matched entities is still counted once for each.
+MEMORY_LINKS_PER_ENTITY = 200
+
+
 def _link_within_tenant(tenant_id: str) -> ColumnElement[bool]:
     """Confine a ``memory_entity_links`` row to ``tenant_id``, via both parents.
 
@@ -1592,7 +1635,12 @@ def _attach_agent_display_names(rows: Any) -> list[Memory]:
     return out
 
 
-def _recorded_winners(loser_ids: Sequence[UUID], tenant_id: str, *where: ColumnElement[bool]) -> list[Select]:
+def _recorded_winners(
+    loser_ids: Sequence[UUID],
+    tenant_id: str,
+    *where: ColumnElement[bool],
+    readable_tenant_ids: list[str] | None = None,
+) -> list[Select]:
     """Select ``(Memory, successor_of)``: the memory that beat each demoted memory
     in ``loser_ids``, as only its ``memory_conflicts`` record names it (M-34).
 
@@ -1603,17 +1651,25 @@ def _recorded_winners(loser_ids: Sequence[UUID], tenant_id: str, *where: ColumnE
     decides it: created later, or on a tie the greater id. A dismissed record
     names no winner, and a pair an edge also joins is left to the
     ``supersedes_id`` lookups. ``where`` holds the winner to the caller's scope.
+
+    ``readable_tenant_ids`` widens the loser and its record from ``tenant_id``
+    to that set, for a search that read it (L-43); a record and its loser are
+    always in one tenant.
     """
     loser = aliased(Memory)
+    tenant_match = (
+        [MemoryConflict.tenant_id.in_(readable_tenant_ids), loser.tenant_id == MemoryConflict.tenant_id]
+        if readable_tenant_ids
+        else [MemoryConflict.tenant_id == tenant_id, loser.tenant_id == tenant_id]
+    )
     return [
         select(Memory, loser.id.label("successor_of"))
         .join(MemoryConflict, winner_side == Memory.id)
         .join(loser, loser.id == loser_side)
         .where(
-            MemoryConflict.tenant_id == tenant_id,
+            *tenant_match,
             MemoryConflict.review_status != "dismissed",
             loser_side.in_(loser_ids),
-            loser.tenant_id == tenant_id,
             loser.deleted_at.is_(None),
             loser.status.in_(CONTRADICTED_STATUSES),
             or_(
@@ -3986,27 +4042,13 @@ class PostgresService:
                 )
             )
         if valid_at:
-            from datetime import date as _date_type
-
-            from sqlalchemy import Date as _Date
-            from sqlalchemy import cast as _cast
-            from sqlalchemy import literal as _literal
-
             # Hard filter on the START side, compared at DAY granularity.
             # Future-dated memories can't answer past questions — but strict
             # timestamp comparison also excludes same-day memories written a
             # few hours after the query was asked, which is too aggressive
             # for workflows where the question + its evidence share a day.
-            # We cast both sides to DATE so same-day-later memories pass.
-            _valid_at_date = (
-                valid_at.date() if hasattr(valid_at, "date") else _date_type.fromisoformat(str(valid_at)[:10])
-            )
-            row_filters.append(
-                or_(
-                    Memory.ts_valid_start.is_(None),
-                    _cast(Memory.ts_valid_start, _Date) <= _cast(_literal(_valid_at_date), _Date),
-                )
-            )
+            # Both sides are UTC days, so same-day-later memories pass.
+            row_filters.append(_started_by(valid_at))
             # NOTE: the END side (`ts_valid_end >= valid_at`) is NO LONGER
             # a hard filter.  A past ts_valid_end now triggers the soft
             # ``currency_factor`` below (default 0.5x) — so an over-eager
@@ -4126,31 +4168,17 @@ class PostgresService:
             arm_selects.append(select(recency_arm.subquery()))
 
             if date_range_start and date_range_end:
-                from datetime import date as _dr_date_type
-
-                from sqlalchemy import Date as _DrDate
-                from sqlalchemy import cast as _dr_cast
-                from sqlalchemy import literal as _dr_literal
-
                 # Parsed again in the date_range_boost block below,
                 # deliberately: the boost runs whether or not the pool is
                 # active, and threading parsed dates between the two blocks
                 # couples them for the price of two date.fromisoformat calls.
-                _arm_start = _dr_date_type.fromisoformat(date_range_start)
-                _arm_end = _dr_date_type.fromisoformat(date_range_end)
-                _arm_anchor = func.coalesce(
-                    _dr_cast(Memory.ts_valid_start, _DrDate),
-                    _dr_cast(Memory.created_at, _DrDate),
-                )
+                _arm_start = date.fromisoformat(date_range_start)
+                _arm_end = date.fromisoformat(date_range_end)
+                _arm_anchor = func.coalesce(_utc_day(Memory.ts_valid_start), _utc_day(Memory.created_at))
                 date_arm = (
                     select(Memory.id, literal("date").label("arm"))
                     .where(*row_filters)
-                    .where(
-                        and_(
-                            _arm_anchor >= _dr_cast(_dr_literal(_arm_start), _DrDate),
-                            _arm_anchor <= _dr_cast(_dr_literal(_arm_end), _DrDate),
-                        )
-                    )
+                    .where(and_(_arm_anchor >= _arm_start, _arm_anchor <= _arm_end))
                     .order_by(Memory.created_at.desc())
                     .limit(_ANN_POOL_SIDE_ARM_LIMIT)
                 )
@@ -4341,21 +4369,16 @@ class PostgresService:
         # the old hard WHERE filter so semantically strong out-of-range
         # memories remain retrievable.
         if date_range_start and date_range_end:
-            from datetime import date as date_type
-
             from core_storage_api.config import settings as _storage_settings
 
-            temporal_anchor = func.coalesce(
-                cast(ing.c.ts_valid_start, Date),
-                cast(ing.c.created_at, Date),
-            )
-            _start_dt = date_type.fromisoformat(date_range_start)
-            _end_dt = date_type.fromisoformat(date_range_end)
+            temporal_anchor = func.coalesce(_utc_day(ing.c.ts_valid_start), _utc_day(ing.c.created_at))
+            _start_dt = date.fromisoformat(date_range_start)
+            _end_dt = date.fromisoformat(date_range_end)
             date_range_boost = case(
                 (
                     and_(
-                        temporal_anchor >= cast(literal(_start_dt), Date),
-                        temporal_anchor <= cast(literal(_end_dt), Date),
+                        temporal_anchor >= _start_dt,
+                        temporal_anchor <= _end_dt,
                     ),
                     _storage_settings.date_range_boost_factor,
                 ),
@@ -4752,26 +4775,10 @@ class PostgresService:
                 # injects the supersedes successor so both sides remain visible.
                 stmt = stmt.where(Memory.status != "outdated")
             if valid_at:
-                from datetime import date as _date_type
-
-                from sqlalchemy import Date as _Date
-                from sqlalchemy import cast as _cast
-                from sqlalchemy import literal as _literal
-
-                # DATE-cast comparison matches scored_search semantics
-                # (same-day-later memories pass). End side is intentionally
-                # NOT a hard filter — see scored_search currency_factor.
-                _valid_at_date = (
-                    valid_at.date()
-                    if hasattr(valid_at, "date")
-                    else _date_type.fromisoformat(str(valid_at)[:10])
-                )
-                stmt = stmt.where(
-                    or_(
-                        Memory.ts_valid_start.is_(None),
-                        _cast(Memory.ts_valid_start, _Date) <= _cast(_literal(_valid_at_date), _Date),
-                    ),
-                )
+                # Day-granular, as scored_search compares (same-day-later
+                # memories pass). End side is intentionally NOT a hard filter —
+                # see scored_search currency_factor.
+                stmt = stmt.where(_started_by(valid_at))
             return _attach_agent_display_names((await session.execute(stmt)).all())
 
     # ------------------------------------------------------------------
@@ -4847,6 +4854,7 @@ class PostgresService:
         memory_type_filter: str | None = None,
         valid_at: datetime | None = None,
         strict_fleet_scoping: bool = False,
+        readable_tenant_ids: list[str] | None = None,
     ) -> list[tuple[Memory, UUID]]:
         """Find the active/confirmed memories that replaced the given ones, each
         with the id of the one it replaced.
@@ -4854,9 +4862,21 @@ class PostgresService:
         A chain edge's winner names its loser in ``supersedes_id``. A
         contradiction's further losers have no edge, so the winner their
         ``memory_conflicts`` record names is found too (M-34), in the same scope.
+
+        Visible as the scored search's rows are (L-43): in every readable
+        tenant, valid from ``valid_at``'s day or earlier, and with no hard
+        filter on ``ts_valid_end``, which scored search only discounts. The
+        stale rows that search returns are corrected only if their successors
+        are found by the same rules; a stricter lookup found none, and the
+        stale claim surfaced as if no correction existed. On the replica, as
+        the search it serves (L-190).
         """
         scope: list[ColumnElement[bool]] = [
-            Memory.tenant_id == tenant_id,
+            (
+                Memory.tenant_id.in_(readable_tenant_ids)
+                if readable_tenant_ids
+                else Memory.tenant_id == tenant_id
+            ),
             Memory.status.in_(("active", "confirmed")),
             Memory.deleted_at.is_(None),
             _visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id),
@@ -4868,10 +4888,9 @@ class PostgresService:
         if memory_type_filter:
             scope.append(Memory.memory_type == memory_type_filter)
         if valid_at:
-            scope.append(or_(Memory.ts_valid_start.is_(None), Memory.ts_valid_start <= valid_at))
-            scope.append(or_(Memory.ts_valid_end.is_(None), Memory.ts_valid_end >= valid_at))
+            scope.append(_started_by(valid_at))
         display = Agent.display_name.label("agent_display_name")
-        async with get_session() as session:
+        async with get_read_session() as session:
             edges = await session.execute(
                 select(Memory, display)
                 .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
@@ -4880,7 +4899,10 @@ class PostgresService:
             found: list[tuple[Memory, UUID]] = [
                 (m, m.supersedes_id) for m in _attach_agent_display_names(edges.all()) if m.supersedes_id
             ]
-            for stmt in _recorded_winners(supersedes_ids, tenant_id, *scope):
+            winners = _recorded_winners(
+                supersedes_ids, tenant_id, *scope, readable_tenant_ids=readable_tenant_ids
+            )
+            for stmt in winners:
                 named = stmt.add_columns(display).outerjoin(Agent, _AGENT_DISPLAY_JOIN)
                 rows = (await session.execute(named)).all()
                 memories = _attach_agent_display_names((row[0], row[2]) for row in rows)
@@ -8600,7 +8622,9 @@ class PostgresService:
         """
         if not tokens:
             return []
-        async with get_session() as session:
+        # The reader, as the scored search beside it on the search path: it
+        # reads entities earlier requests wrote, never its own (L-190).
+        async with get_read_session() as session:
             # OR across tokens via one plainto_tsquery per token. Each
             # term passes through PG's ``english`` config (stem +
             # stopword), so we don't have to escape — plainto_tsquery
@@ -8854,8 +8878,10 @@ class PostgresService:
         The downstream ``parallel_embed_entity_boost`` step applies the
         same cap defensively at the call boundary so a future regression
         here can't blow up ``get_memory_ids_by_entity_ids`` either.
+
+        Reads on the replica, as the search path's other reads do (L-190).
         """
-        async with get_session() as session:
+        async with get_read_session() as session:
             entity_hops: dict[UUID, tuple[int, float]] = dict.fromkeys(seed_entity_ids, (0, 1.0))
             frontier: set[UUID] | list[UUID] = set(seed_entity_ids)
 
@@ -9478,17 +9504,51 @@ class PostgresService:
         the payload. It feeds the search graph-boost path, which then fetches
         those memories — unscoped, it handed the caller ids of memories in other
         tenants to look up. Both ends are checked; see ``_link_within_tenant``.
+
+        Live memories only, newest first, at most ``MEMORY_LINKS_PER_ENTITY``
+        per entity (L-13, L-195). Both callers keep 50 memories after a stable
+        sort, so this order is what picks among a hub entity's tied links: it
+        was whatever the planner returned, and could change between runs. The
+        cap bounds what a hub sends; it is four times the 50 kept so a memory
+        linked to several matched entities keeps every match it counts. A
+        deleted memory took a slot and was then dropped by the load.
+
+        On the replica, as the rest of the search path (L-190).
         """
         if not entity_ids:
             return []
-        async with get_session() as session:
-            stmt = select(
-                MemoryEntityLink.memory_id,
-                MemoryEntityLink.entity_id,
-                MemoryEntityLink.role,
-            ).where(
-                MemoryEntityLink.entity_id.in_(entity_ids),
-                _link_within_tenant(tenant_id),
+        # Joined under an alias: ``_link_within_tenant`` correlates on
+        # ``Memory`` itself, which a plain join would correlate away.
+        linked = aliased(Memory)
+        async with get_read_session() as session:
+            rank = (
+                func.row_number()
+                .over(
+                    partition_by=MemoryEntityLink.entity_id,
+                    order_by=(linked.created_at.desc(), linked.id.desc()),
+                )
+                .label("link_rank")
+            )
+            ranked = (
+                select(
+                    MemoryEntityLink.memory_id,
+                    MemoryEntityLink.entity_id,
+                    MemoryEntityLink.role,
+                    linked.created_at,
+                    rank,
+                )
+                .join(linked, linked.id == MemoryEntityLink.memory_id)
+                .where(
+                    MemoryEntityLink.entity_id.in_(entity_ids),
+                    linked.deleted_at.is_(None),
+                    _link_within_tenant(tenant_id),
+                )
+                .subquery()
+            )
+            stmt = (
+                select(ranked.c.memory_id, ranked.c.entity_id, ranked.c.role)
+                .where(ranked.c.link_rank <= MEMORY_LINKS_PER_ENTITY)
+                .order_by(ranked.c.created_at.desc(), ranked.c.memory_id.desc(), ranked.c.entity_id)
             )
             result = await session.execute(stmt)
             return list(result.all())  # type: ignore[arg-type]

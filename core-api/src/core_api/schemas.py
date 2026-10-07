@@ -476,6 +476,9 @@ class ScoreParts(BaseModel):
     returns per row; this model only surfaces them. All fields are nullable:
     FTS-only rows have no ``vec_sim``, entity-lookup short-circuit rows have no
     FTS rank, and successor-injected rows were never scored at all.
+
+    ``rerank`` is the second-stage reranker's score, set only on rows it
+    reordered. ``MemoryOut.score`` stays the first-stage composite.
     """
 
     vec_sim: float | None = None
@@ -485,6 +488,7 @@ class ScoreParts(BaseModel):
     recall_boost: float | None = None
     temporal_boost: float | None = None
     status_penalty: float | None = None
+    rerank: float | None = None
 
 
 class MemoryOut(BaseModel):
@@ -549,7 +553,9 @@ class MemoryOut(BaseModel):
     # cosine (the ``min_similarity``-comparable value); ``score`` routinely
     # exceeds 1.0 and is for explaining rank, not for threshold gating.
     # Populated only on scored-search hits; None on list/get reads and on
-    # successor-injected rows, which were never scored.
+    # successor-injected rows, which were never scored. With reranking on it
+    # is still the first-stage composite, and ``score_parts.rerank`` holds the
+    # score that ordered the row (L-115).
     score: float | None = None
     score_parts: ScoreParts | None = None
     # D16 — true when the row was not matched by the query but injected as the
