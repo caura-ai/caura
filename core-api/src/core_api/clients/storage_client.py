@@ -7,6 +7,7 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any, Literal, NotRequired, TypedDict
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
@@ -209,6 +210,17 @@ def _storage_permanent(response: httpx.Response) -> tuple[str, dict] | None:
     # it as data, not as a substring of the message.
     fields = {k: v for k, v in detail.items() if k != "message"}
     return (message if isinstance(message, str) and message else _PERMANENT_FALLBACK_DETAIL), fields
+
+
+def _agent_path(agent_id: str) -> str:
+    """``/agents/<agent_id>``, with the id escaped as one path segment (M-13).
+
+    Interpolated raw, ``?`` and ``#`` end the path: httpx reads ``bot?v2`` as
+    agent ``bot`` with a query, so a lookup returned another agent's row. An
+    escaped ``/`` does not survive routing, since the server decodes it first;
+    ``get_or_create_agent`` refuses such an id before it gets here.
+    """
+    return f"/agents/{quote(agent_id, safe='')}"
 
 
 def _reject_reserved_write_id(agent_id: str | None) -> None:
@@ -2190,8 +2202,14 @@ class CoreStorageClient:
         The default stays ``True``. Most callers here are plain lookups — trust
         gates, fleet resolution, 404 checks — and sending those to the primary
         would give up the read split entirely to fix four call sites.
+
+        An id with a ``/`` cannot be addressed (see ``_agent_path``), so it
+        finds nothing here rather than routing to a sub-resource such as
+        ``/fleet`` and failing there.
         """
-        return await self._get(f"/agents/{agent_id}", read=read, tenant_id=tenant_id)
+        if "/" in agent_id:
+            return None
+        return await self._get(_agent_path(agent_id), read=read, tenant_id=tenant_id)
 
     async def list_agents(
         self,
@@ -2204,16 +2222,16 @@ class CoreStorageClient:
         return await self._get_list("/agents", **params)
 
     async def update_trust_level(self, agent_id: str, data: dict) -> dict | None:
-        return await self._patch(f"/agents/{agent_id}/trust-level", data)
+        return await self._patch(f"{_agent_path(agent_id)}/trust-level", data)
 
     async def update_search_profile(
         self,
-        agent_id_pk: str,
+        agent_id: str,
         tenant_id: str,
         search_profile: dict,
     ) -> dict | None:
         return await self._patch(
-            f"/agents/{agent_id_pk}/search-profile",
+            f"{_agent_path(agent_id)}/search-profile",
             {"tenant_id": tenant_id, "search_profile": search_profile},
         )
 
@@ -2223,7 +2241,7 @@ class CoreStorageClient:
         tenant_id: str,
     ) -> dict | None:
         return await self._post_optional(
-            f"/agents/{agent_id}/search-profile/reset",
+            f"{_agent_path(agent_id)}/search-profile/reset",
             {"tenant_id": tenant_id},
         )
 
@@ -2233,7 +2251,7 @@ class CoreStorageClient:
         tenant_id: str,
     ) -> dict | None:
         return await self._get(
-            f"/agents/{agent_id}/search-profile",
+            f"{_agent_path(agent_id)}/search-profile",
             tenant_id=tenant_id,
         )
 
@@ -2244,10 +2262,10 @@ class CoreStorageClient:
         )
 
     async def update_agent_fleet(self, agent_id: str, data: dict) -> dict | None:
-        return await self._patch(f"/agents/{agent_id}/fleet", data)
+        return await self._patch(f"{_agent_path(agent_id)}/fleet", data)
 
     async def delete_agent(self, agent_id: str, tenant_id: str) -> bool:
-        return await self._delete(f"/agents/{agent_id}", tenant_id=tenant_id)
+        return await self._delete(_agent_path(agent_id), tenant_id=tenant_id)
 
     # =====================================================================
     # Documents

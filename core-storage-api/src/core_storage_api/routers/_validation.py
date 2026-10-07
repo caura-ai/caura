@@ -59,3 +59,17 @@ def _require_uuid(body: dict, key: str) -> UUID:
         return UUID(str(val))
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=f"{key} must be a UUID") from exc
+
+
+def _int_at_least(body: dict, key: str, default: int, minimum: int) -> int:
+    """Fail-closed page-bound guard — 422 unless ``key`` is an int >= ``minimum``.
+
+    For the ``limit``, ``offset`` and ``batch_size`` that reach SQL as
+    ``LIMIT``/``OFFSET``: a negative one is a Postgres error (a 500), and a batch
+    of 0 makes a sweep do nothing while reporting success (L-40). ``bool`` is
+    an ``int`` but never a count, so it is refused too.
+    """
+    val = body.get(key, default)
+    if isinstance(val, bool) or not isinstance(val, int) or val < minimum:
+        raise HTTPException(status_code=422, detail=f"'{key}' must be an integer >= {minimum}")
+    return val

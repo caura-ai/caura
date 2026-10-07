@@ -69,12 +69,9 @@ def test_reviewer_identity_is_never_taken_from_the_body():
     to file a decision under someone else's name."""
     assert "resolved_by" not in ConflictResolveRequest.model_fields
     src = inspect.getsource(__import__("core_api.routes.conflicts", fromlist=["x"]))
-    # attribution is the gated identity, resolved before the trust check
+    # attribution is the caller's own identity, resolved by ``_reviewer``
     assert '"resolved_by": reviewer' in src
-    assert (
-        "reviewer = canonical_service_agent_id(auth.agent_id or DEFAULT_AGENT_ID)"
-        in src
-    )
+    assert "reviewer = await _reviewer(auth, body.tenant_id)" in src
 
 
 # ── storage-side guarantees ───────────────────────────────────────────────
@@ -151,16 +148,21 @@ def test_conflict_out_keeps_detector_and_reviewer_fields_apart():
 def test_missing_and_foreign_conflicts_answer_identically():
     """Ownership is never signalled by a distinct status: a 403-for-foreign would
     turn the endpoint into an existence oracle for other tenants' conflict ids.
-    The one 403 in this module is the TRUST gate, which fires before any lookup
-    and so reveals nothing about which ids exist."""
-    src = inspect.getsource(__import__("core_api.routes.conflicts", fromlist=["x"]))
+    Every 403 in this module is the reviewer gate, ``_reviewer``: an agent below
+    trust 2, or a credential that names no reviewer (M-28). It runs before any
+    lookup and so reveals nothing about which ids exist."""
+    from core_api.routes import conflicts
+
+    src = inspect.getsource(conflicts)
     assert src.count('status_code=404, detail="Conflict not found"') >= 1
-    trust_403 = src.count("cannot review conflicts")
-    assert src.count("status_code=403") == trust_403 == 1
+    gate = inspect.getsource(conflicts._reviewer)
+    assert src.count("status_code=403") == gate.count("status_code=403") == 2
 
 
 def test_review_requires_elevated_trust():
     """Plain tenant scope would let any agent dismiss the contradictions it
     caused — and a dismissal is the only record that detection was wrong."""
-    src = inspect.getsource(__import__("core_api.routes.conflicts", fromlist=["x"]))
-    assert "_require_trust(body.tenant_id, reviewer, min_level=2)" in src
+    from core_api.routes import conflicts
+
+    gate = inspect.getsource(conflicts._reviewer)
+    assert "_require_trust(tenant_id, reviewer, min_level=2)" in gate

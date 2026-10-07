@@ -763,9 +763,9 @@ async def _upsert_document_claimed(
     return out
 
 
-# NOTE: /documents/collections must be registered BEFORE /documents/{doc_id}
+# NOTE: /documents/collections must be registered BEFORE /documents/{doc_id:path}
 # because FastAPI matches in declaration order — without this ordering,
-# `GET /documents/collections` would match `/documents/{doc_id}` with
+# `GET /documents/collections` would match `/documents/{doc_id:path}` with
 # doc_id="collections" and require the `collection=` query param, returning 422.
 @router.get(
     "/documents/collections",
@@ -800,14 +800,20 @@ async def list_collections(
     )
 
 
-@router.get("/documents/{doc_id}", responses={200: {"model": DocOut}})
+# ``{doc_id:path}`` on the two by-id routes because a doc_id may contain "/":
+# ``forge/<slug>`` and ``agent/<slug>`` skills, and hierarchical ids such as
+# ``runbooks/db/failover``, which the write path accepts and storage serves.
+# The single-segment form could write those rows but never read or delete them
+# here (M-30). A guess of ``/documents/{collection}/{doc_id}`` now lands on this
+# route and is told the query parameter it is missing, instead of a 404.
+@router.get("/documents/{doc_id:path}", responses={200: {"model": DocOut}})
 async def get_document(
     doc_id: str,
     tenant_id: str = Query(...),
     collection: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Get a single document by collection + doc_id.
+    """Get a single document by collection + doc_id. ``doc_id`` may contain "/".
 
     Cross-tenant credentials may pass any ``tenant_id`` in their readable
     set; the gate widens via ``enforce_readable_tenant``. Single-tenant
@@ -937,14 +943,14 @@ async def list_documents(
     return [_dict_to_out(d) for d in docs]
 
 
-@router.delete("/documents/{doc_id}", status_code=204)
+@router.delete("/documents/{doc_id:path}", status_code=204)
 async def delete_document(
     doc_id: str,
     tenant_id: str = Query(...),
     collection: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Delete a document by collection + doc_id.
+    """Delete a document by collection + doc_id. ``doc_id`` may contain "/".
 
     Also un-mints the memory the write minted — see ``POST /documents``.
     """

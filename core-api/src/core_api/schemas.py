@@ -1314,6 +1314,15 @@ class AgentTrustUpdate(BaseModel):
     fleet_id: str | None = None
 
 
+class AgentFleetUpdate(BaseModel):
+    """``PATCH /agents/{id}/fleet``. Typed so a non-string ``fleet_id`` is a 422
+    here, not a storage failure reported as a retryable 503 (L-20)."""
+
+    model_config = STRICT_WRITE_BODY
+
+    fleet_id: str = Field(min_length=1)
+
+
 # Derived from ``SEARCH_KNOBS`` rather than written out. The fields and their
 # bounds were hand-maintained here, in the MCP ``caura_tune`` signature and in
 # the knob table, and they had already drifted: ``graph_max_hops`` was capped at 3

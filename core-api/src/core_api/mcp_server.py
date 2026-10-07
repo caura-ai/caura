@@ -2626,7 +2626,7 @@ async def caura_tune(
         if updates:
             current.update(updates)
             current = validate_search_profile(current)
-            await get_storage_client().update_search_profile(agent["id"], tenant_id, current)
+            await get_storage_client().update_search_profile(agent["agent_id"], tenant_id, current)
             await log_action(
                 tenant_id=tenant_id,
                 agent_id=agent_id,

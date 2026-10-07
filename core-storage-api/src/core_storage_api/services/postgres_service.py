@@ -7162,11 +7162,16 @@ class PostgresService:
 
         using_cursor = cursor_ts is not None and cursor_id is not None
         if using_cursor:
-            # Row-value comparison ``(created_at, id) < (cursor_ts, cursor_id)``
-            # — same form core-api's ``memory_repository.list_by_filters`` uses.
-            # ``type: ignore`` because the SQLAlchemy stubs don't model bare
-            # Python literals as ``tuple_`` args.
-            stmt = stmt.where(tuple_(Memory.created_at, Memory.id) < tuple_(cursor_ts, cursor_id))  # type: ignore[arg-type]
+            # Row-value comparison on ``(created_at, id)``, pointing the way the
+            # page is ordered, as ``memory_list_by_filters`` does: a desc page
+            # walks to older rows, an asc page to newer ones. Always ``<`` sent
+            # an asc page back the way it came (L-45). The routers refuse a
+            # cursor on any other sort. ``type: ignore`` because the SQLAlchemy
+            # stubs don't model bare Python literals as ``tuple_`` args.
+            if order == "desc":
+                stmt = stmt.where(tuple_(Memory.created_at, Memory.id) < tuple_(cursor_ts, cursor_id))  # type: ignore[arg-type]
+            else:
+                stmt = stmt.where(tuple_(Memory.created_at, Memory.id) > tuple_(cursor_ts, cursor_id))  # type: ignore[arg-type]
 
         # core-api restricts ``sort`` via a route regex, but this endpoint is
         # independently callable — allowlist the column so an unknown value
@@ -10850,7 +10855,8 @@ class PostgresService:
                 await session.flush()
             return agent, False
 
-    async def agent_delete(self, agent_id: str, tenant_id: str) -> None:
+    async def agent_delete(self, agent_id: str, tenant_id: str) -> bool:
+        """Delete one tenant's agent. ``False`` when no row matched."""
         async with get_session() as session:
             result = await session.execute(
                 select(Agent).where(
@@ -10861,6 +10867,7 @@ class PostgresService:
             agent = result.scalar_one_or_none()
             if agent is not None:
                 await session.delete(agent)
+            return agent is not None
 
     async def agent_update_trust_level(
         self,
@@ -10868,7 +10875,8 @@ class PostgresService:
         tenant_id: str,
         trust_level: int,
         fleet_id: str | None = None,
-    ) -> None:
+    ) -> bool:
+        """Set one tenant's agent's trust. ``False`` when no row matched."""
         async with get_session() as session:
             result = await session.execute(
                 select(Agent).where(
@@ -10883,13 +10891,15 @@ class PostgresService:
                     agent.fleet_id = fleet_id
                 agent.updated_at = datetime.now(UTC)
                 await session.flush()
+            return agent is not None
 
     async def agent_update_fleet(
         self,
         agent_id: str,
         tenant_id: str,
         fleet_id: str,
-    ) -> None:
+    ) -> bool:
+        """Move one tenant's agent to a fleet. ``False`` when no row matched."""
         async with get_session() as session:
             result = await session.execute(
                 select(Agent).where(
@@ -10900,6 +10910,7 @@ class PostgresService:
             agent = result.scalar_one_or_none()
             if agent is not None:
                 agent.fleet_id = fleet_id
+            return agent is not None
 
     async def agent_update_search_profile(
         self,
@@ -13176,7 +13187,9 @@ class PostgresService:
                     FleetNode.fleet_id,
                     func.sum(
                         case(
-                            (~FleetNode.node_name.startswith("_fleet_"), 1),
+                            # ``autoescape``: unescaped, ``_`` is a LIKE wildcard,
+                            # so ``xfleet1`` was counted out as a sentinel (L-53).
+                            (~FleetNode.node_name.startswith("_fleet_", autoescape=True), 1),
                             else_=0,
                         )
                     ).label("node_count"),

@@ -67,9 +67,11 @@ async def list_entities(
     entity_type: str | None = Query(default=None),
     search: str | None = Query(default=None),
     limit: int = Query(default=DEFAULT_ENTITY_LIMIT, ge=1, le=MAX_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """List all entities for a tenant.
+    """List all entities for a tenant, a page at a time: ``limit`` rows from
+    ``offset`` (L-22; without it, nothing past the first page was reachable).
 
     Reads widen across the caller's ``readable_tenant_ids`` set when the
     requested ``tenant_id`` is in that set — the same contract memory
@@ -103,6 +105,7 @@ async def list_entities(
         entity_type=entity_type,
         search=search,
         limit=limit,
+        offset=offset,
         reader=reader,
     )
 

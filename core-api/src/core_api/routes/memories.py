@@ -563,6 +563,11 @@ async def list_memories(
         if not auth.tenant_id:
             raise HTTPException(status_code=400, detail="tenant_id is required")
         tenant_id = auth.tenant_id
+    if not tenant_id:
+        # An admin naming no tenant. Storage reads one tenant here, and
+        # forwarding none came back as a 500 (audit 10/01 L-23);
+        # ``/memories/count`` below already answers this 400.
+        raise HTTPException(status_code=400, detail="tenant_id is required")
     # Visibility/fleet identity: prefer the gateway-authenticated agent over the
     # caller-supplied query param so an agent credential can't widen its view by
     # passing a peer's agent_id (which would expose that peer's scope_agent rows)
@@ -752,6 +757,11 @@ async def memory_stats(
         if not auth.tenant_id:
             raise HTTPException(status_code=400, detail="tenant_id is required")
         tenant_id = auth.tenant_id
+    if not tenant_id:
+        # An admin naming no tenant. Storage reads one tenant here, and
+        # forwarding none came back as a 500 (audit 10/01 L-23);
+        # ``/memories/count`` below already answers this 400.
+        raise HTTPException(status_code=400, detail="tenant_id is required")
 
     # ``agent_id`` is the author filter. It used to be the visibility identity
     # too, so an agent credential naming a PEER would have learned that peer's
@@ -846,12 +856,10 @@ async def memory_count(
     literal ``count`` segment resolves here instead of being parsed as a UUID
     (which previously returned a confusing 422).
     """
-    # Tenant resolution mirrors memory_stats, with one deliberate difference:
-    # count is single-tenant (count_active has no cross-tenant aggregate the way
-    # compute_memory_stats does), so a tenant_id must ALWAYS be resolvable. An
-    # admin omitting tenant_id therefore gets 400 — count_active(tenant_id=None)
-    # is meaningless to storage (the /count-active endpoint requires tenant_id) —
-    # rather than aggregating the way memory_stats does for admins.
+    # Tenant resolution mirrors memory_stats: a tenant_id must ALWAYS be
+    # resolvable, so an admin omitting it gets 400 — count_active(tenant_id=None)
+    # is meaningless to storage (the /count-active endpoint requires tenant_id).
+    # memory_stats and list_memories answer the same 400 (audit 10/01 L-23).
     if tenant_id:
         auth.enforce_readable_tenant(tenant_id)
     elif not auth.is_admin:
