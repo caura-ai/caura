@@ -1,12 +1,12 @@
 [project]
 name = "caura-bus-adapter-sdk"
-version = "0.2.0"
+version = "0.2.0"  # x-release-please-version
 description = "SDK for building caura-bus adapters: connect, subscribe, gate on idle, consume"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Caura, Inc." }]
 dependencies = [
-    "caura-bus-core",
+    "caura-bus-core==0.2.0",  # x-release-please-version
 ]
 
 [project.scripts]
@@ -14,6 +14,11 @@ caura-bus-adapter-echo = "caura_bus_adapter.echo:main"
 
 [tool.uv.sources]
 caura-bus-core = { workspace = true }
+
+[project.urls]
+Homepage = "https://github.com/caura-ai/caura/tree/main/clients/collaboration"
+Source = "https://github.com/caura-ai/caura"
+Changelog = "https://github.com/caura-ai/caura/blob/main/clients/collaboration/CHANGELOG.md"
 
 [build-system]
 requires = ["setuptools>=75"]

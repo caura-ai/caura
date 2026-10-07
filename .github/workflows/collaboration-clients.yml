@@ -23,3 +23,8 @@ jobs:
           uv run --no-sync ruff format --check .
           uv run --no-sync pytest --cov=caura_bus_core --cov=caura_bus_mcp --cov=caura_bus_cli --cov=caura_bus_adapter --cov-fail-under=70
           uv build --all-packages
+      # The built wheels must install together and run without this source
+      # tree: exact intra-family pins, pip check, import origin, entrypoints.
+      - name: Clean artifact install
+        working-directory: clients/collaboration
+        run: python3 -I scripts/verify_dist.py dist
