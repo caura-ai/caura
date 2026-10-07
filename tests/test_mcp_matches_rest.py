@@ -7,23 +7,25 @@ L-09 sits with the other route-level checks in tests/test_route_authz_gaps.py.
 
 from __future__ import annotations
 
+import itertools
 import json
+import time
 import uuid
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
 
-from core_api import mcp_server
+from core_api import _standalone_state, mcp_server
 from core_api.config import settings
 from core_api.routes import documents as documents_route
 from core_api.tools import REGISTRY
 from tests._mcp_test_helpers import (
     is_error_envelope,
     parse_envelope,
-    strip_latency,
     stub_storage_client,
 )
+from tests._scoped_module import scoped
 from tests.test_mcp_gateway_secret import _SHARED_KEY_FIELD, _call_middleware
 
 pytestmark = pytest.mark.unit
@@ -75,6 +77,9 @@ async def test_l101_standalone_keeps_its_single_identity(monkeypatch):
     monkeypatch.setattr(settings, _SHARED_KEY_FIELD, "sh4red")
     monkeypatch.setattr(settings, "gateway_shared_secret", None)
     monkeypatch.setattr(settings, "is_standalone", True)
+    # What init_standalone() sets at startup. Without it this test passed only
+    # after another module's fixture had initialised standalone mode.
+    monkeypatch.setattr(_standalone_state, "standalone_tenant_id", "default")
 
     app_called, _ = await _call_middleware([(b"x-api-key", b"sh4red")])
 
@@ -102,6 +107,12 @@ async def test_l102_a_refused_recall_is_not_charged(mcp_env, monkeypatch):
 
 
 async def test_l103_a_keyed_write_replays_on_retry(mcp_env, monkeypatch):
+    # The clock moves on further at each reading, so the two calls answer with
+    # different ``_latency_ms``, as they can by chance. The replay must match
+    # the first answer apart from it.
+    readings = itertools.count()
+    clock = scoped(time, perf_counter=lambda: next(readings) ** 2 / 1000)
+    monkeypatch.setattr(mcp_server, "time", clock)
     sc = stub_storage_client(
         monkeypatch,
         get_idempotency=None,
@@ -127,7 +138,8 @@ async def test_l103_a_keyed_write_replays_on_retry(mcp_env, monkeypatch):
     second = await mcp_server.caura_write(content="hello", metadata=metadata)
 
     assert create.await_count == 1
-    assert strip_latency(second) == strip_latency(first)
+    assert json.loads(second)["_latency_ms"] != json.loads(first)["_latency_ms"]
+    assert parse_envelope(second) == parse_envelope(first)
 
 
 # --- L-104: reading a profile needs no write scope; reset clears it --------------
