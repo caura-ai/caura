@@ -4838,10 +4838,12 @@ class PostgresService:
     ) -> list[Memory]:
         """Find active memories sharing entities with the given memory by entity name.
 
-        Joins through Entity.canonical_name to find overlap. When fleet_id is
-        provided, candidates are scoped to the same fleet. ``visibility``
-        scopes candidates to the writer's visibility tier so a scope_org
-        write can't be linked into a scope_team chain (and vice versa).
+        Joins through Entity.canonical_name to find overlap. Candidates are
+        scoped to the memory's fleet, and a memory with no fleet (``None`` or
+        ``''``) meets fleet-less rows only, as in the RDF and semantic finders
+        (L-147). ``visibility`` scopes candidates to the writer's visibility
+        tier so a scope_org write can't be linked into a scope_team chain (and
+        vice versa).
 
         ``include_supersedes`` (A4 #11): when True, also return the
         ``conflicted`` row that ``memory_id``'s chain points at — i.e.
@@ -4930,7 +4932,11 @@ class PostgresService:
                     # write into a row the writer cannot read. Wet-proven, not
                     # theoretical. Pin the owner for that tier.
                     *([Memory.agent_id == agent_id] if visibility == "scope_agent" and agent_id else []),
-                    *([Memory.fleet_id == fleet_id] if fleet_id else []),
+                    # L-147 — the same fleet grouping as the RDF and semantic
+                    # finders. A memory with no fleet used to meet every fleet's
+                    # rows here, and Path C then demoted and linked rows of fleets
+                    # its writer may not read (M-124).
+                    _fleet_scope(Memory.fleet_id, fleet_id),
                 )
                 .group_by(Memory.id)
                 .order_by(func.count(func.distinct(other_ent.c.canonical_name)).desc())

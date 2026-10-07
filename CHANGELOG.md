@@ -10,6 +10,20 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.26.2](https://github.com/caura-ai/caura/compare/backend-v3.26.1...backend-v3.26.2) (2026-10-07)
+
+
+### Bug Fixes
+
+* **contradiction:** Path C keeps a memory with no fleet among fleet-less memories (L-147) ([ae5d7e4](https://github.com/caura-ai/caura/commit/ae5d7e472898837e970334c9b26fcd3dd3c2b70e))
+* **memories:** contradictions and lineage show only linked memories the caller may read (M-124) ([ae5d7e4](https://github.com/caura-ai/caura/commit/ae5d7e472898837e970334c9b26fcd3dd3c2b70e))
+* **memories:** keep a write a person turned down out of every read ([#1975](https://github.com/caura-ai/caura/issues/1975)) ([f0dc968](https://github.com/caura-ai/caura/commit/f0dc968b604aa0ad84f918737dfc61359254b267))
+
+
+### Dependencies
+
+* **docker:** bump datadog/serverless-init from `f494334` to `161423d` in /core-storage-api ([#1851](https://github.com/caura-ai/caura/issues/1851)) ([ffa0208](https://github.com/caura-ai/caura/commit/ffa02086ec3959cf94bac28eca4719207ec3d9fe))
+
 ## [3.26.1](https://github.com/caura-ai/caura/compare/backend-v3.26.0...backend-v3.26.1) (2026-10-07)
 
 
