@@ -57,3 +57,18 @@ structlog>=26.1.0,<27
 # extra on each service, e.g. `pip install 'core-api[pubsub]'`. The
 # lazy import in common/events/pubsub.py keeps the rest of the code
 # loadable without the SDK.
+
+# Declared by core-api/pyproject.toml and missing here, so the manual install
+# (AGENT-INSTALL.md Option B) could not import core_api.app (M-71). Ranges
+# match the service's; tests/test_manual_install_path_runs_the_services.py
+# fails when this file falls behind either service again.
+# Document chunking, imported at startup.
+markdown-it-py>=4.0,<5
+tiktoken>=0.10,<1
+pysbd>=0.3,<1
+# The insights discover mode.
+numpy>=2.0,<3
+# FastAPI's UploadFile and Form support.
+python-multipart>=0.0.20,<1
+# SQLAlchemy[asyncio]'s greenlet, capped as the services cap it.
+greenlet<3.6.0

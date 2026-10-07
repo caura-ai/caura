@@ -62,6 +62,10 @@ FROZEN_PLUGIN_ID = (
     "memclaw"  # legacy-name-ok: existing on-disk plugin and skill identifier
 )
 
+# ``plugin/tools.json`` in the checkout this script runs from, for a host whose
+# installed plugin has no copy.
+_REPO_TOOLS_JSON = Path(__file__).resolve().parents[1] / "plugin" / "tools.json"
+
 
 class GatewayIntegrationTest:
     def __init__(
@@ -77,7 +81,7 @@ class GatewayIntegrationTest:
         json_output: bool = False,
     ):
         self.base = base_url.rstrip("/")
-        self.api = f"{self.base}/api"
+        self.api = f"{self.base}/api/v1"
         self.api_key = api_key
         self.tenant_id = tenant_id
         self.node_name = node_name
@@ -341,6 +345,17 @@ class GatewayIntegrationTest:
             f"allow={allow}",
         )
 
+    def _plugin_exposed_tools(self) -> list[str]:
+        """The tools the plugin registers, which install adds to ``tools.alsoAllow``:
+        the ``plugin_exposed`` entries of ``tools.json``, the plugin's source of truth.
+        The installed plugin's copy first, then the checkout's.
+        """
+        for path in (self.plugin_dir / "tools.json", _REPO_TOOLS_JSON):
+            if path.exists():
+                specs = json.loads(path.read_text())
+                return [t["name"] for t in specs if t.get("plugin_exposed")]
+        return []
+
     def test_openclaw_config_tools(self):
         """Verify all Caura tools are in tools.alsoAllow."""
         config_path = Path(self.openclaw_dir) / "openclaw.json"
@@ -349,20 +364,10 @@ class GatewayIntegrationTest:
             return
         config = json.loads(config_path.read_text())
         also_allow = config.get("tools", {}).get("alsoAllow", [])
-        expected_tools = [
-            "caura_recall",
-            "caura_write",
-            "caura_manage",
-            "caura_doc",
-            "caura_list",
-            "caura_entity_get",
-            "caura_tune",
-            "caura_insights",
-            "caura_evolve",
-            "caura_stats",
-            "caura_keystones",
-            "caura_keystones_set",
-        ]
+        expected_tools = self._plugin_exposed_tools()
+        if not expected_tools:
+            self.skip("OpenClaw config: tools", "tools.json not found")
+            return
         missing = [t for t in expected_tools if t not in also_allow]
         self.check(
             f"OpenClaw config: all {len(expected_tools)} tools allowed",
@@ -818,8 +823,7 @@ class GatewayIntegrationTest:
         if r.status_code != 200:
             return
 
-        data = r.json()
-        results = data if isinstance(data, list) else data.get("results", [])
+        results = r.json().get("items", [])
         self.check(
             "Context engine: search returns results",
             len(results) > 0,
@@ -904,11 +908,7 @@ class GatewayIntegrationTest:
             },
         )
         if r2.status_code == 200:
-            results = (
-                r2.json()
-                if isinstance(r2.json(), list)
-                else r2.json().get("results", [])
-            )
+            results = r2.json().get("items", [])
             found = any(unique in (m.get("content", "") or "") for m in results)
             self.check(
                 "afterTurn: episode retrievable via search",

@@ -289,20 +289,38 @@ export async function resolveTenantId(): Promise<string> {
   return "";
 }
 
+/**
+ * M-69: how long a failed ``ensureTenantId`` is remembered, process-wide.
+ * Every lifecycle hook awaits it, and against a half-open backend one
+ * resolution takes about 54s: four attempts at TENANT_RESOLVE_TIMEOUT_MS
+ * plus 2s/4s/8s of backoff. A failure used to clear the memoized promise
+ * and nothing else, so the next turn paid the whole loop again. Within the
+ * cooldown a turn now fails at once with the same error, and the first turn
+ * after it resolves afresh.
+ */
+const TENANT_FAILURE_COOLDOWN_MS = 30_000;
+
+const TENANT_RESOLVE_FAILED =
+  "Caura: Failed to resolve tenant_id from API key. Set CAURA_TENANT_ID in .env.";
+
 let _tenantPromise: Promise<string> | null = null;
+let _tenantFailedAt: number | null = null;
 
 export async function ensureTenantId(): Promise<string> {
   if (CAURA_TENANT_ID) return CAURA_TENANT_ID;
   if (!_tenantPromise) {
+    if (_tenantFailedAt !== null && Date.now() - _tenantFailedAt < TENANT_FAILURE_COOLDOWN_MS) {
+      throw new Error(TENANT_RESOLVE_FAILED);
+    }
     _tenantPromise = resolveTenantId();
   }
   const tid = await _tenantPromise;
   if (!tid) {
     _tenantPromise = null;
-    throw new Error(
-      "Caura: Failed to resolve tenant_id from API key. Set CAURA_TENANT_ID in .env.",
-    );
+    _tenantFailedAt = Date.now();
+    throw new Error(TENANT_RESOLVE_FAILED);
   }
+  _tenantFailedAt = null;
   return tid;
 }
 

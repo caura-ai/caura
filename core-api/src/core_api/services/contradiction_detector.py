@@ -19,6 +19,7 @@ import re
 import time
 import traceback
 import uuid as _uuid
+from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Any, NamedTuple
@@ -178,6 +179,39 @@ def _pick_older(a: dict, b: dict) -> dict:
     # Return ``a`` by convention; callers should not pass the same
     # row on both sides in production, but tests do for invariants.
     return a
+
+
+async def revert_unheld_loser(sc, tenant_id: str, loser: dict, *, ignore: Callable[[dict], bool]) -> bool:
+    """Revert a verdict's ``loser`` to ``active`` when nothing else holds it (M-34).
+
+    Held means a row's ``supersedes_id`` points at it, or a ``memory_conflicts``
+    record that is not dismissed says it lost to a live, newer row. ``ignore``
+    sets aside the records of the verdict being undone. The loser is then read
+    again, last, and reverted only if detection's status is still on it. Every
+    read goes to the writer, because each decides the write after it. Returns
+    whether the row was reverted; a storage error is raised.
+
+    One rule for the three ways a verdict no chain edge records is undone: a
+    dismissal of its record (``routes/conflicts.py``, caura PR #1885), a content
+    edit of its winner (``memory_service._revert_unlinked_losers``) and Path C's
+    retraction (``_retract_unlinked_verdicts``).
+    """
+    loser_id = str(loser["id"])
+    if await sc.find_by_supersedes_id(tenant_id, loser_id, read=False):
+        return False
+    for record in await sc.list_memory_conflicts(tenant_id, limit=200, memory_id=loser_id, read=False):
+        if record.get("review_status") == "dismissed" or ignore(record):
+            continue
+        new_side, old_side = str(record.get("new_memory_id")), str(record.get("old_memory_id"))
+        rival = await sc.get_memory(old_side if new_side == loser_id else new_side, tenant_id, read=False)
+        if rival and rival.get("deleted_at") is None and _pick_older(loser, rival) is loser:
+            logger.info("%s stays demoted: conflict %s still holds it", loser_id, record.get("id"))
+            return False
+    fresh = await sc.get_memory(loser_id, tenant_id, read=False)
+    if not fresh or fresh.get("deleted_at") is not None or fresh.get("status") not in CONTRADICTED_STATUSES:
+        return False
+    await sc.update_memory_status(loser_id, "active", tenant_id=tenant_id)
+    return True
 
 
 def _merge_status_update(acc: dict[str, dict], row: dict) -> None:
@@ -2628,6 +2662,127 @@ def _rdf_pass_would_mark(new_memory: dict, other: dict, *, other_is_loser: bool)
     return other_value is not None and _rdf_object_key(value) != _rdf_object_key(other_value)
 
 
+async def _retraction_judge_clears(
+    sc, winner: dict, loser: dict, tenant_config, *, tenant_id: str, memory_id, candidate_id
+) -> float | None:
+    """The retraction judge on ``winner`` against ``loser``: its confidence when it
+    clears the verdict, or None when the verdict stands.
+
+    Clearing means "no contradiction" at ``RETRACTION_CONFIDENCE_THRESHOLD`` or
+    above, judged with both rows' resolved entity context. ``memory_id`` and
+    ``candidate_id`` are what the log lines name. Shared by the edge's pair
+    (``_attempt_entity_retraction``) and the pairs no edge records
+    (``_retract_unlinked_verdicts``).
+    """
+    new_content = winner.get("content", "") or ""
+    old_content = loser.get("content", "") or ""
+
+    # CAURA-129 — fetch resolved entity context for BOTH memories. If
+    # either side has no resolved entities, the entity-aware judge has
+    # nothing to ground same_subject on, and we'd degenerate to the
+    # CAURA-128 pre-fix state (same prompt + same inputs as Path A,
+    # stochastically flipping). Empty on either side → skip retraction;
+    # Path A's verdict stands. This is correct for the common case (the
+    # entity-extraction worker that *enqueued* Path C populates the
+    # links by definition), and conservative for the edge case
+    # (degenerate inputs / extractor failure).
+    # Wrap the fetch in ``asyncio.wait_for`` so a hung storage
+    # round-trip cannot block Path C indefinitely (mirrors the LLM
+    # call's cancellation boundary below). On failure (timeout,
+    # network, storage error), treat as "no context, leave Path A
+    # alone" rather than retrying. See ``_CONTEXT_FETCH_TIMEOUT_SECONDS``
+    # for the timeout rationale (CAURA-134).
+    winner_id = str(winner.get("id"))
+    loser_id = str(loser.get("id"))
+    try:
+        # One batched fetch for BOTH sides rather than two parallel
+        # per-memory fetches: same contexts, two round-trips instead of
+        # 2 + one per link on each side. See ``_fetch_entity_contexts``.
+        ctx_by_memory = await asyncio.wait_for(
+            _fetch_entity_contexts(sc, [winner_id, loser_id], tenant_id),
+            timeout=_CONTEXT_FETCH_TIMEOUT_SECONDS,
+        )
+        new_entities = ctx_by_memory.get(winner_id, [])
+        old_entities = ctx_by_memory.get(loser_id, [])
+    except Exception as e:
+        # CAURA-134 — include exception class name in the log. The
+        # default str(e) is empty for ``asyncio.TimeoutError``, which
+        # made the old "failed: . Path A's verdict stands." message
+        # un-diagnosable; the class name disambiguates timeouts from
+        # network errors from malformed responses.
+        #
+        # No symmetric INFO line here: the retraction path has no
+        # success-side ``context_fetched`` INFO to mirror (unlike the
+        # detection path, which emits one on the happy path for GCP
+        # metric parity). A redundant failure-only INFO would skew
+        # any retraction-path success/failure counter built from
+        # ``context_fetched`` / ``context_fetch_failed`` pairs.
+        logger.warning(
+            "PATH_C_RETRACTION context_fetch_failed memory=%s candidate=%s "
+            "exc_type=%s exc=%s. Path A's verdict stands.",
+            memory_id,
+            candidate_id,
+            type(e).__name__,
+            e,
+        )
+        return None
+
+    if not new_entities or not old_entities:
+        logger.info(
+            "Path C retraction skipped — empty entity context for "
+            "memory %s (new_n=%d cand_n=%d). Path A's verdict stands.",
+            memory_id,
+            len(new_entities),
+            len(old_entities),
+        )
+        return None
+
+    # No outer ``wait_for`` (L-179): ``call_with_fallback`` bounds each attempt,
+    # and a 10 s cut here cancelled a hanging primary before its retry or the
+    # fallback provider could run.
+    try:
+        verdict, confidence = await _llm_entity_aware_contradiction_check(
+            new_content, old_content, new_entities, old_entities, tenant_config
+        )
+    except Exception as e:
+        # CAURA-134 — include the exception class name and use the
+        # grep-friendly ``PATH_C_RETRACTION judge_failed`` prefix.
+        # str(e) is empty for ``asyncio.TimeoutError``, which was the
+        # silent failure mode masked by the prior log shape.
+        logger.warning(
+            "PATH_C_RETRACTION judge_failed memory=%s candidate=%s exc_type=%s exc=%s",
+            memory_id,
+            candidate_id,
+            type(e).__name__,
+            e,
+        )
+        return None
+
+    if verdict:
+        # Judge agrees with Path A — real contradiction, leave it.
+        return None
+    if confidence < RETRACTION_CONFIDENCE_THRESHOLD:
+        # Below the CAURA-128 floor (0.90). Covers gate-1 (0.60, the
+        # stochastic-flip case where parser overrode ``contradicts=True
+        # same_subject=False`` to False), gate-2 (0.85, single-gate
+        # ``non_conflict_reason``), and the malformed / no-LLM-abstain
+        # case (0.50). None are trustworthy enough on their own —
+        # the judge call is the same prompt + same inputs as Path A's
+        # semantic judge, so a single-gate disagreement is just an
+        # independent LLM roll flipping. Leave Path A's verdict in
+        # place until the deeper entity-aware-prompt fix lands.
+        logger.info(
+            "Path C retraction skipped low-confidence verdict for memory %s "
+            "candidate %s (confidence=%.2f < threshold=%.2f)",
+            memory_id,
+            candidate_id,
+            confidence,
+            RETRACTION_CONFIDENCE_THRESHOLD,
+        )
+        return None
+    return confidence
+
+
 async def _attempt_entity_retraction(
     sc,
     new_memory: dict,
@@ -2769,111 +2924,16 @@ async def _attempt_entity_retraction(
     # made the flipped branch compare the loser with itself, which the judge
     # answers "no contradiction" at 0.90 -- enough to retract every flipped
     # verdict it reached.
-    new_content = edge_owner.get("content", "") or ""
-    old_content = candidate.get("content", "") or ""
-
-    # CAURA-129 — fetch resolved entity context for BOTH memories. If
-    # either side has no resolved entities, the entity-aware judge has
-    # nothing to ground same_subject on, and we'd degenerate to the
-    # CAURA-128 pre-fix state (same prompt + same inputs as Path A,
-    # stochastically flipping). Empty on either side → skip retraction;
-    # Path A's verdict stands. This is correct for the common case (the
-    # entity-extraction worker that *enqueued* Path C populates the
-    # links by definition), and conservative for the edge case
-    # (degenerate inputs / extractor failure).
-    # Wrap the fetch in ``asyncio.wait_for`` so a hung storage
-    # round-trip cannot block Path C indefinitely (mirrors the LLM
-    # call's cancellation boundary below). On failure (timeout,
-    # network, storage error), treat as "no context, leave Path A
-    # alone" rather than retrying. See ``_CONTEXT_FETCH_TIMEOUT_SECONDS``
-    # for the timeout rationale (CAURA-134).
-    owner_id = str(edge_owner.get("id"))
-    candidate_id = str(candidate.get("id"))
-    try:
-        # One batched fetch for BOTH sides rather than two parallel
-        # per-memory fetches: same contexts, two round-trips instead of
-        # 2 + one per link on each side. See ``_fetch_entity_contexts``.
-        ctx_by_memory = await asyncio.wait_for(
-            _fetch_entity_contexts(sc, [owner_id, candidate_id], retraction_tenant_id),
-            timeout=_CONTEXT_FETCH_TIMEOUT_SECONDS,
-        )
-        new_entities = ctx_by_memory.get(owner_id, [])
-        old_entities = ctx_by_memory.get(candidate_id, [])
-    except Exception as e:
-        # CAURA-134 — include exception class name in the log. The
-        # default str(e) is empty for ``asyncio.TimeoutError``, which
-        # made the old "failed: . Path A's verdict stands." message
-        # un-diagnosable; the class name disambiguates timeouts from
-        # network errors from malformed responses.
-        #
-        # No symmetric INFO line here: the retraction path has no
-        # success-side ``context_fetched`` INFO to mirror (unlike the
-        # detection path, which emits one on the happy path for GCP
-        # metric parity). A redundant failure-only INFO would skew
-        # any retraction-path success/failure counter built from
-        # ``context_fetched`` / ``context_fetch_failed`` pairs.
-        logger.warning(
-            "PATH_C_RETRACTION context_fetch_failed memory=%s candidate=%s "
-            "exc_type=%s exc=%s. Path A's verdict stands.",
-            new_memory.get("id"),
-            candidate.get("id"),
-            type(e).__name__,
-            e,
-        )
-        return False
-
-    if not new_entities or not old_entities:
-        logger.info(
-            "Path C retraction skipped — empty entity context for "
-            "memory %s (new_n=%d cand_n=%d). Path A's verdict stands.",
-            new_memory.get("id"),
-            len(new_entities),
-            len(old_entities),
-        )
-        return False
-
-    # No outer ``wait_for`` (L-179): ``call_with_fallback`` bounds each attempt,
-    # and a 10 s cut here cancelled a hanging primary before its retry or the
-    # fallback provider could run.
-    try:
-        verdict, confidence = await _llm_entity_aware_contradiction_check(
-            new_content, old_content, new_entities, old_entities, tenant_config
-        )
-    except Exception as e:
-        # CAURA-134 — include the exception class name and use the
-        # grep-friendly ``PATH_C_RETRACTION judge_failed`` prefix.
-        # str(e) is empty for ``asyncio.TimeoutError``, which was the
-        # silent failure mode masked by the prior log shape.
-        logger.warning(
-            "PATH_C_RETRACTION judge_failed memory=%s candidate=%s exc_type=%s exc=%s",
-            new_memory.get("id"),
-            candidate.get("id"),
-            type(e).__name__,
-            e,
-        )
-        return False
-
-    if verdict:
-        # Judge agrees with Path A — real contradiction, leave it.
-        return False
-    if confidence < RETRACTION_CONFIDENCE_THRESHOLD:
-        # Below the CAURA-128 floor (0.90). Covers gate-1 (0.60, the
-        # stochastic-flip case where parser overrode ``contradicts=True
-        # same_subject=False`` to False), gate-2 (0.85, single-gate
-        # ``non_conflict_reason``), and the malformed / no-LLM-abstain
-        # case (0.50). None are trustworthy enough on their own —
-        # the judge call is the same prompt + same inputs as Path A's
-        # semantic judge, so a single-gate disagreement is just an
-        # independent LLM roll flipping. Leave Path A's verdict in
-        # place until the deeper entity-aware-prompt fix lands.
-        logger.info(
-            "Path C retraction skipped low-confidence verdict for memory %s "
-            "candidate %s (confidence=%.2f < threshold=%.2f)",
-            new_memory.get("id"),
-            candidate.get("id"),
-            confidence,
-            RETRACTION_CONFIDENCE_THRESHOLD,
-        )
+    confidence = await _retraction_judge_clears(
+        sc,
+        edge_owner,
+        candidate,
+        tenant_config,
+        tenant_id=retraction_tenant_id,
+        memory_id=new_memory.get("id"),
+        candidate_id=candidate.get("id"),
+    )
+    if confidence is None:
         return False
 
     # Two-step retraction via A4 #10. Each write is scoped to the HOME tenant
@@ -2957,6 +3017,87 @@ async def _attempt_entity_retraction(
         confidence,
     )
     return True
+
+
+#: M-34 — the most verdicts without a chain edge one Path C run re-judges (owner
+#: decision 2026-10-07). Each costs one judge call, and only a detection run that
+#: marked two or more rows leaves any.
+_UNLINKED_RETRACTION_CAP = 3
+
+
+async def _retract_unlinked_verdicts(sc, new_memory: dict, tenant_config) -> int:
+    """Re-judge the verdicts ``new_memory``'s detection recorded without a chain edge (M-34).
+
+    ``_attempt_entity_retraction`` follows the edge, and a winner wires its one
+    ``supersedes_id`` to its first loser only. Every other loser of the run is
+    known only from its ``memory_conflicts`` record (caura PR #1815), so a wrong
+    verdict on one was left for a person to dismiss. Each record this memory's
+    detection wrote whose pair no edge joins, and whose loser detection's status
+    is still on, is re-judged as the edge's pair is, at most
+    ``_UNLINKED_RETRACTION_CAP`` per run. A loser the judge clears is reverted
+    when nothing else holds it (``revert_unheld_loser``). Records stay as they
+    are, as on the edge path. Returns how many rows were reverted. A storage
+    failure is logged and ends the phase, leaving the remaining verdicts as they
+    stand.
+    """
+    if tenant_config is not None and not getattr(tenant_config, "retraction_enabled", True):
+        return 0
+    tenant_id = str(new_memory["tenant_id"])
+    new_id = str(new_memory.get("id"))
+    judged = reverted = 0
+    try:
+        for record in await sc.list_memory_conflicts(tenant_id, limit=200, memory_id=new_id, read=False):
+            if str(record.get("new_memory_id")) != new_id or record.get("review_status") == "dismissed":
+                continue
+            other = await sc.get_memory(str(record.get("old_memory_id")), tenant_id, read=False)
+            if not other or other.get("deleted_at") is not None or str(other.get("id")) == new_id:
+                continue
+            other_id = str(other.get("id"))
+            # An edge joins the pair: ``_attempt_entity_retraction`` judged it.
+            if other_id == str(new_memory.get("supersedes_id") or ""):
+                continue
+            if new_id == str(other.get("supersedes_id") or ""):
+                continue
+            loser = _pick_older(new_memory, other)
+            if loser.get("status") not in CONTRADICTED_STATUSES:
+                continue
+            # L-27, as on the edge path: the RDF pass that follows would mark it again.
+            if _rdf_pass_would_mark(new_memory, other, other_is_loser=loser is other):
+                continue
+            if judged == _UNLINKED_RETRACTION_CAP:
+                logger.info(
+                    "PATH_C_RETRACTION unlinked_cap_reached memory=%s cap=%d",
+                    new_id,
+                    _UNLINKED_RETRACTION_CAP,
+                )
+                break
+            judged += 1
+            confidence = await _retraction_judge_clears(
+                sc,
+                other if loser is new_memory else new_memory,
+                loser,
+                tenant_config,
+                tenant_id=tenant_id,
+                memory_id=new_id,
+                candidate_id=other_id,
+            )
+            if confidence is None:
+                continue
+            this_record = str(record.get("id"))
+            reverted_one = await revert_unheld_loser(
+                sc, tenant_id, loser, ignore=lambda r: str(r.get("id")) == this_record
+            )
+            if reverted_one:
+                reverted += 1
+                logger.info(
+                    "Path C retracted an unlinked verdict for memory %s: %s reverted (confidence=%.2f)",
+                    new_id,
+                    loser.get("id"),
+                    confidence,
+                )
+    except Exception:
+        logger.warning("PATH_C_RETRACTION unlinked_failed memory=%s", new_id, exc_info=True)
+    return reverted
 
 
 # ---------------------------------------------------------------------------
@@ -3051,6 +3192,13 @@ async def detect_contradictions_by_entities_async(
             n_retractions = 1
             # The new memory's ``supersedes_id`` was just cleared.
             # Re-fetch so the detection phase below sees the fresh state.
+            refreshed = await sc.get_memory(str(memory_id), tenant_id)
+            if refreshed and refreshed.get("deleted_at") is None:
+                new_memory = refreshed
+        # M-34 — then the verdicts it recorded without an edge, which the call
+        # above cannot reach. One may have reverted the new memory itself.
+        if unlinked := await _retract_unlinked_verdicts(sc, new_memory, tenant_config):
+            n_retractions += unlinked
             refreshed = await sc.get_memory(str(memory_id), tenant_id)
             if refreshed and refreshed.get("deleted_at") is None:
                 new_memory = refreshed

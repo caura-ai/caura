@@ -613,17 +613,21 @@ Tags follow SemVer with floating aliases — `:v1`, `:v1.0`, `:v1.0.0`, plus `:l
 
 ### Manual deployment (without Docker)
 
-The `core-api/` service is a standard FastAPI app that runs under any ASGI server (uvicorn, hypercorn). Requirements:
+Caura is two FastAPI services, and both run under any ASGI server (uvicorn, hypercorn). `core-storage-api` owns the database and applies the migrations when it starts. `core-api` serves the REST and MCP API and reaches the database only through it. Requirements:
 
 - Python 3.12+
-- PostgreSQL 16+ with the `pgvector` extension
+- PostgreSQL 16+ with the `pgvector` extension, for `core-storage-api`
 - Redis (optional — falls back to in-memory cache if unavailable)
+
+Both services need the same non-empty `CORE_STORAGE_SHARED_SECRET`, and core-api refuses to start without it. Point core-api at the storage service with `CORE_STORAGE_API_URL` (default `http://localhost:8002`). [AGENT-INSTALL.md, Option B](AGENT-INSTALL.md#option-b-manual-no-docker) walks through the whole install, `pip install -r requirements.txt` included.
 
 Export `.env` into the process environment before starting each service. The services load their own settings from `.env`, but some knobs are read from the environment only: the embedder (`OPENAI_EMBEDDING_*`, `EMBEDDING_QUERY_INSTRUCTION`), the reranker (`RANK_*`) and the provider model overrides (`*_DEFAULT_MODEL`). `.env.example` marks those blocks "env-only". Compose's `env_file:` puts them in the environment; a bare uvicorn run does not. An exported value takes precedence over `.env`, so export again after editing it. Sourcing hands every line to the shell, so wrap any value that contains spaces, quotes or shell characters such as `$`, `&`, `;` or backticks (a password, say) in single quotes. Otherwise the shell mangles it, and the mangled value overrides the one in `.env`.
 
 ```bash
 set -a; . ./.env; set +a
-uvicorn core_api.app:app --host 0.0.0.0 --port 8000 --workers 2
+PYTHONPATH=.:core-storage-api/src uvicorn core_storage_api.app:app --host 127.0.0.1 --port 8002
+# Then, in a second shell with the same .env exported:
+PYTHONPATH=.:core-api/src uvicorn core_api.app:app --host 0.0.0.0 --port 8000 --workers 2
 ```
 
 ### Deployment topologies

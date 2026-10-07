@@ -222,6 +222,8 @@ directly. A complete `ALLOYDB_HOST`, `ALLOYDB_USER`, `ALLOYDB_PASSWORD`, and
 | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | local PostgreSQL defaults | Inputs used by migration/dev helpers; the stock Compose file hardcodes its container connection values |
 | `DATABASE_URL` | local PostgreSQL URL | Storage-service primary connection URL; set directly outside the stock Compose deployment |
 | `READ_DATABASE_URL` | *(empty)* | Optional storage-service read-replica URL |
+| `CORE_STORAGE_API_URL` | `http://localhost:8002` | Where core-api reaches the storage service (its writer, when the storage layer is split) |
+| `CORE_STORAGE_SHARED_SECRET` | *(empty)* | Secret core-api and every storage caller send as `X-Storage-Secret`. Required: core-api refuses to start without it, and storage rejects a request without it. Docker Compose generates one; `CORE_STORAGE_SHARED_SECRET_FILE` reads it from a file instead |
 | `ADMIN_API_KEY` | *(empty)* | Admin API key — bypasses tenant enforcement |
 | `ADMIN_API_KEY_FILE` | *(empty)* | File holding the admin key, read only while `ADMIN_API_KEY` is blank. Docker Compose sets it to a key `admin-key-init` generates for the bundled scheduler |
 | `CAURA_API_KEY` | *(empty)* | Shared perimeter key for a network-exposed OSS deployment |

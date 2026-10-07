@@ -26,7 +26,12 @@ _REPO = pathlib.Path(__file__).resolve().parents[1]
 _SCRIPTS = _REPO / "scripts"
 
 # Scripts that build a versioned base URL and hang paths off it.
-_API_SCRIPTS = ("latency_test.py", "hyperagent_test.py", "gateway_integration_test.py")
+_API_SCRIPTS = (
+    "latency_test.py",
+    "hyperagent_test.py",
+    "gateway_integration_test.py",
+    "smoke_test.py",
+)
 
 # Paths a script calls deliberately that THIS app does not serve. Each entry is
 # a statement about the deployment the script targets, not an exemption:
@@ -62,10 +67,16 @@ def test_the_spec_and_the_scan_both_see_something() -> None:
         )
 
 
+# A base ending in ``/api``: ``f"{url.rstrip('/')}/api"`` on one line, or
+# ``f"{self.base}/api"`` after a ``self.base = url.rstrip("/")`` on the line before
+# it, which is how ``gateway_integration_test`` built one that every call 404'd on.
+_UNVERSIONED_BASE = re.compile(r"""\}/api["']""")
+
+
 @pytest.mark.parametrize("script", _API_SCRIPTS)
 def test_no_script_builds_an_unversioned_api_base(script: str) -> None:
     text = (_SCRIPTS / script).read_text()
-    assert not re.search(r"""rstrip\(['"]/['"]\)\}/api["']""", text), (
+    assert not _UNVERSIONED_BASE.search(text), (
         f"{script} builds an unversioned /api base; every router is mounted under /api/v1"
     )
 

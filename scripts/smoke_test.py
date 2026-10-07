@@ -14,6 +14,7 @@ import json
 import sys
 import time
 import uuid
+from pathlib import Path
 
 import httpx
 
@@ -23,6 +24,24 @@ DEFAULT_URL = "http://localhost:8000"
 TENANT = f"smoke-test-{uuid.uuid4().hex[:8]}"
 AGENT = "smoke-agent"
 TIMEOUT = 30.0
+# The tool registry's mirror in this checkout.
+_TOOLS_JSON = Path(__file__).resolve().parents[1] / "plugin" / "tools.json"
+
+
+def _search_items(resp: httpx.Response) -> list[dict]:
+    """The memories a ``/search`` response returned: its ``items``.
+
+    Empty for anything but a 200, so a failed search reads as one that found
+    nothing.
+    """
+    if resp.status_code != 200:
+        return []
+    body = resp.json()
+    return body.get("items", []) if isinstance(body, dict) else []
+
+
+def _ids(memories: list[dict]) -> list:
+    return [m.get("id") for m in memories]
 
 
 def _retry_until(fn, *, predicate, interval=0.5, max_wait=10.0):
@@ -149,11 +168,8 @@ class SmokeTest:
             self.test_fleet_heartbeat,
             self.test_graph_endpoint,
             self.test_entity_list,
-            self.test_usage,
-            self.test_usage_history,
             self.test_audit_log,
             self.test_settings,
-            self.test_auth_verify,
             self.test_mcp_initialize,
             # ── Document store ──
             self.test_document_store,
@@ -164,7 +180,6 @@ class SmokeTest:
             self.test_invalid_memory_id_format,
             # ── Optional / feature-gated ──
             self.test_soft_delete,
-            self.test_demo_token,
         ]
 
         for test_fn in tests:
@@ -287,18 +302,8 @@ class SmokeTest:
         """GET /api/tool-descriptions returns all canonical tool descriptions."""
         r = self.client.get(f"{self.api}/tool-descriptions")
         data = r.json()
-        expected_tools = {
-            "caura_recall",
-            "caura_write",
-            "caura_manage",
-            "caura_list",
-            "caura_doc",
-            "caura_entity_get",
-            "caura_tune",
-            "caura_insights",
-            "caura_evolve",
-            "caura_stats",
-        }
+        # Every tool the registry defines, which ``plugin/tools.json`` mirrors.
+        expected_tools = {t["name"] for t in json.loads(_TOOLS_JSON.read_text())}
         self.check(
             "Tool descriptions: 200", r.status_code == 200, f"status={r.status_code}"
         )
@@ -419,15 +424,14 @@ class SmokeTest:
             json={
                 "tenant_id": TENANT,
                 "query": content,
-                "limit": 1,
+                "top_k": 1,
             },
         )
-        results = sr.json()
-        # The unique content shouldn't match anything with high similarity
-        found = (
-            any(content in m.get("content", "") for m in results)
-            if isinstance(results, list)
-            else False
+        found = any(content in m.get("content", "") for m in _search_items(sr))
+        self.check(
+            "Extract-only: search 200",
+            sr.status_code == 200,
+            f"status={sr.status_code}",
         )
         self.check("Extract-only: not in DB", not found)
 
@@ -489,18 +493,16 @@ class SmokeTest:
 
         r = _retry_until(
             do_search,
-            predicate=lambda resp: (
-                isinstance(resp.json(), list) and len(resp.json()) > 0
-            ),
+            predicate=lambda resp: len(_search_items(resp)) > 0,
             max_wait=5.0,
         )
-        data = r.json()
+        data = _search_items(r)
         self.check(
             "Search: returns results",
-            isinstance(data, list) and len(data) > 0,
-            f"count={len(data) if isinstance(data, list) else 'not a list'}",
+            len(data) > 0,
+            f"status={r.status_code} count={len(data)}",
         )
-        if isinstance(data, list) and data:
+        if data:
             self.check(
                 "Search: has similarity score",
                 data[0].get("similarity") is not None,
@@ -516,11 +518,11 @@ class SmokeTest:
                 "query": "quantum entanglement in superconducting qubits at absolute zero",
             },
         )
-        data = r.json()
+        data = _search_items(r)
         self.check(
             "Min similarity: irrelevant query returns few/no results",
-            isinstance(data, list) and len(data) == 0,
-            f"count={len(data) if isinstance(data, list) else 'not a list'}",
+            r.status_code == 200 and len(data) == 0,
+            f"status={r.status_code} count={len(data)}",
         )
 
     def test_recall(self):
@@ -637,11 +639,7 @@ class SmokeTest:
                     "query": "backend migration",
                 },
             ),
-            predicate=lambda resp: (
-                resp.status_code == 200
-                and isinstance(resp.json(), list)
-                and len(resp.json()) > 0
-            ),
+            predicate=lambda resp: len(_search_items(resp)) > 0,
             max_wait=10.0,
         )
 
@@ -659,15 +657,10 @@ class SmokeTest:
 
         r_search = _retry_until(
             do_graph_search,
-            predicate=lambda resp: (
-                resp.status_code == 200
-                and isinstance(resp.json(), list)
-                and mem_id in [m.get("id") for m in resp.json()]
-            ),
+            predicate=lambda resp: mem_id in _ids(_search_items(resp)),
             max_wait=12.0,
         )
-        results = r_search.json() if r_search.status_code == 200 else []
-        result_ids = [m.get("id") for m in results] if isinstance(results, list) else []
+        result_ids = _ids(_search_items(r_search))
         found = mem_id in result_ids
         self.check(
             "Graph: 1-hop memory found via relation",
@@ -772,16 +765,10 @@ class SmokeTest:
             # 3. Baseline (flag defaults ON): reachable via the graph only.
             r_on = _retry_until(
                 search_queried_entity,
-                predicate=lambda resp: (
-                    resp.status_code == 200
-                    and isinstance(resp.json(), list)
-                    and mem_id in [m.get("id") for m in resp.json()]
-                ),
+                predicate=lambda resp: mem_id in _ids(_search_items(resp)),
                 max_wait=12.0,
             )
-            on_ids = (
-                [m.get("id") for m in r_on.json()] if r_on.status_code == 200 else []
-            )
+            on_ids = _ids(_search_items(r_on))
             self.check(
                 "Entity flag ON: graph-only memory found",
                 mem_id in on_ids,
@@ -807,11 +794,11 @@ class SmokeTest:
             r_off = search_queried_entity()
             self.check(
                 "Entity flag OFF: search still succeeds",
-                r_off.status_code == 200 and isinstance(r_off.json(), list),
+                r_off.status_code == 200,
                 f"status={r_off.status_code} body={r_off.text[:200]}",
             )
-            if r_off.status_code == 200 and isinstance(r_off.json(), list):
-                off_ids = [m.get("id") for m in r_off.json()]
+            if r_off.status_code == 200:
+                off_ids = _ids(_search_items(r_off))
                 self.check(
                     "Entity flag OFF: graph-only memory NOT returned",
                     mem_id not in off_ids,
@@ -1567,41 +1554,6 @@ class SmokeTest:
         else:
             self.skip("Entity GET by ID", "no entity IDs available")
 
-    def test_usage(self):
-        """GET /api/usage returns usage metering data."""
-        r = self.client.get(f"{self.api}/usage", params={"tenant_id": TENANT})
-        self.check("Usage: 200", r.status_code == 200, f"status={r.status_code}")
-        if r.status_code == 200:
-            data = r.json()
-            usage = data.get("usage", data)
-            self.check(
-                "Usage: has usage data",
-                isinstance(usage, dict) and len(usage) > 0,
-                f"keys={list(data.keys())}",
-            )
-
-    def test_usage_history(self):
-        """GET /api/usage/history returns historical usage periods."""
-        r = self.client.get(
-            f"{self.api}/usage/history", params={"tenant_id": TENANT, "periods": 3}
-        )
-        # This endpoint may require org context; 200 or 400 are both valid
-        if r.status_code == 400:
-            self.skip("Usage history", "requires organization context")
-            return
-        self.check(
-            "Usage history: 200",
-            r.status_code == 200,
-            f"status={r.status_code}{self._verbose_body(r)}",
-        )
-        if r.status_code == 200:
-            data = r.json()
-            self.check(
-                "Usage history: returns list",
-                isinstance(data, list),
-                f"type={type(data).__name__}",
-            )
-
     def test_audit_log(self):
         """GET /api/audit-log returns audit entries for test tenant."""
         r = self.client.get(
@@ -1674,25 +1626,6 @@ class SmokeTest:
             json={"graph_expand": True},
         )
 
-    def test_auth_verify(self):
-        """POST /api/auth/verify validates API key."""
-        if not self.headers.get("X-API-Key"):
-            self.skip("Auth verify", "no API key configured")
-            return
-        r = self.client.post(
-            f"{self.api}/auth/verify",
-            json={
-                "key": self.headers["X-API-Key"],
-            },
-        )
-        self.check("Auth verify: 200", r.status_code == 200, f"status={r.status_code}")
-        if r.status_code == 200:
-            data = r.json()
-            # Admin key returns is_admin=True but no tenant_id; tenant key returns tenant_id
-            self.check(
-                "Auth verify: valid response", data.get("valid") is True, f"data={data}"
-            )
-
     def test_mcp_initialize(self):
         """Initialize an MCP session."""
         r = self.client.post(
@@ -1747,6 +1680,7 @@ class SmokeTest:
     def test_document_store(self):
         """Full CRUD cycle on the document store."""
         collection = f"smoke-docs-{uuid.uuid4().hex[:6]}"
+        acme, beta = "acme-corp", "beta-inc"
 
         # 1. Write a document
         r = self.client.post(
@@ -1754,7 +1688,7 @@ class SmokeTest:
             json={
                 "tenant_id": TENANT,
                 "collection": collection,
-                "doc_id": "acme-corp",
+                "doc_id": acme,
                 "data": {
                     "name": "Acme Corp",
                     "plan": "business",
@@ -1771,13 +1705,13 @@ class SmokeTest:
         if r.status_code == 200:
             self.check(
                 "Doc write: has doc_id",
-                r.json().get("doc_id") == "acme-corp",
+                r.json().get("doc_id") == acme,
                 f"doc_id={r.json().get('doc_id')}",
             )
 
         # 2. Get the document
         r = self.client.get(
-            f"{self.api}/documents/acme-corp",
+            f"{self.api}/documents/{acme}",
             params={"tenant_id": TENANT, "collection": collection},
         )
         self.check(
@@ -1798,7 +1732,7 @@ class SmokeTest:
             json={
                 "tenant_id": TENANT,
                 "collection": collection,
-                "doc_id": "beta-inc",
+                "doc_id": beta,
                 "data": {"name": "Beta Inc", "plan": "pro", "mrr": 200, "active": True},
             },
         )
@@ -1827,7 +1761,7 @@ class SmokeTest:
             if results:
                 self.check(
                     "Doc query: correct doc",
-                    results[0].get("doc_id") == "acme-corp",
+                    results[0].get("doc_id") == acme,
                     f"doc_id={results[0].get('doc_id')}",
                 )
 
@@ -1837,7 +1771,7 @@ class SmokeTest:
             json={
                 "tenant_id": TENANT,
                 "collection": collection,
-                "doc_id": "acme-corp",
+                "doc_id": acme,
                 "data": {
                     "name": "Acme Corp",
                     "plan": "business",
@@ -1865,14 +1799,14 @@ class SmokeTest:
 
         # 7. Delete
         r = self.client.delete(
-            f"{self.api}/documents/acme-corp",
+            f"{self.api}/documents/{acme}",
             params={"tenant_id": TENANT, "collection": collection},
         )
         self.check("Doc delete: 204", r.status_code == 204, f"status={r.status_code}")
 
         # 8. Get deleted → 404
         r = self.client.get(
-            f"{self.api}/documents/acme-corp",
+            f"{self.api}/documents/{acme}",
             params={"tenant_id": TENANT, "collection": collection},
         )
         self.check(
@@ -1881,7 +1815,7 @@ class SmokeTest:
 
         # Cleanup remaining
         self.client.delete(
-            f"{self.api}/documents/beta-inc",
+            f"{self.api}/documents/{beta}",
             params={"tenant_id": TENANT, "collection": collection},
         )
 
@@ -1936,8 +1870,9 @@ class SmokeTest:
 
     def test_invalid_memory_id_format(self):
         """GET /api/memories/not-a-uuid -> 422."""
+        bad_id = "not-a-uuid"
         r = self.client.get(
-            f"{self.api}/memories/not-a-uuid", params={"tenant_id": TENANT}
+            f"{self.api}/memories/{bad_id}", params={"tenant_id": TENANT}
         )
         self.check(
             "Validation: invalid UUID returns 422",
@@ -1960,28 +1895,10 @@ class SmokeTest:
         # Remove from cleanup list
         self.memory_ids.remove(mid)
 
-    def test_demo_token(self):
-        """Fetch demo token (public endpoint)."""
-        r = self.client.get(f"{self.api}/demo/token")
-        if r.status_code == 404:
-            self.skip("Demo token", "demo not configured (404)")
-            return
-        data = r.json()
-        self.check(
-            "Demo token: returns key",
-            bool(data.get("api_key")),
-            f"api_key={'present' if data.get('api_key') else 'missing'}",
-        )
-        self.check(
-            "Demo token: returns tenant",
-            bool(data.get("tenant_id")),
-            f"tenant_id={data.get('tenant_id')}",
-        )
-
     # ── Cleanup ──
 
     def cleanup(self):
-        """Delete all test memories, entities, and the test tenant's data."""
+        """Delete the test memories. Entities stay: the API cannot delete one."""
         for mid in self.memory_ids:
             try:
                 self.client.delete(
@@ -1994,14 +1911,6 @@ class SmokeTest:
             self.client.delete(f"{self.api}/memories", params={"tenant_id": TENANT})
         except Exception:
             pass
-        # Delete entities created during the test
-        for eid in self.entity_ids:
-            try:
-                self.client.delete(
-                    f"{self.api}/entities/{eid}", params={"tenant_id": TENANT}
-                )
-            except Exception:
-                pass
 
 
 def main():

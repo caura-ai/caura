@@ -3596,7 +3596,7 @@ class PostgresService:
         history_query: bool = False,
         strict_fleet_scoping: bool = False,
     ) -> list[SimpleNamespace]:
-        """Execute the full CTE-based scored search with entity-link JOIN.
+        """Execute the full CTE-based scored search, then load the hits' entity links.
 
         Returns a list of SimpleNamespace objects with attributes:
         Memory, score, similarity, vec_sim, entity_links.
@@ -4412,7 +4412,10 @@ class PostgresService:
         else:
             scored_cte = main_stmt.cte("scored")
 
-        # -- Outer query: JOIN Memory + LEFT JOIN entity links --
+        # -- Outer query: JOIN Memory; entity links follow in a keyed query --
+        # M-112: one row per memory, without the two large columns the route
+        # drops (it serialises ``MEMORY_LIST_FIELDS``). A LEFT JOIN on the links
+        # repeated each memory's row, vector and tsvector included, once per link.
         # ``pool_arms`` (D12 provenance) exists only in ann-mode; the default
         # path selects a typed NULL so the row shape is identical either way
         # and the route serialises one contract.
@@ -4433,14 +4436,12 @@ class PostgresService:
                 scored_cte.c.recall_boost,
                 scored_cte.c.temporal_boost,
                 pool_arms_col,
-                MemoryEntityLink.entity_id,
-                MemoryEntityLink.role,
                 Agent.display_name.label("agent_display_name"),
             )
             .join(scored_cte, Memory.id == scored_cte.c.mem_id)
-            .outerjoin(MemoryEntityLink, Memory.id == MemoryEntityLink.memory_id)
             .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
             .order_by(scored_cte.c.score.desc(), Memory.created_at.desc())
+            .options(defer(Memory.embedding), defer(Memory.search_vector))
         )
         if use_ann_pool:
             stmt = stmt.outerjoin(pool_cte, Memory.id == pool_cte.c.id)
@@ -4490,6 +4491,9 @@ class PostgresService:
                     )
                 result = await session.execute(stmt)
                 rows = result.all()
+                hit_ids = [row.Memory.id for row in rows]
+                links_stmt = select(MemoryEntityLink).where(MemoryEntityLink.memory_id.in_(hit_ids))
+                links = (await session.execute(links_stmt)).scalars().all() if hit_ids else []
 
         grouped: OrderedDict[UUID, SimpleNamespace] = OrderedDict()
         for row in rows:
@@ -4513,8 +4517,8 @@ class PostgresService:
                     pool_arms=row.pool_arms,
                     entity_links=[],
                 )
-            if row.entity_id is not None:
-                grouped[mid].entity_links.append({"entity_id": row.entity_id, "role": row.role})
+        for link in links:
+            grouped[link.memory_id].entity_links.append({"entity_id": link.entity_id, "role": link.role})
         if use_ann_pool and len(grouped) < top_k:
             # The pool admitted fewer distinct rows than the caller asked for —
             # either the tenant slice is simply small (benign) or the arms are
