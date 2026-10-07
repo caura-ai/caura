@@ -1,7 +1,7 @@
 """Agent trust-level enforcement for fleet-scoped access control."""
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -736,6 +736,38 @@ async def enforce_memory_read(
     )
     if not allowed:
         raise HTTPException(status_code=404, detail="Memory not found")
+
+
+async def memory_reader(
+    tenant_id: str,
+    caller_agent_id: AgentIdentity | None,
+    *,
+    caller_tenant_id: str | None = None,
+) -> Callable[[dict], bool]:
+    """:func:`authorize_memory_access` for many rows, with one agent lookup.
+
+    For a by-id read that returns OTHER memories too, as a contradiction's
+    linked rows (M-124). Each one owes the caller the check the requested
+    memory got: a link is not a grant, and one can join memories that different
+    callers may read (L-147 linked a fleet-less memory to other fleets' rows).
+    A tenant / user / admin credential (``caller_agent_id`` None) reads them all.
+    """
+    if not caller_agent_id:
+        return lambda _row: True
+    agent = await lookup_agent(tenant_id, caller_agent_id)
+
+    def can_read(row: dict) -> bool:
+        return memory_access_allowed_for_agent(
+            agent,
+            caller_agent_id,
+            visibility=row.get("visibility"),
+            owner_agent_id=row.get("agent_id"),
+            fleet_id=row.get("fleet_id"),
+            row_tenant_id=tenant_id,
+            caller_tenant_id=caller_tenant_id,
+        )
+
+    return can_read
 
 
 async def enforce_delete(

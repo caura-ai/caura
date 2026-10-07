@@ -77,6 +77,7 @@ from core_api.services.agent_service import (
     enforce_fleet_read_many,
     enforce_fleet_write,
     lookup_agent,
+    memory_reader,
     resolve_write_agent,
 )
 
@@ -2199,9 +2200,16 @@ async def caura_manage(
                 # a soft-deleted ``older`` is excluded exactly as the
                 # pre-migration inline query did (``older.deleted_at is None``).
                 older = bundle.get("older")
+                newer = bundle.get("supersessors", [])
+                # M-124 — every linked row gets the check ``this`` just got, or
+                # a link shows its content to a caller who may not read it by id.
+                if older or newer:
+                    can_read = await memory_reader(tenant_id, caller_agent_id)
+                    older = older if older and can_read(older) else None
+                    newer = [m for m in newer if can_read(m)]
                 superseded_by = _chain_row(older) if older and older.get("deleted_at") is None else None
                 # Newer rows whose supersedes_id points at this row.
-                supersessors = [_chain_row(m) for m in bundle.get("supersessors", [])]
+                supersessors = [_chain_row(m) for m in newer]
                 return _with_latency(
                     _dumps(
                         {

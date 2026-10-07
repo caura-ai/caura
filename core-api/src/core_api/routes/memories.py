@@ -96,6 +96,7 @@ from core_api.services.agent_service import (
     enforce_fleet_write,
     get_or_create_agent,
     lookup_agent,
+    memory_reader,
     resolve_read_fleet_gate,
     resolve_write_agent,
 )
@@ -1365,6 +1366,12 @@ async def get_contradictions(
     # the soft-deleted ``older`` filter (storage returns it regardless of
     # ``deleted_at`` so we can decide per-field).
     older = bundle["older"]
+    # M-124 — every linked row gets the check this memory just got, or a link
+    # shows its content to a caller who may not read it by id.
+    if supersessors or older is not None:
+        can_read = await memory_reader(tenant_id, auth.agent_id, caller_tenant_id=auth.tenant_id)
+        supersessors = [m for m in supersessors if can_read(m)]
+        older = older if older is not None and can_read(older) else None
     older_live = older is not None and older.get("deleted_at") is None
     superseded_by = None
     if older_live:
