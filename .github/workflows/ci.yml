@@ -98,6 +98,22 @@ jobs:
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
 
+      - name: Every service's uv.lock matches its pyproject.toml
+        # M-01: each image installs its service's uv.lock as it stands (``uv
+        # export --frozen``), while the install below resolves the pyproject
+        # ranges afresh. A pyproject edit made without a re-lock was therefore
+        # tested here and missing from the image, with nothing to fail it.
+        # ``uv lock --check`` fails when re-locking would change the lock.
+        run: |
+          stale=""
+          for service in core-api core-storage-api core-operations core-worker; do
+            uv lock --check --directory "${service}" || stale="${stale} ${service}/uv.lock"
+          done
+          if [ -n "${stale}" ]; then
+            echo "::error::Out of date:${stale}. Run uv lock in each one's directory and commit the result."
+            exit 1
+          fi
+
       - name: Install dependencies
         # core-operations is installed for its own ruff/mypy/pytest steps
         # below. Before it was listed here those steps passed only because
@@ -772,6 +788,17 @@ jobs:
             echo "::error::numpy is missing from the core-api image — insights discover mode would silently fall back to non-clustered analysis. It must stay declared in core-api/pyproject.toml (see services/insights_service.py::_numpy_kmeans)."
             exit 1
           }
+
+      # M-01: core-worker's image, the write path in deferred mode, was built by
+      # no workflow. Its tests run in the CI job's shared venv, where another
+      # service's dependency can stand in for one core-worker never declared,
+      # so import the app its CMD serves from what the image itself installed.
+      - name: Build core-worker image and import its app
+        run: |
+          docker build --platform linux/amd64 --target runtime \
+            -t core-worker-imagetest \
+            -f core-worker/Dockerfile .
+          docker run --rm core-worker-imagetest python -c "import uvicorn, core_worker.app"
 
       - name: Build core-storage-api image for README quickstart
         run: |
