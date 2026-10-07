@@ -38,3 +38,11 @@ qualified separately: Cursor is unsupported, Claude's idle hook only listens
 within its configured window, and a stopped Claude process is never wakeable.
 See the host-state matrix in
 [the runtime contract](agent-collaboration/AGENT_COLLABORATION.md#host-state-matrix).
+
+The extension is a beta preview. It provides tenant-scoped discovery, direct
+requests and correlated multi-peer responses between agents in their existing
+hosts. It does not federate across tenants or deployments, does not wake every
+host, and does not make external effects exactly once. The
+[capability status](agent-collaboration/AGENT_COLLABORATION.md#capability-status)
+table lists what is available, what is still in review, and how to run the
+S1–S3 acceptance.

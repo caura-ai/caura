@@ -2,15 +2,30 @@
 
 ## Product objective
 
-Caura is the control plane for discovering available agents, communicating with
-them in real time, and involving a human when needed. The Docker environment
-is a test fixture for the completed capability, not the product deliverable.
+Agent collaboration lets an agent running in a human's existing host ask other
+agents directly. The requesting agent discovers peers by their expertise
+descriptions, sends addressed requests through Caura, and collects correlated
+answers from one or several peers. Caura transports and records the exchange
+and involves a human when policy requires it. The Docker environment is a test
+fixture for the completed capability, not the product deliverable.
+
+This replaces the earlier store-only coordination pattern, in which agents
+handed work to each other only by writing shared memories and hoping a peer
+recalled them later. Shared memory stays the place for durable knowledge the
+whole fleet should find. Collaboration is for asking a specific peer a question
+now and getting an attributable answer back. The capability is a **beta
+preview**; see [Capability status](#capability-status) for what is available,
+what is still in review, and what is deliberately not promised.
 
 The capability covers:
 
 1. Credential-bound agent sessions advertising capabilities and availability,
-   with expiring presence so disconnected agents do not appear online.
+   with expiring presence so disconnected agents do not appear online, plus a
+   registered expertise description that stays discoverable while the agent
+   is offline (in review, see the status table).
 2. Durable agent conversations plus resumable live events through Caura.
+   Messages are delivered at least once; live delivery into a host depends on
+   the host state (see the [host-state matrix](#host-state-matrix)).
 3. Agent checkpoints evaluated by Caura policy. Missing information, conflicting
    results, low confidence, consequential actions and exhausted delivery retries
    create a human intervention with a clear reason and relevant context.
@@ -66,6 +81,123 @@ Rules that apply to every scenario:
 - **Real-model selection is separate from transport tests.** Scripted CI
   agents prove transport, correlation and recovery; they do not prove that a
   model chooses the right peer. Report the two separately.
+
+## Capability status
+
+Status as of 2026-10-06. **Available** means merged into the collaboration
+branches (`feat/collaboration-benchmark` here, `feat/tenant-send-quota` in
+Caura Enterprise); those branches are themselves still in review against the
+default branches, and nothing below is generally available. **In review** means
+an open pull request; do not rely on it until it merges. Everything is beta.
+
+| Capability | Status | Source |
+|---|---|---|
+| Durable direct messages, private delivery leases, atomic reply plus ACK, idempotent sends | Available | Collaboration foundation |
+| Request lifecycle: reply due times, overdue/undelivered/unclaimed/stuck/silent notices, `status`, `requests` | Available | Collaboration foundation |
+| Description-based consultation guidance in the `peer` tool and agent template | Available | caura#1914 |
+| Bounded multi-peer `collect` with partial results, late answers and duplicate-presentation suppression | Available | caura#1917 |
+| Consultation count and deadline bounds; direct A→B→A back-edge refused | Available | caura#1922 |
+| Hostile peer descriptions and replies kept as data; tokens never rendered | Available | caura#1918 |
+| Host busy/approval/re-entry boundaries; Claude Stop listener advertises `busy` while holding a lease | Available | caura#1916 |
+| Stale paused MCP claim refreshed from Caura after a human decision | Available | caura#1920 |
+| Failed native Codex wake retried with capped backoff instead of stranded | Available | caura#1928 |
+| Credential rotation and revocation bounds across live leases, long polls and streams | Available (tests and bounds) | caura-enterprise#2147 |
+| Configurable payload and fan-out budgets | Available | caura-enterprise#2135 |
+| Registered expertise descriptions, discoverable while offline | In review | caura-enterprise#2139, #2140 |
+| `describe` opcode and `Bus.describe()` in the SDK and MCP | In review | caura#1923 |
+| Broker `caura agent connect --description` and `caura agent describe` | In review (draft until #2139 merges) | caura-daemon#251 |
+| Directory pagination (`cursor`, `limit`, `next_cursor`) | In review | caura-enterprise#2151, caura#1931 |
+| Acknowledge with `progress`, deliver with one `reply` | In review | caura#1919 |
+| Reclaim before reply after a lost lease | In review | caura#1921 |
+| Wake for resumed work after approve or redirect | In review | caura-enterprise#2141 |
+| Outstanding-backlog quotas; recipient-weighted send admission; degraded quota bounds | In review | caura-enterprise#2149, #2142, #2138 |
+| Opt-in retention with `stream.resync_required` replay handling | In review | caura-enterprise#2137, #2148, caura#1932 |
+| Collaboration data removed with org tenant deletion | In review | caura-enterprise#2146 |
+| Deterministic S1–S3 acceptance and its CI gate | In review | caura-enterprise#2145, #2150 |
+| Published `caura-bus-*` packages on PyPI | In review; not yet published | caura#1927 |
+| Real-model peer selection inside a host; second host and cross-runtime direction | Not yet qualified | Release plan PR-35, PR-36 |
+
+Until directory pagination merges, `discover` and `agents` return at most the
+first 1000 visible agents. Until registered descriptions merge, a peer is
+described only by its live session presence, so an offline peer cannot be
+found by expertise and S3 cannot be run end to end on a released build.
+
+What this capability does **not** promise:
+
+- **No federation.** Agent messages, discovery and history are tenant-scoped.
+  There is no cross-tenant or cross-deployment messaging.
+- **No universal wake-up.** Only the host states marked supported in the
+  [host-state matrix](#host-state-matrix) receive work without a human turn.
+  Everything else receives queued work the next time the agent calls `wait`.
+- **No exactly-once effects.** Delivery is at least once. Idempotency keys
+  deduplicate sends and replies inside Caura; duplicate-presentation tracking
+  in the MCP session is bookkeeping that resets on restart. Runtimes must
+  deduplicate their own external effects.
+- **No server-side routing.** Caura never chooses a recipient with a model.
+  The requesting agent selects peers from descriptions.
+
+Onboarding steps for hosts are in the
+[client README](../../clients/collaboration/README.md#cli-first-onboarding-with-the-broker).
+
+## Running the S1–S3 acceptance
+
+Two kinds of evidence are kept apart.
+
+**Deterministic transport acceptance** (caura-enterprise#2145, in review) runs
+S1–S3 as pytest against the real collaboration platform: routes, the PostgreSQL
+store and Redis-backed send admission, driven by scripted `caura_bus_core.Bus`
+clients. No model and no real host is involved. Each test records
+`evidence = "transport-only: scripted description keyword selection, not model-driven"`
+in its JUnit properties. From a Caura Enterprise checkout paired with this
+repository:
+
+```sh
+docker run -d --name acc-pg -p 55432:5432 -e POSTGRES_PASSWORD=x postgres:16
+docker run -d --name acc-redis -p 56379:6379 redis:7
+cd platform-collaboration-api
+CAURA_BUS_TEST_DATABASE_URL=postgresql+asyncpg://postgres:x@127.0.0.1:55432/postgres \
+COLLABORATION_QUOTA_REDIS_URL=redis://127.0.0.1:56379/0 \
+PYTHONPATH=.:..:../platform-storage-api \
+pytest tests/test_private_expertise_acceptance.py -v
+```
+
+Without both URLs the tests skip. Set `CAURA_BUS_REQUIRE_SERVICES=1` to turn
+any skip into a failure. The CI gate (caura-enterprise#2150, in review) runs the
+same suite on every collaboration pull request with disposable PostgreSQL 16
+and Redis 7, fails on any skipped test or on fewer than seven passing acceptance
+cases, and uses no model credentials.
+
+What the deterministic suite checks:
+
+- **Setup.** Agents A, B, C and an irrelevant peer each get their own
+  workspace and key. Each peer registers its own expertise description through
+  the self-service description API. B and C get fresh random private facts that
+  exist only in their own workspaces. A receives only its own config and the
+  human's question. Before any peer answers, no fact appears anywhere in the
+  platform schema or the environment.
+- **S1.** A finds B by description with `discover(available_only=false)`, sends
+  one request and returns B's correlated answer. C and the irrelevant peer
+  receive nothing.
+- **S2.** A asks B and C, in either completion order, and combines both
+  attributed answers. A partial variant lets C's request go overdue: A reports
+  B's fact and says C has not answered, and C's delivery is still pending.
+- **S3.** B's presence has expired. A still finds B by description, sends once,
+  and B's later start completes the original request with no resend.
+
+A clean setup needs **no dashboard, no direct database edits, no hidden
+recipient IDs and no shared answer files**: descriptions are self-registered
+through the API (or `caura agent connect --description` on a real host), and
+selection uses run-time discovery. To keep the suite fast, the harness shortens
+the 45-second presence expiry and the request due time by moving those
+timestamps in its disposable test database. That is a test-clock shortcut, not
+a setup step.
+
+**Real-host qualification** connects separate host sessions with the Broker
+(see the client README), registers each peer's description, and asks A an
+ordinary question in A's own host. Record the host executable versions and the
+host state from the matrix. Model-driven selection in a real host and the second
+host (release plan PR-35 and PR-36) are not yet qualified; do not report the deterministic
+suite as evidence for them.
 
 ## Authorization and boundaries
 
@@ -128,14 +260,16 @@ qualified in this release.
 What a recipient host can do when a message arrives depends on its state, not
 just its product name. Advertise and test only the rows marked supported.
 Presence descriptions published by the waker and the Stop listener describe
-the receive mode; they must not claim more than this table.
+the receive mode; they must not claim more than this table. Every supported
+row is **beta**: it is qualified on the collaboration branches, not in a
+generally available release.
 
 | Host | State | Receive behavior | Status |
 |---|---|---|---|
-| Codex | Session open, `caura-bus wake --runtime codex --thread ID` running | Native `codex queue` delivers one wake prompt to that session; the model calls `peer wait` at its next turn boundary. | **Supported** active-session receive. Used for the initial S1–S3 demonstration. |
+| Codex | Session open, `caura-bus wake --runtime codex --thread ID` running | Native `codex queue` delivers one wake prompt to that session; the model calls `peer wait` at its next turn boundary. | **Supported (beta)** active-session receive. Used for the initial S1–S3 demonstration. |
 | Codex | Waker not running, or the session thread is gone | Nothing queues a prompt. Messages stay durable in Caura until a session calls `wait`. | Not wakeable. Work is delivered when the agent next calls `wait`. |
-| Claude Code | Session open and inside a turn that calls `peer wait` | The MCP tool returns the delivery inside that turn. | Supported (pull). |
-| Claude Code | Session open, turn just ended, hooks installed | The Stop hook listens for a bounded window: up to `listen_seconds` (600 by default) while a sent request is unanswered, otherwise `idle_listen_seconds` (5 by default). Work arriving inside the window continues the session. | Supported **only within that window**. Qualified separately from the Codex demonstration. |
+| Claude Code | Session open and inside a turn that calls `peer wait` | The MCP tool returns the delivery inside that turn. | Supported (beta, pull). |
+| Claude Code | Session open, turn just ended, hooks installed | The Stop hook listens for a bounded window: up to `listen_seconds` (600 by default) while a sent request is unanswered, otherwise `idle_listen_seconds` (5 by default). Work arriving inside the window continues the session. | Supported (beta) **only within that window**. Qualified separately from the Codex demonstration. |
 | Claude Code | Session open, idle beyond the listening window | No hook runs; there is no session queue API. A human turn (UserPromptSubmit hook) surfaces pending work. | Not wakeable. |
 | Claude Code | Process stopped or exited | Nothing runs. Messages stay durable; starting the agent and calling `wait` (S3) receives them. | **Never advertised as wakeable.** |
 | Cursor | Any | No automatic wake. | Unsupported in this release. |

@@ -1,5 +1,13 @@
 # Caura agent collaboration — implementation status and GA plan
 
+> **Status update (2026-10-06).** The product scope is now CLI-first: agents in
+> the human's existing hosts discover peers by registered expertise, send direct
+> requests and collect correlated answers (scenarios S1–S4). The current list
+> of merged, in-review and unqualified items, the supported host states and the
+> S1–S3 acceptance procedure are in
+> [AGENT_COLLABORATION.md](AGENT_COLLABORATION.md#capability-status). The dated
+> sections below are kept as the history of how the capability was built.
+
 ## Current local implementation (2026-09-20)
 
 The product objective is a **new native Caura capability**: discover agents,
@@ -72,7 +80,7 @@ trail, not authorization to keep an injection fallback in the product.
    platform/runtime matrix, clean distributions, backup/restore and an opt-in
    beta. Publish measured latency and reliability targets, then decide GA.
 
-See [LOCAL_HANDOFF.md](../../clients/collaboration/README.md) for the live local URL, exact verification
+See the [collaboration client README](../../clients/collaboration/README.md) for the live local URL, exact verification
 results, files and commands. See [SPEC.md](SPEC.md) for the implemented API and
 [AGENT_COLLABORATION.md](AGENT_COLLABORATION.md) for the product contract.
 
