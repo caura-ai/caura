@@ -956,6 +956,9 @@ jobs:
 
       - name: Build every package the PyPI workflows publish
         run: |
-          for pyproject in clients/*/pyproject.toml; do
+          # clients/collaboration is a uv workspace root (no [project]); its
+          # published packages are the members one level down.
+          for pyproject in clients/*/pyproject.toml clients/*/*/pyproject.toml; do
+            grep -q '^\[project\]' "${pyproject}" || continue
             python -m build --no-isolation --outdir "${RUNNER_TEMP}/dist" "$(dirname "${pyproject}")"
           done
