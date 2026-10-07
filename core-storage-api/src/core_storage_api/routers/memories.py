@@ -698,6 +698,23 @@ async def set_subject_entity_if_null(memory_id: UUID, request: Request) -> dict:
     return {"updated": updated}
 
 
+@router.post("/{memory_id}/supersedes")
+async def set_supersedes_if_null(memory_id: UUID, request: Request) -> dict:
+    """Point a live row at the memory it supersedes, if it points nowhere yet.
+
+    The near-duplicate merge's link (L-19): the compare-and-set that
+    ``PATCH /memories/{id}/status`` runs after writing a status, without the
+    status, which the merge has no business changing. Returns
+    ``{"updated": bool}``; ``false`` covers a row that is absent, deleted,
+    held, foreign or already points somewhere, and a target outside the tenant.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    supersedes_id = _require_uuid(body, "supersedes_id")
+    updated = await _svc.memory_set_supersedes_if_null(memory_id, supersedes_id, tenant_id=tenant_id)
+    return {"updated": updated}
+
+
 @router.post("/{memory_id}/predicate")
 async def set_predicate_if_null(memory_id: UUID, request: Request) -> dict:
     """A65 — conditional write-back of the extraction-derived predicate/object.

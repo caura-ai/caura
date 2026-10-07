@@ -3152,7 +3152,7 @@ class PostgresService:
         semantics ``PATCH /memories/{id}/status`` has always had.
 
         Returns True when the pointer was written; False when the row is
-        absent, soft-deleted, foreign-tenant, or already points somewhere.
+        absent, soft-deleted, held, foreign-tenant, or already points somewhere.
         A False is not an error: it means another writer got there first and
         owns the edge, which is exactly what the CAS is for.
         """
@@ -3168,6 +3168,10 @@ class PostgresService:
                     Memory.id == memory_id,
                     Memory.tenant_id == tenant_id,
                     Memory.deleted_at.is_(None),
+                    # A held row moves only by a person's release, which then
+                    # replays the link (L-19: the merge's own route reaches
+                    # here without the status write that used to refuse one).
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
                     Memory.supersedes_id.is_(None),
                     select(target.id)
                     .where(target.id == supersedes_id, target.tenant_id == tenant_id)

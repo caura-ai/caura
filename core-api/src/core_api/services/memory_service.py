@@ -52,6 +52,7 @@ from core_api.constants import (
     BULK_EMBEDDING_TIMEOUT_SECONDS,
     BULK_ENRICHMENT_CONCURRENCY,
     BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS,
+    BULK_REEMBED_PATCH_CONCURRENCY,
     BULK_STRONG_EMBED_TIMEOUT_SECONDS,
     CANDIDATE_POOL_SIZE,
     CHUNKING_THRESHOLD_CHARS,
@@ -3255,32 +3256,33 @@ async def _reembed_memories_bulk(
 
     sc = get_storage_client()
 
-    # Fan out the get_memory reads concurrently — O(N) serial awaits
-    # was a real cliff for large bulks (a 100-item batch with 50ms
-    # storage p99 = 5s wall-clock before the first PATCH). gather with
-    # return_exceptions=True so one failed read doesn't nuke the rest.
-    mems = await asyncio.gather(
-        *[sc.get_memory(str(memory_id), tenant_id) for (memory_id, _), _ in pairs],
-        return_exceptions=True,
-    )
+    # L-184: one read for the batch, on the writer. Per-id GETs cost N round
+    # trips where bulk-get answers 1000 ids at once, and they went to the
+    # reader moments after the insert, where lag read a row back as missing
+    # and it was skipped with no retry.
+    try:
+        mems = await sc.bulk_get_memories(
+            [str(memory_id) for (memory_id, _), _ in pairs], tenant_id, read=False
+        )
+    except Exception:
+        # Broad for the same reason as the batch call above: a transient read
+        # failure would otherwise strand every item unembedded.
+        logger.exception("Bulk re-embed: bulk read failed; scheduling per-item retries")
+        for memory_id, content in items:
+            _fallback(memory_id, content)
+        return
 
-    for ((memory_id, content), embedding), mem in zip(pairs, mems):
+    # The PATCHes run side by side under a cap (L-184): one at a time, a
+    # 100-item batch was 100 serial round trips, each carrying a vector.
+    patch_slots = asyncio.Semaphore(BULK_REEMBED_PATCH_CONCURRENCY)
+
+    async def _store(memory_id: UUID, content: str, embedding: list[float] | None, mem: dict | None) -> None:
         if embedding is None:
             _fallback(memory_id, content)
-            continue
-        if isinstance(mem, BaseException):
-            # A transient get_memory failure here would otherwise strand
-            # this item permanently unembedded — the batch helper is the
-            # only scheduled writer. Reschedule as a per-item retry.
-            logger.error(
-                "Bulk re-embed: get_memory failed for %s; scheduling per-item retry",
-                memory_id,
-                exc_info=mem,
-            )
-            _fallback(memory_id, content)
-            continue
-        if mem is None or mem.get("deleted_at") is not None:
-            continue
+            return
+        if mem is None:
+            # Deleted or held since the insert: nothing to embed.
+            return
         # Mirror the single-item race guard in _reembed_memory: if
         # _enrich_memory_background has already written a hint-enhanced
         # embedding, respect it (higher retrieval quality) and fire
@@ -3301,21 +3303,22 @@ async def _reembed_memories_bulk(
                     tenant_id,
                 )
             )
-            continue
+            return
         try:
-            # Same provenance stamp as the single-row path above: hash the
-            # text we embedded, not whatever the row says now.
-            await sc.update_embedding(
-                str(memory_id),
-                tenant_id,
-                embedding,
-                embedded_content_hash=_content_hash(tenant_id, mem.get("fleet_id"), content),
-            )
+            async with patch_slots:
+                # Same provenance stamp as the single-row path above: hash the
+                # text we embedded, not whatever the row says now.
+                await sc.update_embedding(
+                    str(memory_id),
+                    tenant_id,
+                    embedding,
+                    embedded_content_hash=_content_hash(tenant_id, mem.get("fleet_id"), content),
+                )
         except Exception:
             # Broad match for the same reason as the outer batch-call
             # except: httpx-layer errors, pool exhaustion, auth, etc.
             # aren't in the narrow tuple and would otherwise propagate
-            # out of the for-loop, aborting the rest of the batch.
+            # out of the gather, abandoning the rest of the batch.
             # CancelledError (BaseException subclass) still propagates.
             # Reschedule the item so a transient PATCH blip doesn't
             # leave it permanently unembedded.
@@ -3324,7 +3327,7 @@ async def _reembed_memories_bulk(
                 memory_id,
             )
             _fallback(memory_id, content)
-            continue
+            return
         track_task(
             tracked_task(
                 run_contradiction_detection(
@@ -3340,6 +3343,13 @@ async def _reembed_memories_bulk(
                 tenant_id,
             )
         )
+
+    await asyncio.gather(
+        *[
+            _store(memory_id, content, embedding, mem)
+            for ((memory_id, content), embedding), mem in zip(pairs, mems, strict=True)
+        ]
+    )
 
 
 _STRONG_TYPES = frozenset({"decision", "commitment", "cancellation"})

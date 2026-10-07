@@ -176,6 +176,10 @@ def _row(**over: Any) -> dict:
 def _storage(**raises: BaseException) -> MagicMock:
     sc = MagicMock(name="storage_client")
     sc.get_memory = AsyncMock(return_value=_row())
+    # The bulk re-embed reads its batch in one call (L-184).
+    sc.bulk_get_memories = AsyncMock(
+        side_effect=lambda ids, _t, **_kw: [_row() for _ in ids]
+    )
     for method in ("update_embedding", "update_memory", "update_memory_status"):
         setattr(sc, method, AsyncMock(side_effect=raises.get(method)))
     return sc

@@ -160,21 +160,26 @@ async def test_a_read_by_id_asks_for_held_rows_for_a_person_only(
 
 
 async def test_the_merge_retires_nothing_when_the_new_row_was_not_linked():
-    """Storage answers no row for a held memory (or one deleted since), so
-    nothing stands in the candidate's place and it must stay current."""
+    """Storage links no held memory (or one deleted since), so nothing stands
+    in the candidate's place and it must stay current."""
     client = MagicMock()
-    client.update_memory_status = AsyncMock(return_value=None)
+    client.set_supersedes_if_null = AsyncMock(return_value=False)
+    client.update_memory_status = AsyncMock()
+    client.update_memory = AsyncMock()
     with patch.object(background, "get_storage_client", return_value=client):
         await background._merge_near_duplicate(
             str(uuid.uuid4()), str(uuid.uuid4()), "t"
         )
 
-    client.update_memory_status.assert_awaited_once()
+    client.set_supersedes_if_null.assert_awaited_once()
+    client.update_memory_status.assert_not_awaited()
 
 
 async def test_the_merge_still_retires_the_candidate_once_linked():
     client = MagicMock()
+    client.set_supersedes_if_null = AsyncMock(return_value=True)
     client.update_memory_status = AsyncMock(return_value={"ok": True})
+    client.update_memory = AsyncMock()
     candidate = str(uuid.uuid4())
     with patch.object(background, "get_storage_client", return_value=client):
         await background._merge_near_duplicate(str(uuid.uuid4()), candidate, "t")

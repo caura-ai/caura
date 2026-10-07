@@ -441,6 +441,20 @@ async def test_reembed_respects_existing_embedding_from_enrich_race() -> None:
     assert detect_calls[0][4] == existing
 
 
+def _read_in_bulk(sc: MagicMock) -> None:
+    """Answer ``bulk_get_memories`` from the test's per-row ``get_memory``.
+
+    ``_reembed_memories_bulk`` reads its rows in one call, on the writer
+    (L-184). Storage leaves deleted rows out, so they come back as ``None``.
+    """
+
+    async def _bulk(ids, tenant_id, **_kw):
+        rows = [await sc.get_memory(i, tenant_id) for i in ids]
+        return [r if r and r.get("deleted_at") is None else None for r in rows]
+
+    sc.bulk_get_memories = AsyncMock(side_effect=_bulk)
+
+
 async def test_bulk_reembed_preserves_batching() -> None:
     """Bulk writes with the flag off must call the provider's batch
     endpoint ONCE for the whole batch — not N times. Regression guard
@@ -456,6 +470,7 @@ async def test_bulk_reembed_preserves_batching() -> None:
         }
     )
     sc.update_embedding = AsyncMock()
+    _read_in_bulk(sc)
 
     # Record every call into get_embeddings_batch so we can assert that
     # all N items arrive in a single provider roundtrip.
@@ -700,7 +715,7 @@ _PROVENANCE_BRANCHES = (
     "batch-raise",
     "batch-short",
     "batch-none",
-    "get-memory-raise",
+    "bulk-read-raise",
     "update-raise",
 )
 
@@ -791,7 +806,7 @@ async def _provenance_harness(
         return [[0.1] * VECTOR_DIM for _ in texts]
 
     async def _get_memory(mid: str, _tenant_id: str, **_kw):
-        if branch == "get-memory-raise":
+        if branch == "bulk-read-raise":
             raise RuntimeError("storage transient error")
         # ``fleet_id`` is what the row actually carries, and it is FLEET_ID
         # because memory_add_all wrote the whole batch under one fleet. The
@@ -811,6 +826,7 @@ async def _provenance_harness(
     sc = MagicMock()
     sc.get_memory = AsyncMock(side_effect=_get_memory)
     sc.update_embedding = AsyncMock(side_effect=_update_embedding)
+    _read_in_bulk(sc)
 
     def _fake_detect(*_a, **_kw):
         async def _noop() -> None:
@@ -892,41 +908,27 @@ async def test_bulk_reembed_fallback_catches_unexpected_exception_types() -> Non
         assert call["kwargs"].get("is_failure_fallback") is True
 
 
-async def test_bulk_reembed_reschedules_items_whose_get_memory_failed() -> None:
-    """One bad get_memory (return_exceptions=True in the gather) must
-    not strand the item permanently unembedded — reschedule it as a
-    per-item retry so it eventually lands. The other items in the
-    batch should still go through the normal write pass."""
+async def test_bulk_reembed_reschedules_every_item_when_the_read_fails() -> None:
+    """The batch is read in one call (L-184), so a failed read must not strand
+    the batch unembedded: every item is rescheduled as a per-item retry, and
+    nothing is PATCHed from a read that did not happen."""
     from core_api.services import memory_service
 
     mem_a_id = uuid.uuid4()
     mem_b_id = uuid.uuid4()
 
-    async def _get_memory(mid: str, tenant_id: str, **_kw):
-        if mid == str(mem_a_id):
-            raise RuntimeError("storage transient error for item A")
-        return {"id": mid, "deleted_at": None, "fleet_id": "f", "embedding": None}
-
     sc = MagicMock()
-    sc.get_memory = AsyncMock(side_effect=_get_memory)
+    sc.bulk_get_memories = AsyncMock(
+        side_effect=RuntimeError("storage transient error")
+    )
     sc.update_embedding = AsyncMock()
 
     async def _batch(_texts, _cfg, *, budget_s=None, **_kwargs):
         return [[0.1] * VECTOR_DIM, [0.2] * VECTOR_DIM]
 
-    def _fake_detect(*args, **_kwargs):
-        async def _noop() -> None:
-            return None
-
-        return _noop()
-
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_batch),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch(
-            "core_api.services.contradiction_detector.detect_contradictions_async",
-            new=_fake_detect,
-        ),
         patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         # _reembed_memories_bulk uses the module-level tracked_task
         # binding (not a local re-import like _enrich_memory_background),
@@ -945,15 +947,9 @@ async def test_bulk_reembed_reschedules_items_whose_get_memory_failed() -> None:
             [(mem_a_id, "body a"), (mem_b_id, "body b")], TENANT_ID, FLEET_ID
         )
 
-    # Item B went through the normal write pass.
-    sc.update_embedding.assert_awaited_once_with(
-        str(mem_b_id), TENANT_ID, [0.2] * VECTOR_DIM, embedded_content_hash=ANY
-    )
-    # Item A was rescheduled as a per-item retry (reembed task) AND
-    # item B scheduled contradiction detection — both tracked.
+    sc.update_embedding.assert_not_awaited()
     names = [call.args[1] for call in tracked.call_args_list]
-    assert "reembed" in names
-    assert "contradiction_detection_post_reembed" in names
+    assert names == ["reembed", "reembed"]
 
 
 async def test_bulk_reembed_patch_failure_reschedules_item() -> None:
@@ -983,6 +979,7 @@ async def test_bulk_reembed_patch_failure_reschedules_item() -> None:
     sc = MagicMock()
     sc.get_memory = AsyncMock(side_effect=_get_memory)
     sc.update_embedding = AsyncMock(side_effect=_update_embedding)
+    _read_in_bulk(sc)
 
     async def _batch(_texts, _cfg, *, budget_s=None, **_kwargs):
         return [[0.1] * VECTOR_DIM, [0.2] * VECTOR_DIM]
@@ -1052,6 +1049,7 @@ async def test_bulk_reembed_respects_existing_embedding_per_item() -> None:
     sc = MagicMock()
     sc.get_memory = AsyncMock(side_effect=_get_memory)
     sc.update_embedding = AsyncMock()
+    _read_in_bulk(sc)
 
     async def _batch(_texts, _cfg, *, budget_s=None, **_kwargs):
         return [fresh, fresh]

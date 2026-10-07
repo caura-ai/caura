@@ -1021,6 +1021,7 @@ INTERVIEW_TEMPERATURE = 0.2
 BULK_MAX_ITEMS = 100  # max memories per bulk request
 BULK_EMBEDDING_CONCURRENCY = 10  # max parallel embedding calls in bulk mode
 BULK_ENRICHMENT_CONCURRENCY = 10  # max parallel enrichment calls in bulk mode
+BULK_REEMBED_PATCH_CONCURRENCY = 8  # max parallel embedding PATCHes after a bulk re-embed (L-184)
 # Outer cap on the whole enrichment gather. One hung provider call would
 # otherwise stall the batch; on timeout, completed slots keep their values
 # and pending ones stay None (same as a per-item provider error). Should

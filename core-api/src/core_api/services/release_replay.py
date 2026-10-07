@@ -83,7 +83,9 @@ async def replay_released_write(memory_id: str, tenant_id: str) -> None:
         return  # the governance verdict dropped it
 
     candidate = system.get("near_duplicate_of")
-    if candidate and system.get("near_duplicate_merged"):
+    # The pending decision (L-17), or ``near_duplicate_merged`` on a row held
+    # before L-17, which recorded the decision under that name.
+    if candidate and (system.get("near_duplicate_merge_pending") or system.get("near_duplicate_merged")):
         from core_api.pipeline.steps.write.schedule_background_tasks import _merge_near_duplicate
 
         await _merge_near_duplicate(memory_id, str(candidate), tenant_id)

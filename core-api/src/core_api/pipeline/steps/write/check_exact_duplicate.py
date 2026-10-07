@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from common import duplicate_memory
 from core_api.clients.storage_client import get_storage_client
 from core_api.pipeline.context import PipelineContext
-from core_api.pipeline.step import StepResult
+from core_api.pipeline.step import StepOutcome, StepResult
 
 
 class CheckExactDuplicate:
@@ -22,6 +22,10 @@ class CheckExactDuplicate:
     async def execute(self, ctx: PipelineContext) -> StepResult | None:
         data = ctx.data["input"]
         ch = ctx.data["content_hash"]
+        if ch is None:
+            # An extract-only preview (``persist=false``) stores nothing, so
+            # ``ComputeContentHash`` gives it no hash and there is no duplicate.
+            return StepResult(outcome=StepOutcome.SKIPPED)
 
         sc = get_storage_client()
         # Time just the storage roundtrip so write-latency attribution can

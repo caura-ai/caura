@@ -892,6 +892,18 @@ class CoreStorageClient:
         result = await self._post(f"/memories/{memory_id}/predicate", body, read=False)
         return bool((result or {}).get("updated"))
 
+    async def set_supersedes_if_null(self, memory_id: str, tenant_id: str, *, supersedes_id: str) -> bool:
+        """Point a live row at the memory it supersedes, if it points nowhere yet.
+
+        The near-duplicate merge's link (L-19): a compare-and-set against NULL
+        that writes ``supersedes_id`` and nothing else, where
+        ``update_memory_status`` also writes a status. Returns whether the link
+        landed; ``False`` covers a row that is gone, held, foreign, or already
+        supersedes another, and a target outside ``tenant_id``."""
+        body = {"tenant_id": tenant_id, "supersedes_id": supersedes_id}
+        result = await self._post(f"/memories/{memory_id}/supersedes", body, read=False)
+        return bool((result or {}).get("updated"))
+
     async def update_memory_status(
         self,
         memory_id: str,
@@ -1586,6 +1598,8 @@ class CoreStorageClient:
         self,
         ids: list[str],
         tenant_id: str,
+        *,
+        read: bool = True,
     ) -> list[dict | None]:
         """Fetch many memories; order matches input ``ids``.
 
@@ -1599,12 +1613,15 @@ class CoreStorageClient:
         ``tenant_id`` is required. As an optional argument it was the client
         half of GHSA-wgvw-28pq-jc36, and one of the two call sites did in fact
         omit it.
+
+        ``read=False`` routes to the WRITER, for a read-back of rows written
+        moments ago, as on ``get_memory``.
         """
         rows: list[dict | None] = []
         for start in range(0, len(ids), _BULK_GET_MAX_IDS):
             payload: dict[str, Any] = {"ids": ids[start : start + _BULK_GET_MAX_IDS], "tenant_id": tenant_id}
             chunk: list[dict | None] = await self._post(  # type: ignore[assignment]
-                "/memories/bulk-get", payload, read=True
+                "/memories/bulk-get", payload, read=read
             )
             rows.extend(chunk)
         return rows
