@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.26.1](https://github.com/caura-ai/caura/compare/backend-v3.26.0...backend-v3.26.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* **contradiction:** every unlinked loser is recorded and shown (M-34) ([#1971](https://github.com/caura-ai/caura/issues/1971)) ([b268428](https://github.com/caura-ai/caura/commit/b26842846b060d83f398b79318f647bc071e4e1e))
+
 ## [3.26.0](https://github.com/caura-ai/caura/compare/backend-v3.25.2...backend-v3.26.0) (2026-10-07)
 
 
