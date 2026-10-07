@@ -80,6 +80,21 @@ async def test_ambiguous_runtime_failure_is_not_retried_inside_backoff(tmp_path)
     assert "last_wake_at" not in state.load()
 
 
+async def test_missing_runtime_can_retry_after_install_without_clearing_state(tmp_path):
+    clock = Clock()
+    state = runtime.WakeState(tmp_path / "state.json", clock=clock)
+    executable = tmp_path / "not-installed-yet"
+    queue = runtime.CodexQueue("thread", str(executable))
+    snapshot = {"pending": True, "wait_generation": 0}
+    with pytest.raises(runtime.WakeNotStarted):
+        await state.notify(snapshot, queue)
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    clock.now += runtime.WAKE_RETRY_BASE_SECONDS
+    assert await runtime.WakeState(state.path, clock=clock).notify(snapshot, queue)
+    assert not await state.notify(snapshot, queue)
+
+
 @pytest.mark.parametrize("failure", [RuntimeError("Codex queue failed"), TimeoutError(), FileNotFoundError()])
 async def test_failed_queue_is_retried_on_a_later_snapshot_and_delivered_once(tmp_path, failure):
     clock = Clock()
