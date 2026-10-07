@@ -10,6 +10,26 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.28.0](https://github.com/caura-ai/caura/compare/backend-v3.27.1...backend-v3.28.0) (2026-10-07)
+
+
+### Features
+
+* **entities:** re-run entity extraction for memories that lost it ([#1996](https://github.com/caura-ai/caura/issues/1996)) ([44fa4e4](https://github.com/caura-ai/caura/commit/44fa4e44c8f5ec18db586aac4051bcb38be81d14))
+
+
+### Bug Fixes
+
+* **api:** REST validates requests and reaches what it writes ([#1997](https://github.com/caura-ai/caura/issues/1997)) ([0ea70e7](https://github.com/caura-ai/caura/commit/0ea70e7f43a00308182fe04e13c77f43f2ed7693))
+* **entities:** ask the providers again before settling for the heuristic ([#1992](https://github.com/caura-ai/caura/issues/1992)) ([ea1c018](https://github.com/caura-ai/caura/commit/ea1c018cf85c6ee6fdb1ab9a9c9a91bd660af9b2))
+* **entities:** read a queued re-run's memory when its turn comes ([#1999](https://github.com/caura-ai/caura/issues/1999)) ([37d59e5](https://github.com/caura-ai/caura/commit/37d59e55bb29538a2037e33013621d732d0dbba2))
+* **mcp:** MCP tools answer as their REST twins do ([#1994](https://github.com/caura-ai/caura/issues/1994)) ([f7a7f88](https://github.com/caura-ai/caura/commit/f7a7f88e5c33eae993a71bf2c51f4d4ba38f3970))
+
+
+### Documentation
+
+* the docs and skills say what the code does ([#1988](https://github.com/caura-ai/caura/issues/1988)) ([befc128](https://github.com/caura-ai/caura/commit/befc1283781a0899d8a7f357f5ac65bfac1e5282))
+
 ## [3.27.1](https://github.com/caura-ai/caura/compare/backend-v3.27.0...backend-v3.27.1) (2026-10-07)
 
 
