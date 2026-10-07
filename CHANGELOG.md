@@ -10,6 +10,32 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.26.0](https://github.com/caura-ai/caura/compare/backend-v3.25.2...backend-v3.26.0) (2026-10-07)
+
+
+### Features
+
+* **memories:** hold a memory for a person's review, list held memories, roll a session back ([#1956](https://github.com/caura-ai/caura/issues/1956)) ([b41dd04](https://github.com/caura-ai/caura/commit/b41dd04f437e143c27a8328c32d62f6e4dab743e))
+* **memories:** hold writes from agents below a trust level for review ([#1966](https://github.com/caura-ai/caura/issues/1966)) ([43509ea](https://github.com/caura-ai/caura/commit/43509ea4833cc4559ef803509c0ab4b8f5acc7b3))
+* **memories:** keep the broker's rules receipt on its writes ([#1970](https://github.com/caura-ai/caura/issues/1970)) ([e65a22d](https://github.com/caura-ai/caura/commit/e65a22d41f7db2f71e0fceccd156a4c59e5a5b29))
+* **memories:** run what a held write skipped when a person releases it ([#1969](https://github.com/caura-ai/caura/issues/1969)) ([f1b3f01](https://github.com/caura-ai/caura/commit/f1b3f017fcca88749a539ef9135fe670ae810943))
+
+
+### Bug Fixes
+
+* **contradiction:** edits and retraction reach unlinked losers (M-34) ([f0c7068](https://github.com/caura-ai/caura/commit/f0c7068704a3381b19a3dc110293375b6eae4d17))
+* **install:** the manual install runs both services (M-71, M-98) ([f0c7068](https://github.com/caura-ai/caura/commit/f0c7068704a3381b19a3dc110293375b6eae4d17))
+* **plugin:** remember a failed tenant lookup for 30s (M-69) ([f0c7068](https://github.com/caura-ai/caura/commit/f0c7068704a3381b19a3dc110293375b6eae4d17))
+* **plugin:** the default agent writes under the id its heartbeat registers (M-107) ([f2e1b6b](https://github.com/caura-ai/caura/commit/f2e1b6b447a1c13b872d51ade60bba0ab473d19b))
+* **scripts:** smoke and gateway scripts call the real API (M-72, M-108) ([f0c7068](https://github.com/caura-ai/caura/commit/f0c7068704a3381b19a3dc110293375b6eae4d17))
+* **storage:** drop ix_memories_recall_count so recall bumps can be HOT (M-111) ([#1959](https://github.com/caura-ai/caura/issues/1959)) ([10d1d02](https://github.com/caura-ai/caura/commit/10d1d027f6ebc76a71dc8936b8b0ea300522f707))
+* **storage:** fetch each scored-search memory once (M-112) ([f0c7068](https://github.com/caura-ai/caura/commit/f0c7068704a3381b19a3dc110293375b6eae4d17))
+
+
+### Documentation
+
+* **upgrade:** move a v1 volume's role and database to caura (M-67) ([f2e1b6b](https://github.com/caura-ai/caura/commit/f2e1b6b447a1c13b872d51ade60bba0ab473d19b))
+
 ## [3.25.2](https://github.com/caura-ai/caura/compare/backend-v3.25.1...backend-v3.25.2) (2026-10-07)
 
 

@@ -4,6 +4,23 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.24.1](https://github.com/caura-ai/caura/compare/plugin-v2.24.0...plugin-v2.24.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* **contradiction:** edits and retraction reach unlinked losers (M-34) ([f0c7068](https://github.com/caura-ai/caura/commit/f0c7068704a3381b19a3dc110293375b6eae4d17))
+* **install:** the manual install runs both services (M-71, M-98) ([f0c7068](https://github.com/caura-ai/caura/commit/f0c7068704a3381b19a3dc110293375b6eae4d17))
+* **plugin:** remember a failed tenant lookup for 30s (M-69) ([f0c7068](https://github.com/caura-ai/caura/commit/f0c7068704a3381b19a3dc110293375b6eae4d17))
+* **plugin:** the default agent writes under the id its heartbeat registers (M-107) ([f2e1b6b](https://github.com/caura-ai/caura/commit/f2e1b6b447a1c13b872d51ade60bba0ab473d19b))
+* **scripts:** smoke and gateway scripts call the real API (M-72, M-108) ([f0c7068](https://github.com/caura-ai/caura/commit/f0c7068704a3381b19a3dc110293375b6eae4d17))
+* **storage:** fetch each scored-search memory once (M-112) ([f0c7068](https://github.com/caura-ai/caura/commit/f0c7068704a3381b19a3dc110293375b6eae4d17))
+
+
+### Documentation
+
+* **upgrade:** move a v1 volume's role and database to caura (M-67) ([f2e1b6b](https://github.com/caura-ai/caura/commit/f2e1b6b447a1c13b872d51ade60bba0ab473d19b))
+
 ## [2.24.0](https://github.com/caura-ai/caura/compare/plugin-v2.23.7...plugin-v2.24.0) (2026-10-06)
 
 
