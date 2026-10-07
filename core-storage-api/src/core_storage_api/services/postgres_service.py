@@ -55,6 +55,7 @@ from sqlalchemy.sql.selectable import Select
 
 from common import duplicate_memory, permanent_failure
 from common.constants import (
+    CONTRADICTED_STATUSES,
     CONTRADICTION_CANDIDATE_MAX,
     CONTRADICTION_SIMILARITY_THRESHOLD,
     DEFAULT_RELATION_TYPE_WEIGHT,
@@ -308,6 +309,37 @@ def derived_rows_where(tenant_id: str, parent_ids: Any) -> list[ColumnElement[bo
         Memory.tenant_id == tenant_id,
         Memory.deleted_at.is_(None),
         Memory.metadata_["parent_memory_id"].astext.in_(parent_ids),
+    ]
+
+
+def session_rows_where(tenant_id: str, session_id: str) -> list[ColumnElement[bool]]:
+    """Rows of ``tenant_id`` the broker wrote in ``session_id`` and hasn't deleted.
+
+    g2.9. The broker stamps each memory it writes with ``metadata.session_id``;
+    the rows derived from one carry only ``metadata.parent_memory_id``
+    (``derived_rows_where``). Implies the predicate of the partial index
+    ``ix_memories_session`` (migration 062), keyed on the same expression.
+    Module-level so the plan can be checked against the exact predicate the
+    service runs.
+    """
+    return [
+        Memory.tenant_id == tenant_id,
+        Memory.deleted_at.is_(None),
+        Memory.metadata_["session_id"].astext == session_id,
+    ]
+
+
+def held_rows_where(tenant_id: str) -> list[ColumnElement[bool]]:
+    """The held memories of ``tenant_id``: the review queue (g2.9).
+
+    Implies the predicate of the partial index ``ix_memories_held`` (migration
+    062), keyed on ``(tenant_id, created_at, id)``, so the queue and its count
+    read held rows only. Module-level for the same plan check.
+    """
+    return [
+        Memory.tenant_id == tenant_id,
+        Memory.deleted_at.is_(None),
+        Memory.status == QUARANTINED_MEMORY_STATUS,
     ]
 
 
@@ -2691,6 +2723,140 @@ class PostgresService:
             stmt = stmt.values(**values)
             result = await session.execute(stmt)
             return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
+
+    async def memory_list_held(
+        self,
+        tenant_id: str,
+        *,
+        session_id: str | None = None,
+        limit: int = 50,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
+    ) -> tuple[list[Memory], int]:
+        """The held memories of ``tenant_id``, newest first, and how many (g2.9).
+
+        The review queue, and the one read that returns held rows in bulk: every
+        other read leaves them out, so only a person reviewing them sees them.
+        ``session_id`` narrows both to what one broker session had held. Returns
+        up to ``limit`` rows (the caller widens it by one to find the next page)
+        after the ``(created_at, id)`` cursor; the count ignores the cursor.
+        Read-only (reader replica).
+        """
+        where = held_rows_where(tenant_id)
+        if session_id is not None:
+            where.append(Memory.metadata_["session_id"].astext == session_id)
+        page = select(Memory).where(*where)
+        if cursor_ts is not None and cursor_id is not None:
+            page = page.where(tuple_(Memory.created_at, Memory.id) < tuple_(cursor_ts, cursor_id))  # type: ignore[arg-type]
+        page = page.order_by(Memory.created_at.desc(), Memory.id.desc()).limit(limit)
+        async with get_read_session() as session:
+            rows = list((await session.execute(page)).scalars().all())
+            total = (
+                await session.execute(select(func.count()).select_from(Memory).where(*where))
+            ).scalar_one()
+        return rows, total
+
+    async def memory_rollback_session(self, tenant_id: str, session_id: str) -> dict[str, list[str]]:
+        """Undo what the broker wrote in one session (g2.9). Returns the ids changed.
+
+        - Its live memories become ``outdated``, and so do the live rows derived
+          from them (atomic facts, auto-chunks, and theirs), which carry no
+          session id of their own.
+        - What those had superseded or contradicted becomes ``active`` again
+          (``restored``). A near-duplicate merge or a contradiction verdict
+          outdated it for the session's write, so undoing the write alone would
+          leave neither version live. As when an edit or a contradiction
+          retracts a supersession, only from a status a supersession sets
+          (``CONTRADICTED_STATUSES``), and never a deleted row, one the session
+          wrote, or one a live row still supersedes or contradicts. The
+          rolled-back row keeps its ``supersedes_id``, and its conflict records
+          stay, as the record of what it replaced.
+        - Its held memories become ``cancelled``: a held memory leaves
+          quarantine only as ``active`` or ``cancelled`` (g2.7), and a
+          rolled-back session's write is not released.
+        - What it wrote that is already out of play (outdated, cancelled,
+          archived, deleted) stays as it is, so a second rollback changes
+          nothing.
+
+        One transaction: a rollback lands whole or not at all.
+        """
+        now = datetime.now(UTC)
+        live = Memory.status.in_(LIVE_MEMORY_STATUSES)
+        async with get_session() as session:
+
+            async def move(where: list[ColumnElement[bool]], status: str) -> list[str]:
+                result = await session.execute(
+                    sql_update(Memory)
+                    .where(*where)
+                    .values(status=status, status_changed_at=now)
+                    .returning(Memory.id)
+                )
+                return [str(memory_id) for memory_id in result.scalars().all()]
+
+            outdated = await move([*session_rows_where(tenant_id, session_id), live], "outdated")
+            parents = outdated
+            # Each pass takes the live rows derived from the last, and a row
+            # changes once, so this ends at the deepest generation.
+            while parents:
+                parents = await move([*derived_rows_where(tenant_id, parents), live], "outdated")
+                outdated.extend(parents)
+            restored: list[str] = []
+            if outdated:
+                rolled_back = [UUID(memory_id) for memory_id in outdated]
+                successor, standing, winner = aliased(Memory), aliased(Memory), aliased(Memory)
+                # After the pass above, so a rolled-back row no longer stands.
+                restored = await move(
+                    [
+                        Memory.tenant_id == tenant_id,
+                        Memory.deleted_at.is_(None),
+                        Memory.status.in_(CONTRADICTED_STATUSES),
+                        # What a rolled-back row held down: the row its
+                        # ``supersedes_id`` names, and a contradiction's further
+                        # losers, which no edge names (M-34), only their
+                        # ``memory_conflicts`` record, written whatever the flag.
+                        or_(
+                            Memory.id.in_(
+                                select(successor.supersedes_id).where(
+                                    successor.tenant_id == tenant_id, successor.id.in_(rolled_back)
+                                )
+                            ),
+                            Memory.id.in_(
+                                select(MemoryConflict.old_memory_id).where(
+                                    MemoryConflict.tenant_id == tenant_id,
+                                    MemoryConflict.new_memory_id.in_(rolled_back),
+                                )
+                            ),
+                        ),
+                        # The session's own rows, rolled back now or before.
+                        Memory.id.notin_(rolled_back),
+                        Memory.metadata_["session_id"].astext.is_distinct_from(session_id),
+                        # Not while a live memory still supersedes it, or still
+                        # contradicts it without an edge.
+                        ~select(standing.id)
+                        .where(
+                            standing.tenant_id == tenant_id,
+                            standing.supersedes_id == Memory.id,
+                            standing.deleted_at.is_(None),
+                            standing.status.in_(LIVE_MEMORY_STATUSES),
+                        )
+                        .exists(),
+                        ~select(MemoryConflict.id)
+                        .join(winner, winner.id == MemoryConflict.new_memory_id)
+                        .where(
+                            MemoryConflict.tenant_id == tenant_id,
+                            MemoryConflict.old_memory_id == Memory.id,
+                            winner.deleted_at.is_(None),
+                            winner.status.in_(LIVE_MEMORY_STATUSES),
+                        )
+                        .exists(),
+                    ],
+                    "active",
+                )
+            cancelled = await move(
+                [*session_rows_where(tenant_id, session_id), Memory.status == QUARANTINED_MEMORY_STATUS],
+                "cancelled",
+            )
+        return {"outdated": outdated, "restored": restored, "cancelled": cancelled}
 
     async def memory_set_supersedes_if_null(
         self,

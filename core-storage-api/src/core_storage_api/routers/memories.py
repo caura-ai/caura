@@ -1249,6 +1249,48 @@ async def count_active_memories(
     return {"count": count}
 
 
+@router.get("/held")
+async def list_held_memories(
+    tenant_id: str,
+    session_id: str | None = None,
+    limit: int = 50,
+    cursor_ts: datetime | None = None,
+    cursor_id: UUID | None = None,
+) -> dict:
+    """The review queue (g2.9): held memories of ``tenant_id``, newest first.
+
+    ``{"items": [...], "total": n}``. Up to ``limit`` rows after the
+    ``(cursor_ts, cursor_id)`` cursor; core-api asks for one more than it shows
+    to find the next page. ``total`` counts the whole queue, or one broker
+    session's part of it with ``session_id``. The only bulk read of held rows:
+    core-api serves it to a person reviewing them, and to no one else.
+    """
+    if not 1 <= limit <= 1001:
+        raise HTTPException(status_code=422, detail="limit must be 1-1001")
+    memories, total = await _svc.memory_list_held(
+        tenant_id, session_id=session_id, limit=limit, cursor_ts=cursor_ts, cursor_id=cursor_id
+    )
+    return {"items": [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories], "total": total}
+
+
+@router.post("/rollback-session")
+async def rollback_session(request: Request) -> dict:
+    """Undo what the broker wrote in one session (g2.9).
+
+    Body: ``{tenant_id, session_id}``. Its live memories and the rows derived
+    from them become ``outdated``, what they had superseded or contradicted
+    ``active`` again, and its held memories ``cancelled``, in one transaction.
+    Returns ``{"outdated": [ids], "restored": [ids], "cancelled": [ids]}``, all
+    empty when there is nothing left to undo.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    session_id = _require(body, "session_id")
+    if not isinstance(tenant_id, str) or not isinstance(session_id, str):
+        raise HTTPException(status_code=422, detail="tenant_id and session_id are strings")
+    return await _svc.memory_rollback_session(tenant_id, session_id)
+
+
 @router.get("/null-embedding-ids")
 async def list_null_embedding_ids(
     tenant_id: str,

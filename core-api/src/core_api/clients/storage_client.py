@@ -914,6 +914,39 @@ class CoreStorageClient:
             payload["release_hold"] = True
         return await self._patch(f"/memories/{memory_id}/status", payload)
 
+    async def list_held_memories(
+        self,
+        tenant_id: str,
+        *,
+        session_id: str | None = None,
+        limit: int,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
+    ) -> dict:
+        """The review queue of held memories, newest first: ``{"items", "total"}``.
+
+        Up to ``limit`` rows after the cursor; ``total`` counts the whole queue,
+        or one broker session's part of it. Only for a person reviewing them.
+        """
+        params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit}
+        if session_id is not None:
+            params["session_id"] = session_id
+        if cursor_ts is not None and cursor_id is not None:
+            params["cursor_ts"] = cursor_ts.isoformat()
+            params["cursor_id"] = str(cursor_id)
+        return await self._get("/memories/held", **params) or {"items": [], "total": 0}
+
+    async def rollback_session(self, tenant_id: str, session_id: str) -> dict:
+        """Undo one broker session's writes: ``{"outdated", "restored", "cancelled"}`` ids.
+
+        Its live memories and the rows derived from them become ``outdated``,
+        what they had superseded or contradicted ``active`` again, and its held memories
+        ``cancelled``, in one storage transaction.
+        """
+        return await self._post(
+            "/memories/rollback-session", {"tenant_id": tenant_id, "session_id": session_id}
+        )
+
     async def find_by_content_hash(
         self,
         tenant_id: str,

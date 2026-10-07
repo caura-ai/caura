@@ -37,6 +37,23 @@ QUARANTINED_MEMORY_STATUS = "quarantined"
 # (``cancelled``).
 QUARANTINE_EXITS = ("active", "cancelled")
 
+# The two statuses contradiction detection writes on a losing row — and the only
+# two any retraction path may revert FROM. Anything else on a contradicted row
+# means another writer has moved it since (a human confirmed it, the crystallizer
+# archived it, a different chain superseded it), so stamping "active" over that
+# would discard someone else's decision.
+#
+# One definition because five call sites read it and every one of them is a
+# destructive-write guard: ``contradiction_detector``'s Path-C retraction,
+# ``memory_service``'s edit-time revert, the supersedes-chain follow in
+# ``pipeline.steps.search.load_and_serialize``, outcome inference's failure
+# evidence, and core-storage-api's session rollback (g2.9), which is why it lives
+# here rather than in ``core_api.constants``. It previously lived in
+# ``outcome_inference.contradictions`` under a comment telling readers to keep it
+# in sync BY HAND with the detector's writes — which is the strongest possible
+# argument that it belongs in one place.
+CONTRADICTED_STATUSES: tuple[str, ...] = ("outdated", "conflicted")
+
 # ── Embeddings ──
 # Native dim of the default embedder (BAAI/bge-m3, see local-embedder docs).
 # Schema upgrade lives in alembic migration 012_vector_dim_1024.py — keep

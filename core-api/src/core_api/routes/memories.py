@@ -45,6 +45,7 @@ from core_api.constants import (
 from core_api.errors import (
     AUTH_AGENT_TRUST_TOO_LOW,
     AUTH_FLEET_SCOPE_FORBIDDEN,
+    AUTH_PERSON_REQUIRED,
     AUTH_TARGET_AGENT_RESTRICTED,
     REQUEST_BUDGET_EXCEEDED,
     coded_detail,
@@ -63,6 +64,7 @@ from core_api.schemas import (
     BulkMemoryCreate,
     BulkMemoryItem,
     BulkMemoryResponse,
+    HeldMemoryPage,
     IngestCommitRequest,
     IngestRequest,
     MemoryCreate,
@@ -77,6 +79,8 @@ from core_api.schemas import (
     SearchRequest,
     SearchResponse,
     SearchWarning,
+    SessionRollbackRequest,
+    SessionRollbackResponse,
     STMWriteResponse,
     UsageSummary,
 )
@@ -877,6 +881,105 @@ async def memory_count(
         caller_tenant_id=auth.tenant_id,
     )
     return {"count": count}
+
+
+def _require_person(auth: AuthContext, what: str) -> None:
+    """Held memories and their review are a person's (g2.7, g2.9): 403 to anyone else."""
+    if not auth.is_person:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_PERSON_REQUIRED, f"{what} is for a signed-in person, not an agent or an API key."
+            ),
+        )
+
+
+@router.get("/memories/held", response_model=HeldMemoryPage)
+async def list_held_memories(
+    tenant_id: str = Query(...),
+    session_id: str | None = Query(
+        default=None, min_length=1, max_length=200, description="Only what this broker session had held."
+    ),
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str | None = Query(default=None),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """The memories held for a person's review, newest first, and how many.
+
+    The write gate's queue (g2.9). A held memory shows here, and in the
+    inspector opened from here, and nowhere else. A person releases or rejects
+    one with ``PATCH /memories/{id}/status``. Pass ``next_cursor`` back as
+    ``cursor``; ``total`` counts the whole queue, not only the page. Declared
+    BEFORE ``/memories/{memory_id}`` so ``held`` isn't read as an id.
+    """
+    auth.enforce_tenant(tenant_id)
+    _require_person(auth, "The held-memory queue")
+    cursor_ts = cursor_id = None
+    if cursor:
+        try:
+            cursor_ts, cursor_id = decode_cursor(cursor)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid cursor")
+    page = await get_storage_client().list_held_memories(
+        tenant_id, session_id=session_id, limit=limit + 1, cursor_ts=cursor_ts, cursor_id=cursor_id
+    )
+    rows = page["items"]
+    next_cursor = None
+    if len(rows) > limit:
+        last = rows[limit - 1]
+        next_cursor = encode_cursor(datetime.fromisoformat(last["created_at"]), UUID(last["id"]))
+    return HeldMemoryPage(
+        items=[_memory_to_out(m) for m in rows[:limit]], next_cursor=next_cursor, total=page["total"]
+    )
+
+
+@router.post("/memories/rollback-session", response_model=SessionRollbackResponse)
+async def rollback_session(
+    body: SessionRollbackRequest,
+    tenant_id: str = Query(...),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Undo what an agent wrote in one broker session (g2.9).
+
+    Its live memories, and the rows derived from them, become ``outdated``, and
+    what they had superseded or contradicted ``active`` again; the ones held for review become
+    ``cancelled``, as a reject would make them. A person only. Each memory
+    changed gets its own ``session.rollback`` audit row naming that person, so
+    the trail shows it on the memory. A second rollback of the same session
+    changes nothing.
+    """
+    auth.enforce_read_only()
+    auth.enforce_tenant(tenant_id)
+    _require_person(auth, "Rolling back a session")
+    changed = await get_storage_client().rollback_session(tenant_id, body.session_id)
+    # Storage has committed the rollback, and a second one changes nothing, so a
+    # row missed here is never written. Each is ``critical``: a full audit queue
+    # writes it straight to storage instead of dropping it. A write that still
+    # fails (no queue, storage down) is logged and the rest go on, so it costs
+    # its own row only, and the response still says what changed.
+    for kind, new_status in (("outdated", "outdated"), ("restored", "active"), ("cancelled", "cancelled")):
+        for memory_id in changed[kind]:
+            try:
+                await log_action(
+                    tenant_id=tenant_id,
+                    action="session.rollback",
+                    resource_type="memory",
+                    resource_id=memory_id,
+                    detail={"session_id": body.session_id, "new_status": new_status, **auth.audit_actor()},
+                    critical=True,
+                )
+            except Exception:
+                logger.exception(
+                    "session.rollback audit row not written for memory %s (session %s)",
+                    memory_id,
+                    body.session_id,
+                )
+    return SessionRollbackResponse(
+        session_id=body.session_id,
+        outdated=changed["outdated"],
+        restored=changed["restored"],
+        cancelled=changed["cancelled"],
+    )
 
 
 @router.delete("/memories", status_code=204)

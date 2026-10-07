@@ -19,7 +19,9 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/memories/{id}` | GET | Full memory detail (embedding stats, entity links, RDF triple, temporal bounds) |
 | `/memories/{id}` | PATCH | Update content or metadata. Re-embeds if content changes |
 | `/memories/{id}` | DELETE | Soft delete (sets status to `deleted`). A held memory (`quarantined`) is a 404 here: a person rejects it, and after that it deletes like any other |
-| `/memories/{id}/status` | PATCH | Update lifecycle status. A memory held for review (`quarantined`) is moved only here, by a person: `active` releases it, `cancelled` rejects it |
+| `/memories/{id}/status` | PATCH | Update lifecycle status. A memory held for review (`quarantined`) is moved only by a person, here or by a session rollback: `active` releases it, `cancelled` rejects it. Release only changes the status: the entity links, contradiction check and atomic-fact children a held write skipped are not made afterwards |
+| `/memories/held` | GET | The memories held for review, newest first, with `total`; `session_id` narrows to one broker session. A person only |
+| `/memories/rollback-session` | POST | Undo a broker session's writes (`{"session_id"}`): its live memories and the rows derived from them become `outdated`, what they had superseded or contradicted becomes `active` again (`restored`), and its held ones become `cancelled`. A person only |
 | `/memories/{id}/contradictions` | GET | View contradiction chain |
 | `/memories` | DELETE | Bulk soft-delete. Skips held memories (`quarantined`), as every delete does, because a person decides on those. A fleet or tenant purge still removes them |
 | `/memories/stats` | GET | Counts by type, agent, and status, plus `pending: {embedding, enrichment, fanout}` (live rows still owed background work) and `settled` (all zero). Benchmarks and other measure-after-ingest callers should poll until `settled: true` before measuring — see [BENCHMARKS.md](../BENCHMARKS.md#reproduce-it-yourself) |
@@ -182,6 +184,7 @@ request body.
 | `keystone.delete` | `keystone` | `DELETE /keystones/{doc_id}` | `caura_keystones_set op=delete` |
 | `quarantine.release` | `memory` | `PATCH /memories/{id}/status` to `active`, on a held memory | — |
 | `quarantine.reject` | `memory` | `PATCH /memories/{id}/status` to `cancelled`, on a held memory | — |
+| `session.rollback` | `memory` | `POST /memories/rollback-session`, one row per memory it changed | — |
 
 **Rate limiting (managed platform)**
 
