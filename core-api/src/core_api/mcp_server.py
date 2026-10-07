@@ -3819,6 +3819,8 @@ async def caura_stats(
         # scope='agent' filters to caller's own memories (mirrors caura_list);
         # scope='fleet'/'all' drops the per-caller filter so cross-agent
         # aggregates surface — fleet_id (if supplied) still narrows the pool.
+        # Visibility is the caller's at every scope, as on caura_list, so its
+        # own private rows count in the wider aggregates too (M-104).
         effective_agent_id = agent_id if scope == "agent" else None
         effective_include_deleted = include_deleted and trust >= 3
 
@@ -3833,6 +3835,7 @@ async def caura_stats(
                     "tenant_id": tenant_id,
                     "fleet_id": fleet_id,
                     "agent_id": effective_agent_id,
+                    "caller_agent_id": agent_id,
                     "memory_type": memory_type,
                     "status": status,
                     "include_deleted": effective_include_deleted,
@@ -4571,6 +4574,10 @@ async def caura_keystones_set(
                     payload["agent_id"] = agent_id
                 if author_user_id is not None:
                     payload["author_user_id"] = author_user_id
+                payload["actor_agent_id"] = caller_agent_id
+                actor_user_id = _user_id_var.get(None)
+                if actor_user_id is not None:
+                    payload["actor_user_id"] = actor_user_id
                 doc = await sc.upsert_keystone(payload)
                 await log_action(
                     tenant_id=tenant_id,
@@ -4664,7 +4671,12 @@ async def caura_keystones_set(
                     ),
                     t0,
                 )
-            deleted = await sc.delete_keystone(tenant_id=tenant_id, doc_id=doc_id)
+            deleted = await sc.delete_keystone(
+                tenant_id=tenant_id,
+                doc_id=doc_id,
+                actor_agent_id=caller_agent_id,
+                actor_user_id=_user_id_var.get(None),
+            )
             if not deleted:
                 return _with_latency(_error_response("NOT_FOUND", f"Keystone '{doc_id}' not found."), t0)
             await log_action(

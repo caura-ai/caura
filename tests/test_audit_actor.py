@@ -66,6 +66,18 @@ def _assert_actor(detail: dict, expected: dict = ACTOR) -> None:
     assert {k: detail.get(k, "<absent>") for k in expected} == expected
 
 
+def _assert_version_actor(log: AsyncMock, action: str, sent: dict) -> None:
+    """A keystone write tells storage who made it, for the version it records
+    (g1.12): the agent its audit row names, and the person the gateway vouched
+    for, never a person the body claims."""
+    [agent] = [
+        c.kwargs["agent_id"]
+        for c in log.await_args_list
+        if c.kwargs["action"] == action
+    ]
+    assert (sent["actor_agent_id"], sent["actor_user_id"]) == (agent, "user-1")
+
+
 # ---------------------------------------------------------------------------
 # The header: a closed set, and anything else dropped
 # ---------------------------------------------------------------------------
@@ -384,7 +396,7 @@ async def test_trust(monkeypatch, log):
 
 async def test_keystone_set(monkeypatch, log):
     monkeypatch.setattr(keystones, "_enforce_author_trust", AsyncMock())
-    _storage(
+    sc = _storage(
         monkeypatch, keystones, get_document=None, upsert_keystone={"id": str(uuid4())}
     )
     body = keystones.KeystoneSetRequest(
@@ -394,16 +406,20 @@ async def test_keystone_set(monkeypatch, log):
         content="Never.",
         scope="tenant",
         weight="med",
+        author_user_id="claimed",
     )
     await keystones.upsert_keystone(body=body, x_agent_id=None, auth=_ctx())
     _assert_actor(_detail(log, "keystone.set"))
+    [sent] = sc.upsert_keystone.await_args.args
+    _assert_version_actor(log, "keystone.set", sent)
+    assert sent["author_user_id"] == "claimed"  # the claim stays on the rule
 
 
 async def test_keystone_delete(monkeypatch, log):
     monkeypatch.setattr(
         keystones, "_require_trust", AsyncMock(return_value=(3, False, None))
     )
-    _storage(
+    sc = _storage(
         monkeypatch,
         keystones,
         get_document={"data": {"scope": "tenant"}},
@@ -413,6 +429,7 @@ async def test_keystone_delete(monkeypatch, log):
         doc_id="no-secrets", tenant_id="t1", x_agent_id=None, auth=_ctx()
     )
     _assert_actor(_detail(log, "keystone.delete"))
+    _assert_version_actor(log, "keystone.delete", sc.delete_keystone.await_args.kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -510,7 +527,7 @@ async def test_mcp_tune(mcp_env, mcp_log, monkeypatch):
 
 
 async def test_mcp_keystone_set(mcp_env, mcp_log, monkeypatch):
-    stub_storage_client(
+    sc = stub_storage_client(
         monkeypatch, get_document=None, upsert_keystone={"id": str(uuid4())}
     )
     await mcp_server.caura_keystones_set(
@@ -522,14 +539,19 @@ async def test_mcp_keystone_set(mcp_env, mcp_log, monkeypatch):
         weight="med",
     )
     _assert_actor(_detail(mcp_log, "keystone.set"), MCP_ACTOR)
+    [sent] = sc.upsert_keystone.await_args.args
+    _assert_version_actor(mcp_log, "keystone.set", sent)
 
 
 async def test_mcp_keystone_delete(mcp_env, mcp_log, monkeypatch):
-    stub_storage_client(
+    sc = stub_storage_client(
         monkeypatch, get_document={"data": {"scope": "tenant"}}, delete_keystone=True
     )
     await mcp_server.caura_keystones_set(op="delete", doc_id="no-secrets")
     _assert_actor(_detail(mcp_log, "keystone.delete"), MCP_ACTOR)
+    _assert_version_actor(
+        mcp_log, "keystone.delete", sc.delete_keystone.await_args.kwargs
+    )
 
 
 # ---------------------------------------------------------------------------

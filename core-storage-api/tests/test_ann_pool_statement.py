@@ -251,7 +251,7 @@ async def test_concurrent_probes_coalesce_to_one_lookup(monkeypatch) -> None:
         yield _Session()
 
     monkeypatch.setattr(ps, "get_read_session", _counting_session)
-    results = await asyncio.gather(*(ps._ann_pool_available() for _ in range(8)))
+    results = await asyncio.gather(*(ps._iterative_scan_available() for _ in range(8)))
     assert all(results)
     assert opened == 1, f"expected one coalesced probe, saw {opened}"
 
@@ -265,7 +265,7 @@ async def test_probe_failure_is_not_cached(monkeypatch) -> None:
         yield  # pragma: no cover
 
     monkeypatch.setattr(ps, "get_read_session", _broken_session)
-    assert await ps._ann_pool_available() is False
+    assert await ps._iterative_scan_available() is False
     assert ps._pgvector_version is None, "a failed probe must not stick the process on fallback"
 
 
@@ -287,4 +287,4 @@ async def test_probe_parses_extversion(monkeypatch, raw: str, expected: bool) ->
         yield _Session()
 
     monkeypatch.setattr(ps, "get_read_session", _fake_session)
-    assert await ps._ann_pool_available() is expected
+    assert await ps._iterative_scan_available() is expected

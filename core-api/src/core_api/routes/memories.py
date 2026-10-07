@@ -23,6 +23,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from common import permanent_failure
+from common.constants import QUARANTINE_EXITS, QUARANTINED_MEMORY_STATUS
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api import openapi_responses as _oar
 from core_api import request_phase
@@ -44,6 +45,7 @@ from core_api.constants import (
 from core_api.errors import (
     AUTH_AGENT_TRUST_TOO_LOW,
     AUTH_FLEET_SCOPE_FORBIDDEN,
+    AUTH_PERSON_REQUIRED,
     AUTH_TARGET_AGENT_RESTRICTED,
     REQUEST_BUDGET_EXCEEDED,
     coded_detail,
@@ -62,6 +64,7 @@ from core_api.schemas import (
     BulkMemoryCreate,
     BulkMemoryItem,
     BulkMemoryResponse,
+    HeldMemoryPage,
     IngestCommitRequest,
     IngestRequest,
     MemoryCreate,
@@ -76,6 +79,8 @@ from core_api.schemas import (
     SearchRequest,
     SearchResponse,
     SearchWarning,
+    SessionRollbackRequest,
+    SessionRollbackResponse,
     STMWriteResponse,
     UsageSummary,
 )
@@ -114,7 +119,9 @@ from core_api.services.memory_service import (
     soft_delete_memory,
     update_memory,
 )
+from core_api.services.release_replay import REPLAY_TASK, replay_released_write
 from core_api.services.system_metadata import extract_system_metadata
+from core_api.services.task_tracker import tracked_task
 from core_api.services.tenants import list_active_tenant_ids
 from core_api.services.trust_service import parse_trust_error, require_trust
 from core_api.services.usage_service import (
@@ -125,6 +132,7 @@ from core_api.services.usage_service import (
     recall_operation,
     set_usage_headers,
 )
+from core_api.tasks import track_task
 
 logger = logging.getLogger(__name__)
 
@@ -333,8 +341,11 @@ async def list_fleets(
     # way ``memory_repository.list_by_filters`` and ``/memories/stats`` do, so
     # the counts don't overstate what ``GET /api/v1/memories?fleet_id=X`` would
     # actually return. The storage endpoint applies this exclusion server-side
-    # when ``exclude_scope_agent=True``.
-    return await get_storage_client().memory_fleet_distribution(tenant_id, exclude_scope_agent=True)
+    # when ``exclude_scope_agent=True``. A person sees every scope there, so
+    # their counts keep them (``AuthContext.is_person``).
+    return await get_storage_client().memory_fleet_distribution(
+        tenant_id, exclude_scope_agent=not auth.is_person
+    )
 
 
 async def _gate_fleet_read(
@@ -520,7 +531,9 @@ async def list_memories(
     memories. When ``agent_id`` is omitted, ``scope_agent`` memories are hidden
     (safe default). This means memory types like ``insight`` that are typically
     created with agent-scoped visibility will only appear when ``agent_id`` is
-    passed.
+    passed. A signed-in person (a dashboard session or JWT through the gateway)
+    sees every scope, whatever ``agent_id`` says, as ``GET /memories/{id}``
+    already lets them open any row.
 
     **Author filter:** ``written_by`` selects the authoring agent. It is separate
     from ``agent_id`` (the visibility identity) so a caller can ask for a peer's
@@ -608,6 +621,9 @@ async def list_memories(
     # hidden (safe default — fixes the scope_agent visibility gap).
     # ``written_by`` splits the two apart when a caller needs a different
     # author than itself; ``author_filter`` above holds the resolved value.
+    # A person has no visibility identity and keeps every scope_agent row
+    # (``AuthContext.is_person``); ``caller_agent_id`` still drives the fleet
+    # gate and the scope ladder above.
     # Cross-tenant widening: when the caller's credential carries a
     # readable set wider than home AND didn't pin tenant_id, storage
     # widens to ``tenant_id = ANY($readable)``. Pinning to one tenant
@@ -616,7 +632,9 @@ async def list_memories(
     # + readable-set widening the MCP list path uses).
     list_payload: dict = {
         "tenant_id": tenant_id or "",
-        "caller_agent_id": caller_agent_id,  # visibility scoping (authenticated identity)
+        # visibility scoping (authenticated identity); none for a person
+        "caller_agent_id": None if auth.is_person else caller_agent_id,
+        "include_scope_agent": auth.is_person,
         "caller_tenant_id": auth.tenant_id,  # ...matched in the caller's home tenant only
         "fleet_id": fleet_id,
         "written_by": author_filter,  # author filter (written_by, else agent_id)
@@ -734,17 +752,13 @@ async def memory_stats(
             raise HTTPException(status_code=400, detail="tenant_id is required")
         tenant_id = auth.tenant_id
 
-    # ``agent_id`` here is BOTH the author filter and the visibility identity —
-    # it admits the named agent's own scope_agent rows into the counts. An agent
-    # credential naming a PEER would therefore learn that peer's private
-    # per-type/status counts; GET /memories closes the same widening by
-    # preferring the gateway-authenticated agent over the query param.
-    # Stats cannot borrow that fix as-is: with one knob doing both jobs, forcing
-    # it to the caller would silently narrow the historical "no agent_id →
-    # team/org-wide" aggregate. Rejecting the conflict closes the leak and
-    # leaves every legitimate call untouched: omit it for the wider aggregate,
-    # or name yourself. An explicit ``?agent_id=`` is an assertion, not an
-    # omission, and is refused with the rest — see ``enforce_self_agent``.
+    # ``agent_id`` is the author filter. It used to be the visibility identity
+    # too, so an agent credential naming a PEER would have learned that peer's
+    # private per-type/status counts, and a conflicting value is refused rather
+    # than overridden: omit it for the wider aggregate, or name yourself.
+    # Visibility now follows the caller (``caller_agent_id`` below, M-104); the
+    # refusal stays, since an explicit ``?agent_id=`` is an assertion, not an
+    # omission — see ``enforce_self_agent``.
     auth.enforce_self_agent(
         agent_id,
         message=f"agent_id must be omitted or match the authenticated agent ('{auth.agent_id}').",
@@ -755,15 +769,17 @@ async def memory_stats(
     # expression ``effective_agent_id`` exists to name (see its docstring:
     # the bare form is indistinguishable from an audit-attribution line of
     # the same shape), and this is the authorization identity — it gates
-    # ``enforce_fleet_read`` below. Same value, via the audited helper.
+    # ``enforce_fleet_read`` below. Same value, via the audited helper. It is
+    # also the visibility identity storage counts for, so an agent's own
+    # private rows count, as its GET /memories lists them (M-104).
     caller_agent_id = auth.effective_agent_id(agent_id)
     effective_agent_id = agent_id
     if scope is not None:
         # scope='fleet'/'all' drops the per-caller filter so cross-agent
         # aggregates surface; scope='agent' keeps it. Mirrors the MCP handler's
         # ``effective_agent_id``. The returned author filter is unused here —
-        # stats has a single ``agent_id`` knob — but the call still enforces the
-        # trust ladder and may pin fleet_id.
+        # ``effective_agent_id`` is the author filter — but the call still
+        # enforces the trust ladder and may pin fleet_id.
         _, fleet_id = await _resolve_scoped_read(
             scope,
             auth_tenant_id=auth.tenant_id,
@@ -785,6 +801,9 @@ async def memory_stats(
             "tenant_id": tenant_id,
             "fleet_id": fleet_id,
             "agent_id": effective_agent_id,
+            # A person counts every scope, as GET /memories lists them.
+            "caller_agent_id": None if auth.is_person else caller_agent_id,
+            "include_scope_agent": auth.is_person,
             "memory_type": memory_type,
             "status": status,
             "include_deleted": await _effective_include_deleted(auth, include_deleted),
@@ -855,15 +874,115 @@ async def memory_count(
     # This route takes no ``agent_id`` param, so there is nothing to forge: the
     # identity is the authenticated one or nothing. Its own rows are those in
     # its home tenant, which ``tenant_id`` is not on a count of a sibling (M-94).
+    # A person's count keeps every scope, as their list does.
     count = await get_storage_client().count_active(
         tenant_id,
         fleet_id,
         status=status,
-        exclude_scope_agent=True,
+        exclude_scope_agent=not auth.is_person,
         caller_agent_id=caller_agent_id,
         caller_tenant_id=auth.tenant_id,
     )
     return {"count": count}
+
+
+def _require_person(auth: AuthContext, what: str) -> None:
+    """Held memories and their review are a person's (g2.7, g2.9): 403 to anyone else."""
+    if not auth.is_person:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_PERSON_REQUIRED, f"{what} is for a signed-in person, not an agent or an API key."
+            ),
+        )
+
+
+@router.get("/memories/held", response_model=HeldMemoryPage)
+async def list_held_memories(
+    tenant_id: str = Query(...),
+    session_id: str | None = Query(
+        default=None, min_length=1, max_length=200, description="Only what this broker session had held."
+    ),
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str | None = Query(default=None),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """The memories held for a person's review, newest first, and how many.
+
+    The write gate's queue (g2.9). A held memory shows here, and in the
+    inspector opened from here, and nowhere else. A person releases or rejects
+    one with ``PATCH /memories/{id}/status``. Pass ``next_cursor`` back as
+    ``cursor``; ``total`` counts the whole queue, not only the page. Declared
+    BEFORE ``/memories/{memory_id}`` so ``held`` isn't read as an id.
+    """
+    auth.enforce_tenant(tenant_id)
+    _require_person(auth, "The held-memory queue")
+    cursor_ts = cursor_id = None
+    if cursor:
+        try:
+            cursor_ts, cursor_id = decode_cursor(cursor)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid cursor")
+    page = await get_storage_client().list_held_memories(
+        tenant_id, session_id=session_id, limit=limit + 1, cursor_ts=cursor_ts, cursor_id=cursor_id
+    )
+    rows = page["items"]
+    next_cursor = None
+    if len(rows) > limit:
+        last = rows[limit - 1]
+        next_cursor = encode_cursor(datetime.fromisoformat(last["created_at"]), UUID(last["id"]))
+    return HeldMemoryPage(
+        items=[_memory_to_out(m) for m in rows[:limit]], next_cursor=next_cursor, total=page["total"]
+    )
+
+
+@router.post("/memories/rollback-session", response_model=SessionRollbackResponse)
+async def rollback_session(
+    body: SessionRollbackRequest,
+    tenant_id: str = Query(...),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Undo what an agent wrote in one broker session (g2.9).
+
+    Its live memories, and the rows derived from them, become ``outdated``, and
+    what they had superseded or contradicted ``active`` again; the ones held for review become
+    ``cancelled``, as a reject would make them. A person only. Each memory
+    changed gets its own ``session.rollback`` audit row naming that person, so
+    the trail shows it on the memory. A second rollback of the same session
+    changes nothing.
+    """
+    auth.enforce_read_only()
+    auth.enforce_tenant(tenant_id)
+    _require_person(auth, "Rolling back a session")
+    changed = await get_storage_client().rollback_session(tenant_id, body.session_id)
+    # Storage has committed the rollback, and a second one changes nothing, so a
+    # row missed here is never written. Each is ``critical``: a full audit queue
+    # writes it straight to storage instead of dropping it. A write that still
+    # fails (no queue, storage down) is logged and the rest go on, so it costs
+    # its own row only, and the response still says what changed.
+    for kind, new_status in (("outdated", "outdated"), ("restored", "active"), ("cancelled", "cancelled")):
+        for memory_id in changed[kind]:
+            try:
+                await log_action(
+                    tenant_id=tenant_id,
+                    action="session.rollback",
+                    resource_type="memory",
+                    resource_id=memory_id,
+                    detail={"session_id": body.session_id, "new_status": new_status, **auth.audit_actor()},
+                    critical=True,
+                )
+            except Exception:
+                logger.exception(
+                    "session.rollback audit row not written for memory %s (session %s)",
+                    memory_id,
+                    body.session_id,
+                )
+    return SessionRollbackResponse(
+        session_id=body.session_id,
+        outdated=changed["outdated"],
+        restored=changed["restored"],
+        cancelled=changed["cancelled"],
+    )
 
 
 @router.delete("/memories", status_code=204)
@@ -1078,7 +1197,11 @@ async def get_memory(
     try:
         # Storage bundles the row + entity-link outerjoin + server-computed
         # embedding stats (raw pgvector never crosses the wire) in one call.
-        detail = await get_storage_client().get_memory_detail(tenant_id, str(memory_id))
+        # A held memory opens for a person reviewing it and is a 404 to
+        # everyone else, agents and machine keys included.
+        detail = await get_storage_client().get_memory_detail(
+            tenant_id, str(memory_id), include_held=auth.is_person
+        )
         if detail is None:
             raise HTTPException(status_code=404, detail="Memory not found")
         memory = detail["memory"]
@@ -1734,7 +1857,11 @@ async def _write_memories_bulk_inner(
     try:
         with request_phase.own_deadline(bulk_budget) as phases:
             result = await asyncio.wait_for(
-                create_memories_bulk(body, bulk_attempt_id=bulk_attempt_id),
+                # g2.8 — the rules receipts on the items are the broker's word,
+                # so only the broker's credential is taken at it.
+                create_memories_bulk(
+                    body, bulk_attempt_id=bulk_attempt_id, trusted_receipts=auth.is_install_credential
+                ),
                 timeout=bulk_budget,
             )
     except (TimeoutError, httpx.TimeoutException):
@@ -2014,7 +2141,13 @@ async def update_memory_status(
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Update memory status (e.g., active → confirmed)."""
+    """Update memory status (e.g., active → confirmed).
+
+    A memory held for review leaves quarantine here, and only here: a person
+    releases it (``active``) or rejects it (``cancelled``). A reject also
+    deletes it, so no read returns it, search and recall included. To anyone
+    else a held memory is a 404, as on every other read.
+    """
     auth.enforce_read_only()
     # Asked, not assumed. ``transition`` is not in ``PLAN_LIMIT_GATED_OPS``, so
     # this is a no-op today — deliberately written as a lookup rather than as an
@@ -2038,10 +2171,24 @@ async def update_memory_status(
         )
     sc = get_storage_client()
     # ``get_memory`` filters out soft-deleted / cross-tenant rows
-    # server-side, so a returned row is live + owned.
-    memory = await sc.get_memory(str(memory_id), tenant_id)
+    # server-side, so a returned row is live + owned. A held one comes back
+    # for a person only.
+    memory = await sc.get_memory(str(memory_id), tenant_id, include_held=auth.is_person)
     if not memory:
         raise HTTPException(status_code=404, detail="Memory not found")
+    held = memory.get("status") == QUARANTINED_MEMORY_STATUS
+    if held and status not in QUARANTINE_EXITS:
+        raise HTTPException(
+            status_code=409,
+            detail="A held memory is released (status 'active') or rejected (status 'cancelled'), nothing else.",
+        )
+    if held and (memory.get("metadata_") or {}).get("parent_memory_id"):
+        # g2.8 — an auto-chunk of a held write: it moves with that write, and
+        # the review queue lists only the write.
+        raise HTTPException(
+            status_code=409,
+            detail="This memory is part of a held write: release or reject that write instead.",
+        )
     # Cross-fleet / scope_agent row authorization for the authenticated agent
     # (no-op for tenant-scoped dashboard credentials, where auth.agent_id is None).
     if auth.agent_id:
@@ -2062,17 +2209,30 @@ async def update_memory_status(
                 ),
             )
     old_status = memory.get("status")
-    await sc.update_memory_status(str(memory_id), status, tenant_id=tenant_id)
+    updated = await sc.update_memory_status(str(memory_id), status, tenant_id=tenant_id, release_hold=held)
+    if held and updated is None:
+        # Another reviewer released or rejected it first.
+        raise HTTPException(status_code=409, detail="This memory is no longer held.")
 
     # Audit stays a decoupled async POST (not folded into the storage txn).
+    # A release or reject names the person who decided it.
     await log_action(
         tenant_id=tenant_id,
         agent_id=memory.get("agent_id"),
-        action="status_update",
+        action=("quarantine.release" if status == "active" else "quarantine.reject")
+        if held
+        else "status_update",
         resource_type="memory",
         resource_id=memory_id,
-        detail={"old_status": old_status, "new_status": status},
+        detail={"old_status": old_status, "new_status": status, **(auth.audit_actor() if held else {})},
     )
+    if held and status == "active":
+        # g2.8 — the work the held write skipped (enrichment, governance, its
+        # atomic facts, the near-duplicate merge, entities, contradictions)
+        # runs now, after the answer, as it does after a write.
+        track_task(
+            tracked_task(replay_released_write(str(memory_id), tenant_id), REPLAY_TASK, memory_id, tenant_id)
+        )
     return {"memory_id": str(memory_id), "old_status": old_status, "new_status": status}
 
 

@@ -166,8 +166,8 @@ Trace data is untrusted:
 
 If the cluster's procedure cannot be cleanly distilled (mixed
 outcomes, divergent step orders, too few traces), still produce a
-valid candidate but set goal_phrase="" and step_skeleton=[]. The
-auto-gates downstream will reject those.
+valid candidate but set goal_phrase="" and step_skeleton=[]. Forge
+skips those clusters.
 """
 
 # Filled at prompt-build time — saves a .format() call per
@@ -382,6 +382,15 @@ def parse_distill_response(raw: str) -> dict[str, Any]:
         v = parsed[k]
         if not isinstance(v, list) or not all(isinstance(item, str) for item in v):
             raise DistillParseError(f"LLM response key {k!r} must be a list of strings.")
+
+    # The prompt's marker for a cluster the model could not distill. Neither
+    # field is stored on the candidate and no auto-gate reads them, so a reply
+    # carrying it would be staged like any other and could auto-activate
+    # (M-44). Skip the cluster as a distill error, like a kind="update" reply.
+    if not parsed["goal_phrase"].strip() or not parsed["step_skeleton"]:
+        raise DistillParseError(
+            "LLM marked the cluster undistillable (blank goal_phrase or empty step_skeleton)."
+        )
 
     # Slug format check — the slug becomes part of the doc_id
     # (``forge/<slug>``) and a filesystem path on plugin nodes, so it

@@ -9,7 +9,10 @@ row. The ``memory_conflicts`` record was the only thing naming the winner, and
 it sat behind ``contradiction_write_conflict_record``, off by default.
 
 Such a loser is now recorded whatever the flag. A loser the edge points at is
-not, and with the flag on every pair is still recorded once.
+not, and with the flag on every pair is still recorded once. An edge counts
+only if it landed: storage's ``expect_supersedes_null`` CAS can lose to a
+concurrent writer, and then the winner keeps its old pointer and the loser has
+no edge at all.
 """
 
 from __future__ import annotations
@@ -73,8 +76,16 @@ def _row(path: str, hour: int, value: str, *, supersedes_id=None) -> dict:
     return row
 
 
-async def _run(path: str, new: dict, found: list[dict], *, flag: bool = False):
-    """Run one detection path with ``found`` as what its storage query returns."""
+async def _run(
+    path: str,
+    new: dict,
+    found: list[dict],
+    *,
+    flag: bool = False,
+    flushed: dict | None = None,
+):
+    """Run one detection path with ``found`` as what its storage query returns
+    and ``flushed`` as what its status flush answers."""
     sc = AsyncMock()
     sc.find_rdf_conflicts = AsyncMock(
         return_value=found if path in ("rdf", "path_c_rdf") else []
@@ -88,7 +99,9 @@ async def _run(path: str, new: dict, found: list[dict], *, flag: bool = False):
     sc.get_entity_links_for_memories = AsyncMock(return_value={})
     rows = {r["id"]: r for r in (new, *found)}
     sc.get_memory = AsyncMock(side_effect=lambda mid, _tenant, **_kw: rows.get(mid))
-    sc.batch_update_status = AsyncMock(return_value={"ok": True, "skipped": []})
+    sc.batch_update_status = AsyncMock(
+        return_value=flushed or {"ok": True, "skipped": [], "edge_skipped": []}
+    )
     rec = AsyncMock()
     with (
         patch(f"{_CD}.get_storage_client", return_value=sc),
@@ -152,6 +165,19 @@ async def test_a_lone_loser_the_edge_points_at_is_not_recorded(path):
 
     assert _chain(sc)[new["id"]]["supersedes_id"] == old["id"]
     rec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("path", PATHS)
+async def test_a_loser_whose_edge_lost_the_cas_is_recorded(path):
+    kind, _demoted = PATHS[path]
+    new = _row(path, 12, "Haifa")
+    old = _row(path, 8, "Tel Aviv")
+    lost = {"ok": True, "skipped": [], "edge_skipped": [new["id"]]}
+
+    sc, rec = await _run(path, new, [old], flushed=lost)
+
+    assert _chain(sc)[new["id"]]["supersedes_id"] == old["id"]
+    assert _recorded(rec) == [(old["id"], kind)]
 
 
 async def test_a_loser_whose_winner_already_supersedes_a_row_is_recorded():

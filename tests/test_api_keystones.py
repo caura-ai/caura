@@ -12,8 +12,10 @@ from __future__ import annotations
 import pytest
 
 from common.governance.ruleset_hash import rule_set_hash
+from core_api import mcp_server
 from core_api.agent_ids import INSIGHTER_AGENT_ID
 from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
+from tests._mcp_test_helpers import parse_envelope
 from tests.conftest import get_test_auth
 from tests.conftest import uid as _uid
 
@@ -354,6 +356,46 @@ async def test_set_invalid_scope_surfaces_as_422(client):
     # ``_surface_storage_error`` translates storage's HTTPStatusError
     # into a 422 here (rather than letting it bubble as a 500).
     assert resp.status_code == 422, resp.text
+
+
+async def test_text_postgres_cannot_read_back_surfaces_as_422(client):
+    """Storage refuses a NUL in a rule's text: stored, it would fail the
+    tenant's whole list. The proxy surfaces that 422, and nothing is kept."""
+    tenant_id, headers = get_test_auth(_ks_tenant())
+    resp = await _set_keystone(client, headers, tenant_id, content="before\x00after")
+    assert resp.status_code == 422, resp.text
+    assert "content must not contain" in resp.text
+
+    listed = await client.get(
+        f"/api/v1/keystones?tenant_id={tenant_id}", headers=headers
+    )
+    assert (listed.status_code, listed.json()) == (200, [])
+
+
+async def test_mcp_set_with_text_postgres_cannot_read_back_is_refused(
+    client, mcp_env, monkeypatch
+):
+    """The MCP tool, where agents author their rules, against the same real
+    storage: the refusal comes back as INVALID_ARGUMENTS, and nothing is kept.
+    (``client`` brings up the schema the storage bridge writes to.)"""
+    tenant_id, headers = get_test_auth(_ks_tenant())
+    monkeypatch.setattr(mcp_server, "_get_tenant", lambda: tenant_id)
+    out = await mcp_server.caura_keystones_set(
+        op="set",
+        doc_id=f"ks-{_uid()}",
+        title="No secrets",
+        content="before\x00after",
+        scope="tenant",
+        weight="high",
+    )
+    error = parse_envelope(out)["error"]
+    assert error["code"] == "INVALID_ARGUMENTS"
+    assert "content must not contain" in error["message"]
+
+    listed = await client.get(
+        f"/api/v1/keystones?tenant_id={tenant_id}", headers=headers
+    )
+    assert (listed.status_code, listed.json()) == (200, [])
 
 
 # ---------------------------------------------------------------------------

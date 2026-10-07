@@ -169,6 +169,17 @@ DOCUMENT_FIELDS: list[str] = [
     "updated_at",
 ]
 
+# A keystone version as the versions routes summarise it (migration 061). Not
+# the snapshot: a version is read as the rules it gives an agent.
+KEYSTONE_VERSION_FIELDS: list[str] = [
+    "version",
+    "op",
+    "doc_id",
+    "actor_agent_id",
+    "actor_user_id",
+    "created_at",
+]
+
 IDEMPOTENCY_RESPONSE_FIELDS: list[str] = [
     "tenant_id",
     "idempotency_key",

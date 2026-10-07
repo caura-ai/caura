@@ -55,6 +55,7 @@ from sqlalchemy.sql.selectable import Select
 
 from common import duplicate_memory, permanent_failure
 from common.constants import (
+    CONTRADICTED_STATUSES,
     CONTRADICTION_CANDIDATE_MAX,
     CONTRADICTION_SIMILARITY_THRESHOLD,
     DEFAULT_RELATION_TYPE_WEIGHT,
@@ -64,6 +65,9 @@ from common.constants import (
     GRAPH_MAX_HOPS,
     LIVE_MEMORY_STATUSES,
     NODE_PRINCIPAL_TENANT,
+    QUARANTINE_EXITS,
+    QUARANTINE_REJECTED,
+    QUARANTINED_MEMORY_STATUS,
     RECALL_BOOST_SCALE,
     RELATION_TYPE_WEIGHTS,
     REPORT_RUNNING_STALE_AFTER,
@@ -309,6 +313,41 @@ def derived_rows_where(tenant_id: str, parent_ids: Any) -> list[ColumnElement[bo
     ]
 
 
+def session_rows_where(tenant_id: str, session_id: str) -> list[ColumnElement[bool]]:
+    """Rows of ``tenant_id`` the broker wrote in ``session_id`` and hasn't deleted.
+
+    g2.9. The broker stamps each memory it writes with ``metadata.session_id``;
+    the rows derived from one carry only ``metadata.parent_memory_id``
+    (``derived_rows_where``). Implies the predicate of the partial index
+    ``ix_memories_session`` (migration 062), keyed on the same expression.
+    Module-level so the plan can be checked against the exact predicate the
+    service runs.
+    """
+    return [
+        Memory.tenant_id == tenant_id,
+        Memory.deleted_at.is_(None),
+        Memory.metadata_["session_id"].astext == session_id,
+    ]
+
+
+def held_rows_where(tenant_id: str) -> list[ColumnElement[bool]]:
+    """The held memories of ``tenant_id``: the review queue (g2.9).
+
+    Implies the predicate of the partial index ``ix_memories_held`` (migration
+    062), keyed on ``(tenant_id, created_at, id)``, so the queue and its count
+    read held rows only. Module-level for the same plan check.
+
+    A held write's auto-chunks are left out (g2.8): they are released or
+    rejected with it, so the queue lists the write once.
+    """
+    return [
+        Memory.tenant_id == tenant_id,
+        Memory.deleted_at.is_(None),
+        Memory.status == QUARANTINED_MEMORY_STATUS,
+        Memory.metadata_["parent_memory_id"].astext.is_(None),
+    ]
+
+
 async def _change_derived_rows(
     session: AsyncSession, tenant_id: str, parent_id: str, derived: dict
 ) -> list[dict]:
@@ -411,7 +450,10 @@ def _visibility_scope_clause(
 
     With an identity: ``scope_org``/``scope_team`` always, plus the caller's OWN
     ``scope_agent`` rows. Without one, every ``scope_agent`` row is dropped —
-    a credential that authenticates no agent is entitled to none of them.
+    a credential that authenticates no agent is entitled to none of them. The
+    one exception is a signed-in person, who sees every scope: the readers
+    that serve one skip this predicate (``include_scope_agent``, or
+    ``exclude_scope_agent=False``) rather than pass it an identity.
 
     "Own" means the caller's agent id IN THE CALLER'S HOME TENANT
     (``caller_tenant_id``). ``agent_id`` is unique only per tenant
@@ -626,7 +668,8 @@ _ANN_EF_SEARCH_FLOOR = 100
 # the mechanism that lets a filtered ANN arm keep scanning until the LIMIT
 # is satisfied instead of post-filtering a fixed ef_search batch. Below this
 # version the GUC does not exist (SET fails), so the ANN pool declines
-# entirely and the statement keeps its pre-pool shape.
+# entirely and the statement keeps its pre-pool shape, and the filtered
+# lookups skip the SET (``_scan_past_other_tenants``).
 _PGVECTOR_ITERATIVE_MIN = (0, 8)
 # Process-wide probe cache: extversion cannot change under a running service
 # (ALTER EXTENSION requires a restart window in every deployment shape we
@@ -656,16 +699,17 @@ def _get_probe_lock() -> asyncio.Lock:
     return _probe_lock
 
 
-async def _ann_pool_available() -> bool:
-    """True when the ANN candidate pool may run: pgvector >= 0.8 on this DB.
+async def _iterative_scan_available() -> bool:
+    """True when this DB's pgvector (>= 0.8) has ``hnsw.iterative_scan``.
 
-    Called only when ``ann_pool_size`` > 0, so the default path never pays
-    the probe. The first caller runs one ``pg_extension`` lookup on a read
-    session and caches the parsed version; concurrent first callers coalesce
-    on the probe lock instead of each issuing their own lookup. The fallback
-    decision is logged once, at WARNING, because a tenant explicitly asked
-    for the pool and is silently getting the full scan instead — on-call
-    should be able to grep why.
+    Gates the ANN candidate pool (asked only when ``ann_pool_size`` > 0) and
+    the filtered nearest-neighbour lookups (``_scan_past_other_tenants``).
+    The first caller runs one ``pg_extension`` lookup on a read session and
+    caches the parsed version; concurrent first callers coalesce on the probe
+    lock instead of each issuing their own lookup. An old pgvector is logged
+    once, at WARNING: a tenant that asked for the pool silently gets the full
+    scan instead, and a filtered lookup can come back short — on-call should
+    be able to grep why.
 
     A probe FAILURE deliberately caches nothing (a transient read error must
     not stick the process on the fallback path), so callers queued behind a
@@ -687,8 +731,9 @@ async def _ann_pool_available() -> bool:
                 ).scalar()
         except Exception:
             logger.warning(
-                "ann_pool: pgvector version probe failed; falling back to the "
-                "full-scan candidate window for this call (will re-probe)",
+                "pgvector version probe failed; no iterative scans for this call, "
+                "so the ANN pool falls back to the full-scan candidate window "
+                "(will re-probe)",
                 exc_info=True,
             )
             return False
@@ -699,15 +744,42 @@ async def _ann_pool_available() -> bool:
             parts.append(int(piece))
         _pgvector_version = tuple(parts) or (0,)
         if _pgvector_version >= _PGVECTOR_ITERATIVE_MIN:
-            logger.info("ann_pool: pgvector %s supports iterative scans; ANN pool enabled", raw)
+            logger.info("pgvector %s supports iterative scans; ANN pool and filtered lookups use them", raw)
         else:
             logger.warning(
-                "ann_pool: pgvector %s < 0.8 (no hnsw.iterative_scan); ann_pool_size "
-                "is set but the statement keeps the full-scan candidate window. "
-                "ALTER EXTENSION vector UPDATE to enable the two-stage path.",
+                "pgvector %s < 0.8 (no hnsw.iterative_scan): ann_pool_size keeps the "
+                "full-scan candidate window, and a filtered ANN lookup can return "
+                "fewer rows than its LIMIT. ALTER EXTENSION vector UPDATE to enable "
+                "iterative scans.",
                 raw,
             )
     return _pgvector_version >= _PGVECTOR_ITERATIVE_MIN
+
+
+async def _scan_past_other_tenants(session: AsyncSession) -> None:
+    """Let this transaction's filtered HNSW lookups scan until their LIMIT is met.
+
+    Each HNSW index (memories, entities, documents) spans every tenant. A scan
+    hands back one ``hnsw.ef_search`` batch, 40 rows by default, and the
+    tenant, fleet and status filters run on that batch alone, so a caller
+    whose rows sit behind 40 nearer rows of other tenants got fewer rows than
+    the LIMIT, or none, and no error (M-61, 2026-10-01 audit).
+    ``hnsw.iterative_scan`` keeps scanning until the LIMIT is met, bounded by
+    ``hnsw.max_scan_tuples`` (20k by default); ``ef_search`` keeps its default.
+
+    Callers keep their similarity threshold OUTSIDE the LIMITed scan. An
+    iterative scan stops only once enough rows pass its WHERE clause, so with
+    the threshold inside, a lookup with nothing above it (dedup's usual
+    answer) would walk ``max_scan_tuples`` rows on every call.
+    ``relaxed_order`` can return rows slightly out of distance order, so
+    callers also re-sort what the scan returns.
+
+    ``set_config(..., is_local => true)`` is SET LOCAL: it lasts until the
+    session's transaction ends, so call this on the session that runs the
+    lookup. Below pgvector 0.8 the GUC does not exist, and this does nothing.
+    """
+    if await _iterative_scan_available():
+        await session.execute(select(func.set_config("hnsw.iterative_scan", "relaxed_order", True)))
 
 
 def _saturate_rank(scaled_rank: Any) -> Any:
@@ -1100,6 +1172,7 @@ def _entity_reader_memory_clause(
     conds = [
         Memory.tenant_id == tenant_id,
         Memory.deleted_at.is_(None),
+        Memory.status != QUARANTINED_MEMORY_STATUS,
         _visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id),
     ]
     if caller_fleet_ids is not None:
@@ -1165,12 +1238,18 @@ def _entity_visible_to_tenant(tenant_id: str) -> ColumnElement[bool]:
     """
     return or_(
         ~_entity_has_readable_memory(Memory.tenant_id == tenant_id),
-        _entity_has_readable_memory(and_(Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None))),
+        _entity_has_readable_memory(
+            and_(
+                Memory.tenant_id == tenant_id,
+                Memory.deleted_at.is_(None),
+                Memory.status != QUARANTINED_MEMORY_STATUS,
+            )
+        ),
     )
 
 
 def _relation_has_live_evidence() -> ColumnElement[bool]:
-    """``Relation`` is not derived only from soft-deleted memories (M-92).
+    """``Relation`` is not derived only from soft-deleted or held memories (M-92).
 
     Kept when it has no evidence at all (a caller's own edge, or one whose
     evidence a pre-#1775 hard delete set to NULL, which nothing can tell apart),
@@ -1178,7 +1257,7 @@ def _relation_has_live_evidence() -> ColumnElement[bool]:
     ``relation_evidence`` row. So an edge some live memory still asserts stays,
     even when its latest evidence is the deleted one.
     """
-    live = Memory.deleted_at.is_(None)
+    live = and_(Memory.deleted_at.is_(None), Memory.status != QUARANTINED_MEMORY_STATUS)
     recorded = select(RelationEvidence.memory_id).where(RelationEvidence.relation_id == Relation.id)
     return or_(
         and_(Relation.evidence_memory_id.is_(None), ~recorded.exists()),
@@ -1257,6 +1336,9 @@ _PURGE_TENANT_TABLES: tuple[str, ...] = (
     # against a tenant that no longer exists.
     "audit_chain_head",
     "documents",
+    # Every version's snapshot holds the tenant's keystone text (migration 061),
+    # so the history goes with the documents it copies.
+    "keystone_versions",
     "analysis_reports",
     "dedup_reviews",
     "background_task_log",
@@ -1509,6 +1591,44 @@ def _attach_agent_display_names(rows: Any) -> list[Memory]:
     return out
 
 
+def _recorded_winners(loser_ids: Sequence[UUID], tenant_id: str, *where: ColumnElement[bool]) -> list[Select]:
+    """Select ``(Memory, successor_of)``: the memory that beat each demoted memory
+    in ``loser_ids``, as only its ``memory_conflicts`` record names it (M-34).
+
+    ``supersedes_id`` is one column, so a contradiction wires its winner to one
+    loser only, and its other losers are named only by their records (#1815), on
+    either side: the older memory loses whichever one detection ran for. The
+    winner is the record's other side when it is the newer, as ``_pick_older``
+    decides it: created later, or on a tie the greater id. A dismissed record
+    names no winner, and a pair an edge also joins is left to the
+    ``supersedes_id`` lookups. ``where`` holds the winner to the caller's scope.
+    """
+    loser = aliased(Memory)
+    return [
+        select(Memory, loser.id.label("successor_of"))
+        .join(MemoryConflict, winner_side == Memory.id)
+        .join(loser, loser.id == loser_side)
+        .where(
+            MemoryConflict.tenant_id == tenant_id,
+            MemoryConflict.review_status != "dismissed",
+            loser_side.in_(loser_ids),
+            loser.tenant_id == tenant_id,
+            loser.deleted_at.is_(None),
+            loser.status.in_(CONTRADICTED_STATUSES),
+            or_(
+                Memory.created_at > loser.created_at,
+                and_(Memory.created_at == loser.created_at, Memory.id > loser.id),
+            ),
+            Memory.supersedes_id.is_distinct_from(loser.id),
+            *where,
+        )
+        for loser_side, winner_side in (
+            (MemoryConflict.old_memory_id, MemoryConflict.new_memory_id),
+            (MemoryConflict.new_memory_id, MemoryConflict.old_memory_id),
+        )
+    ]
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PostgresService
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1743,8 +1863,14 @@ class PostgresService:
         self,
         memory_id: UUID,
         tenant_id: str,
+        *,
+        include_held: bool = False,
     ) -> Memory | None:
         """Fetch one memory by id within one tenant, or None.
+
+        A held memory (``QUARANTINED_MEMORY_STATUS``) is None too, unless
+        ``include_held``: only a person reviewing it may read one, and core-api
+        is what knows the caller is a person.
 
         There was an unscoped sibling, ``memory_get_by_id``, that took an id
         alone and returned whatever it matched. It is gone: it was the
@@ -1773,6 +1899,8 @@ class PostgresService:
                     Memory.tenant_id == tenant_id,
                     Memory.deleted_at.is_(None),
                 )
+                if not include_held:
+                    stmt = stmt.where(Memory.status != QUARANTINED_MEMORY_STATUS)
                 return (await session.execute(stmt)).scalar_one_or_none()
 
     @staticmethod
@@ -2545,6 +2673,7 @@ class PostgresService:
         supersedes_id: UUID | None = None,
         unset_supersedes: bool = False,
         expected_supersedes_id: UUID | None = None,
+        release_hold: bool = False,
     ) -> bool:
         """Update a memory's ``status`` and optionally (re)set ``supersedes_id``.
 
@@ -2570,13 +2699,32 @@ class PostgresService:
                 clobbered. It cannot express "expect NULL": ``None`` means
                 "no gate", so a caller whose precondition is an empty
                 pointer needs ``memory_set_supersedes_if_null`` instead.
+            release_hold: Move a held memory out of quarantine. The row must
+                be ``QUARANTINED_MEMORY_STATUS`` and ``status`` one of
+                ``QUARANTINE_EXITS``. Without it a held row never matches, so no
+                other writer (contradiction detection, the near-duplicate
+                merge, the crystallizer, a caller's transition) can move one.
+                Its held auto-chunks move with it. A reject
+                (``QUARANTINE_REJECTED``) also soft-deletes them, so the write
+                a person turned down is out of every read, search and recall
+                included.
 
         Returns:
             True if the row was updated, False if the ``expected_supersedes_id``
-            CAS check failed, the tenant didn't match, or the row id doesn't
-            exist. Existing callers ignore the return value — adding it is
-            backward-compatible.
+            CAS check failed, the tenant didn't match, the row id doesn't
+            exist, or the row is held and ``release_hold`` wasn't given (or
+            isn't held and it was). Existing callers ignore the return value —
+            adding it is backward-compatible.
+
+        Raises:
+            ValueError: ``status`` is the held status (a memory is held when
+                it is written, never by an update), or ``release_hold`` names a
+                status a held memory can't become.
         """
+        if status == QUARANTINED_MEMORY_STATUS:
+            raise ValueError("a memory is held when it is written, never by a status update")
+        if release_hold and status not in QUARANTINE_EXITS:
+            raise ValueError(f"a held memory becomes one of {', '.join(QUARANTINE_EXITS)}, not {status}")
         # 09/02 M-55: stamp WHEN the status changed. A contradiction is a flip
         # on an existing row, and that event previously had no timestamp — so
         # the outcome-inference window had to use ``created_at`` and dropped
@@ -2585,6 +2733,9 @@ class PostgresService:
             "status": status,
             "status_changed_at": datetime.now(UTC),
         }
+        rejected = release_hold and status == QUARANTINE_REJECTED
+        if rejected:
+            values["deleted_at"] = values["status_changed_at"]
         if unset_supersedes:
             values["supersedes_id"] = None
         elif supersedes_id is not None:
@@ -2611,12 +2762,177 @@ class PostgresService:
                 # matched, updated, and returned True, so the route answered
                 # 200 for a write the caller is told is impossible.
                 Memory.deleted_at.is_(None),
+                # A held row moves only by release or reject, and only a held
+                # row moves that way.
+                (Memory.status == QUARANTINED_MEMORY_STATUS)
+                if release_hold
+                else (Memory.status != QUARANTINED_MEMORY_STATUS),
             )
             if expected_supersedes_id is not None:
                 stmt = stmt.where(Memory.supersedes_id == expected_supersedes_id)
             stmt = stmt.values(**values)
             result = await session.execute(stmt)
-            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
+            moved = (result.rowcount or 0) > 0  # type: ignore[attr-defined]
+            if moved and release_hold:
+                # g2.8 — a held write's auto-chunks are held with it, cut from
+                # its content, so they leave quarantine with it, the same way
+                # and in the same transaction.
+                chunks = (
+                    sql_update(Memory)
+                    .where(
+                        *derived_rows_where(tenant_id, [str(memory_id)]),
+                        Memory.status == QUARANTINED_MEMORY_STATUS,
+                    )
+                    .values(status=status, status_changed_at=values["status_changed_at"])
+                )
+                if rejected:
+                    chunks = chunks.values(deleted_at=values["status_changed_at"])
+                await session.execute(chunks)
+            return moved
+
+    async def memory_list_held(
+        self,
+        tenant_id: str,
+        *,
+        session_id: str | None = None,
+        limit: int = 50,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
+    ) -> tuple[list[Memory], int]:
+        """The held memories of ``tenant_id``, newest first, and how many (g2.9).
+
+        The review queue, and the one read that returns held rows in bulk: every
+        other read leaves them out, so only a person reviewing them sees them.
+        ``session_id`` narrows both to what one broker session had held. Returns
+        up to ``limit`` rows (the caller widens it by one to find the next page)
+        after the ``(created_at, id)`` cursor; the count ignores the cursor.
+        Read-only (reader replica).
+        """
+        where = held_rows_where(tenant_id)
+        if session_id is not None:
+            where.append(Memory.metadata_["session_id"].astext == session_id)
+        page = select(Memory).where(*where)
+        if cursor_ts is not None and cursor_id is not None:
+            page = page.where(tuple_(Memory.created_at, Memory.id) < tuple_(cursor_ts, cursor_id))  # type: ignore[arg-type]
+        page = page.order_by(Memory.created_at.desc(), Memory.id.desc()).limit(limit)
+        async with get_read_session() as session:
+            rows = list((await session.execute(page)).scalars().all())
+            total = (
+                await session.execute(select(func.count()).select_from(Memory).where(*where))
+            ).scalar_one()
+        return rows, total
+
+    async def memory_rollback_session(self, tenant_id: str, session_id: str) -> dict[str, list[str]]:
+        """Undo what the broker wrote in one session (g2.9). Returns the ids changed.
+
+        - Its live memories become ``outdated``, and so do the live rows derived
+          from them (atomic facts, auto-chunks, and theirs), which carry no
+          session id of their own.
+        - What those had superseded or contradicted becomes ``active`` again
+          (``restored``). A near-duplicate merge or a contradiction verdict
+          outdated it for the session's write, so undoing the write alone would
+          leave neither version live. As when an edit or a contradiction
+          retracts a supersession, only from a status a supersession sets
+          (``CONTRADICTED_STATUSES``), and never a deleted row, one the session
+          wrote, or one a live row still supersedes or contradicts. The
+          rolled-back row keeps its ``supersedes_id``, and its conflict records
+          stay, as the record of what it replaced.
+        - Its held memories are rejected: ``cancelled`` and soft-deleted, as
+          a person's reject leaves them (``QUARANTINE_REJECTED``), since a
+          rolled-back session's write is not released.
+        - What it wrote that is already out of play (outdated, cancelled,
+          archived, deleted) stays as it is, so a second rollback changes
+          nothing.
+
+        One transaction: a rollback lands whole or not at all.
+        """
+        now = datetime.now(UTC)
+        live = Memory.status.in_(LIVE_MEMORY_STATUSES)
+        async with get_session() as session:
+
+            async def move(
+                where: list[ColumnElement[bool]], status: str, *, delete: bool = False
+            ) -> list[str]:
+                update = sql_update(Memory).where(*where).values(status=status, status_changed_at=now)
+                if delete:
+                    update = update.values(deleted_at=now)
+                result = await session.execute(update.returning(Memory.id))
+                return [str(memory_id) for memory_id in result.scalars().all()]
+
+            outdated = await move([*session_rows_where(tenant_id, session_id), live], "outdated")
+            parents = outdated
+            # Each pass takes the live rows derived from the last, and a row
+            # changes once, so this ends at the deepest generation.
+            while parents:
+                parents = await move([*derived_rows_where(tenant_id, parents), live], "outdated")
+                outdated.extend(parents)
+            restored: list[str] = []
+            if outdated:
+                rolled_back = [UUID(memory_id) for memory_id in outdated]
+                successor, standing, winner = aliased(Memory), aliased(Memory), aliased(Memory)
+                # After the pass above, so a rolled-back row no longer stands.
+                restored = await move(
+                    [
+                        Memory.tenant_id == tenant_id,
+                        Memory.deleted_at.is_(None),
+                        Memory.status.in_(CONTRADICTED_STATUSES),
+                        # What a rolled-back row held down: the row its
+                        # ``supersedes_id`` names, and a contradiction's further
+                        # losers, which no edge names (M-34), only their
+                        # ``memory_conflicts`` record, written whatever the flag.
+                        or_(
+                            Memory.id.in_(
+                                select(successor.supersedes_id).where(
+                                    successor.tenant_id == tenant_id, successor.id.in_(rolled_back)
+                                )
+                            ),
+                            Memory.id.in_(
+                                select(MemoryConflict.old_memory_id).where(
+                                    MemoryConflict.tenant_id == tenant_id,
+                                    MemoryConflict.new_memory_id.in_(rolled_back),
+                                )
+                            ),
+                        ),
+                        # The session's own rows, rolled back now or before.
+                        Memory.id.notin_(rolled_back),
+                        Memory.metadata_["session_id"].astext.is_distinct_from(session_id),
+                        # Not while a live memory still supersedes it, or still
+                        # contradicts it without an edge.
+                        ~select(standing.id)
+                        .where(
+                            standing.tenant_id == tenant_id,
+                            standing.supersedes_id == Memory.id,
+                            standing.deleted_at.is_(None),
+                            standing.status.in_(LIVE_MEMORY_STATUSES),
+                        )
+                        .exists(),
+                        ~select(MemoryConflict.id)
+                        .join(winner, winner.id == MemoryConflict.new_memory_id)
+                        .where(
+                            MemoryConflict.tenant_id == tenant_id,
+                            MemoryConflict.old_memory_id == Memory.id,
+                            winner.deleted_at.is_(None),
+                            winner.status.in_(LIVE_MEMORY_STATUSES),
+                        )
+                        .exists(),
+                    ],
+                    "active",
+                )
+            cancelled = await move(
+                [*session_rows_where(tenant_id, session_id), Memory.status == QUARANTINED_MEMORY_STATUS],
+                QUARANTINE_REJECTED,
+                delete=True,
+            )
+            # And the auto-chunks held with them (g2.8), which carry no session
+            # id of their own. One pass: a held row has no other derived rows,
+            # since nothing fans out of it until it is released.
+            if cancelled:
+                cancelled += await move(
+                    [*derived_rows_where(tenant_id, cancelled), Memory.status == QUARANTINED_MEMORY_STATUS],
+                    QUARANTINE_REJECTED,
+                    delete=True,
+                )
+        return {"outdated": outdated, "restored": restored, "cancelled": cancelled}
 
     async def memory_set_supersedes_if_null(
         self,
@@ -2940,17 +3256,14 @@ class PostgresService:
         threshold = min_similarity if min_similarity is not None else SEMANTIC_DEDUP_THRESHOLD
         async with get_session() as session:
             distance = Memory.embedding.cosine_distance(embedding)
-            similarity = (1.0 - distance).label("similarity")
-
-            stmt = (
-                select(Memory, similarity)
+            nearest = (
+                select(Memory.id, distance.label("distance"))
                 .where(
                     Memory.tenant_id == tenant_id,
                     Memory.deleted_at.is_(None),
                     Memory.status.in_(("active", "confirmed", "pending")),
                     Memory.embedding.is_not(None),
                 )
-                .where((1.0 - distance) >= threshold)
                 .order_by(distance)
                 .limit(SEMANTIC_DEDUP_CANDIDATE_LIMIT)
             )
@@ -2959,11 +3272,11 @@ class PostgresService:
             # stored with ``fleet_id = ''`` matched neither ``== ''`` (never
             # asked) nor ``IS NULL``, so a paraphrase of it was admitted while
             # an identical write 409'd. See ``_content_hash_fleet_scope``.
-            stmt = stmt.where(_fleet_scope(Memory.fleet_id, fleet_id))
+            nearest = nearest.where(_fleet_scope(Memory.fleet_id, fleet_id))
             if visibility:
-                stmt = stmt.where(Memory.visibility == visibility)
+                nearest = nearest.where(Memory.visibility == visibility)
             if exclude_id is not None:
-                stmt = stmt.where(Memory.id != exclude_id)
+                nearest = nearest.where(Memory.id != exclude_id)
             # CAURA-721. Plain equality, not ``_content_hash_fleet_scope``'s
             # COALESCE dance: ``Memory.agent_id`` is ``nullable=False``, so
             # there is no NULL-vs-empty-string group to reconcile the way
@@ -2971,8 +3284,19 @@ class PostgresService:
             # matches every other optional predicate here — an unowned write
             # has no owner to pin.
             if agent_id:
-                stmt = stmt.where(Memory.agent_id == agent_id)
+                nearest = nearest.where(Memory.agent_id == agent_id)
 
+            # The threshold applies to the nearest rows, outside the scan; see
+            # ``_scan_past_other_tenants``.
+            found = nearest.subquery()
+            similarity = (1.0 - found.c.distance).label("similarity")
+            stmt = (
+                select(Memory, similarity)
+                .join(found, Memory.id == found.c.id)
+                .where((1.0 - found.c.distance) >= threshold)
+                .order_by(found.c.distance)
+            )
+            await _scan_past_other_tenants(session)
             result = await session.execute(stmt)
             row = result.first()
             if row is None:
@@ -3348,7 +3672,7 @@ class PostgresService:
         history_query: bool = False,
         strict_fleet_scoping: bool = False,
     ) -> list[SimpleNamespace]:
-        """Execute the full CTE-based scored search with entity-link JOIN.
+        """Execute the full CTE-based scored search, then load the hits' entity links.
 
         Returns a list of SimpleNamespace objects with attributes:
         Memory, score, similarity, vec_sim, entity_links.
@@ -3409,7 +3733,7 @@ class PostgresService:
             ref_ts = valid_at_ts
         else:
             ref_ts = func.now()
-        use_ann_pool = _ann_pool_size > 0 and await _ann_pool_available()
+        use_ann_pool = _ann_pool_size > 0 and await _iterative_scan_available()
         if use_ann_pool and _candidate_pool_size > 0:
             # The two pool selectors are mutually exclusive by design —
             # core-api's profile validation rejects the combination up front;
@@ -3521,6 +3845,7 @@ class PostgresService:
                 else Memory.tenant_id == tenant_id
             ),
             Memory.deleted_at.is_(None),
+            Memory.status != QUARANTINED_MEMORY_STATUS,
             # CAURA-594: NULL-embedding rows are admitted only if they also
             # match the FTS query — otherwise they'd rank on `Memory.weight *
             # freshness * ...` alone and could fill top_k slots with rows
@@ -4163,7 +4488,10 @@ class PostgresService:
         else:
             scored_cte = main_stmt.cte("scored")
 
-        # -- Outer query: JOIN Memory + LEFT JOIN entity links --
+        # -- Outer query: JOIN Memory; entity links follow in a keyed query --
+        # M-112: one row per memory, without the two large columns the route
+        # drops (it serialises ``MEMORY_LIST_FIELDS``). A LEFT JOIN on the links
+        # repeated each memory's row, vector and tsvector included, once per link.
         # ``pool_arms`` (D12 provenance) exists only in ann-mode; the default
         # path selects a typed NULL so the row shape is identical either way
         # and the route serialises one contract.
@@ -4184,14 +4512,12 @@ class PostgresService:
                 scored_cte.c.recall_boost,
                 scored_cte.c.temporal_boost,
                 pool_arms_col,
-                MemoryEntityLink.entity_id,
-                MemoryEntityLink.role,
                 Agent.display_name.label("agent_display_name"),
             )
             .join(scored_cte, Memory.id == scored_cte.c.mem_id)
-            .outerjoin(MemoryEntityLink, Memory.id == MemoryEntityLink.memory_id)
             .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
             .order_by(scored_cte.c.score.desc(), Memory.created_at.desc())
+            .options(defer(Memory.embedding), defer(Memory.search_vector))
         )
         if use_ann_pool:
             stmt = stmt.outerjoin(pool_cte, Memory.id == pool_cte.c.id)
@@ -4241,6 +4567,9 @@ class PostgresService:
                     )
                 result = await session.execute(stmt)
                 rows = result.all()
+                hit_ids = [row.Memory.id for row in rows]
+                links_stmt = select(MemoryEntityLink).where(MemoryEntityLink.memory_id.in_(hit_ids))
+                links = (await session.execute(links_stmt)).scalars().all() if hit_ids else []
 
         grouped: OrderedDict[UUID, SimpleNamespace] = OrderedDict()
         for row in rows:
@@ -4264,8 +4593,8 @@ class PostgresService:
                     pool_arms=row.pool_arms,
                     entity_links=[],
                 )
-            if row.entity_id is not None:
-                grouped[mid].entity_links.append({"entity_id": row.entity_id, "role": row.role})
+        for link in links:
+            grouped[link.memory_id].entity_links.append({"entity_id": link.entity_id, "role": link.role})
         if use_ann_pool and len(grouped) < top_k:
             # The pool admitted fewer distinct rows than the caller asked for —
             # either the tenant slice is simply small (benign) or the arms are
@@ -4334,6 +4663,7 @@ class PostgresService:
                     if readable_tenant_ids
                     else Memory.tenant_id == tenant_id,
                     Memory.deleted_at.is_(None),
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
                 )
             )
             if fleet_ids:
@@ -4452,39 +4782,45 @@ class PostgresService:
         memory_type_filter: str | None = None,
         valid_at: datetime | None = None,
         strict_fleet_scoping: bool = False,
-    ) -> list[Memory]:
-        """Find active/confirmed memories that supersede the given memory IDs."""
+    ) -> list[tuple[Memory, UUID]]:
+        """Find the active/confirmed memories that replaced the given ones, each
+        with the id of the one it replaced.
+
+        A chain edge's winner names its loser in ``supersedes_id``. A
+        contradiction's further losers have no edge, so the winner their
+        ``memory_conflicts`` record names is found too (M-34), in the same scope.
+        """
+        scope: list[ColumnElement[bool]] = [
+            Memory.tenant_id == tenant_id,
+            Memory.status.in_(("active", "confirmed")),
+            Memory.deleted_at.is_(None),
+            _visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id),
+        ]
+        if fleet_ids:
+            scope.append(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
+        if filter_agent_id:
+            scope.append(Memory.agent_id == filter_agent_id)
+        if memory_type_filter:
+            scope.append(Memory.memory_type == memory_type_filter)
+        if valid_at:
+            scope.append(or_(Memory.ts_valid_start.is_(None), Memory.ts_valid_start <= valid_at))
+            scope.append(or_(Memory.ts_valid_end.is_(None), Memory.ts_valid_end >= valid_at))
+        display = Agent.display_name.label("agent_display_name")
         async with get_session() as session:
-            stmt = (
-                select(Memory, Agent.display_name.label("agent_display_name"))
+            edges = await session.execute(
+                select(Memory, display)
                 .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
-                .where(
-                    Memory.tenant_id == tenant_id,
-                    Memory.supersedes_id.in_(supersedes_ids),
-                    Memory.status.in_(("active", "confirmed")),
-                    Memory.deleted_at.is_(None),
-                )
+                .where(Memory.supersedes_id.in_(supersedes_ids), *scope)
             )
-            if fleet_ids:
-                stmt = stmt.where(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
-            stmt = stmt.where(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
-            if filter_agent_id:
-                stmt = stmt.where(Memory.agent_id == filter_agent_id)
-            if memory_type_filter:
-                stmt = stmt.where(Memory.memory_type == memory_type_filter)
-            if valid_at:
-                stmt = stmt.where(
-                    or_(
-                        Memory.ts_valid_start.is_(None),
-                        Memory.ts_valid_start <= valid_at,
-                    ),
-                ).where(
-                    or_(
-                        Memory.ts_valid_end.is_(None),
-                        Memory.ts_valid_end >= valid_at,
-                    ),
-                )
-            return _attach_agent_display_names((await session.execute(stmt)).all())
+            found: list[tuple[Memory, UUID]] = [
+                (m, m.supersedes_id) for m in _attach_agent_display_names(edges.all()) if m.supersedes_id
+            ]
+            for stmt in _recorded_winners(supersedes_ids, tenant_id, *scope):
+                named = stmt.add_columns(display).outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+                rows = (await session.execute(named)).all()
+                memories = _attach_agent_display_names((row[0], row[2]) for row in rows)
+                found.extend(zip(memories, (row[1] for row in rows), strict=True))
+        return found
 
     # ------------------------------------------------------------------
     # D) Contradiction detection
@@ -4675,10 +5011,8 @@ class PostgresService:
     ) -> list[Memory]:
         async with get_session() as session:
             distance = Memory.embedding.cosine_distance(embedding)
-            similarity = (1.0 - distance).label("similarity")
-
-            stmt = (
-                select(Memory, similarity)
+            nearest = (
+                select(Memory.id, distance.label("distance"))
                 .where(
                     Memory.tenant_id == tenant_id,
                     Memory.deleted_at.is_(None),
@@ -4686,25 +5020,34 @@ class PostgresService:
                     Memory.embedding.is_not(None),
                     Memory.id != memory_id,
                 )
-                .where((1.0 - distance) >= threshold)
                 .order_by(distance)
                 .limit(limit)
             )
 
             # Same fleet grouping as ``memory_find_rdf_conflicts`` above.
-            stmt = stmt.where(_fleet_scope(Memory.fleet_id, fleet_id))
+            nearest = nearest.where(_fleet_scope(Memory.fleet_id, fleet_id))
 
-            stmt = stmt.where(Memory.visibility == visibility)
+            nearest = nearest.where(Memory.visibility == visibility)
             # A54 — ``scope_agent`` means "private to SOME agent", not "private
             # to THIS agent": the tier predicate alone still matches a DIFFERENT
             # agent's private rows, which contradiction then marks
             # outdated/conflicted — a status write into a row the writer cannot
             # read. Wet-proven, not theoretical. Pin the owner for that tier.
             if visibility == "scope_agent" and agent_id:
-                stmt = stmt.where(Memory.agent_id == agent_id)
+                nearest = nearest.where(Memory.agent_id == agent_id)
 
+            # The threshold applies to the nearest rows, outside the scan; see
+            # ``_scan_past_other_tenants``.
+            found = nearest.subquery()
+            stmt = (
+                select(Memory)
+                .join(found, Memory.id == found.c.id)
+                .where((1.0 - found.c.distance) >= threshold)
+                .order_by(found.c.distance)
+            )
+            await _scan_past_other_tenants(session)
             result = await session.execute(stmt)
-            return [row.Memory for row in result.all()]
+            return list(result.scalars().all())
 
     # ------------------------------------------------------------------
     # E) Lifecycle batch
@@ -5138,6 +5481,7 @@ class PostgresService:
                     Memory.tenant_id == tenant_id,
                     status_filter,
                     Memory.deleted_at.is_(None),
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
                 )
             )
             if fleet_id:
@@ -5346,6 +5690,7 @@ class PostgresService:
                           OR m.fleet_id = CAST(:fleet_id AS text)
                       )
                       AND m.deleted_at IS NULL
+                      AND m.status <> 'quarantined'
                     """
                 ),
                 params,
@@ -5412,7 +5757,9 @@ class PostgresService:
         # the number by an order of magnitude on busy environments.
         async with get_read_session() as session:
             result = await session.scalar(
-                select(func.count()).select_from(Memory).where(Memory.deleted_at.is_(None))
+                select(func.count())
+                .select_from(Memory)
+                .where(Memory.deleted_at.is_(None), Memory.status != QUARANTINED_MEMORY_STATUS)
             )
             return result or 0
 
@@ -5434,6 +5781,7 @@ class PostgresService:
                 select(func.count(func.distinct(Memory.agent_id))).where(
                     Memory.agent_id.isnot(None),
                     Memory.deleted_at.is_(None),
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
                 )
             )
             return result or 0
@@ -5451,6 +5799,7 @@ class PostgresService:
             result = await session.scalar(
                 select(func.count(func.distinct(Memory.tenant_id))).where(
                     Memory.deleted_at.is_(None),
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
                 )
             )
             return result or 0
@@ -5600,6 +5949,10 @@ class PostgresService:
         async with get_session() as session:
             cand_scope, params = _scope_sql(tenant_id, fleet_id)
             nb_scope, _ = _scope_sql(tenant_id, fleet_id, table="n")
+            # The threshold applies to each candidate's nearest neighbours,
+            # outside the scan: Postgres never pushes a WHERE into a subquery
+            # with a LIMIT. See ``_scan_past_other_tenants``.
+            await _scan_past_other_tenants(session)
             result = await session.execute(
                 text(f"""
                 WITH candidates AS (
@@ -5619,19 +5972,22 @@ class PostgresService:
                        nb.similarity AS similarity
                 FROM candidates c
                 LEFT JOIN LATERAL (
-                    SELECT n.id AS id,
-                           1 - (n.embedding <=> c.embedding) AS similarity
-                    FROM memories n
-                    WHERE {nb_scope}
-                      AND n.embedding IS NOT NULL
-                      AND n.deleted_at IS NULL
-                      AND n.status = ANY(:live_statuses)
-                      AND n.visibility = ANY(:shared_visibilities)
-                      AND n.fleet_id IS NOT DISTINCT FROM c.fleet_id
-                      AND n.id != c.id
-                      AND 1 - (n.embedding <=> c.embedding) >= :threshold
-                    ORDER BY n.embedding <=> c.embedding
-                    LIMIT :k
+                    SELECT nearest.id, nearest.similarity
+                    FROM (
+                        SELECT n.id AS id,
+                               1 - (n.embedding <=> c.embedding) AS similarity
+                        FROM memories n
+                        WHERE {nb_scope}
+                          AND n.embedding IS NOT NULL
+                          AND n.deleted_at IS NULL
+                          AND n.status = ANY(:live_statuses)
+                          AND n.visibility = ANY(:shared_visibilities)
+                          AND n.fleet_id IS NOT DISTINCT FROM c.fleet_id
+                          AND n.id != c.id
+                        ORDER BY n.embedding <=> c.embedding
+                        LIMIT :k
+                    ) nearest
+                    WHERE nearest.similarity >= :threshold
                 ) nb ON TRUE
                 ORDER BY c.created_at DESC, c.id DESC, nb.similarity DESC NULLS LAST, nb.id
             """),
@@ -5727,6 +6083,7 @@ class PostgresService:
     ) -> list[tuple]:
         async with get_session() as session:
             scope, params = _scope_sql(tenant_id, fleet_id)
+            scope += " AND m.status <> 'quarantined'"
             params["stale_days"] = stale_days
             params["max_weight"] = max_weight
             result = await session.execute(
@@ -5752,6 +6109,7 @@ class PostgresService:
     ) -> list[tuple]:
         async with get_session() as session:
             scope, params = _scope_sql(tenant_id, fleet_id)
+            scope += " AND m.status <> 'quarantined'"
             params["min_chars"] = min_chars
             result = await session.execute(
                 text(f"""
@@ -5773,6 +6131,7 @@ class PostgresService:
     ) -> dict:
         async with get_read_session() as session:
             scope, params = _scope_sql(tenant_id, fleet_id)
+            scope += " AND m.status <> 'quarantined'"
 
             r = await session.execute(
                 text(f"""
@@ -6301,6 +6660,7 @@ class PostgresService:
                 Memory.id.in_(memory_ids),
                 Memory.tenant_id == tenant_id,
                 Memory.deleted_at.is_(None),
+                Memory.status != QUARANTINED_MEMORY_STATUS,
             )
             result = await session.execute(stmt)
             return {m.id: m for m in result.scalars().all()}
@@ -6319,12 +6679,14 @@ class PostgresService:
 
         Serves both the tenant-facing ``/fleets`` (``exclude_scope_agent``
         True — no caller identity to legitimately see ``scope_agent`` rows,
-        so they're excluded the same way ``list_by_filters`` does) and the
+        so they're excluded the same way ``list_by_filters`` does; False for a
+        signed-in person, who sees every scope) and the
         admin ``/admin/fleets`` (``exclude_scope_agent`` False, cross-tenant
         when ``tenant_id`` is None). Read-only (reader replica).
         """
         filters: list[ColumnElement[bool]] = [
             Memory.deleted_at.is_(None),
+            Memory.status != QUARANTINED_MEMORY_STATUS,
             Memory.fleet_id.isnot(None),
         ]
         if exclude_scope_agent:
@@ -6352,6 +6714,8 @@ class PostgresService:
         self,
         memory_id: UUID,
         tenant_id: str,
+        *,
+        include_held: bool = False,
     ) -> dict | None:
         """Bundle a single memory's full row + entity links + embedding stats.
 
@@ -6360,7 +6724,8 @@ class PostgresService:
         embedding column is stripped from the returned row dict. The memory
         row and its entity-link outerjoin are fetched in two queries in one
         session (no per-link N+1). Returns None when the row is absent, soft-
-        deleted, or belongs to another tenant. Read-only (reader replica).
+        deleted, or belongs to another tenant, and when it is held unless
+        ``include_held`` (a person reviewing it). Read-only (reader replica).
         """
         async with get_read_session() as session:
             # Fetch the memory + its agent label in one query (the agent join is
@@ -6377,6 +6742,8 @@ class PostgresService:
                 return None
             memory, agent_display_name = mem_row
             if memory.tenant_id != tenant_id or memory.deleted_at is not None:
+                return None
+            if memory.status == QUARANTINED_MEMORY_STATUS and not include_held:
                 return None
             memory.agent_display_name = agent_display_name
 
@@ -6457,23 +6824,31 @@ class PostgresService:
         """
         async with get_read_session() as session:
             memory = await session.get(Memory, memory_id)
-            if memory is None or memory.tenant_id != tenant_id or memory.deleted_at is not None:
+            if (
+                memory is None
+                or memory.tenant_id != tenant_id
+                or memory.deleted_at is not None
+                or memory.status == QUARANTINED_MEMORY_STATUS
+            ):
                 return None
 
-            supersessors = (
-                (
-                    await session.execute(
-                        select(Memory)
-                        .where(
-                            Memory.supersedes_id == memory_id,
-                            Memory.tenant_id == tenant_id,
-                            Memory.deleted_at.is_(None),
-                        )
-                        .order_by(Memory.created_at.desc())
-                    )
-                )
+            not_gone = (
+                Memory.tenant_id == tenant_id,
+                Memory.deleted_at.is_(None),
+                Memory.status != QUARANTINED_MEMORY_STATUS,
+            )
+            supersessors = list(
+                (await session.execute(select(Memory).where(Memory.supersedes_id == memory_id, *not_gone)))
                 .scalars()
                 .all()
+            )
+            if memory.status in CONTRADICTED_STATUSES:
+                # M-34 — a contradiction's further losers have no edge, only
+                # the record naming the memory that beat them.
+                for stmt in _recorded_winners([memory_id], tenant_id, *not_gone):
+                    supersessors.extend((await session.execute(stmt)).scalars().all())
+            supersessors = sorted(
+                {m.id: m for m in supersessors}.values(), key=lambda m: m.created_at, reverse=True
             )
 
             older = None
@@ -6514,10 +6889,21 @@ class PostgresService:
         The single-row delete passes ``with_derived=False``: its callers
         (``soft_delete_memory``, governance remediation) delete and audit each
         child themselves, governance auditing before it deletes.
+
+        A held row (``QUARANTINED_MEMORY_STATUS``) is never selected: it leaves
+        quarantine only by a person's decision on it, so no delete, the
+        writer's own included, takes it out of the review queue. A bulk
+        delete's audit row names no memory, so it can't stand for a person's
+        decision on one. A fleet or tenant purge still removes it.
         """
 
         def selected(m: Any) -> list[ColumnElement[bool]]:
-            clauses = [m.tenant_id == tenant_id, m.deleted_at.is_(None), *where(m)]
+            clauses = [
+                m.tenant_id == tenant_id,
+                m.deleted_at.is_(None),
+                m.status != QUARANTINED_MEMORY_STATUS,
+                *where(m),
+            ]
             if exclude_ids:
                 clauses.append(m.id.notin_(exclude_ids))
             return clauses
@@ -6693,6 +7079,9 @@ class PostgresService:
             stmt = stmt.where(Memory.fleet_id == fleet_id)
         if not include_deleted:
             stmt = stmt.where(Memory.deleted_at.is_(None))
+        # Held rows stay out even with the deleted ones in: a held row is never
+        # deleted, so this drops no deleted row.
+        stmt = stmt.where(Memory.status != QUARANTINED_MEMORY_STATUS)
         if agent_id:
             stmt = stmt.where(Memory.agent_id == agent_id)
         if memory_type:
@@ -6760,7 +7149,7 @@ class PostgresService:
                 memory_type, agent_id, status,
                 COUNT(*)                                         AS cnt
             FROM memories
-            WHERE deleted_at IS NULL
+            WHERE deleted_at IS NULL AND status <> 'quarantined'
               AND (CAST(:tenant_id AS text) IS NULL OR tenant_id = CAST(:tenant_id AS text))
               AND (CAST(:fleet_id AS text) IS NULL OR fleet_id = CAST(:fleet_id AS text))
             GROUP BY GROUPING SETS ((memory_type), (agent_id), (status), ())
@@ -6811,6 +7200,7 @@ class PostgresService:
         cursor_id: UUID | None = None,
         readable_tenant_ids: list[str] | None = None,
         visibility: str | None = None,
+        include_scope_agent: bool = False,
     ) -> list[Memory]:
         """Filter, sort, paginate memories WITH visibility scoping.
 
@@ -6823,7 +7213,11 @@ class PostgresService:
         **Visibility:** when ``caller_agent_id`` is set, ``scope_agent`` rows
         are visible only to the authoring agent in its home tenant
         (``caller_tenant_id``, defaulting to ``tenant_id``); team/org always
-        visible. When unset, all ``scope_agent`` rows are excluded.
+        visible. When unset, all ``scope_agent`` rows are excluded, unless
+        ``include_scope_agent`` asks for every row whatever its visibility:
+        core-api sets it for a signed-in person, who sees every scope.
+        ``include_scope_agent`` is ignored when ``caller_agent_id`` is set, as
+        in ``memory_stats_breakdown``.
         **Cross-tenant widening:**
         a non-empty ``readable_tenant_ids`` expands ``tenant_id = $1`` to
         ``tenant_id = ANY($1)``; ``tenant_id`` stays the binding/home tenant.
@@ -6837,7 +7231,8 @@ class PostgresService:
             stmt = base.where(Memory.tenant_id == tenant_id)
 
         # Visibility predicate (critical: prevents scope_agent leaks).
-        stmt = stmt.where(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
+        if caller_agent_id or not include_scope_agent:
+            stmt = stmt.where(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
 
         if fleet_id:
             # Same predicate as the bare ``Memory.fleet_id == fleet_id`` this
@@ -6896,6 +7291,9 @@ class PostgresService:
             stmt = stmt.where(Memory.created_at <= created_before)
         if not include_deleted:
             stmt = stmt.where(Memory.deleted_at.is_(None))
+        # Held rows stay out even with the deleted ones in: a held row is never
+        # deleted, so this drops no deleted row.
+        stmt = stmt.where(Memory.status != QUARANTINED_MEMORY_STATUS)
 
         if cursor_ts is not None and cursor_id is not None:
             # Cursor predicate direction must match the ORDER BY below: a desc
@@ -6944,6 +7342,7 @@ class PostgresService:
         readable_tenant_ids: list[str] | None = None,
         include_pending: bool = False,
         caller_tenant_id: str | None = None,
+        caller_agent_id: str | None = None,
     ) -> dict:
         """Return ``{total, by_type, by_agent, by_status}`` (+ optional
         ``by_tenant`` / ``deleted`` / ``total_including_deleted`` /
@@ -6964,12 +7363,15 @@ class PostgresService:
         optional; omitting them aggregates all-time (the MCP ``caura_stats``
         behaviour, unchanged).
 
-        Ports core-api ``services.memory_stats.compute_memory_stats`` verbatim —
-        same visibility scoping (``agent_id`` doubles as visibility identity AND
-        author filter; when omitted, ``scope_agent`` rows are excluded so totals
-        match what a non-semantic list would return), same single-pass GROUPING
-        SETS aggregation, same cross-tenant widening + ``by_tenant`` breakdown,
-        and same ``include_deleted`` CTE. Read-only (reader replica).
+        Ports core-api ``services.memory_stats.compute_memory_stats`` — same
+        single-pass GROUPING SETS aggregation, same cross-tenant widening +
+        ``by_tenant`` breakdown, and same ``include_deleted`` CTE. Read-only
+        (reader replica). Visibility follows ``memory_list_by_filters``:
+        ``caller_agent_id`` is the identity the counted rows must be visible to,
+        so the caller's own ``scope_agent`` rows count, and ``agent_id`` is only
+        the author filter (M-104). A caller that sends ``agent_id`` alone keeps
+        the historical rule, where it doubles as the visibility identity; with
+        neither, ``scope_agent`` rows are excluded.
 
         ``include_scope_agent`` (default False keeps the historical MCP
         ``caura_stats`` behaviour) opts into counting agent-private
@@ -6977,8 +7379,10 @@ class PostgresService:
         a pure COUNT — no memory content is returned — so private rows can be
         tallied without leaking their contents; the report uses it so
         ``durable_memories_written`` reflects everything an agent wrote, not just
-        what it shared. Ignored when ``agent_id`` is set (that path already
-        scopes visibility to the named agent).
+        what it shared. ``GET /memories/stats`` sets it for a signed-in person,
+        whose list shows every scope. Ignored when an identity is set
+        (``caller_agent_id`` or ``agent_id``), which already scopes visibility
+        to that agent.
         """
         scope_filters: list[ColumnElement[bool]] = []
         if readable_tenant_ids:
@@ -6998,12 +7402,14 @@ class PostgresService:
             )
         if agent_id:
             scope_filters.append(Memory.agent_id == agent_id)
-            # Private rows count for the named agent in its home tenant only —
-            # under ``readable_tenant_ids``, or on a read pinned to a sibling, a
-            # sibling tenant's same-named agent is a different agent (M-94).
+        visible_to = caller_agent_id or agent_id
+        if visible_to:
+            # Private rows count for that agent in its home tenant only — under
+            # ``readable_tenant_ids``, or on a read pinned to a sibling, a sibling
+            # tenant's same-named agent is a different agent (M-94).
             # ``caller_tenant_id`` names that home; ``tenant_id`` is it for every
             # caller that does not pin a sibling.
-            scope_filters.append(_visibility_scope_clause(agent_id, caller_tenant_id or tenant_id))
+            scope_filters.append(_visibility_scope_clause(visible_to, caller_tenant_id or tenant_id))
         elif not include_scope_agent:
             scope_filters.append(_visibility_scope_clause(None))
         if memory_type:
@@ -7032,7 +7438,7 @@ class PostgresService:
         if exclude_title_regex:
             scope_filters.append(~func.coalesce(Memory.title, "").op("~*")(exclude_title_regex))
 
-        filters = [Memory.deleted_at.is_(None), *scope_filters]
+        filters = [Memory.deleted_at.is_(None), Memory.status != QUARANTINED_MEMORY_STATUS, *scope_filters]
 
         include_by_tenant = bool(readable_tenant_ids and len(readable_tenant_ids) > 1)
 
@@ -7097,7 +7503,10 @@ class PostgresService:
             select_cols = f"{select_cols}, tenant_id"
 
         if include_deleted:
-            all_predicate, pred_params = _predicate_sql(scope_filters)
+            # A held row is never deleted, so it is out of both counts.
+            all_predicate, pred_params = _predicate_sql(
+                [*scope_filters, Memory.status != QUARANTINED_MEMORY_STATUS]
+            )
             sql = f"""
             WITH base AS (
                 SELECT memory_type, agent_id, status, tenant_id,
@@ -7217,6 +7626,7 @@ class PostgresService:
         """
         conds = [
             Memory.deleted_at.is_(None),
+            Memory.status != QUARANTINED_MEMORY_STATUS,
             Memory.created_at >= since,
         ]
         if not include_scope_agent:
@@ -7300,7 +7710,7 @@ class PostgresService:
             scope_filters.append(Memory.agent_id.notin_(exclude_agent_ids))
         if exclude_title_regex:
             scope_filters.append(~func.coalesce(Memory.title, "").op("~*")(exclude_title_regex))
-        filters = [Memory.deleted_at.is_(None), *scope_filters]
+        filters = [Memory.deleted_at.is_(None), Memory.status != QUARANTINED_MEMORY_STATUS, *scope_filters]
 
         reused = case((Memory.recall_count > 0, 1), else_=0)
         per_type_stmt = (
@@ -7477,9 +7887,8 @@ class PostgresService:
         """
         async with get_session() as session:
             distance = Entity.name_embedding.cosine_distance(name_embedding)
-            similarity = (1.0 - distance).label("similarity")
-            stmt = (
-                select(Entity, similarity)
+            nearest = (
+                select(Entity.id, distance.label("distance"))
                 .where(
                     Entity.tenant_id == tenant_id,
                     Entity.entity_type == entity_type,
@@ -7492,10 +7901,18 @@ class PostgresService:
             # ``fleet_id`` matches an empty-string column value instead
             # of silently routing to the IS NULL branch.
             if fleet_id is not None:
-                stmt = stmt.where(Entity.fleet_id == fleet_id)
+                nearest = nearest.where(Entity.fleet_id == fleet_id)
             else:
-                stmt = stmt.where(Entity.fleet_id.is_(None))
+                nearest = nearest.where(Entity.fleet_id.is_(None))
 
+            # Re-sorted outside the scan; see ``_scan_past_other_tenants``.
+            found = nearest.subquery()
+            stmt = (
+                select(Entity, (1.0 - found.c.distance).label("similarity"))
+                .join(found, Entity.id == found.c.id)
+                .order_by(found.c.distance)
+            )
+            await _scan_past_other_tenants(session)
             result = await session.execute(stmt)
             return list(result.all())  # type: ignore[arg-type]
 
@@ -7647,6 +8064,10 @@ class PostgresService:
             # session. N queries one HTTP — the win is HTTP-roundtrip
             # elimination, not query count. Items without a name_embedding
             # skip Phase 2 (mirrors ``entity_service.upsert_entity`` line 46).
+            # One SET LOCAL covers every lookup below, and each is re-sorted
+            # outside its scan, since the first match wins: see
+            # ``_scan_past_other_tenants``.
+            await _scan_past_other_tenants(session)
             for it in items:
                 idx = it["input_idx"]
                 if idx in matched_idxs:
@@ -7655,9 +8076,8 @@ class PostgresService:
                 if emb is None:
                     continue
                 distance = Entity.name_embedding.cosine_distance(emb)
-                sim_col = (1.0 - distance).label("similarity")
-                stmt = (
-                    select(Entity, sim_col)
+                nearest = (
+                    select(Entity.id, distance.label("distance"))
                     .where(
                         Entity.tenant_id == tenant_id,
                         Entity.entity_type == it["entity_type"],
@@ -7667,7 +8087,13 @@ class PostgresService:
                     .limit(candidate_limit)
                 )
                 # Phase 1's fleet key: ``''`` and NULL are one fleet (L-47).
-                stmt = stmt.where(_fleet_scope(Entity.fleet_id, it.get("fleet_id")))
+                nearest = nearest.where(_fleet_scope(Entity.fleet_id, it.get("fleet_id")))
+                found = nearest.subquery()
+                stmt = (
+                    select(Entity, (1.0 - found.c.distance).label("similarity"))
+                    .join(found, Entity.id == found.c.id)
+                    .order_by(found.c.distance)
+                )
 
                 rows = (await session.execute(stmt)).all()
                 for entity, sim in rows:
@@ -8532,6 +8958,7 @@ class PostgresService:
         memory_conds: list[ColumnElement[bool]] = [
             Memory.id == MemoryEntityLink.memory_id,
             Memory.deleted_at.is_(None),
+            Memory.status != QUARANTINED_MEMORY_STATUS,
         ]
         if caller_agent_id:
             memory_conds.append(
@@ -8957,6 +9384,7 @@ class PostgresService:
                 .where(
                     MemoryEntityLink.entity_id == entity_id,
                     Memory.deleted_at.is_(None),
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
                     Memory.tenant_id == tenant_id,
                 )
             )
@@ -9369,21 +9797,28 @@ class PostgresService:
                    nb.sim
             FROM batch b
             JOIN LATERAL (
-                SELECT e.id, e.canonical_name,
-                       1 - (e.name_embedding <=> b.name_embedding) AS sim
-                FROM entities e
-                WHERE e.tenant_id = :tenant_id
-                  AND e.name_embedding IS NOT NULL
-                  AND e.id > b.id
-                  AND e.entity_type = b.entity_type
-                  AND e.fleet_id IS NOT DISTINCT FROM b.fleet_id
-                  AND (1 - (e.name_embedding <=> b.name_embedding)) >= :threshold
-                ORDER BY e.name_embedding <=> b.name_embedding
-                LIMIT :candidate_limit
+                SELECT nearest.id, nearest.canonical_name, nearest.sim
+                FROM (
+                    SELECT e.id, e.canonical_name,
+                           1 - (e.name_embedding <=> b.name_embedding) AS sim
+                    FROM entities e
+                    WHERE e.tenant_id = :tenant_id
+                      AND e.name_embedding IS NOT NULL
+                      AND e.id > b.id
+                      AND e.entity_type = b.entity_type
+                      AND e.fleet_id IS NOT DISTINCT FROM b.fleet_id
+                    ORDER BY e.name_embedding <=> b.name_embedding
+                    LIMIT :candidate_limit
+                ) nearest
+                WHERE nearest.sim >= :threshold
             ) nb ON true
         """)
 
         async with get_session() as session:
+            # The threshold applies to each entity's nearest neighbours, outside
+            # the scan: Postgres never pushes a WHERE into a subquery with a
+            # LIMIT. See ``_scan_past_other_tenants``.
+            await _scan_past_other_tenants(session)
             rows = (await session.execute(pair_sql, params)).all()
             # Similarity alone is not identity: 'CAURA-712' / 'CAURA-713',
             # 'v1.0.2' / 'v1.0.3' and 'acme (ohio)' / 'acme (delaware)' embed
@@ -9845,20 +10280,26 @@ class PostgresService:
                 FROM (SELECT id, embedding FROM memories
                       WHERE id = ANY(CAST(:memory_ids AS uuid[])) AND tenant_id = :tenant_id) m
                 JOIN LATERAL (
-                    SELECT e.id, e.canonical_name, e.attributes,
-                           1 - (e.name_embedding <=> m.embedding) AS sim
-                    FROM entities e
-                    WHERE e.tenant_id = :tenant_id
-                      AND e.name_embedding IS NOT NULL
-                      AND (1 - (e.name_embedding <=> m.embedding)) >= :threshold
-                      {entity_fleet_clause}
-                    ORDER BY e.name_embedding <=> m.embedding
-                    LIMIT 10
+                    SELECT nearest.id, nearest.canonical_name, nearest.attributes, nearest.sim
+                    FROM (
+                        SELECT e.id, e.canonical_name, e.attributes,
+                               1 - (e.name_embedding <=> m.embedding) AS sim
+                        FROM entities e
+                        WHERE e.tenant_id = :tenant_id
+                          AND e.name_embedding IS NOT NULL
+                          {entity_fleet_clause}
+                        ORDER BY e.name_embedding <=> m.embedding
+                        LIMIT 10
+                    ) nearest
+                    WHERE nearest.sim >= :threshold
                 ) e ON true
                 ORDER BY m.id, e.sim DESC
             """)
 
             with phases.phase("lateral"):
+                # The threshold applies to each memory's nearest entities,
+                # outside the scan; see ``_scan_past_other_tenants``.
+                await _scan_past_other_tenants(session)
                 lateral_rows = (
                     await session.execute(
                         lateral_query,
@@ -9976,6 +10417,7 @@ class PostgresService:
                           ON mem.id = a.memory_id
                           AND mem.tenant_id = :tenant_id
                           AND mem.deleted_at IS NULL
+                          AND mem.status <> 'quarantined'
                           {memory_fleet_clause}
                         WHERE a.entity_id IN (SELECT id FROM tenant_entity_ids)
                           AND b.entity_id IN (SELECT id FROM tenant_entity_ids)
@@ -10462,6 +10904,7 @@ class PostgresService:
         agent_id: str | None = None,
         system: bool = False,
         force: bool = False,
+        session: AsyncSession | None = None,
     ) -> Document:
         """INSERT ... ON CONFLICT DO UPDATE. Returns the upserted Document.
 
@@ -10478,39 +10921,53 @@ class PostgresService:
         of those 0 bytes replaced a 105KB shared checklist, and recovery meant
         reconstructing it by hand. ``_guard_document_shrink`` refuses a
         catastrophic shrink unless the caller passes ``force``.
+
+        The check and the write share one transaction: the caller's when it
+        passes ``session`` (a keystone write records its version in it).
         """
         if collection.startswith("_") and not system:
             raise ValueError(f"Collection '{collection}' is system-managed; use the dedicated endpoint.")
-        if not force:
-            await self._guard_document_shrink(tenant_id, collection, doc_id, data)
-        async with get_session() as session:
-            stmt = (
-                pg_insert(Document)
-                .values(
+        if session is None:
+            async with get_session() as own:
+                return await self.document_upsert(
                     tenant_id=tenant_id,
-                    fleet_id=fleet_id,
                     collection=collection,
                     doc_id=doc_id,
                     data=data,
+                    fleet_id=fleet_id,
                     agent_id=agent_id,
+                    system=system,
+                    force=force,
+                    session=own,
                 )
-                .on_conflict_do_update(
-                    constraint="uq_documents_tenant_collection_doc",
-                    set_={
-                        "data": data,
-                        "fleet_id": fleet_id,
-                        # ax-0917-m-14 — the upsert replaces the document, so
-                        # the author recorded is whoever wrote THIS version.
-                        # Keeping the original author would attribute someone
-                        # else's edit to the first writer.
-                        "agent_id": agent_id,
-                        "updated_at": datetime.now(UTC),
-                    },
-                )
-                .returning(Document)
+        if not force:
+            await self._guard_document_shrink(session, tenant_id, collection, doc_id, data)
+        stmt = (
+            pg_insert(Document)
+            .values(
+                tenant_id=tenant_id,
+                fleet_id=fleet_id,
+                collection=collection,
+                doc_id=doc_id,
+                data=data,
+                agent_id=agent_id,
             )
-            result = await session.execute(stmt)
-            return result.scalar_one()
+            .on_conflict_do_update(
+                constraint="uq_documents_tenant_collection_doc",
+                set_={
+                    "data": data,
+                    "fleet_id": fleet_id,
+                    # ax-0917-m-14 — the upsert replaces the document, so
+                    # the author recorded is whoever wrote THIS version.
+                    # Keeping the original author would attribute someone
+                    # else's edit to the first writer.
+                    "agent_id": agent_id,
+                    "updated_at": datetime.now(UTC),
+                },
+            )
+            .returning(Document)
+        )
+        return (await session.execute(stmt)).scalar_one()
 
     # C34 — a replacement this much smaller than what is stored is treated as
     # a truncated payload, not an intentional edit. 10% keeps ordinary
@@ -10521,20 +10978,21 @@ class PostgresService:
     # guard stays out of the way of genuinely tiny documents.
     _SHRINK_MIN_STORED_BYTES = 2048
 
-    async def _guard_document_shrink(self, tenant_id: str, collection: str, doc_id: str, data: dict) -> None:
+    async def _guard_document_shrink(
+        self, session: AsyncSession, tenant_id: str, collection: str, doc_id: str, data: dict
+    ) -> None:
         """Refuse an upsert that would replace a substantial document with a
         near-empty one. Raises ``ValueError`` (surfaced as 400) naming both
         sizes and the override, so a caller who MEANT it can retry."""
-        async with get_session() as session:
-            stored = (
-                await session.execute(
-                    select(Document.data).where(
-                        Document.tenant_id == tenant_id,
-                        Document.collection == collection,
-                        Document.doc_id == doc_id,
-                    )
+        stored = (
+            await session.execute(
+                select(Document.data).where(
+                    Document.tenant_id == tenant_id,
+                    Document.collection == collection,
+                    Document.doc_id == doc_id,
                 )
-            ).scalar_one_or_none()
+            )
+        ).scalar_one_or_none()
         if stored is None:
             return
         old_len = len(json.dumps(stored, ensure_ascii=False))
@@ -10580,9 +11038,9 @@ class PostgresService:
         # the path INDEXED documents take (the one the 2026-08-27 data loss
         # actually went through), so guarding only the sibling would have
         # missed the real incident.
-        if not force:
-            await self._guard_document_shrink(tenant_id, collection, doc_id, data)
         async with get_session() as session:
+            if not force:
+                await self._guard_document_shrink(session, tenant_id, collection, doc_id, data)
             stmt = (
                 pg_insert(Document)
                 .values(
@@ -10711,8 +11169,8 @@ class PostgresService:
         else:
             tenant_pred = Document.tenant_id == tenant_id
         distance = Document.embedding.cosine_distance(query_embedding)
-        stmt = (
-            select(Document, distance.label("distance"))
+        nearest = (
+            select(Document.id, distance.label("distance"))
             .where(
                 tenant_pred,
                 Document.embedding.is_not(None),
@@ -10721,12 +11179,20 @@ class PostgresService:
             .limit(max(top_k, 1))
         )
         if collection is not None:
-            stmt = stmt.where(Document.collection == collection)
+            nearest = nearest.where(Document.collection == collection)
         if fleet_id:
-            stmt = stmt.where(_document_fleet_clause(collection, fleet_id))
+            nearest = nearest.where(_document_fleet_clause(collection, fleet_id))
         if status is not None:
-            stmt = stmt.where(Document.data["status"].astext == status)
+            nearest = nearest.where(Document.data["status"].astext == status)
+        # Re-sorted outside the scan; see ``_scan_past_other_tenants``.
+        found = nearest.subquery()
+        stmt = (
+            select(Document, found.c.distance)
+            .join(found, Document.id == found.c.id)
+            .order_by(found.c.distance)
+        )
         async with get_read_session() as session:
+            await _scan_past_other_tenants(session)
             result = await session.execute(stmt)
             return [(row.Document, 1.0 - float(row.distance)) for row in result.all()]
 
@@ -10906,6 +11372,7 @@ class PostgresService:
         doc_id: str,
         system: bool = False,
         require_status: str | None = None,
+        session: AsyncSession | None = None,
     ) -> UUID | None:
         """Delete by (tenant_id, collection, doc_id). Returns the deleted id or None.
 
@@ -10919,20 +11386,30 @@ class PostgresService:
         rows and returns ``None``, indistinguishable from a missing one (no
         existence leak). Home-tenant scoped (deletes never span readable
         tenants).
+
+        ``session``: delete inside the caller's transaction, as
+        ``document_upsert``.
         """
         if collection.startswith("_") and not system:
             raise ValueError(f"Collection '{collection}' is system-managed; use the dedicated endpoint.")
-        async with get_session() as session:
-            base = delete(Document).where(
-                Document.tenant_id == tenant_id,
-                Document.collection == collection,
-                Document.doc_id == doc_id,
-            )
-            if require_status is not None:
-                base = base.where(Document.data["status"].astext == require_status)
-            stmt = base.returning(Document.id)
-            result = await session.execute(stmt)
-            return result.scalar_one_or_none()
+        if session is None:
+            async with get_session() as own:
+                return await self.document_delete_by_doc_id(
+                    tenant_id=tenant_id,
+                    collection=collection,
+                    doc_id=doc_id,
+                    system=system,
+                    require_status=require_status,
+                    session=own,
+                )
+        base = delete(Document).where(
+            Document.tenant_id == tenant_id,
+            Document.collection == collection,
+            Document.doc_id == doc_id,
+        )
+        if require_status is not None:
+            base = base.where(Document.data["status"].astext == require_status)
+        return (await session.execute(base.returning(Document.id))).scalar_one_or_none()
 
     async def document_update_status(
         self,
@@ -11532,6 +12009,7 @@ class PostgresService:
         base = [
             Memory.tenant_id == tenant_id,
             Memory.deleted_at.is_(None),
+            Memory.status != QUARANTINED_MEMORY_STATUS,
             Memory.content.notlike(PostgresService._INSIGHTS_OPAQUE_CONTENT_PREFIX),
             # The same visibility rule every read path applies: team and org
             # rows, plus the caller's own private rows. Insights put row
@@ -12065,7 +12543,11 @@ class PostgresService:
         Ports ``lifecycle_audit.insights()`` gate queries: ``MAX(created_at)``
         for non-insight vs insight memories, scoped to tenant (+ fleet).
         Returns ``{latest_non_insight: iso|null, latest_insight: iso|null}``."""
-        scope_filter = [Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None)]
+        scope_filter = [
+            Memory.tenant_id == tenant_id,
+            Memory.deleted_at.is_(None),
+            Memory.status != QUARANTINED_MEMORY_STATUS,
+        ]
         if fleet_id:
             scope_filter.append(Memory.fleet_id == fleet_id)
         async with get_read_session() as session:
@@ -12108,7 +12590,11 @@ class PostgresService:
         fleet-scoped run never swept the other fleets, so letting it answer here
         skipped them until the next write (L-52).
         """
-        mem_filter = [Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None)]
+        mem_filter = [
+            Memory.tenant_id == tenant_id,
+            Memory.deleted_at.is_(None),
+            Memory.status != QUARANTINED_MEMORY_STATUS,
+        ]
         report_filter = [
             CrystallizationReport.tenant_id == tenant_id,
             CrystallizationReport.status == "completed",
@@ -12183,7 +12669,7 @@ class PostgresService:
             select(Memory.id)
             .where(Memory.id.in_(uuids))
             .where(Memory.tenant_id == tenant_id)
-            .where(Memory.deleted_at.is_(None))
+            .where(Memory.deleted_at.is_(None), Memory.status != QUARANTINED_MEMORY_STATUS)
             .where(_visibility_scope_clause(caller_agent_id, tenant_id))
         )
         if scope == "agent":
@@ -12351,6 +12837,7 @@ class PostgresService:
         """Per-agent memory stats + fleet summary for the Fleet UI."""
         async with get_session() as session:
             scope, params = _scope_sql(tenant_id, fleet_id)
+            scope += " AND m.status <> 'quarantined'"
             # Per-agent stats from memories
             result = await session.execute(
                 text(f"""
@@ -12535,6 +13022,7 @@ class PostgresService:
                     tenant_pred,
                     Memory.agent_id == agent_id,
                     Memory.deleted_at.is_(None),
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
                 )
                 .limit(1)
             )

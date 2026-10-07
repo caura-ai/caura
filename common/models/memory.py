@@ -128,7 +128,8 @@ class Memory(Base):
         nullable=False,
     )
 
-    # Recall tracking (incremented on agent-facing retrievals only)
+    # Recall tracking (incremented on agent-facing retrievals only). Neither
+    # column is indexed, so a bump can be a HOT update (M-111, migration 063).
     recall_count: Mapped[int] = mapped_column(
         Integer, server_default=text("0"), nullable=False
     )
@@ -237,7 +238,6 @@ class Memory(Base):
             "supersedes_id",
             postgresql_where=text("supersedes_id IS NOT NULL"),
         ),
-        Index("ix_memories_recall_count", "recall_count"),
         Index("ix_memories_tenant_fleet", "tenant_id", "fleet_id"),
         # Backs the cursor-paginated list path (``list_by_filters`` +
         # the ``caura_list`` MCP tool) which orders by
@@ -304,4 +304,28 @@ Index(
     Memory.tenant_id,
     Memory.metadata_["doc_hash"].astext,
     postgresql_where=text("deleted_at IS NULL AND (metadata ->> 'source') = 'ingest'"),
+)
+
+
+# Backs session rollback and a session's held writes (g2.9): the broker stamps
+# each memory it writes with ``metadata.session_id``. Partial on live rows that
+# have one. Created CONCURRENTLY in migration 062 with the same key and
+# predicate; declared after the class for the reason the two above give.
+Index(
+    "ix_memories_session",
+    Memory.tenant_id,
+    Memory.metadata_["session_id"].astext,
+    postgresql_where=text("deleted_at IS NULL AND (metadata ->> 'session_id') IS NOT NULL"),
+)
+
+
+# Backs the review queue of held memories and its count (g2.9). Held rows only,
+# so the queue costs what it holds, not what the tenant holds. Created
+# CONCURRENTLY in migration 062 with the same key and predicate.
+Index(
+    "ix_memories_held",
+    Memory.tenant_id,
+    Memory.created_at,
+    Memory.id,
+    postgresql_where=text("deleted_at IS NULL AND status = 'quarantined'"),
 )

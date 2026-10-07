@@ -445,6 +445,11 @@ SELF_GATE_ALLOWLIST: dict[str, str] = {
     # serves, so the legacy spelling is mandatory, and a marker on this
     # line would be displaced the first time ``ruff format`` wrapped it.
     LEGACY_KEYSTONES_ROUTE: "filter: the supported legacy route of the line above",
+    "GET /api/v1/keystones/versions": (
+        "filter: the agent each version's rule-set hash is computed for; the "
+        "history itself is the tenant's, under enforce_tenant"
+    ),
+    "GET /api/v1/keystones/versions/{version}": "filter: as the line above, for one version",
     "GET /api/v1/reports/agent-activity": (
         "filter: narrows a digest on a surface that is cross-agent by design — "
         "GET /reports builds a per_agent breakdown of the tenant"

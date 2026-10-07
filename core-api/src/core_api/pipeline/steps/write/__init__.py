@@ -10,6 +10,7 @@ from core_api.pipeline.steps.write.detect_near_duplicate import DetectNearDuplic
 from core_api.pipeline.steps.write.emit_memory_triple import EmitMemoryTriple
 from core_api.pipeline.steps.write.governance_decision import GovernanceDecision
 from core_api.pipeline.steps.write.governance_scan_content import GovernanceScanContent
+from core_api.pipeline.steps.write.hold_low_trust_write import HoldLowTrustWrite
 from core_api.pipeline.steps.write.load_tenant_config import LoadTenantConfig
 from core_api.pipeline.steps.write.merge_enrichment_fields import MergeEnrichmentFields
 from core_api.pipeline.steps.write.parallel_embed_enrich import ParallelEmbedEnrich
@@ -31,6 +32,7 @@ __all__ = [
     "EmitMemoryTriple",
     "GovernanceDecision",
     "GovernanceScanContent",
+    "HoldLowTrustWrite",
     "LoadTenantConfig",
     "MergeEnrichmentFields",
     "ParallelEmbedEnrich",

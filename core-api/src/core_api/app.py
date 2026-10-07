@@ -36,6 +36,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from common import permanent_failure
 from common.events.base import EventBus
 from common.events.factory import get_event_bus
+from common.events.inprocess import InProcessEventBus
 from core_api.clients.storage_client import (
     PermanentStorageWriteError,
     StoragePointerRejectedError,
@@ -64,6 +65,7 @@ from core_api.routes.health import router as health_router
 from core_api.routes.insights import router as insights_router
 from core_api.routes.interview import router as interview_router
 from core_api.routes.keystones import router as keystones_router
+from core_api.routes.keystones import versions_router as keystone_versions_router
 from core_api.routes.lifecycle import router as lifecycle_router
 from core_api.routes.memories import admin_memories_router
 from core_api.routes.memories import router as memories_router
@@ -169,12 +171,25 @@ def _validate_startup_settings(app_settings) -> None:  # type: ignore[no-untyped
     entire job is to prevent unsafe production boots had no tests of its own.
 
     Storage authentication is required in every environment because the storage
-    service enforces it unconditionally. Standalone mode and a missing perimeter
+    service enforces it unconditionally, and so is a shared event bus for deferred
+    mode, which fails the same way everywhere. Standalone mode and a missing perimeter
     are refused in every hosted environment, ``sandbox`` included. The remaining
     guards are production-only.
     """
     if _blank_secret(app_settings.core_storage_shared_secret):
         raise RuntimeError("CORE_STORAGE_SHARED_SECRET is required for core-api")
+    # M-15: a deferred write publishes its embed and enrich requests for
+    # core-worker, and core-api subscribes to neither. On the in-process bus
+    # nothing receives them, so every memory would stay unembedded and
+    # unenriched with no error or log, in any environment. Only deferred mode
+    # consults the bus, so an inline boot builds nothing here.
+    if app_settings.deployment_mode == "deferred" and isinstance(get_event_bus(), InProcessEventBus):
+        raise RuntimeError(
+            "DEPLOYMENT_MODE=deferred needs core-worker on a shared event bus, but the event bus "
+            "is in-process (EVENT_BUS_BACKEND unset or inprocess): the embed and enrich requests "
+            "each write publishes would reach no subscriber. Set EVENT_BUS_BACKEND=pubsub with "
+            "core-worker subscribed, or DEPLOYMENT_MODE=inline."
+        )
     if app_settings.environment == "development":
         return
     # Hosted from here: production, and ``sandbox``, which staging and every
@@ -676,7 +691,6 @@ async def lifespan(app):
         #   * Crystallize + entity-link (CAURA-657) — pipeline-machinery
         #     consumers. ALWAYS registered here because the pipeline
         #     code lives in core-api and isn't reachable from worker.
-        from common.events.inprocess import InProcessEventBus
         from common.events.lifecycle_handlers import (
             register_archive_consumers,
             register_pipeline_consumers,
@@ -1207,6 +1221,7 @@ app.include_router(reports_router, prefix="/api/v1")
 # change until they explicitly enable the feature.
 app.include_router(skills_inbox_router, prefix="/api/v1")
 app.include_router(keystones_router, prefix="/api/v1")
+app.include_router(keystone_versions_router, prefix="/api/v1")
 # Rename compatibility (2026-08-14): the keystones REST surface
 # shipped under the old brand prefix and customer scripts call it. The
 # canonical path is now the brand-neutral /api/v1/keystones (matching every

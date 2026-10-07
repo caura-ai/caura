@@ -27,6 +27,8 @@ _BRIDGE_KEYS = (
     "GEMINI_API_KEY",
     "ENTITY_EXTRACTION_PROVIDER",
     "ENTITY_EXTRACTION_MODEL",
+    "EMBEDDING_PROVIDER",
+    "LOCAL_EMBEDDING_MODEL",
     "OPENAI_REQUEST_TIMEOUT_SECONDS",
     "PLATFORM_LLM_PROVIDER",
     "PLATFORM_LLM_MODEL",
@@ -128,6 +130,34 @@ class TestBridgeCredentialsToEnviron:
         provider = get_llm_provider("openai", tenant_config=None)
         assert not isinstance(provider, FakeLLMProvider)
         assert isinstance(provider, OpenAILLMProvider)
+
+    def test_bridges_the_embedding_provider(self, monkeypatch):
+        """M-18. An embedder with no tenant config (the nightly entity backfill,
+        the query-embedding cache key) resolves its provider from
+        ``EMBEDDING_PROVIDER`` in the environment. Unbridged, a ``.env`` that
+        picks ``local`` embedded memories locally and those callers with the
+        default provider: two vector spaces in one tenant."""
+        import core_api.config as cfg
+        from common.embedding._service import _resolve_provider_name
+
+        monkeypatch.delenv("EMBEDDING_PROVIDER", raising=False)
+        monkeypatch.setattr(cfg.settings, "embedding_provider", "local")
+
+        bridge_credentials_to_environ()
+
+        assert _resolve_provider_name(None) == "local"
+
+    def test_bridges_the_local_embedding_model(self, monkeypatch):
+        """M-18. The embedding registry reads ``LOCAL_EMBEDDING_MODEL`` from the
+        environment for every caller, so a ``.env``-only model never loaded."""
+        import core_api.config as cfg
+
+        monkeypatch.delenv("LOCAL_EMBEDDING_MODEL", raising=False)
+        monkeypatch.setattr(cfg.settings, "local_embedding_model", "org/minilm-1024")
+
+        bridge_credentials_to_environ()
+
+        assert os.environ["LOCAL_EMBEDDING_MODEL"] == "org/minilm-1024"
 
 
 @pytest.mark.unit

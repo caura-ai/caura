@@ -346,6 +346,28 @@ class TestSanitizeFindings:
         assert f["what_happened"] == "Old-style description."
         assert f["recommended_action"] == "Old-style action."
 
+    @pytest.mark.parametrize(
+        ("related", "kept"),
+        [
+            pytest.param(None, [], id="null"),
+            pytest.param(7, [], id="number"),
+            pytest.param("m1", ["m1"], id="bare-id"),
+        ],
+    )
+    def test_related_memory_ids_that_is_not_a_list(self, related, kept):
+        """M-49: ``related_memory_ids`` is model output. ``null`` raised TypeError
+        after the LLM call was paid for, failing the whole run, and a bare id was
+        iterated character by character and dropped."""
+        from core_api.services.insights_service import _sanitize_findings
+
+        findings, _ = _sanitize_findings(
+            {"findings": [{"headline": "h", "related_memory_ids": related}]},
+            shown_ids={"m1"},
+            focus="patterns",
+            scope="all",
+        )
+        assert findings[0]["related_memory_ids"] == kept
+
 
 class TestSharpnessGate:
     """_gate_findings: machinery-subject and bookkeeping findings rejected."""

@@ -37,11 +37,44 @@
    docker compose down
    ```
 
-3. **Select a v2 image, pull it, and run the migration explicitly.** If `.env`
-   pins `CAURA_VERSION` to a v1 tag, update it to the v2 release you are
-   installing first; otherwise `docker compose pull` will fetch v1 again. The
-   stock Compose service does not forward arbitrary shell variables into the
-   container, so pass the opt-in on the one-off migration command itself:
+3. **Move the database to the names the current Compose file uses.** v1's
+   Compose file created the PostgreSQL role and database under the old
+   product name, and the current one connects as `caura` to a database named
+   `caura`. PostgreSQL applies `POSTGRES_USER` and `POSTGRES_DB` only when it
+   initialises an empty data directory, so a `pgdata` volume first started
+   before release 2.46.2 (3 September 2026) keeps the old names. On such a
+   volume core-storage-api fails with `role "caura" does not exist`, while
+   the `db` healthcheck stays green, because `pg_isready` does not log in.
+   Check which names your volume has:
+
+   ```bash
+   docker compose up -d db
+   docker exec <container> psql -U caura -d caura -c 'SELECT 1'
+   ```
+
+   If that succeeds, the volume already has the current names: run
+   `docker compose down` and go on to step 4. If it fails with
+   `role "caura" does not exist`, create the role and rename the database.
+   Both commands connect to the `postgres` maintenance database, because
+   PostgreSQL cannot rename the database a session is connected to:
+
+   ```bash
+   docker exec <container> psql -U memclaw -d postgres -c "CREATE ROLE caura LOGIN SUPERUSER PASSWORD 'changeme'" # legacy-name-floor: the role a v1 volume still has
+   docker exec <container> psql -U memclaw -d postgres -c "ALTER DATABASE memclaw RENAME TO caura" # legacy-name-floor: the role and database a v1 volume still has
+   docker compose down
+   ```
+
+   Use the password from `DATABASE_URL` in your `docker-compose.yml`
+   (`changeme` in the stock file). `caura` is a superuser, as on a fresh
+   install, so it can use the tables the old role still owns.
+
+4. **Update the checkout, select a v2 image, pull it, and run the migration
+   explicitly.** Update your checkout to the release you are installing, so
+   `docker-compose.yml` is the current one. If `.env` pins `CAURA_VERSION` to
+   a v1 tag, update it to the v2 release you are installing first; otherwise
+   `docker compose pull` will fetch v1 again. The stock Compose service does
+   not forward arbitrary shell variables into the container, so pass the
+   opt-in on the one-off migration command itself:
 
    ```bash
    docker compose pull
@@ -56,7 +89,7 @@
    path used at normal service startup. The migration runs in
    seconds-to-minutes for typical OSS workloads.
 
-4. **Verify the restarted service is at the current schema head.** The
+5. **Verify the restarted service is at the current schema head.** The
    `--wait` command above checks readiness; the storage log should also show
    that no migration remains:
 
@@ -65,7 +98,7 @@
      grep -i "schema already at head\|database initialization complete"
    ```
 
-5. **Re-embed your data.** Three paths are available:
+6. **Re-embed your data.** Three paths are available:
 
    - **Keyword-only while waiting:** no automatic read-time re-embedding occurs.
      NULL-vector rows may still appear through full-text matching, but semantic
@@ -125,7 +158,9 @@ retry.
 
 ## Rolling back
 
-Restore the `pg_dump` snapshot from step 2. Migration 012 has a symmetric
+Restore the `pg_dump` snapshot from step 2. A v1 checkout connects to the
+database under its old name, which step 3 renamed to `caura`, so restore the
+snapshot into a database of the old name. Migration 012 has a symmetric
 `downgrade()`, but it NULLs every 1024-dim embedding written since the upgrade
 before restoring `vector(768)`, so restoring the pre-upgrade snapshot is the
 safer and simpler recovery path.

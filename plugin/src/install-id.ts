@@ -39,6 +39,7 @@ import { getInstallStatePath } from "./paths.js";
 import { logError } from "./logger.js";
 
 let _cached: string | null = null;
+let _defaultAgentId: string | null = null;
 
 const _SCHEMA_VERSION = 1;
 
@@ -46,6 +47,8 @@ interface InstallState {
   schema_version: number;
   install_id: string;
   created_at: string;
+  /** The id the default agent writes and registers under (M-107). */
+  default_agent_id?: string;
 }
 
 /**
@@ -83,17 +86,66 @@ export function getInstallId(): string {
     schema_version: _SCHEMA_VERSION,
     install_id: fresh,
     created_at: new Date().toISOString(),
+    default_agent_id: `main-${fresh}`,
   };
+  writeInstallState(
+    path,
+    state,
+    `Failed to persist install.json — install_id will reset on next process start`,
+  );
 
-  // Atomic write: ``writeFileSync`` itself isn't atomic (a crash
-  // mid-write leaves a truncated file that the malformed-JSON
-  // recovery path interprets as "regenerate", silently rotating the
-  // install_id and breaking the sticky-id guarantee). Writing to a
-  // sibling ``.tmp`` and then ``renameSync`` makes the publish
-  // atomic on POSIX (rename(2) is guaranteed atomic on the same
-  // filesystem) and atomic-enough on Windows (replace-on-rename).
-  // Readers always see either the previous complete file or the new
-  // complete file, never a partial one.
+  _cached = fresh;
+  return fresh;
+}
+
+/**
+ * Return the id the install's default agent writes and registers under.
+ *
+ * With no ``agents.list``, OpenClaw runs one agent, ``main``. A new install
+ * records ``main-<install_id>`` when it first writes install.json, so
+ * installs sharing a tenant do not merge into one ``main``. An install.json
+ * without the record was written by an older plugin, whose turns wrote as
+ * ``main``; the plugin's recall filters on the agent's id, so that install
+ * keeps ``main`` and records it, and the choice never changes (M-107).
+ */
+export function getDefaultAgentId(): string {
+  if (_defaultAgentId) return _defaultAgentId;
+  const installId = getInstallId();
+  const path = getInstallStatePath();
+  let state: Partial<InstallState> | null = null;
+  try {
+    state = JSON.parse(readFileSync(path, "utf-8")) as Partial<InstallState>;
+  } catch {
+    // No readable install.json: getInstallId could not persist one, so this
+    // install starts afresh on every process start, as a new install.
+  }
+  if (typeof state?.default_agent_id === "string" && state.default_agent_id) {
+    _defaultAgentId = state.default_agent_id;
+  } else if (state?.install_id === installId) {
+    _defaultAgentId = "main";
+    writeInstallState(
+      path,
+      { ...state, default_agent_id: "main" } as InstallState,
+      `Failed to record the default agent in install.json — it is derived again on next start`,
+    );
+  } else {
+    _defaultAgentId = `main-${installId}`;
+  }
+  return _defaultAgentId;
+}
+
+/**
+ * Atomic write: ``writeFileSync`` itself isn't atomic (a crash
+ * mid-write leaves a truncated file that the malformed-JSON
+ * recovery path interprets as "regenerate", silently rotating the
+ * install_id and breaking the sticky-id guarantee). Writing to a
+ * sibling ``.tmp`` and then ``renameSync`` makes the publish
+ * atomic on POSIX (rename(2) is guaranteed atomic on the same
+ * filesystem) and atomic-enough on Windows (replace-on-rename).
+ * Readers always see either the previous complete file or the new
+ * complete file, never a partial one.
+ */
+function writeInstallState(path: string, state: InstallState, failure: string): void {
   const tmp = `${path}.tmp`;
   try {
     mkdirSync(dirname(path), { recursive: true });
@@ -108,14 +160,8 @@ export function getInstallId(): string {
     } catch {
       /* ignore */
     }
-    logError(
-      `Failed to persist install.json — install_id will reset on next process start`,
-      e,
-    );
+    logError(failure, e);
   }
-
-  _cached = fresh;
-  return fresh;
 }
 
 /**
@@ -129,4 +175,5 @@ export function getInstallId(): string {
  */
 export function _resetInstallIdCacheForTesting(): void {
   _cached = null;
+  _defaultAgentId = null;
 }

@@ -86,35 +86,6 @@ def test_resolved_config_empty_uses_global_defaults():
     assert cfg.default_write_mode == "fast"
 
 
-def test_resolved_config_security_audit_defaults_opt_in():
-    """security_audit schedule + alerts default to False (opt-in)."""
-    cfg = ResolvedConfig({})
-    assert cfg.security_audit_schedule_enabled is False
-    assert cfg.security_audit_alerts_enabled is False
-    assert cfg.security_audit_schedule_cron == "0 2 * * *"
-    assert cfg.security_audit_alert_recipients == []
-    assert cfg.security_audit_alert_score_below is None
-    assert cfg.security_audit_alert_critical_findings_min is None
-    assert cfg.security_audit_alert_score_drop_delta is None
-
-
-def test_resolved_config_tenant_override_wins():
-    cfg = ResolvedConfig(
-        {
-            "security_audit": {
-                "schedule_enabled": True,
-                "schedule_cron": "0 3 * * 1",
-                "alert_recipients": ["ops@example.com"],
-                "alert_score_below": 75.0,
-            }
-        }
-    )
-    assert cfg.security_audit_schedule_enabled is True
-    assert cfg.security_audit_schedule_cron == "0 3 * * 1"
-    assert cfg.security_audit_alert_recipients == ["ops@example.com"]
-    assert cfg.security_audit_alert_score_below == 75.0
-
-
 # ── Storage: get_raw_settings / update_settings ───────────────────────────
 
 
@@ -213,11 +184,11 @@ async def test_audit_no_row_on_noop(db):
 
 async def test_resolve_config_reads_from_db():
     tid = _tid()
-    await update_settings(tid, {"security_audit": {"schedule_enabled": True}})
+    await update_settings(tid, {"agents": {"require_agent_approval": True}})
     invalidate_cache(tid)
 
     cfg = await resolve_config(tid)
-    assert cfg.security_audit_schedule_enabled is True
+    assert cfg.require_agent_approval is True
 
 
 # ── Cache semantics ───────────────────────────────────────────────────────

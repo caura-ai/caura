@@ -14,6 +14,11 @@ M-78 and L-68 of the 2026-10-01 OSS audit: staging and every sandbox run as
 now keeps the perimeter and standalone guards; the production-only secrets stay
 production-only by decision. Production also refuses ``TESTING=1``, which mounts
 the test-only routes.
+
+M-15 of the same audit: ``DEPLOYMENT_MODE=deferred`` on the default in-process
+event bus published every write's embed and enrich requests to no subscriber, so
+every memory stayed unembedded and unenriched with no error or log. Every
+environment now refuses that boot.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import SecretStr
 
+from common.events.inprocess import InProcessEventBus
 from core_api.app import _DANGEROUS_DEFAULTS, _validate_startup_settings
 from tests._legacy_contracts import LEGACY_API_KEY_FIELD
 
@@ -38,6 +44,7 @@ def _prod(*, compat_api_key=None, **overrides):
         "gateway_shared_secret": "a-real-gateway-secret",
         LEGACY_API_KEY_FIELD: compat_api_key,
         "core_storage_shared_secret": SecretStr("a-real-storage-secret"),
+        "deployment_mode": "inline",
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -294,3 +301,39 @@ def test_a_secretstr_wrapped_default_is_still_caught():
 
     with pytest.raises(RuntimeError, match="JWT_SECRET must be changed"):
         _validate_startup_settings(_prod(jwt_secret=_Secret("change-me-in-production")))
+
+
+# ── M-15: deferred mode needs a bus core-worker shares ──────────────────────
+
+
+@pytest.mark.parametrize("environment", ["development", "sandbox", "production"])
+def test_deferred_mode_on_the_in_process_bus_is_refused(monkeypatch, environment):
+    """Deferred writes publish embed and enrich requests that only core-worker
+    consumes. On the in-process bus nothing in core-api subscribes to them, so
+    every memory stayed unembedded and unenriched with no error or log."""
+    monkeypatch.setattr("core_api.app.get_event_bus", lambda: InProcessEventBus())
+    with pytest.raises(RuntimeError, match="DEPLOYMENT_MODE=deferred"):
+        _validate_startup_settings(
+            _prod(environment=environment, deployment_mode="deferred")
+        )
+
+
+def test_deferred_mode_on_a_shared_bus_is_allowed(monkeypatch):
+    """Control: the SaaS shape, core-worker subscribed on Pub/Sub."""
+
+    class _SharedBus:
+        pass
+
+    monkeypatch.setattr("core_api.app.get_event_bus", _SharedBus)
+    _validate_startup_settings(_prod(deployment_mode="deferred"))
+
+
+def test_inline_mode_does_not_build_the_event_bus(monkeypatch):
+    """Inline boots never consult the bus here, so validation builds nothing
+    ahead of the lifespan."""
+
+    def _no_bus():
+        raise AssertionError("an inline boot must not build the event bus")
+
+    monkeypatch.setattr("core_api.app.get_event_bus", _no_bus)
+    _validate_startup_settings(_prod())

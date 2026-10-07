@@ -246,6 +246,10 @@ class KeystoneUpsertPayload(TypedDict):
     fleet_id: NotRequired[str]
     agent_id: NotRequired[str]
     author_user_id: NotRequired[str]
+    # Who made the change, for its version: the calling agent and the person
+    # the gateway vouched for. ``author_user_id`` above is the body's claim.
+    actor_agent_id: NotRequired[str]
+    actor_user_id: NotRequired[str]
 
 
 _client: CoreStorageClient | None = None
@@ -765,7 +769,9 @@ class CoreStorageClient:
                 _storage_detail(exc.response), _storage_duplicate_fields(exc.response)
             ) from exc
 
-    async def get_memory(self, memory_id: str, tenant_id: str, *, read: bool = True) -> dict | None:
+    async def get_memory(
+        self, memory_id: str, tenant_id: str, *, read: bool = True, include_held: bool = False
+    ) -> dict | None:
         """Fetch one memory by id, within ``tenant_id``.
 
         ``tenant_id`` is required. This method used to take an id alone, and
@@ -779,7 +785,14 @@ class CoreStorageClient:
         read-back of a row this request (or an event's producer) just wrote,
         where replica lag would make the row or the freshly-PATCHed column
         invisible. Same reasoning as the write-path dedup gate below.
+
+        A held memory (``QUARANTINED_MEMORY_STATUS``) comes back as None unless
+        ``include_held``, which only a person reviewing it may be given.
         """
+        if include_held:
+            return await self._get(
+                f"/memories/{memory_id}", tenant_id=tenant_id, read=read, include_held=True
+            )
         return await self._get(f"/memories/{memory_id}", tenant_id=tenant_id, read=read)
 
     async def update_memory(self, memory_id: str, tenant_id: str, data: dict) -> dict | None:
@@ -846,6 +859,7 @@ class CoreStorageClient:
         tenant_id: str,
         unset_supersedes: bool = False,
         expected_supersedes_id: str | None = None,
+        release_hold: bool = False,
     ) -> dict | None:
         """Update status and optionally set or clear ``supersedes_id``.
 
@@ -864,6 +878,11 @@ class CoreStorageClient:
             current value to either match the expected uuid or already be
             NULL. A current pointer to *a different* uuid yields a 409 so
             the caller knows another writer took the row.
+
+        Release path:
+            ``release_hold=True`` moves a held memory to ``active`` or
+            ``cancelled`` and does nothing else. Without it storage never
+            moves a held memory, so this is the only way out of quarantine.
 
         Raises
         ------
@@ -891,7 +910,42 @@ class CoreStorageClient:
         if unset_supersedes:
             payload["unset_supersedes"] = True
             payload["expected_supersedes_id"] = expected_supersedes_id
+        if release_hold:
+            payload["release_hold"] = True
         return await self._patch(f"/memories/{memory_id}/status", payload)
+
+    async def list_held_memories(
+        self,
+        tenant_id: str,
+        *,
+        session_id: str | None = None,
+        limit: int,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
+    ) -> dict:
+        """The review queue of held memories, newest first: ``{"items", "total"}``.
+
+        Up to ``limit`` rows after the cursor; ``total`` counts the whole queue,
+        or one broker session's part of it. Only for a person reviewing them.
+        """
+        params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit}
+        if session_id is not None:
+            params["session_id"] = session_id
+        if cursor_ts is not None and cursor_id is not None:
+            params["cursor_ts"] = cursor_ts.isoformat()
+            params["cursor_id"] = str(cursor_id)
+        return await self._get("/memories/held", **params) or {"items": [], "total": 0}
+
+    async def rollback_session(self, tenant_id: str, session_id: str) -> dict:
+        """Undo one broker session's writes: ``{"outdated", "restored", "cancelled"}`` ids.
+
+        Its live memories and the rows derived from them become ``outdated``,
+        what they had superseded or contradicted ``active`` again, and its held memories
+        ``cancelled``, in one storage transaction.
+        """
+        return await self._post(
+            "/memories/rollback-session", {"tenant_id": tenant_id, "session_id": session_id}
+        )
 
     async def find_by_content_hash(
         self,
@@ -1538,12 +1592,16 @@ class CoreStorageClient:
             params["tenant_id"] = tenant_id
         return await self._get_list("/memories/fleet-distribution", **params)
 
-    async def get_memory_detail(self, tenant_id: str, memory_id: str) -> dict | None:
+    async def get_memory_detail(
+        self, tenant_id: str, memory_id: str, *, include_held: bool = False
+    ) -> dict | None:
         """Full memory row + entity links + server-computed embedding stats.
 
-        Returns None on 404 (absent / soft-deleted / cross-tenant) — the
-        caller raises its own 404.
+        Returns None on 404 (absent / soft-deleted / cross-tenant, or held
+        unless ``include_held``) — the caller raises its own 404.
         """
+        if include_held:
+            return await self._get(f"/memories/{memory_id}/detail", tenant_id=tenant_id, include_held=True)
         return await self._get(f"/memories/{memory_id}/detail", tenant_id=tenant_id)
 
     async def get_memory_contradictions(self, tenant_id: str, memory_id: str) -> dict | None:
@@ -2811,8 +2869,51 @@ class CoreStorageClient:
     async def upsert_keystone(self, data: KeystoneUpsertPayload) -> dict:
         return await self._post("/keystones", data)  # type: ignore[return-value]
 
-    async def delete_keystone(self, tenant_id: str, doc_id: str) -> bool:
-        return await self._delete(f"/keystones/{doc_id}", tenant_id=tenant_id)
+    async def delete_keystone(
+        self,
+        tenant_id: str,
+        doc_id: str,
+        *,
+        actor_agent_id: str | None = None,
+        actor_user_id: str | None = None,
+    ) -> bool:
+        actor = {"actor_agent_id": actor_agent_id, "actor_user_id": actor_user_id}
+        return await self._delete(
+            f"/keystones/{doc_id}", tenant_id=tenant_id, **{k: v for k, v in actor.items() if v is not None}
+        )
+
+    async def list_keystone_versions(
+        self,
+        tenant_id: str,
+        *,
+        fleet_id: str | None = None,
+        agent_id: str | None = None,
+        limit: int,
+        before: int | None = None,
+    ) -> dict:
+        params = {"fleet_id": fleet_id, "agent_id": agent_id, "before": before}
+        return await self._get(  # type: ignore[return-value]
+            "/keystones/versions",
+            tenant_id=tenant_id,
+            limit=limit,
+            **{k: v for k, v in params.items() if v is not None},
+        )
+
+    async def get_keystone_version(
+        self,
+        tenant_id: str,
+        version: int,
+        *,
+        fleet_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> dict | None:
+        """One version; ``None`` when the tenant has no such version."""
+        params = {"fleet_id": fleet_id, "agent_id": agent_id}
+        return await self._get(
+            f"/keystones/versions/{version}",
+            tenant_id=tenant_id,
+            **{k: v for k, v in params.items() if v is not None},
+        )
 
     # =====================================================================
     # Fleet

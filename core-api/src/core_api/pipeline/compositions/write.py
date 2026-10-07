@@ -12,6 +12,7 @@ from core_api.pipeline.steps.write import (
     EmitMemoryTriple,
     GovernanceDecision,
     GovernanceScanContent,
+    HoldLowTrustWrite,
     LoadTenantConfig,
     MergeEnrichmentFields,
     ParallelEmbedEnrich,
@@ -35,6 +36,7 @@ def build_enrichment_pipeline() -> Pipeline:
             ComputeContentHash(),
             ParallelEmbedEnrich(),
             MergeEnrichmentFields(),
+            HoldLowTrustWrite(),
         ],
     )
 
@@ -171,6 +173,7 @@ def build_fast_write_pipeline() -> Pipeline:
             CheckExactDuplicate(),
             ParallelEmbedEnrich(),
             MergeEnrichmentFields(),
+            HoldLowTrustWrite(),
             EmitMemoryTriple(),
             DetectNearDuplicate(),
             WriteMemoryRow(),
@@ -229,6 +232,7 @@ def build_strong_write_pipeline() -> Pipeline:
             CheckExactDuplicate(),
             ParallelEmbedEnrich(),
             MergeEnrichmentFields(),
+            HoldLowTrustWrite(),
             # Strong mode runs enrichment inline, so the LLM's free-form PII +
             # business/personal signal is available pre-persist. Acts on it
             # before dedup/write (fast mode does this as post-write remediation).

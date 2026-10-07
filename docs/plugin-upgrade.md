@@ -135,9 +135,13 @@ That returns the stale-plugin set the auto-deploy gate is currently skipping. Th
 | `node_modules/` | Replaced | Replaced | Replaced |
 | `.agent-keys.json`, `.educated`, `.allowlist-applied` | Preserved | Preserved | Preserved |
 | Custom skills in `skills/` (operator-added) | Preserved | Preserved | Preserved |
-| `install.json` (`install_id` for agent identity) | Preserved | Preserved | Preserved |
+| `install.json` (`install_id` and `default_agent_id`, the agent identity) | Preserved | Preserved | Preserved |
 
 The "manual install (default creds)" column is what you get if you pipe `/api/v1/install-plugin` to bash *without* passing values in the POST body — the installer's defaults (empty key, hostname for node_name) write a new `.env`. Don't do this on a node with existing identity unless you mean to.
+
+## The default agent's id
+
+With no `agents.list` in `openclaw.json`, OpenClaw runs one agent, `main`. The plugin writes that agent's memories, and the heartbeat registers it, under the `default_agent_id` recorded in `install.json`. A new install records `main-<install_id>`, so installs that share a tenant keep their memories apart. An install whose `install.json` predates the record keeps `main`, the id its memories and its recall already use, and installs that already share `main` on a tenant keep sharing it. Agents listed in `agents.list` keep their ids. Every upgrade path preserves `install.json`, so the id does not change; deleting the file gives the install a new `install_id` and a new default agent.
 
 ## Recovering from a partial-deploy state
 

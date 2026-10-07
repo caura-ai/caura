@@ -73,6 +73,10 @@ PLATFORM_ONLY_KEYS: frozenset[str] = frozenset(
         "near_dup_skipped_reason",
         "near_duplicate_of",
         "near_duplicate_similarity",
+        # ``DetectNearDuplicate``'s decision to merge into ``near_duplicate_of``.
+        # A release replays it (g2.8), so a forged one would retire a memory the
+        # write never meant to replace.
+        "near_duplicate_merged",
         # Write mode and the pending flags consumers poll on.
         "write_mode",
         "enrichment_pending",
@@ -85,6 +89,16 @@ PLATFORM_ONLY_KEYS: frozenset[str] = frozenset(
         "child_count",
         # Enrichment output.
         "retrieval_hint",
+        # Facts awaiting their fan-out into child rows: the enrichment worker
+        # stores them for the ENRICHED consumer, and ``HoldLowTrustWrite`` for a
+        # release. Forged ones would come out as the agent's own claims, and a
+        # held write's would go live without the review that held it (g2.8).
+        "atomic_facts",
+        # The rules receipt the broker stamps on its writes. Kept, in
+        # ``_system``, only from an install credential's bulk write
+        # (``services/rules_receipt.py``); from anyone else it would vouch
+        # for itself.
+        "rules_receipt",
     }
 )
 

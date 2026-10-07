@@ -1,10 +1,10 @@
 import logging
 import tempfile
 from pathlib import Path
-from typing import Annotated, Any, Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
-from pydantic_settings import BaseSettings, NoDecode
+from pydantic_settings import BaseSettings
 
 from common.embedding._registry import DEFAULT_LOCAL_EMBEDDING_MODEL
 from common.provider_names import DEFAULT_EMBEDDING_PROVIDER
@@ -64,16 +64,14 @@ class Settings(BaseSettings):
     # MUST emit VECTOR_DIM dimensions; the provider now refuses a mismatch at
     # load rather than failing later at INSERT.
     #
-    # DECLARED, not read: ``common/embedding/_registry.py`` reads
-    # ``LOCAL_EMBEDDING_MODEL`` from ``os.environ`` directly, because that
-    # registry is shared with core-worker and must not import a service's
-    # config. This field exists so the variable appears in core-api's own
-    # settings surface; nothing consults the attribute.
+    # ``common/embedding/_registry.py`` reads ``LOCAL_EMBEDDING_MODEL`` from
+    # ``os.environ`` directly, because that registry is shared with core-worker
+    # and must not import a service's config. ``bridge_credentials_to_environ``
+    # exports this field there: on a bare-metal run nothing else puts a
+    # ``.env`` value into the environment (M-18).
     #
     # Default from the shared constant for the reason ``embedding_provider``
     # above gives: two copies of one literal is how they disagreed last time.
-    # ``test_every_core_api_setting_is_read_by_something`` names this field as
-    # the one declared-but-unread setting, with that distinction.
     local_embedding_model: str = DEFAULT_LOCAL_EMBEDDING_MODEL
     # Per-deploy control for where embedding + LLM enrichment run.
     #
@@ -612,20 +610,6 @@ class Settings(BaseSettings):
     platform_embedding_api_key: SecretStr = SecretStr("")  # OpenAI: API key for embeddings
     platform_embedding_model: str = ""  # e.g. "text-embedding-3-small"
 
-    # Security audit — scheduler + threshold alerts. Enterprise-only feature;
-    # OSS standalone deployments can leave these at defaults (all off).
-    # Per-org overrides live in organization_settings.security_audit.
-    security_audit_schedule_enabled: bool = False
-    security_audit_schedule_cron: str = "0 2 * * *"  # daily 02:00 by default
-    security_audit_alerts_enabled: bool = False
-    # Comma-separated env → list. ``NoDecode`` hands the raw env string to
-    # ``_split_recipients``; without it pydantic-settings JSON-decodes
-    # ``list[str]`` first and a plain ``a@x.com,b@y.com`` crashes at import.
-    security_audit_alert_recipients: Annotated[list[str], NoDecode] = []
-    security_audit_alert_score_below: float | None = None
-    security_audit_alert_critical_findings_min: int | None = None
-    security_audit_alert_score_drop_delta: float | None = None
-
     @model_validator(mode="after")
     def _prefer_the_new_api_key_name(self) -> "Settings":
         """Collapse the two accepted spellings onto the field auth.py reads.
@@ -643,13 +627,6 @@ class Settings(BaseSettings):
         # after we return — this validator only needs to uppercase so env
         # vars like LOG_LEVEL=debug are accepted.
         return v.upper() if isinstance(v, str) else v
-
-    @field_validator("security_audit_alert_recipients", mode="before")
-    @classmethod
-    def _split_recipients(cls, v: object) -> object:
-        if isinstance(v, str):
-            return [s.strip() for s in v.split(",") if s.strip()]
-        return v
 
     @field_validator(
         "per_tenant_search_concurrency",
@@ -881,17 +858,6 @@ class Settings(BaseSettings):
             )
         return self
 
-    @field_validator("security_audit_schedule_cron")
-    @classmethod
-    def _validate_cron_field(cls, v: str) -> str:
-        from croniter import CroniterBadCronError, croniter
-
-        try:
-            croniter(v)
-        except (CroniterBadCronError, ValueError) as exc:
-            raise ValueError(f"Invalid cron expression {v!r}: {exc}") from exc
-        return v
-
     @model_validator(mode="after")
     def _remap_deprecated_vertex(self) -> "Settings":
         """Graceful fallback for deprecated tenant-tier ``vertex`` provider.
@@ -1019,6 +985,14 @@ def bridge_credentials_to_environ() -> None:
         # Default provider + model used by ``common.enrichment.service``.
         "ENTITY_EXTRACTION_PROVIDER": settings.entity_extraction_provider or "",
         "ENTITY_EXTRACTION_MODEL": settings.entity_extraction_model or "",
+        # Embedding provider and local model, read from ``os.environ`` by
+        # ``common.embedding`` (M-18): the provider by every embedder with no
+        # tenant config (the nightly entity backfill, the query-embedding cache
+        # key), the local model by the registry for every caller. Unbridged, a
+        # bare-metal ``.env`` that picked ``local`` embedded memories with it and
+        # those callers with the default provider: two vector spaces.
+        "EMBEDDING_PROVIDER": settings.embedding_provider or "",
+        "LOCAL_EMBEDDING_MODEL": settings.local_embedding_model or "",
         # OpenAI client timeout used by ``common.llm.constants``.
         "OPENAI_REQUEST_TIMEOUT_SECONDS": str(settings.openai_request_timeout_seconds),
         # Platform-tier singletons read by ``common.llm._platform``.
