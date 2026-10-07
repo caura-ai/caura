@@ -63,16 +63,20 @@ from common.constants import (
     ENTITY_RESOLUTION_CANDIDATE_LIMIT,
     GRAPH_MAX_EXPANDED_ENTITIES,
     GRAPH_MAX_HOPS,
+    HOLD_KEY,
     LIVE_MEMORY_STATUSES,
     NODE_PRINCIPAL_TENANT,
     QUARANTINE_EXITS,
+    QUARANTINE_REJECT_ACTION,
     QUARANTINE_REJECTED,
+    QUARANTINE_RELEASE_ACTION,
     QUARANTINED_MEMORY_STATUS,
     RECALL_BOOST_SCALE,
     RELATION_TYPE_WEIGHTS,
     REPORT_RUNNING_STALE_AFTER,
     SEMANTIC_DEDUP_CANDIDATE_LIMIT,
     SEMANTIC_DEDUP_THRESHOLD,
+    SESSION_ROLLBACK_ACTION,
     TYPE_DECAY_DAYS,
     predicate_cluster,
 )
@@ -2942,6 +2946,60 @@ class PostgresService:
                 await session.execute(select(func.count()).select_from(Memory).where(*where))
             ).scalar_one()
         return rows, total
+
+    async def memory_hold_counts(self, tenant_id: str, *, since: datetime, until: datetime) -> dict[str, Any]:
+        """What was held in ``[since, until)``, and what people decided in it (g4.3).
+
+        - ``held``: the memories written in the window that were held, by the
+          hold's ``reason`` (``below_trust``, ``write_gate``), whatever became of
+          them: a release or reject leaves the hold in ``_system``, and a reject
+          only soft-deletes. A held write's auto-chunks are left out, as the
+          review queue leaves them out (``held_rows_where``).
+        - ``released`` and ``rejected``: the ``quarantine.release`` and
+          ``quarantine.reject`` audit rows in the window, and ``rolled_back``
+          the held memories a ``session.rollback`` rejected in it. A decision
+          can be on a memory held before the window.
+
+        The numbers a tenant's weekly pilot report takes from here. Read-only
+        (reader replica).
+        """
+        reason = Memory.metadata_[(_SYSTEM_NAMESPACE, HOLD_KEY, "reason")].astext
+        held = (
+            select(reason, func.count())
+            .where(
+                Memory.tenant_id == tenant_id,
+                Memory.created_at >= since,
+                Memory.created_at < until,
+                reason.is_not(None),
+                Memory.metadata_["parent_memory_id"].astext.is_(None),
+            )
+            .group_by(reason)
+        )
+        decided = (
+            select(AuditLog.action, func.count())
+            .where(
+                AuditLog.tenant_id == tenant_id,
+                AuditLog.created_at >= since,
+                AuditLog.created_at < until,
+                or_(
+                    AuditLog.action.in_((QUARANTINE_RELEASE_ACTION, QUARANTINE_REJECT_ACTION)),
+                    and_(
+                        AuditLog.action == SESSION_ROLLBACK_ACTION,
+                        AuditLog.detail["new_status"].astext == QUARANTINE_REJECTED,
+                    ),
+                ),
+            )
+            .group_by(AuditLog.action)
+        )
+        async with get_read_session() as session:
+            by_reason: dict[str, int] = dict((await session.execute(held)).tuples().all())
+            by_action: dict[str, int] = dict((await session.execute(decided)).tuples().all())
+        return {
+            "held": by_reason,
+            "released": by_action.get(QUARANTINE_RELEASE_ACTION, 0),
+            "rejected": by_action.get(QUARANTINE_REJECT_ACTION, 0),
+            "rolled_back": by_action.get(SESSION_ROLLBACK_ACTION, 0),
+        }
 
     async def memory_rollback_session(self, tenant_id: str, session_id: str) -> dict[str, list[str]]:
         """Undo what the broker wrote in one session (g2.9). Returns the ids changed.

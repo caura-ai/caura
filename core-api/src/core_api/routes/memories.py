@@ -23,7 +23,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from common import permanent_failure
-from common.constants import QUARANTINE_EXITS, QUARANTINED_MEMORY_STATUS
+from common.constants import (
+    QUARANTINE_EXITS,
+    QUARANTINE_REJECT_ACTION,
+    QUARANTINE_RELEASE_ACTION,
+    QUARANTINED_MEMORY_STATUS,
+    SESSION_ROLLBACK_ACTION,
+)
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api import openapi_responses as _oar
 from core_api import request_phase
@@ -974,7 +980,7 @@ async def rollback_session(
             try:
                 await log_action(
                     tenant_id=tenant_id,
-                    action="session.rollback",
+                    action=SESSION_ROLLBACK_ACTION,
                     resource_type="memory",
                     resource_id=memory_id,
                     detail={"session_id": body.session_id, "new_status": new_status, **auth.audit_actor()},
@@ -2238,7 +2244,7 @@ async def update_memory_status(
         # tenant credential carries no agent, so it logs none rather than the
         # owner's; the actor fields name the person on a release or reject.
         agent_id=auth.agent_id,
-        action=("quarantine.release" if status == "active" else "quarantine.reject")
+        action=(QUARANTINE_RELEASE_ACTION if status == "active" else QUARANTINE_REJECT_ACTION)
         if held
         else "status_update",
         resource_type="memory",

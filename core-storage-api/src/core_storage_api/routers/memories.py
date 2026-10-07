@@ -1278,6 +1278,25 @@ async def list_held_memories(
     return {"items": [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories], "total": total}
 
 
+@router.get("/held/counts")
+async def count_held_memories(tenant_id: str, since: datetime, until: datetime) -> dict:
+    """What was held in ``[since, until)``, and what people decided in it (g4.3).
+
+    ``{"held": {reason: n}, "released": n, "rejected": n, "rolled_back": n}``:
+    the write gate's part of a tenant's weekly pilot report, read by the
+    enterprise report builder. ``held`` counts the memories written in the
+    window that were held, by why; the rest count the decisions made in it
+    (``memory_hold_counts``). Both times need an offset.
+    """
+    if since.tzinfo is None or until.tzinfo is None:
+        raise HTTPException(
+            status_code=422, detail="since and until must be timezone-aware (e.g. include +00:00)"
+        )
+    if since >= until:
+        raise HTTPException(status_code=422, detail="since must be before until")
+    return await _svc.memory_hold_counts(tenant_id, since=since, until=until)
+
+
 @router.post("/rollback-session")
 async def rollback_session(request: Request) -> dict:
     """Undo what the broker wrote in one session (g2.9).

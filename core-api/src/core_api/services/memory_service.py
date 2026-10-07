@@ -36,7 +36,7 @@ except ImportError:
         pass  # type: ignore[misc]
 
 
-from common.constants import QUARANTINED_MEMORY_STATUS, VECTOR_DIM
+from common.constants import HOLD_KEY, QUARANTINED_MEMORY_STATUS, VECTOR_DIM
 from common.embedding import (
     embedding_configured,
     get_embedding,
@@ -134,7 +134,7 @@ from core_api.services.system_metadata import (
 )
 from core_api.services.task_tracker import record_task_failure, tracked_task
 from core_api.services.write_gate_hold import write_gate_hold_from
-from core_api.services.write_hold import HOLD_KEY, claim_settings, hold_for, insert_deciding_again
+from core_api.services.write_hold import claim_settings, hold_for, insert_deciding_again
 
 logger = logging.getLogger(__name__)
 
