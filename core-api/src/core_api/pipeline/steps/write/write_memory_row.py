@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
 
@@ -16,9 +17,14 @@ from core_api.clients.storage_client import (
 )
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
+from core_api.pipeline.steps.write.hold_low_trust_write import HoldLowTrustWrite
 from core_api.schemas import EntityLinkIn
 from core_api.services.hooks import get_hooks
 from core_api.services.system_metadata import set_system_value
+from core_api.services.write_hold import claim_settings, insert_deciding_again
+
+if TYPE_CHECKING:
+    from core_api.services.organization_settings import ResolvedConfig
 
 logger = logging.getLogger(__name__)
 
@@ -264,9 +270,22 @@ class WriteMemoryRow:
             # keyword, which only platform writers pass.
             "is_inferred": bool(ctx.data.get("is_inferred", False)),
         }
+        claim_settings(memory_data, ctx.tenant_config, is_inferred=memory_data["is_inferred"])
+
+        async def decide_again(config: ResolvedConfig) -> None:
+            # The same step that decided it first, so a write held now is held
+            # exactly as one held then. ``memory_data`` shares ``fields``'
+            # metadata dict, so only the status needs carrying across.
+            ctx.tenant_config = config
+            await HoldLowTrustWrite().execute(ctx)
+            memory_data["status"] = fields["status"]
+            claim_settings(memory_data, config, is_inferred=memory_data["is_inferred"])
+
         storage_t0 = time.perf_counter()
         try:
-            memory = await sc.create_memory(memory_data)
+            memory = await insert_deciding_again(
+                data.tenant_id, lambda: sc.create_memory(memory_data), decide_again
+            )
         except DuplicateMemoryError as exc:
             # Migration 040's unique index rejected the insert. ``CheckExactDuplicate``
             # ran earlier in this same pipeline and found nothing, so reaching here

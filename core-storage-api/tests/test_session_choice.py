@@ -113,6 +113,15 @@ _MUST_STAY_ON_THE_WRITER = {
         "pair these had NO opt-out — get_agent took no `read` argument at all "
         "— which is its own fix, not this file's."
     ),
+    "organization_settings_read": (
+        "core-api reloads its settings cache through it right after a settings "
+        "change, when the change's broadcast evicts every process's copy. Under "
+        "lag the replica hands back the settings from before the change, cached "
+        "for five minutes; a tightened write hold (g2.8) then does not apply. "
+        "core-api already asks for the writer (read=False), but the writer "
+        "service sets read_database_url, the precondition below, so this read "
+        "used to reach the replica anyway."
+    ),
 }
 
 # Private helpers. They open a session but are called only from other methods
@@ -302,12 +311,17 @@ def test_the_writer_session_population_is_pinned() -> None:
     142 -> 143 (pure unchanged at 64): ``memory_rollback_session`` is new (g2.9).
     It outdates a session's rows and rejects its held ones with ``sql_update``,
     a write. Its sibling ``memory_list_held`` reads on the replica.
+
+    143 -> 144 (pure 64 -> 65): ``organization_settings_read`` is new and only
+    selects, on the writer by design — see its ``_MUST_STAY_ON_THE_WRITER``
+    entry — so the convertible count below does not move. It replaces
+    ``organization_settings_get``'s replica read, which now calls it.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 143, f"{len(methods)} methods open a writer session"
-    assert len(pure) == 64, f"{len(pure)} of them show no write marker"
+    assert len(methods) == 144, f"{len(methods)} methods open a writer session"
+    assert len(pure) == 65, f"{len(pure)} of them show no write marker"
 
 
 @pytest.mark.parametrize(
@@ -349,7 +363,7 @@ def test_every_method_that_must_stay_on_the_writer_still_looks_like_a_pure_read(
 def test_the_convertible_population_is_pinned() -> None:
     """What is left after the caller analysis, so a conversion has a target.
 
-    64 methods show no write marker. Seven of them must stay on the writer
+    65 methods show no write marker. Eight of them must stay on the writer
     anyway because of what CALLS them, and one is a private helper that
     inherits its caller's session. The remaining 56 are the candidates — the number a
     conversion PR is allowed to move, and the only number in this file that

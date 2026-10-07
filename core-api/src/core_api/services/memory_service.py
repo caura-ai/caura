@@ -121,7 +121,7 @@ from core_api.services.governance_gate import (
     pii_audit_detail,
 )
 from core_api.services.hooks import get_hooks
-from core_api.services.organization_settings import validate_search_profile
+from core_api.services.organization_settings import ResolvedConfig, validate_search_profile
 from core_api.services.rules_receipt import RULES_RECEIPT_KEY, rules_receipt_from
 from core_api.services.system_metadata import (
     CALLER_OWNABLE_KEYS,
@@ -133,7 +133,7 @@ from core_api.services.system_metadata import (
     set_system_value,
 )
 from core_api.services.task_tracker import record_task_failure, tracked_task
-from core_api.services.write_hold import HOLD_KEY, hold_for
+from core_api.services.write_hold import HOLD_KEY, claim_settings, hold_for, insert_deciding_again
 
 logger = logging.getLogger(__name__)
 
@@ -1127,6 +1127,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         build_fast_persist_pipeline,
         build_persist_pipeline,
     )
+    from core_api.pipeline.steps.write.hold_low_trust_write import HoldLowTrustWrite
     from core_api.pipeline.steps.write.write_memory_row import write_entity_links
     from core_api.services.ingest_service import _chunk_content
 
@@ -1241,10 +1242,6 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                 # re-raises; it never arrives here.)
                 raise HTTPException(status_code=500, detail="Memory dedup pipeline failed unexpectedly")
 
-        parent_metadata = dict(fields["metadata"])
-        parent_metadata["auto_chunked"] = True
-        parent_metadata["child_count"] = len(facts)
-        set_system_value(parent_metadata, "write_latency_ms", round((time.perf_counter() - t0) * 1000))
         # #856: in a deferred deployment ``ParallelEmbedEnrich`` skipped both
         # provider calls, so this row is incomplete. ``MemoryOut.metadata``
         # documents absent flags as "that stage ran inline", which for this row
@@ -1253,13 +1250,68 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         # both flags for free: ``write_memory_row`` sets ``embedding_pending``
         # and ``MergeEnrichmentFields`` sets ``enrichment_pending``.
         defer_enrichment = _enrichment_backfill_needed(ctx.data.get("enrichment"), tenant_config)
-        if embedding is None:
-            set_system_value(parent_metadata, "embedding_pending", True)
-        if defer_enrichment:
-            set_system_value(parent_metadata, "enrichment_pending", True)
+
+        def _parent_metadata() -> dict:
+            # A function because a write decided again (``decide_again`` below)
+            # builds it again, from ``fields`` as the new decision left them.
+            parent_metadata = dict(fields["metadata"])
+            parent_metadata["auto_chunked"] = True
+            parent_metadata["child_count"] = len(facts)
+            set_system_value(parent_metadata, "write_latency_ms", round((time.perf_counter() - t0) * 1000))
+            if embedding is None:
+                set_system_value(parent_metadata, "embedding_pending", True)
+            if defer_enrichment:
+                set_system_value(parent_metadata, "enrichment_pending", True)
+            return parent_metadata
+
         # L-32: server-set, as ``WriteMemoryRow`` sets it. The children copy the
         # parent's flag: they are cut out of the same row.
         is_inferred = bool(ctx.data.get("is_inferred", False))
+
+        parent_payload = {
+            "tenant_id": data.tenant_id,
+            "fleet_id": data.fleet_id,
+            "agent_id": data.agent_id,
+            "memory_type": fields["memory_type"],
+            "title": fields["title"],
+            "content": data.content,
+            "embedding": embedding,
+            "weight": fields["weight"],
+            "source_uri": data.source_uri,
+            "run_id": data.run_id,
+            # See ``write_memory_row`` for the falsy-``{}`` trap.
+            "metadata_": _parent_metadata(),
+            "content_hash": ch,
+            "expires_at": data.expires_at.isoformat() if data.expires_at else None,
+            # OSS 08/14 M-18 — ``str(...)``, because this dict is handed
+            # to ``httpx`` as ``json=`` and ``MemoryCreate`` types this
+            # field as ``UUID``, which the stdlib encoder refuses. Every
+            # other non-JSON-native field in this literal is already
+            # converted (``expires_at``, ``ts_valid_*``); this one was
+            # missed, so ANY auto-chunked write that carried a subject
+            # entity died with a TypeError the caller saw as a 500. The
+            # inline path never hit it because ``WriteMemoryRow`` builds
+            # its payload through the same conversion.
+            "subject_entity_id": str(data.subject_entity_id) if data.subject_entity_id else None,
+            "predicate": data.predicate,
+            "object_value": data.object_value,
+            "ts_valid_start": fields["ts_valid_start"].isoformat() if fields.get("ts_valid_start") else None,
+            "ts_valid_end": fields["ts_valid_end"].isoformat() if fields.get("ts_valid_end") else None,
+            "status": fields["status"],
+            "visibility": data.visibility or "scope_team",
+            "is_inferred": is_inferred,
+        }
+        claim_settings(parent_payload, ctx.tenant_config, is_inferred=is_inferred)
+
+        async def decide_again(config: ResolvedConfig) -> None:
+            # As ``WriteMemoryRow`` decides again, through the step that decided
+            # first. The children take their hold from the parent's metadata
+            # below, so they follow.
+            ctx.tenant_config = config
+            await HoldLowTrustWrite().execute(ctx)
+            parent_payload["metadata_"] = _parent_metadata()
+            parent_payload["status"] = fields["status"]
+            claim_settings(parent_payload, config, is_inferred=is_inferred)
 
         # Auto-chunk parent insert — wrapped in the storage bulkhead
         # like the regular single-write path. Auto-chunk fires two
@@ -1268,45 +1320,10 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         # tenant doing heavy auto-chunking can't park more storage
         # connections than the cap allows.
         async with per_tenant_storage_slot("storage_write", data.tenant_id):
-            parent = await _create_memory_or_409(
-                {
-                    "tenant_id": data.tenant_id,
-                    "fleet_id": data.fleet_id,
-                    "agent_id": data.agent_id,
-                    "memory_type": fields["memory_type"],
-                    "title": fields["title"],
-                    "content": data.content,
-                    "embedding": embedding,
-                    "weight": fields["weight"],
-                    "source_uri": data.source_uri,
-                    "run_id": data.run_id,
-                    # See ``write_memory_row`` for the falsy-``{}`` trap.
-                    "metadata_": parent_metadata,
-                    "content_hash": ch,
-                    "expires_at": data.expires_at.isoformat() if data.expires_at else None,
-                    # OSS 08/14 M-18 — ``str(...)``, because this dict is handed
-                    # to ``httpx`` as ``json=`` and ``MemoryCreate`` types this
-                    # field as ``UUID``, which the stdlib encoder refuses. Every
-                    # other non-JSON-native field in this literal is already
-                    # converted (``expires_at``, ``ts_valid_*``); this one was
-                    # missed, so ANY auto-chunked write that carried a subject
-                    # entity died with a TypeError the caller saw as a 500. The
-                    # inline path never hit it because ``WriteMemoryRow`` builds
-                    # its payload through the same conversion.
-                    "subject_entity_id": str(data.subject_entity_id) if data.subject_entity_id else None,
-                    "predicate": data.predicate,
-                    "object_value": data.object_value,
-                    "ts_valid_start": fields["ts_valid_start"].isoformat()
-                    if fields.get("ts_valid_start")
-                    else None,
-                    "ts_valid_end": fields["ts_valid_end"].isoformat()
-                    if fields.get("ts_valid_end")
-                    else None,
-                    "status": fields["status"],
-                    "visibility": data.visibility or "scope_team",
-                    "is_inferred": is_inferred,
-                }
+            parent = await insert_deciding_again(
+                data.tenant_id, lambda: _create_memory_or_409(parent_payload), decide_again
             )
+        parent_metadata = parent_payload["metadata_"]
 
         parent_id = parent.get("id")
         # M-51: the caller's links go on the parent only (owner decision
@@ -2198,7 +2215,18 @@ async def create_memories_bulk(
             # "inferred cannot overturn explicit" invariant its rows sit on.
             "is_inferred": is_inferred,
         }
+        claim_settings(mem_data, tenant_config, is_inferred=is_inferred)
         pending.append((i, mem_data))
+
+    async def decide_again(config: ResolvedConfig) -> None:
+        # One agent writes the batch, so one answer, applied as the loop above
+        # applies it. Only a live batch is refused, so there is no hold to undo.
+        hold = await hold_for(data.tenant_id, data.agent_id, data.fleet_id, config, is_inferred=is_inferred)
+        for _, mem_data in pending:
+            if hold is not None:
+                mem_data["status"] = QUARANTINED_MEMORY_STATUS
+                mem_data["metadata_"].setdefault(SYSTEM_NAMESPACE, {})[HOLD_KEY] = hold
+            claim_settings(mem_data, config, is_inferred=is_inferred)
 
     # -- Bulk insert via storage client. The storage layer returns one
     # entry per submitted item with ``was_inserted`` distinguishing
@@ -2235,7 +2263,9 @@ async def create_memories_bulk(
             per_tenant_storage_slot("storage_write", data.tenant_id),
         ):
             try:
-                storage_results = await sc.create_memories([d for _, d in pending])
+                storage_results = await insert_deciding_again(
+                    data.tenant_id, lambda: sc.create_memories([d for _, d in pending]), decide_again
+                )
             except DuplicateMemoryError as exc:
                 # Migration 040's constraint aborted the batch. 409, not the 500
                 # an untranslated error would give: nothing was written, and the
