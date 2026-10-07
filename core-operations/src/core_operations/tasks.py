@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 _COVERAGE_TENANT_LOG_CAP = 20
 
 
-async def _fire_fanout(action: str) -> None:
+async def _fire_fanout(action: str, *, dedup_window_hours: float | None = None) -> None:
     """POST ``/admin/lifecycle/fanout/<action>``. A non-2xx response
     logs and returns; the scheduler retries on the next tick, so
     re-raising would just produce duplicate stack traces.
@@ -47,7 +47,8 @@ async def _fire_fanout(action: str) -> None:
     timeout = httpx.Timeout(settings.core_api_http_timeout_s)
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
-            resp = await client.post(url, headers=headers)
+            params = {"dedup_window_hours": dedup_window_hours} if dedup_window_hours is not None else None
+            resp = await client.post(url, headers=headers, params=params)
         except httpx.HTTPError:
             logger.exception(
                 "lifecycle fanout POST failed",
@@ -136,7 +137,19 @@ async def run_lifecycle_reconcile_tick() -> None:
             extra={"status_code": resp.status_code, "body": resp.text[:500]},
         )
         return
-    body = resp.json()
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        # A 2xx: the sweep ALREADY RAN in core-api (L-36). Raising here would
+        # log a failed tick for a sweep that worked, as ``_fire_fanout``
+        # explains. Only this hour's counts are lost, and the log says so.
+        logger.error(
+            "lifecycle reconcile returned an unreadable 2xx; the sweep ran, its counts are lost",
+            extra={"status_code": resp.status_code, "body": resp.text[:500]},
+        )
+        return
     stranded = body.get("stranded") or 0
     if not stranded:
         # The steady state. Debug, so an hourly no-op does not bury the
@@ -185,13 +198,28 @@ async def run_purge_soft_deleted_tick() -> None:
     await _fire_fanout("purge-soft-deleted")
 
 
+def crystallize_dedup_window_hours() -> float | None:
+    """The consumer's dedup window for a sub-daily crystallize cadence.
+
+    The consumer's default (23h) is sized for the daily cron. At N < 24 hours
+    every run after the day's first would be skipped, so send a window just
+    under the interval: wide enough to absorb a double-fired tick, narrow
+    enough that the previous scheduled run never counts. ``None`` keeps the
+    daily default.
+    """
+    hours = max(1, settings.lifecycle_crystallize_every_hours)
+    if hours >= 24:
+        return None
+    return hours - 0.5
+
+
 async def run_crystallize_tick() -> None:
     """CAURA-657: trigger crystallization per active org. Consumer
     side runs in core-api (pipeline machinery isn't reachable from
     core-worker); a 23-hour dedup gate inside the consumer skips orgs
     that succeeded within the window.
     """
-    await _fire_fanout("crystallize")
+    await _fire_fanout("crystallize", dedup_window_hours=crystallize_dedup_window_hours())
 
 
 async def run_entity_link_tick() -> None:

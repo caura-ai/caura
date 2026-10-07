@@ -3,7 +3,10 @@
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from functools import partial
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -46,6 +49,10 @@ from core_api.constants import (
 from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
 
 logger = logging.getLogger(__name__)
+
+# Visibilities a crystal may be built from. ``scope_agent`` rows are private to
+# their author; merging them into a shared crystal would republish them.
+_SHARED_VISIBILITIES = frozenset({"scope_team", "scope_org"})
 
 # A59 — bounded read for the subject-local Type-II sweep. Subjects are small
 # (~1.4 memories each in practice), so this page covers a large tenant while
@@ -387,13 +394,15 @@ async def _execute_crystallization(
 
         # --- Hygiene checks ---
         hygiene: dict = {}
+        # L-180: storage reads several sections share, made once per run.
+        reads: dict = {}
         for name, fn in [
             ("orphaned_entities", _check_orphaned_entities),
             ("near_duplicates", _check_near_duplicates),
-            ("missing_embeddings", _check_missing_embeddings),
-            ("expired_still_active", _check_expired_still_active),
-            ("stale_memories", _check_stale_memories),
-            ("short_content", _check_short_content),
+            ("missing_embeddings", partial(_check_missing_embeddings, reads=reads)),
+            ("expired_still_active", partial(_check_expired_still_active, reads=reads)),
+            ("stale_memories", partial(_check_stale_memories, reads=reads)),
+            ("short_content", partial(_check_short_content, reads=reads)),
             ("broken_entity_links", _check_broken_entity_links),
         ]:
             checks_total += 1
@@ -408,7 +417,7 @@ async def _execute_crystallization(
         health: dict = {}
         checks_total += 1
         try:
-            health = await _compute_health(tenant_id, fleet_id)
+            health = await _compute_health(tenant_id, fleet_id, reads=reads)
         except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError):
             logger.exception("Crystallizer health computation failed for tenant %s", tenant_id)
             health = {"error": True}
@@ -418,7 +427,7 @@ async def _execute_crystallization(
         usage: dict = {}
         checks_total += 1
         try:
-            usage = await _compute_usage(tenant_id, fleet_id)
+            usage = await _compute_usage(tenant_id, fleet_id, reads=reads)
         except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError):
             logger.exception("Crystallizer usage computation failed for tenant %s", tenant_id)
             usage = {"error": True}
@@ -495,7 +504,14 @@ async def _execute_crystallization(
             # migration and rides the route that already serialises hygiene.
             hygiene["type_ii_staleness"] = type_ii
 
-        if auto_crystallize:
+        if not auto_crystallize:
+            # Nothing will act on the duplicates this sweep found, so their rows
+            # are as settled as this policy gets; stamp them as the sweep always
+            # did. Turning auto-curate on reopens them (M-38: ``update_settings``
+            # resets the stamps). (With auto-curate on, ``_run_crystallization``
+            # does this per cluster, keeping back the ones it could not finish.)
+            await _stamp_settled(sc, tenant_id, hygiene.get("near_duplicates", {}).get("pairs", []), set())
+        else:
             try:
                 crystallization = await _run_crystallization(tenant_id, fleet_id, hygiene)
             except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError, HTTPException):
@@ -612,6 +628,10 @@ async def _run_crystallization(
     dup_pairs = dup_data.get("pairs", [])
     if not dup_pairs:
         return result
+    # Members of clusters that did NOT reach a final outcome this run. Every
+    # other paired id is stamped dedup-checked on the way out; these stay
+    # unstamped so the next sweep finds their cluster again.
+    unsettled: set[UUID] = set()
 
     # Build clusters from overlapping pairs
     clusters = _build_clusters(dup_pairs)
@@ -626,22 +646,34 @@ async def _run_crystallization(
     # deploy's, or a test double — resolves to today's behaviour instead of
     # raising.
     min_cluster = getattr(config, "crystallizer_min_cluster_size", CRYSTALLIZER_MIN_CLUSTER_SIZE)
+    # Below the floor is a policy outcome, not a deferral: those rows are
+    # stamped like any settled cluster, or every pair would be re-swept nightly.
+    # Lowering the floor reopens them (M-38: ``update_settings`` resets stamps).
     clusters = [c for c in clusters if len(c) >= min_cluster]
     result["clusters_found"] = len(clusters)
 
     if not clusters:
+        await _stamp_settled(sc, tenant_id, dup_pairs, unsettled)
         return result
 
-    # Limit total memories processed
+    # Limit total memories processed. Smallest first, and a cluster that does
+    # not fit is skipped, not the end of selection: this used to ``break`` at
+    # the first one over the budget, in arbitrary set order, so one large
+    # duplicate family starved every cluster after it. A family larger than the
+    # whole budget could never be processed at all, so it is split into
+    # budget-sized parts first; each part is still a set of near-duplicates.
     total_ids: list[UUID] = []
     selected_clusters: list[set[UUID]] = []
-    for cluster in clusters:
+    parts = [part for cluster in clusters for part in _split_cluster(cluster, CRYSTALLIZER_MAX_BATCH_SIZE)]
+    for cluster in sorted(parts, key=lambda c: (len(c), min(str(m) for m in c))):
         if len(total_ids) + len(cluster) > CRYSTALLIZER_MAX_BATCH_SIZE:
-            break
+            unsettled.update(cluster)
+            continue
         selected_clusters.append(cluster)
         total_ids.extend(cluster)
 
     if not total_ids:
+        await _stamp_settled(sc, tenant_id, dup_pairs, unsettled)
         return result
 
     # Fetch full memory content for all candidates in one round-trip.
@@ -671,10 +703,17 @@ async def _run_crystallization(
         # what close the reported loop. It earns its place by making the
         # invariant checkable next to the delete instead of depending on two
         # remote queries staying right.
+        # Private rows never reach a crystal (the pair query already excludes
+        # them; re-checked here like the status guard above, so the invariant
+        # holds next to the write that would republish them).
         cluster_memories = [
             memories_by_id[mid]
             for mid in cluster_ids
-            if mid in memories_by_id and memories_by_id[mid].get("status") in LIVE_MEMORY_STATUSES
+            if mid in memories_by_id
+            and memories_by_id[mid].get("status") in LIVE_MEMORY_STATUSES
+            # ``visibility`` is NOT NULL and always serialized by storage; an
+            # absent key only occurs in hand-built rows, which predate it.
+            and memories_by_id[mid].get("visibility", "scope_team") in _SHARED_VISIBILITIES
         ]
         # Same floor as the filter above — re-checked because the live-status
         # filter directly above can shrink a cluster below it.
@@ -683,8 +722,24 @@ async def _run_crystallization(
 
         # Call LLM to crystallize
         extracted = await _crystallize_cluster(cluster_memories, config)
-        if not extracted:
+        if extracted is None:
+            # An outage (``_skip_crystallize``) or an unusable answer: nothing
+            # was decided about this cluster, so it must come back next sweep.
+            unsettled.update(cluster_ids)
             continue
+        if not extracted:
+            # The model's verdict that nothing here is worth keeping, which the
+            # prompt asks it to give. Settled: stamped with the rest, nothing
+            # created and nothing archived. Left unsettled, it was re-sent and
+            # re-paid on every run.
+            continue
+
+        # The crystal lives where its sources lived: their fleet (the nightly
+        # run passes none) and the narrowest visibility among them.
+        crystal_fleet_id = fleet_id if fleet_id is not None else cluster_memories[0].get("fleet_id")
+        crystal_visibility = (
+            "scope_org" if all(m.get("visibility") == "scope_org" for m in cluster_memories) else "scope_team"
+        )
 
         # Create new crystallized memories via create_memory
         from core_api.schemas import MemoryCreate
@@ -710,7 +765,8 @@ async def _run_crystallization(
                 mem_out = await create_memory(
                     MemoryCreate(
                         tenant_id=tenant_id,
-                        fleet_id=fleet_id,
+                        fleet_id=crystal_fleet_id,
+                        visibility=crystal_visibility,
                         agent_id="crystallizer",
                         content=fact["content"],
                         memory_type=mt,
@@ -792,14 +848,24 @@ async def _run_crystallization(
         # licenses the archive is that a replacement EXISTS, not that nothing was
         # rejected. A cluster that created one fact and skipped two duplicates is
         # still safe to archive; a cluster that created none never is.
-        if not new_ids:
+        #
+        # But a FAILED fact is different from a duplicate one. A 409 means the
+        # fact's content is already live; a 422/5xx or storage error means it is
+        # nowhere. Archiving the sources then would take that fact out of recall
+        # with no replacement, so any failure keeps the whole cluster live and
+        # leaves it for the next sweep. The facts that did persist stay; the
+        # re-run's own dedup gates absorb them.
+        if not new_ids or failed_facts:
             logger.info(
-                "Crystallizer kept %d source(s) live: cluster produced no new memory "
-                "(duplicates=%d failed=%d)",
+                "Crystallizer kept %d source(s) live: cluster produced no complete "
+                "replacement (new=%d duplicates=%d failed=%d)",
                 len(cluster_memories),
+                len(new_ids),
                 duplicate_facts,
                 failed_facts,
             )
+            if failed_facts:
+                unsettled.update(cluster_ids)
             cluster_ids_to_archive = []
         else:
             cluster_ids_to_archive = [
@@ -829,6 +895,7 @@ async def _run_crystallization(
                 )
         except Exception:
             logger.exception("Failed to archive %d-memory cluster (rolled back)", len(cluster_ids_to_archive))
+            unsettled.update(cluster_ids)
 
         result["clusters"].append(
             {
@@ -844,7 +911,41 @@ async def _run_crystallization(
         result["failed_facts"] += failed_facts
 
     result["memories_crystallized"] = result["memories_archived"]
+    await _stamp_settled(sc, tenant_id, dup_pairs, unsettled)
     return result
+
+
+def _pair_member_ids(pairs: list[dict]) -> set[str]:
+    return {p["id1"] for p in pairs} | {p["id2"] for p in pairs}
+
+
+async def _stamp_settled(sc, tenant_id: str, pairs: list[dict], unsettled: set[UUID]) -> None:
+    """Stamp dedup-checked every paired row whose cluster reached a final
+    outcome, i.e. all of them except ``unsettled``.
+
+    ``_check_near_duplicates`` deliberately leaves paired rows unstamped (see its
+    stamp), so this is what eventually retires them. Best effort: a failed stamp
+    only means those rows are swept once more.
+    """
+    skip = {str(m) for m in unsettled}
+    ids = sorted(mid for mid in _pair_member_ids(pairs) if mid not in skip)
+    if not ids:
+        return
+    try:
+        await sc.mark_dedup_checked(ids, tenant_id)
+    except Exception:
+        logger.warning("Crystallizer could not stamp %d settled row(s)", len(ids), exc_info=True)
+
+
+def _split_cluster(cluster: set[UUID], limit: int) -> list[set[UUID]]:
+    """``cluster`` itself when it fits in ``limit``, else balanced parts that
+    each do. Deterministic (sorted ids) so the same family splits the same way
+    on every run."""
+    if len(cluster) <= limit:
+        return [cluster]
+    ordered = sorted(cluster, key=str)
+    n = -(-len(ordered) // limit)
+    return [set(ordered[i::n]) for i in range(n)]
 
 
 def _build_clusters(pairs: list[dict]) -> list[set[UUID]]:
@@ -874,8 +975,13 @@ def _build_clusters(pairs: list[dict]) -> list[set[UUID]]:
     return list(groups.values())
 
 
-async def _crystallize_cluster(memories: list[dict], config) -> list[dict]:
-    """Send a cluster of memories to the LLM for crystallization."""
+async def _crystallize_cluster(memories: list[dict], config) -> list[dict] | None:
+    """Send a cluster of memories to the LLM for crystallization.
+
+    ``None`` means nothing was decided: an outage, or an answer that is not a
+    list or holds no usable fact. ``[]`` is the model's verdict that nothing in
+    the cluster is worth preserving.
+    """
     mem_texts = []
     for i, m in enumerate(memories, 1):
         mem_texts.append(
@@ -883,10 +989,10 @@ async def _crystallize_cluster(memories: list[dict], config) -> list[dict]:
         )
     prompt = CRYSTALLIZATION_PROMPT.format(memories="\n".join(mem_texts))
 
-    async def _do_crystallize(llm) -> list[dict]:
+    async def _do_crystallize(llm) -> list[dict] | None:
         raw = await llm.complete_json(prompt)
         if not isinstance(raw, list):
-            return []
+            return None
         results = []
         for item in raw:
             if not isinstance(item, dict) or not item.get("content"):
@@ -903,14 +1009,15 @@ async def _crystallize_cluster(memories: list[dict], config) -> list[dict]:
             except (TypeError, ValueError):
                 item["weight"] = 0.7
             results.append(item)
-        return results
+        # Items, but none usable, is a malformed answer, not "nothing to keep".
+        return results if results or not raw else None
 
     return await call_with_fallback(
         primary_provider_name=config.enrichment_provider,
         call_fn=_do_crystallize,
-        # An outage must yield NOTHING here, not a stand-in. The caller does
-        # ``if not extracted: continue`` before it creates anything, so an empty
-        # list skips the cluster untouched — see ``_crystallize_fake``.
+        # An outage must yield NOTHING here, not a stand-in. The caller skips a
+        # ``None`` result before it creates anything and keeps the cluster for
+        # the next sweep — see ``_skip_crystallize``.
         fake_fn=(
             (lambda: _crystallize_fake(memories))
             if deliberate_fake_provider(config.enrichment_provider)
@@ -922,8 +1029,8 @@ async def _crystallize_cluster(memories: list[dict], config) -> list[dict]:
     )
 
 
-def _skip_crystallize() -> list[dict]:
-    """No-LLM crystallization: produce nothing, so the cluster is left alone.
+def _skip_crystallize() -> None:
+    """No-LLM crystallization: decide nothing, so the cluster is left alone.
 
     This is not cosmetic. The caller creates one memory per returned fact and then
     ARCHIVES every source memory in the cluster. With ``_crystallize_fake`` on the
@@ -932,12 +1039,14 @@ def _skip_crystallize() -> list[dict]:
     behind, having synthesised nothing. The other N-1 memories' content is not in
     the survivor, and ``archived`` is outside ``LIVE_MEMORY_STATUSES``.
 
-    Returning ``[]`` takes the caller's existing ``if not extracted: continue``
-    path, so nothing is created and nothing is archived. The cluster is still there
-    to crystallize once a provider answers.
+    Returning ``None`` takes the caller's "nothing decided" path, so nothing is
+    created and nothing is archived. The cluster is still there to crystallize once
+    a provider answers: its rows are left unstamped, so the next sweep finds it
+    again. (``[]`` would not do: it is the model's verdict that nothing is worth
+    keeping, and it settles the cluster.)
     """
     logger.warning("crystallizer: no LLM — cluster skipped, nothing archived")
-    return []
+    return None
 
 
 def _crystallize_fake(memories: list[dict]) -> list[dict]:
@@ -1007,6 +1116,9 @@ async def _check_near_duplicates(
 
     pairs: dict[tuple[str, str], float] = {}  # (id1, id2) -> similarity
     checked_ids: list[str] = []
+    # Every id seen in ANY pair the scan returned, including pairs the cap then
+    # discarded. These are not stamped here; see the stamp below.
+    paired_ids: set[str] = set()
     offset = 0
 
     if threshold is None:
@@ -1050,6 +1162,7 @@ async def _check_near_duplicates(
         checked_ids.extend(candidate_ids)
 
         for pair in batch.get("pairs", []):
+            paired_ids.update((pair["id"], pair["neighbor_id"]))
             id1, id2 = sorted([pair["id"], pair["neighbor_id"]])
             pair_key = (id1, id2)
             if pair_key not in pairs and len(pairs) < CRYSTALLIZER_MAX_DEDUP_PAIRS:
@@ -1057,17 +1170,48 @@ async def _check_near_duplicates(
 
         offset += CRYSTALLIZER_DEDUP_BATCH_SIZE
 
-    # Mark all processed memories as dedup-checked
-    if checked_ids:
-        await sc.mark_dedup_checked(checked_ids, tenant_id)
+    # Stamp only the swept rows that turned out to have no duplicate. The stamp
+    # takes a row out of every future sweep for good, and a row that IS in a
+    # pair is not settled yet: whether its cluster gets crystallized is decided
+    # later, by ``_run_crystallization``, which stamps the members whose cluster
+    # reached a final outcome and leaves the rest (LLM outage, a failed fact,
+    # the batch cap, a pair the cap below discarded) for the next sweep.
+    # Stamping them here, as this used to, meant a cluster skipped for any of
+    # those reasons was never swept again.
+    to_stamp = [mid for mid in checked_ids if mid not in paired_ids]
+    if to_stamp:
+        await sc.mark_dedup_checked(to_stamp, tenant_id)
 
     pairs_list = [{"id1": k[0], "id2": k[1], "similarity": v} for k, v in pairs.items()]
-    return {"count": len(pairs_list), "pairs": pairs_list}
+    # L-28: the ids and the threshold the report's NEAR_DUPLICATES issue quotes.
+    affected = list(dict.fromkeys(mid for p in pairs_list for mid in (p["id1"], p["id2"])))
+    return {
+        "count": len(pairs_list),
+        "pairs": pairs_list,
+        "affected_ids": affected[:MAX_AFFECTED_IDS],
+        "threshold": threshold,
+    }
+
+
+async def _read_once(reads: dict | None, key: str, fetch: Callable[[], Awaitable[Any]]) -> Any:
+    """One storage read per run for an input several sections share (L-180).
+
+    ``reads`` is the run's store; ``None`` reads straight through, for direct
+    callers. Only a success is kept, so a failed read is retried by the next
+    section that needs it and each section still fails on its own.
+    """
+    if reads is None:
+        return await fetch()
+    if key not in reads:
+        reads[key] = await fetch()
+    return reads[key]
 
 
 async def _check_missing_embeddings(
     tenant_id: str,
     fleet_id: str | None,
+    *,
+    reads: dict | None = None,
 ) -> dict:
     """Memories with no embedding vector.
 
@@ -1085,13 +1229,17 @@ async def _check_missing_embeddings(
     starts consuming them.
     """
     sc = get_storage_client()
-    coverage = await sc.get_embedding_coverage(tenant_id, fleet_id)
+    coverage = await _read_once(
+        reads, "embedding_coverage", lambda: sc.get_embedding_coverage(tenant_id, fleet_id)
+    )
     return {"count": coverage.get("missing_embeddings", 0)}
 
 
 async def _check_expired_still_active(
     tenant_id: str,
     fleet_id: str | None,
+    *,
+    reads: dict | None = None,
 ) -> dict:
     """Memories past their validity window but still marked active.
 
@@ -1103,7 +1251,9 @@ async def _check_expired_still_active(
     had something to report, and nothing at all when it didn't.
     """
     sc = get_storage_client()
-    candidates = await sc.get_lifecycle_candidates(tenant_id, fleet_id)
+    candidates = await _read_once(
+        reads, "lifecycle_candidates", lambda: sc.get_lifecycle_candidates(tenant_id, fleet_id)
+    )
     expired = candidates.get("expired_still_active", [])
     return {"count": len(expired), "affected_ids": [str(r) for r in expired][:MAX_AFFECTED_IDS]}
 
@@ -1111,6 +1261,8 @@ async def _check_expired_still_active(
 async def _check_stale_memories(
     tenant_id: str,
     fleet_id: str | None,
+    *,
+    reads: dict | None = None,
 ) -> dict:
     """Old memories never recalled and with low weight.
 
@@ -1119,7 +1271,9 @@ async def _check_stale_memories(
     Values are bare UUID strings — see ``_check_expired_still_active``.
     """
     sc = get_storage_client()
-    candidates = await sc.get_lifecycle_candidates(tenant_id, fleet_id)
+    candidates = await _read_once(
+        reads, "lifecycle_candidates", lambda: sc.get_lifecycle_candidates(tenant_id, fleet_id)
+    )
     stale = candidates.get("stale_low_weight", [])
     return {"count": len(stale), "affected_ids": [str(r) for r in stale][:MAX_AFFECTED_IDS]}
 
@@ -1127,6 +1281,8 @@ async def _check_stale_memories(
 async def _check_short_content(
     tenant_id: str,
     fleet_id: str | None,
+    *,
+    reads: dict | None = None,
 ) -> dict:
     """Memories with very short content (likely low value).
 
@@ -1136,7 +1292,9 @@ async def _check_short_content(
     ``_check_expired_still_active``.
     """
     sc = get_storage_client()
-    candidates = await sc.get_lifecycle_candidates(tenant_id, fleet_id)
+    candidates = await _read_once(
+        reads, "lifecycle_candidates", lambda: sc.get_lifecycle_candidates(tenant_id, fleet_id)
+    )
     short = candidates.get("short_content", [])
     return {"count": len(short), "affected_ids": [str(r) for r in short][:MAX_AFFECTED_IDS]}
 
@@ -1160,16 +1318,21 @@ async def _check_broken_entity_links(
 async def _compute_health(
     tenant_id: str,
     fleet_id: str | None,
+    *,
+    reads: dict | None = None,
 ) -> dict:
     sc = get_storage_client()
     # The three storage reads are independent — fetch them concurrently rather
     # than paying three serial HTTP round-trips. (Entity coverage runs a
-    # cross-table join that lives in the storage API now.)
-    health, coverage, with_entities = await asyncio.gather(
-        sc.get_memory_stats(tenant_id, fleet_id),
-        sc.get_embedding_coverage(tenant_id, fleet_id),
+    # cross-table join that lives in the storage API now.) Stats and coverage
+    # are shared with other sections of the run (L-180).
+    stats, coverage, with_entities = await asyncio.gather(
+        _read_once(reads, "memory_stats", lambda: sc.get_memory_stats(tenant_id, fleet_id)),
+        _read_once(reads, "embedding_coverage", lambda: sc.get_embedding_coverage(tenant_id, fleet_id)),
         sc.get_entity_coverage(tenant_id, fleet_id),
     )
+    # A copy: the shared stats must not carry this section's additions.
+    health = dict(stats)
     total = health.get("total_memories", 0)
     health["embedding_coverage_pct"] = coverage.get("coverage_pct", 0.0)
     health["entity_coverage_pct"] = round(with_entities / total * 100, 1) if total > 0 else 0.0
@@ -1185,12 +1348,14 @@ async def _compute_health(
 async def _compute_usage(
     tenant_id: str,
     fleet_id: str | None,
+    *,
+    reads: dict | None = None,
 ) -> dict:
     sc = get_storage_client()
     # Memory-table stats, type distribution, and audit usage are independent
     # storage reads — fetch them concurrently rather than serially.
     stats, type_dist, audit = await asyncio.gather(
-        sc.get_memory_stats(tenant_id, fleet_id),
+        _read_once(reads, "memory_stats", lambda: sc.get_memory_stats(tenant_id, fleet_id)),
         sc.get_type_distribution(tenant_id, fleet_id),
         sc.get_audit_usage(tenant_id),
     )
@@ -1251,7 +1416,8 @@ def _generate_issues(hygiene: dict, health: dict, usage: dict) -> list[dict]:
             "hygiene",
             "NEAR_DUPLICATES",
             "Near-duplicate memories detected",
-            f"{dup['count']} memory pair(s) exceed {CRYSTALLIZER_DEDUP_THRESHOLD} cosine similarity.",
+            f"{dup['count']} memory pair(s) at or above "
+            f"{dup.get('threshold', CRYSTALLIZER_DEDUP_THRESHOLD)} cosine similarity.",
             count=dup["count"],
             affected_ids=dup.get("affected_ids"),
         )

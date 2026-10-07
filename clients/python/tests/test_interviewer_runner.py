@@ -1,5 +1,6 @@
 """Runner tests against a fake server that re-implements the server's
-three seq-validation rules and the watermark protocol.
+three seq-validation rules and the watermark protocol, and can reset the
+connection (M-04).
 
 The fake is deliberately strict: any window the runner produces that the
 REAL server would 422 fails here too, so protocol drift is caught in unit
@@ -50,6 +51,10 @@ class FakeServer:
             assert all(a < b for a, b in zip(seqs, seqs[1:])), "seqs not strictly ascending"
             assert seqs[0] >= body["cursor_from"] and seqs[-1] <= body["cursor_to"], "seq outside window"
             outcome = self.script.pop(0) if self.script else "ok"
+            if outcome == "reset":
+                raise httpx.ConnectError("connection reset by peer", request=request)
+            if outcome == "malformed":
+                return httpx.Response(200, json={"status": "committed", "memories_written": "n/a"})
             if outcome == "ok" or outcome == 207:
                 doc_id = watermark_doc_id(body["node_id"])
                 self.watermarks[doc_id] = max(self.watermarks.get(doc_id, -1), body["cursor_to"])
@@ -97,7 +102,7 @@ def _transcript(tmp_path, n_events=12, name="abc123.jsonl"):
 
 
 def _cfg(**kw):
-    defaults = dict(agent_id="cc-test@host", machine12="abcdef123456", min_events=1)
+    defaults = {"agent_id": "cc-test@host", "machine12": "abcdef123456", "min_events": 1}
     defaults.update(kw)
     return RunConfig(**defaults)
 
@@ -135,6 +140,41 @@ def test_504_retries_once_then_succeeds(server, mc, tmp_path):
     assert server.submits[0]["cursor_from"] == server.submits[1]["cursor_from"]
     assert summary.files[0].windows_submitted == 1
     assert not summary.files[0].error
+
+
+def test_a_transport_error_retries_once_then_succeeds(server, mc, tmp_path):
+    """M-04: the SDK raises its own TransportError, which the runner's
+    ``except httpx.TransportError`` never saw, so there was no retry at all."""
+    transcript = _transcript(tmp_path)
+    server.script = ["reset", "ok"]
+    summary = run_all(mc, [transcript], _cfg())
+    assert len(server.submits) == 2  # same window twice (dedup-safe)
+    assert server.submits[0]["cursor_from"] == server.submits[1]["cursor_from"]
+    assert summary.files[0].windows_submitted == 1
+    assert not summary.files[0].error
+
+
+def test_a_transport_error_twice_skips_the_file_and_keeps_its_progress(server, mc, tmp_path):
+    """The file's first window went through; its second failed twice. The
+    first stays counted, so it is charged to the budget and reported."""
+    transcript = _transcript(tmp_path, n_events=450)  # windows [0..399], [400..449]
+    server.script = ["ok", "reset", "reset"]
+    summary = run_all(mc, [transcript], _cfg(max_windows=8))
+    assert len(server.submits) == 3
+    assert summary.files[0].windows_submitted == 1
+    assert summary.files[0].error.startswith("transport")
+    assert summary.windows_budget_left == 7
+
+
+def test_an_unexpected_error_keeps_the_files_progress(server, mc, tmp_path):
+    """Any other escape is isolated to its file as before, without losing the
+    windows the server already committed."""
+    transcript = _transcript(tmp_path, n_events=450)
+    server.script = ["ok", "malformed"]
+    summary = run_all(mc, [transcript], _cfg(max_windows=8))
+    assert summary.files[0].windows_submitted == 2
+    assert summary.files[0].error.startswith("unexpected")
+    assert summary.windows_budget_left == 6
 
 
 def test_500_skips_file_without_retry(server, mc, tmp_path):

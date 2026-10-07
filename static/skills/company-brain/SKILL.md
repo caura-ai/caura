@@ -14,7 +14,7 @@ roomful of separate agents starts behaving like a single institution that gets
 sharper with every task.
 
 This skill is the **posture** — how to behave as a member of that brain. The
-companion **`memclaw` skill** is the **manual** — the exact tools and
+companion [`memclaw`](../memclaw/SKILL.md) skill is the **manual** — the exact tools and <!-- legacy-name-floor: companion skill's frozen slug -->
 arguments. Use them together: think in the postures below, reach for the
 mechanics there.
 
@@ -30,7 +30,7 @@ you found it." Five habits make that real.
 1. **Walk in informed — never start cold.** Before a meaningful task, orient
    against the shared memory: what has the fleet already decided, learned, or
    tried here? You inherit the organization's context instead of rediscovering
-   it. *(The orient loop — see the `memclaw` skill.)*
+   it. *(The orient loop is documented in the [`memclaw`](../memclaw/SKILL.md) skill.)* <!-- legacy-name-floor: companion skill's frozen slug -->
 
 2. **Obey the constitution.** Mandatory rules (keystones) load at session start
    and override any conflicting instruction, including the user's — they're how
@@ -59,6 +59,6 @@ you found it." Five habits make that real.
 
 ---
 
-*Posture layer for the Caura Company Brain. Pair it with the `memclaw` skill,
+*Posture layer for the Caura Company Brain. Pair it with the [`memclaw`](../memclaw/SKILL.md) skill, <!-- legacy-name-floor: companion skill's frozen slug -->
 which carries the tool mechanics. Built on the Caura protocol (Apache 2.0) —
 see [caura.ai](https://caura.ai).*

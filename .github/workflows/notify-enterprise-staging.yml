@@ -85,11 +85,20 @@ jobs:
           if [ "$WORKFLOW_REF" != "refs/heads/main" ]; then
             echo "::warning::workflow_dispatch from $WORKFLOW_REF (not main) with empty oss_ref — defaulting to this run's SHA ($DISPATCH_SHA). Pass an explicit oss_ref if you intend a different ref."
           fi
+      - name: Mint deploy-bot token (repository_dispatch to caura-enterprise)
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+          owner: caura-ai
+          repositories: caura-enterprise
+
       - name: POST repository_dispatch to enterprise
         env:
-          # ``gh`` uses GH_TOKEN by default. The fine-grained PAT
+          # ``gh`` uses GH_TOKEN by default. The deploy-bot app token
           # carries the cross-repo permissions GITHUB_TOKEN lacks.
-          GH_TOKEN: ${{ secrets.ENTERPRISE_DEPLOY_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           OSS_REF: ${{ inputs.oss_ref || github.sha }}
           TRIGGERED_BY: ${{ github.actor }}
           EVENT_NAME: ${{ github.event_name }}

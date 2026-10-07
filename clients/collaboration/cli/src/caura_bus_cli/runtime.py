@@ -13,12 +13,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
-from caura_bus_core import Bus, PlatformError
+from caura_bus_core import RESYNC_EVENT, Bus, PlatformError
 from caura_bus_core.collaboration import Presence
 
 WAKE_TEXT = (
     "Caura: check inbox. Call peer wait, handle each delivery, and repeat until delivery is null. "
-    "Read notices too. Stop if paused."
+    "Read notices too. Stop if paused. Acknowledge with peer progress; send one reply with the result."
 )
 OVERDUE_TEXT = "Caura: a request you sent is overdue. Call peer wait."
 WAKE_EVENTS = {
@@ -28,6 +28,8 @@ WAKE_EVENTS = {
     "request.cancelled",
     "message.available",
     "delivery.available",
+    # Retention removed history after our cursor: reconcile from REST state.
+    RESYNC_EVENT,
     "human.decided",
     "delivery.interrupt",
     "delivery.acked",

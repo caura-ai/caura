@@ -23,6 +23,18 @@ function jsonResponse(status: number, data: unknown): Response {
   });
 }
 
+function stalledJsonResponse(signal: AbortSignal, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(),
+    json: () =>
+      new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }),
+  } as unknown as Response;
+}
+
 function makeClient(handler: Handler, options: Record<string, unknown> = {}): Caura {
   return new Caura("mc_test", {
     tenantId: "t1",
@@ -356,6 +368,28 @@ test("the configured timeout wraps the abort reason", { timeout: 1000 }, async (
   });
 });
 
+for (const [status, phase] of [
+  [200, "successful response bodies"],
+  [500, "error response bodies"],
+] as const) {
+  test(`the configured timeout also covers ${phase}`, { timeout: 1000 }, async () => {
+    let signal: AbortSignal | null | undefined;
+    const client = makeClient(
+      (_url, init) => {
+        signal = init.signal;
+        return stalledJsonResponse(signal!, status);
+      },
+      { timeoutMs: 0 },
+    );
+    await assert.rejects(client.search("query"), (error: unknown) => {
+      assert.ok(signal?.aborted);
+      assert.ok(error instanceof TransportError);
+      assert.equal(error.cause, signal.reason);
+      return true;
+    });
+  });
+}
+
 test("transport mapping does not wrap serialization errors", async () => {
   const client = makeClient(() => assert.fail("serialization must fail before fetch"));
   const circular: Record<string, unknown> = {};
@@ -366,4 +400,94 @@ test("transport mapping does not wrap serialization errors", async () => {
 test("transport mapping does not wrap invalid JSON", async () => {
   const client = makeClient(() => new Response("not json"));
   await assert.rejects(client.health(), SyntaxError);
+});
+
+// L-66: the key never crosses the network in cleartext unless the caller opts in.
+
+function clientFor(baseUrl: string, options: Record<string, unknown> = {}): Caura {
+  return makeClient(() => jsonResponse(200, { status: "ok" }), { baseUrl, ...options });
+}
+
+function withEnvOptIn<T>(value: string | undefined, run: () => T): T {
+  const saved = process.env.CAURA_ALLOW_INSECURE_HTTP;
+  if (value === undefined) delete process.env.CAURA_ALLOW_INSECURE_HTTP;
+  else process.env.CAURA_ALLOW_INSECURE_HTTP = value;
+  try {
+    return run();
+  } finally {
+    if (saved === undefined) delete process.env.CAURA_ALLOW_INSECURE_HTTP;
+    else process.env.CAURA_ALLOW_INSECURE_HTTP = saved;
+  }
+}
+
+test("plain http to a remote host is refused", () => {
+  withEnvOptIn(undefined, () => {
+    assert.throws(
+      () => clientFor("http://caura.example"),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /caura\.example/);
+        assert.match(err.message, /allowInsecureHttp/);
+        assert.match(err.message, /CAURA_ALLOW_INSECURE_HTTP/);
+        return true;
+      },
+    );
+  });
+});
+
+for (const scheme of ["ftp", "ws", "file"]) {
+  test(`a ${scheme}:// base URL is refused`, () => {
+    withEnvOptIn(undefined, () => {
+      assert.throws(() => clientFor(`${scheme}://caura.example`), /https:\/\//);
+    });
+  });
+}
+
+for (const baseUrl of [
+  "https://caura.example",
+  "http://localhost:8000",
+  "http://LOCALHOST:8000",
+  "http://api.localhost",
+  "http://127.0.0.1:8000",
+  "http://127.8.9.10",
+  "http://[::1]:8000",
+]) {
+  test(`${baseUrl} is allowed`, async () => {
+    const client = withEnvOptIn(undefined, () => clientFor(baseUrl));
+    assert.deepEqual(await client.health(), { status: "ok" });
+  });
+}
+
+test("allowInsecureHttp allows plain http", () => {
+  withEnvOptIn(undefined, () => clientFor("http://caura.example", { allowInsecureHttp: true }));
+});
+
+for (const value of ["true", "1"]) {
+  test(`CAURA_ALLOW_INSECURE_HTTP=${value} allows plain http`, () => {
+    withEnvOptIn(value, () => clientFor("http://caura.example"));
+  });
+}
+
+for (const value of ["", "false", "0", "yes"]) {
+  test(`CAURA_ALLOW_INSECURE_HTTP=${JSON.stringify(value)} does not opt in`, () => {
+    withEnvOptIn(value, () => {
+      assert.throws(() => clientFor("http://caura.example"));
+    });
+  });
+}
+
+test("an explicit allowInsecureHttp: false beats the env opt-in", () => {
+  withEnvOptIn("true", () => {
+    assert.throws(() => clientFor("http://caura.example", { allowInsecureHttp: false }));
+  });
+});
+
+test("requests refuse redirects, so the key is never re-sent to a redirect target", async () => {
+  let redirect: RequestRedirect | undefined;
+  const client = makeClient((_url, init) => {
+    redirect = init.redirect;
+    return jsonResponse(200, { status: "ok" });
+  });
+  await client.health();
+  assert.equal(redirect, "error");
 });

@@ -41,7 +41,9 @@ async def remote(monkeypatch, request):
 
     server = MCPServer("optional-peer-test")
     if request.param == "network":
-        monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda: httpx.ASGITransport(app=api))
+        monkeypatch.setattr(
+            httpx, "AsyncHTTPTransport", lambda: httpx.ASGITransport(app=api)
+        )
         register_peer(None, server, api_url="http://collaboration-api:8000")
     else:
         register_peer(api, server)

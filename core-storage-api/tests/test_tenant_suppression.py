@@ -149,3 +149,68 @@ class TestTenantSuppression:
             },
         )
         assert resp.status_code == 422
+
+
+class TestTenantSuppressionEventOrdering:
+    """Pub/Sub delivers at least once and in no particular order, and a
+    partially failed event is redelivered whole — possibly after a newer
+    event for the same org, or much later from a dead-letter replay. Storage
+    keeps the newest decision by EVENT time, so a stale arrival cannot undo
+    it."""
+
+    async def _post(self, client: AsyncClient, tid: str, action: str, at: str) -> dict:
+        resp = await client.post(
+            f"{PREFIX}/tenant-suppression",
+            json={"tenant_id": tid, "action": action, "occurred_at": at},
+        )
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    async def _suppressed(self, client: AsyncClient, tid: str) -> bool:
+        return (await client.get(f"{PREFIX}/tenant-suppression/{tid}")).json()["is_suppressed"]
+
+    async def test_stale_restore_does_not_unsuppress(self, client: AsyncClient) -> None:
+        tid = _fresh_tenant()
+        await self._post(client, tid, "suppress", "2026-09-01T10:00:00+00:00")
+        # The restore that was decided at 09:00 arrives late (replayed).
+        body = await self._post(client, tid, "restore", "2026-09-01T09:00:00+00:00")
+        assert body["applied"] is False
+        assert body["suppressed_at"] is not None
+        assert await self._suppressed(client, tid) is True
+
+    async def test_stale_suppress_does_not_resuppress(self, client: AsyncClient) -> None:
+        tid = _fresh_tenant()
+        await self._post(client, tid, "restore", "2026-09-01T10:00:00+00:00")
+        body = await self._post(client, tid, "suppress", "2026-09-01T09:00:00+00:00")
+        assert body["applied"] is False
+        assert await self._suppressed(client, tid) is False
+
+    async def test_newer_event_applies_and_equal_time_is_idempotent(self, client: AsyncClient) -> None:
+        tid = _fresh_tenant()
+        await self._post(client, tid, "suppress", "2026-09-01T09:00:00+00:00")
+        restored = await self._post(client, tid, "restore", "2026-09-01T10:00:00+00:00")
+        assert restored["applied"] is True
+        assert await self._suppressed(client, tid) is False
+        # A plain redelivery of that same restore still applies (no-op shape).
+        again = await self._post(client, tid, "restore", "2026-09-01T10:00:00+00:00")
+        assert again["applied"] is True
+        assert again["suppressed_at"] is None
+        # And the org can be suppressed again by a genuinely newer event.
+        await self._post(client, tid, "suppress", "2026-09-01T11:00:00+00:00")
+        assert await self._suppressed(client, tid) is True
+
+    async def test_offsets_are_compared_as_instants(self, client: AsyncClient) -> None:
+        tid = _fresh_tenant()
+        await self._post(client, tid, "suppress", "2026-09-01T12:00:00+02:00")  # 10:00Z
+        late = await self._post(client, tid, "restore", "2026-09-01T09:30:00+00:00")
+        assert late["applied"] is False
+        newer = await self._post(client, tid, "restore", "2026-09-01T10:30:00+00:00")
+        assert newer["applied"] is True
+
+    async def test_rejects_bad_occurred_at(self, client: AsyncClient) -> None:
+        for bad in ("yesterday", "2026-09-01T10:00:00", 1725184800):
+            resp = await client.post(
+                f"{PREFIX}/tenant-suppression",
+                json={"tenant_id": _fresh_tenant(), "action": "suppress", "occurred_at": bad},
+            )
+            assert resp.status_code == 422, f"occurred_at={bad!r}: {resp.text}"

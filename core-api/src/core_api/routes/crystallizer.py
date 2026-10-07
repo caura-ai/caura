@@ -12,6 +12,8 @@ from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.errors import coded_detail
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
+from core_api.services.agent_service import resolve_crystallize_fleet
+from core_api.services.audit_service import log_action
 from core_api.services.crystallizer_service import start_crystallization
 
 router = APIRouter(tags=["Memory Crystallizer"])
@@ -56,7 +58,9 @@ async def trigger_crystallization(
 ):
     """Trigger crystallization for a tenant (analysis + auto-curate).
 
-    Auth: a write-capable credential for the target tenant.
+    Auth: a write-capable credential for the target tenant. An agent credential
+    below trust level 3 is held to its own fleet: an omitted ``fleet_id`` is
+    pinned to it, and any other fleet is refused.
     """
     # Found by ``tests/test_authz_gate_inventory.py`` on its first run — the
     # same class as H-12/H-13/M-25/#1335/#1337, and the reason that file exists.
@@ -85,6 +89,12 @@ async def trigger_crystallization(
     # operation that shrinks its live set.
     auth.enforce_read_only()
     auth.enforce_tenant(body.tenant_id)
+    # L-70: which fleets the run may archive in. A user or tenant credential
+    # keeps the tenant-wide run; an agent credential is held to its own fleet
+    # below trust 3, as a by-id write would be.
+    fleet_id = body.fleet_id
+    if auth.agent_id and not auth.is_admin:
+        fleet_id = await resolve_crystallize_fleet(body.tenant_id, auth.agent_id, fleet_id)
     from core_api.services.organization_settings import resolve_config
 
     config = await resolve_config(body.tenant_id)
@@ -94,9 +104,19 @@ async def trigger_crystallization(
     # timeout on any non-trivial tenant. Poll ``GET /crystallize/reports``.
     report_id = await start_crystallization(
         body.tenant_id,
-        body.fleet_id,
+        fleet_id,
         trigger="manual",
         auto_crystallize=config.auto_crystallize_enabled,
+    )
+    # The report row says what the run did; only this says who started it and
+    # from where.
+    await log_action(
+        tenant_id=body.tenant_id,
+        agent_id=auth.agent_id,
+        action="crystallize",
+        resource_type="crystallization_report",
+        resource_id=report_id,
+        detail={"fleet_id": fleet_id, "trigger": "manual", **auth.audit_actor()},
     )
     return CrystallizeResult(report_id=str(report_id), status="running")
 

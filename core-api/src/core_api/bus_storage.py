@@ -32,8 +32,10 @@ class CollaborationStorageClient(CoreStorageClient):
 
 class PresenceStorageClient(CollaborationStorageClient):
     @staticmethod
-    def _make_pool():
-        return CollaborationStorageClient._make_pool(settings.presence_http_pool_size)
+    def _make_pool(pool_size=None):
+        return CollaborationStorageClient._make_pool(
+            settings.presence_http_pool_size if pool_size is None else pool_size
+        )
 
 
 _presence_client = None

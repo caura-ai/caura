@@ -279,7 +279,7 @@ export function autoFixAllowlist(options?: {
   const staleRemoved: string[] = [];
   const currentToolSet = new Set<string>(CAURA_TOOLS);
   config.tools.alsoAllow = config.tools.alsoAllow.filter((entry: string) => {
-    if (entry.startsWith("memclaw_") && !currentToolSet.has(entry)) {
+    if (entry.startsWith("memclaw_") && !currentToolSet.has(entry)) { // legacy-name-ok: removes stale pre-v1 tool aliases from existing allowlists
       staleRemoved.push(entry);
       return false;
     }

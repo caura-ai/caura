@@ -23,6 +23,8 @@ class ResolveSearchProfile:
             query=ctx.data["query"],
             top_k=ctx.data["top_k"],
             tenant_config=ctx.tenant_config,
+            # SIDE-60 — a caller-named ``top_k`` beats profile / tenant default.
+            top_k_explicit=bool(ctx.data.get("top_k_explicit")),
         )
         # D12 — a per-request ``min_similarity`` (SearchRequest field) outranks
         # the whole resolution ladder for this one call: request → agent

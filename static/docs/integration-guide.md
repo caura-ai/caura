@@ -94,8 +94,8 @@ table, and the "recall-before-you-start / write-when-something-matters
 agent reads on-demand. Install it after the MCP config above:
 
 ```bash
-# Installs SKILL.md into ~/.claude/skills/memclaw/ (Claude Code)
-# and/or ~/.agents/skills/memclaw/ (Codex).
+# Installs SKILL.md into ~/.claude/skills/memclaw/ (Claude Code). legacy-name-floor: installed default-skill path
+# And/or ~/.agents/skills/memclaw/ (Codex). legacy-name-floor: installed default-skill path
 curl -s "https://your-caura-instance.example.com/api/v1/install-skill" \
   -H "X-API-Key: mc_your_key" | bash
 ```
@@ -207,15 +207,15 @@ npm run build            # emits plugin/dist/
 
 ```bash
 # On the gateway machine
-mkdir -p ~/.openclaw/plugins/memclaw
+mkdir -p ~/.openclaw/plugins/memclaw # legacy-name-floor: frozen plugin install path
 # Copy the built plugin from your build machine (or rebuild here):
 scp -r plugin/dist plugin/package.json plugin/openclaw.plugin.json \
-    user@gateway:~/.openclaw/plugins/memclaw/
+    user@gateway:~/.openclaw/plugins/memclaw/ # legacy-name-floor: frozen plugin install path
 ```
 
 ### Environment variables
 
-Add to `~/.openclaw/plugins/memclaw/.env`:
+Add to `~/.openclaw/plugins/memclaw/.env`: <!-- legacy-name-floor: frozen plugin install path -->
 
 ```bash
 CAURA_API_URL=https://your-caura-instance.example.com   # your Caura API
@@ -223,11 +223,21 @@ CAURA_API_KEY=mc_your_key_here                          # tenant-scoped API key
 CAURA_FLEET_ID=fleet-001                                # identifies this fleet
 CAURA_NODE_NAME=my-gateway                              # friendly name shown in Fleet page
 # CAURA_TENANT_ID=                                      # auto-resolved from API key
-# CAURA_AUTO_WRITE_TURNS=true                           # default; set false to disable auto-write
+# CAURA_AUTO_WRITE_TURNS=true                           # false disables automatic conversation writes
 # CAURA_AUTO_FIX_CONFIG=false                           # set true to auto-fix openclaw.json on startup
 ```
 
 The plugin loads this `.env` file automatically. Both `CAURA_*` and `MEMCLAW_*` keys are read — and only those, so a `.env` cannot set `PATH` or `NODE_OPTIONS`. The pre-rename `MEMCLAW_*` spelling of every name above keeps working; where both are set the first **non-empty** one wins, so a half-filled template cannot blank out a working value. If you use systemd, also add the vars to a drop-in file (`.env` values don't override existing process env). <!-- legacy-name-floor: rule 3 dual-read alias -->
+
+Automatic conversation writes include user messages from `ingest`, assistant
+turn summaries, compaction summaries, and the session summary that OpenClaw's
+pre-compaction memory-flush turn asks the agent to write, all stored as episode
+memories with the server's default `scope_team` visibility. Set
+`CAURA_AUTO_WRITE_TURNS=false` and restart the plugin to disable all four;
+OpenClaw then runs no memory-flush turn. Local message buffering, recall,
+explicit memory tools and runtime compaction continue to work. This does not
+delete existing memories or disable the separately enabled Interviewer
+(`CAURA_INTERVIEWER`).
 
 **Configure OpenClaw** — edit `~/.openclaw/openclaw.json`:
 
@@ -260,7 +270,7 @@ The plugin loads this `.env` file automatically. Both `CAURA_*` and `MEMCLAW_*` 
 > Alternatively, use the Plugin Manager's **Fix Configuration** button or the OpenClaw CLI:
 > ```bash
 > openclaw plugins disable memory-core
-> openclaw plugins enable memclaw
+> openclaw plugins enable memclaw # legacy-name-floor: CLI requires the frozen plugin id
 > ```
 
 **Optional — enable ContextEngine (Tier 2):** For full auto read/write loop, also set the contextEngine slot:
@@ -337,7 +347,11 @@ Caura enforces a 4-tier trust system for agents. Agents are auto-registered on t
 ### How it works
 
 - On first write, the agent is auto-registered with trust level 1 and the `fleet_id` from that write becomes its "home fleet"
+- When the tenant setting `agents.require_agent_approval` is on, a new agent is registered at trust level 0 instead — on whichever call first names it (a write, a search or recall, a fleet heartbeat, `caura_tune`, a document write) — and stays there until an admin raises it
 - Trust level is enforced on every API call — an agent at level 1 attempting a cross-fleet search gets a 403
+- Documents follow the delete bar: an agent below level 3 may create documents and update the ones it wrote or that another agent of its own fleet wrote, but replacing a document an agent of another fleet authored (or `force=true` on `POST /documents`) needs level 3. Documents with no recorded author stay writable. Graph writes (`POST /entities/upsert`, `POST /relations/upsert`) and document writes into a fleet other than the agent's own need level 3, as memory writes do
+- Soft-deleted rows (`include_deleted=true` on `GET /memories`, `GET /memories/stats`, `caura_list`, `caura_stats`) and `POST /ingest/undo/{run_id}` need level 3 for an agent credential
+- Trust and home-fleet changes (`PATCH /agents/{id}/trust`, `PATCH /agents/{id}/fleet`) are recorded in the tenant audit log as `agent_trust_update` / `agent_fleet_update`
 - The admin API key bypasses all trust enforcement
 
 ### Managing trust levels
@@ -655,13 +669,15 @@ Content exceeding 2,000 characters is automatically split into atomic facts via 
 
 ### Lifecycle automation
 
-Background scheduler runs every 24 hours and automatically:
+The `core-operations` scheduler, which the stock `docker compose` stack runs, fires these ticks nightly (02:00 UTC by default, each movable in its settings):
 
-1. **Expires** — active memories past `ts_valid_end` → status `outdated`
-2. **Archives** — memories older than 180 days with weight ≤ 0.3 and zero recalls → status `archived`
-3. **Crystallizes** — triggers crystallization when active memory count exceeds 1,000
+1. **Expires** — active memories past `ts_valid_end` or `expires_at` → status `outdated`, which default search excludes
+2. **Archives** — active memories older than 90 days with weight below 0.3 and no recalls → status `archived`
+3. **Purges** — soft-deleted memories past the tenant's retention window are removed
+4. **Crystallizes** — merges near-duplicate clusters for tenants with `crystallizer.auto_crystallize` on and more than 1,000 active memories, when something was written since the last run
+5. **Links entities** and **discovers insights** — for tenants that enable `entity_linking.auto_entity_linking_enabled` and `insights.auto_insights_enabled`
 
-Togglable per tenant via `lifecycle_automation_enabled` setting.
+Expiry and archival are togglable per tenant via the `lifecycle.lifecycle_automation_enabled` setting. A deployment that does not run `core-operations` runs none of these.
 
 ### Temporal validity
 
@@ -737,9 +753,11 @@ Content-hash rejects exact duplicates within a tenant+fleet scope (HTTP 409). Sa
 |---|---|
 | Plugin tools don't appear | Ensure all three `plugins` keys are set in `openclaw.json`: `allow`, `entries`, and `load.paths`. Restart OpenClaw |
 | Tools not in agent sessions | Auto-fixed on first plugin load (adds v1.0 names, removes stale pre-v1.0 names). If it persists after restart, run `openclaw gateway memclaw.allowlist.fix` or check that `CAURA_AUTO_FIX_CONFIG` is not set to `false` <!-- legacy-name-floor: memclaw.allowlist.fix is the live gateway RPC method name --> |
-| Plugin allowed but not loading | Missing `plugins.entries.memclaw.enabled: true` or `plugins.load.paths` entry — the installer and Fix Configuration set both |
+| Plugin allowed but not loading | Missing `plugins.entries.memclaw.enabled: true` or `plugins.load.paths` entry — the installer and Fix Configuration set both | <!-- legacy-name-floor: troubleshooting names the frozen live config key -->
 | All config issues | Use the "Fix Configuration" button in Fleet Browser Plugin Manager to auto-fix all settings |
 | `ECONNREFUSED` | Check `CAURA_API_URL`, ensure API is running |
+| API URL redirects | Set `CAURA_API_URL` to the final server URL. Credential-bearing plugin requests reject redirects so an API key cannot be forwarded to another host. |
+| Agent-key provisioning unavailable | Concurrent calls for one agent share one provisioning attempt. Failed attempts wait 60 seconds before retrying; a 404 disables provisioning until plugin restart. The existing tenant-key fallback remains, so this is not an agent-revocation control. |
 | 401 Unauthorized | Check `CAURA_API_KEY` env var on gateway |
 | 403 Forbidden | Key used for wrong tenant, or agent trust level too low |
 | 409 Conflict | Duplicate content — safe to ignore |

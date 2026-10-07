@@ -89,13 +89,18 @@ Query parameters:
 | `fleet_id` | – | Optional; narrow the list to one fleet. |
 | `tenant_id` | – | Required for an admin credential, optional (and must match) for a tenant-scoped one — see [Auth & prerequisites](#auth--prerequisites). |
 | `include_content` | `false` | Include the full SKILL.md body on each card. The default list is lean (`content: null`); the edit UI opts in. |
+| `status` | `staged` | `staged` or `quarantined`; any other value is a `422`. |
 
-Returns the tenant's `status='staged'` skill cards, newest first.
-Cards an operator has **deferred** carry a `deferred_at` timestamp and
-sort to the bottom of the page so fresh candidates always surface
-first. (`candidate` and `quarantined` docs do not appear here —
-candidates are Forge/promoter territory, and quarantined docs live in
-the security-review queue.)
+Returns the tenant's skill cards in `status`, newest first: by default
+the `staged` ones. Cards an operator has **deferred** carry a
+`deferred_at` timestamp and sort to the bottom of the page so fresh
+candidates always surface first.
+
+`?status=quarantined` lists the skills Sentinel or a reviewer
+quarantined. Each card's `sentinel_scan.findings` says why it was held.
+A reviewer can approve one with an override (see
+[`approve`](#approve--staged--active)) or reject it. `candidate` docs
+never appear here: they are Forge/promoter territory.
 
 Response shape (this example was requested with
 `?include_content=true`; by default `content` is `null`):
@@ -203,7 +208,7 @@ one may only name its own.
 
 ### `approve` — staged → active
 
-Empty body. Runs a **pre-apply Sentinel rescan** against the exact
+No body, except for an override (below). Runs a **pre-apply Sentinel rescan** against the exact
 content being crystallized; the transition is refused (`422`) unless
 the rescan comes back **clean with zero critical findings** (a dirty
 or quarantine-grade verdict blocks it). A staged doc missing its
@@ -215,6 +220,30 @@ the approve is in flight, the call returns `409` — reload and retry.
 curl -X POST "$BASE/api/v1/skills-inbox/forge/abc-123/approve" \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+**Override a quarantine.** A reviewer who has read the findings and
+judged them safe approves with an override:
+
+```json
+{ "override_quarantine": true, "reason": "the rm -rf targets the build directory" }
+```
+
+- **What it allows:** approving a `quarantined` skill (→ `active`), or a
+  `staged` one whose rescan is critical.
+- **Reason:** required (`422` without one).
+- **What it never allows:** a **fatal** finding (a size or path limit)
+  still refuses with `422`. The override lifts a critical verdict, not a
+  limit on what may be stored.
+- **The record:**
+  - The rescan's verdict is stored as usual, so the active skill keeps
+    the findings it was approved over.
+  - `data.quarantine_override` holds the reason, the overridden
+    `critical_codes` and `approved_by`: the user, else the calling agent,
+    else `admin-api-key` (or `tenant-api-key`) for a credential with neither.
+    The quarantine markers, `quarantined_at` and `quarantine_reason`, move
+    into it, so the active skill no longer looks quarantined.
+  - The `skill_inbox_approve` audit row carries the same with
+    `override_quarantine: true`, and is written as a critical audit event.
 
 ### `defer` — stash for later (stays `staged`)
 
@@ -243,11 +272,17 @@ restore it.
 ### `reject` — staged, candidate, or quarantined → rejected
 
 Body: `{ "reason" }` (required), plus optional `cooloff_days` (1–365).
-**Permanent.** Rejecting also writes the candidate's cluster
+**Permanent.** For a Forge candidate, rejecting also writes its cluster
 fingerprint to the Forge cooloff ledger
 (`forge_rejected_fingerprints`), so Forge will not re-derive the same
 skill for `cooloff_days` — default
 `org_settings.skills_factory.rejection_cooloff_days` (30 days).
+
+A skill an agent wrote through the documents API has no cluster
+fingerprint, so there is nothing to put on cooloff. It is rejected
+without the ledger write, and `cooloff_days` is ignored if given; the
+response's `detail` says so. The agent can't stage it again under the
+same slug: a non-admin write to a rejected slug is refused.
 
 ```bash
 curl -X POST "$BASE/api/v1/skills-inbox/forge/abc-123/reject" \
@@ -262,7 +297,7 @@ curl -X POST "$BASE/api/v1/skills-inbox/forge/abc-123/reject" \
 |---|---|---|---|---|---|
 | `staged` | ✅ → `active` | ✅ stays `staged` (marked deferred) | ✅ stays `staged` (or → `quarantined` if the rescan trips) | ✅ → `quarantined` | ✅ → `rejected` |
 | `candidate` | ❌ 409 | ❌ 409 | ❌ 409 | ✅ → `quarantined` | ✅ → `rejected` |
-| `quarantined` | ❌ 409 | ❌ 409 | ❌ 409 | ❌ 409 | ✅ → `rejected` |
+| `quarantined` | ✅ → `active` with `override_quarantine`, else ❌ 409 | ❌ 409 | ❌ 409 | ❌ 409 | ✅ → `rejected` |
 | `active` / `rejected` / other | ❌ 409 | ❌ 409 | ❌ 409 | ❌ 409 | ❌ 409 |
 
 ## Typical operator workflow
@@ -284,8 +319,12 @@ curl -X POST "$BASE/api/v1/skills-inbox/forge/abc-123/reject" \
    bottom and Forge may refine the candidate on its next run.
 6. **Suspicious content?** `POST …/{slug}/quarantine` with a reason —
    parks it for security review without poisoning the cluster.
-7. **Never want it?** `POST …/{slug}/reject` with a reason — the
-   cluster fingerprint goes on cooloff so Forge stops re-minting it.
+   Quarantined skills are listed with `?status=quarantined`. Once
+   reviewed, approve one with `override_quarantine` and a reason, or
+   reject it.
+7. **Never want it?** `POST …/{slug}/reject` with a reason — a Forge
+   candidate's cluster fingerprint goes on cooloff so Forge stops
+   re-minting it.
 
 ## Error codes
 
@@ -296,7 +335,7 @@ curl -X POST "$BASE/api/v1/skills-inbox/forge/abc-123/reject" \
 | `403` | `SKILLS_FACTORY_DISABLED` (feature flag off for the tenant), `SKILLS_INBOX_FORBIDDEN` (action attempted by a non-admin), or `TENANT_MISMATCH` (a tenant-scoped credential named a different tenant in `?tenant_id=`). |
 | `404` | No skill doc with that slug in the tenant's `skills` collection. Check slug encoding first — an over-encoded `%2F` routes to a nonexistent path. |
 | `409` | Action not permitted from the doc's current status (see matrix), or the doc was concurrently transitioned/edited while your call was in flight — reload the inbox and retry. |
-| `422` | Missing/invalid body field (e.g. `reject` or `quarantine` without `reason`, `edit` with no fields), an approve whose pre-apply rescan refused, or a malformed doc (no `content_hash` / no cluster fingerprint). |
+| `422` | Missing/invalid body field (e.g. `reject` or `quarantine` without `reason`, `edit` with no fields), an approve whose pre-apply rescan refused (a critical verdict without `override_quarantine`, or a fatal finding), an override without a `reason`, a list `status` other than `staged` or `quarantined`, or a malformed doc (no `content_hash`, or a Forge candidate whose cluster fingerprint disappeared during the reject). |
 
 ## Related
 

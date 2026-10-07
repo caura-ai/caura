@@ -13,7 +13,6 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 # Cursor session dirs are UUIDs; a prefix match (8-4-4) is enough to
 # distinguish them from an arbitrarily-named dir that merely happens to
@@ -77,7 +76,7 @@ def find_transcripts(
     *,
     root: Path = DEFAULT_PROJECTS_ROOT,
     allow_globs: list[str],
-    since_hours: Optional[float] = None,
+    since_hours: float | None = None,
     all_projects: bool = False,
     harness: str = HARNESS_CLAUDE_CODE,
 ) -> list[Transcript]:

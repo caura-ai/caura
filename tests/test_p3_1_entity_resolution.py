@@ -97,7 +97,7 @@ class TestUpsertEntityExactMatch:
 
         mock_sc = AsyncMock()
         mock_sc.find_exact_entity.return_value = existing_dict
-        mock_sc.update_entity.return_value = existing_dict
+        mock_sc.merge_entity.return_value = existing_dict
 
         with patch(
             "core_api.services.entity_service.get_storage_client",

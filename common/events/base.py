@@ -146,6 +146,16 @@ class EventBus(ABC):
         the Pub/Sub implementation for why that ordering is load-bearing.
         """
 
+    async def stop_consuming(self) -> None:
+        """Take no new deliveries and settle the ones in flight. No-op by default.
+
+        The consuming half of ``stop()``, on the base class for the same reason
+        as ``release_broadcast_subscriptions``: a shutdown path runs it early,
+        so a cancelled handler releases what it holds inside the SIGTERM budget.
+        Publishing keeps working. Only the Pub/Sub bus pulls deliveries; an
+        in-process bus's handlers are tasks its own ``stop()`` drains.
+        """
+
     @property
     def is_healthy(self) -> bool:
         """True when the bus can still deliver events end-to-end.

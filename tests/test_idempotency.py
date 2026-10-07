@@ -151,10 +151,14 @@ async def test_oversized_key_rejected(client):
     assert resp.status_code == 400
 
 
-async def test_replay_carries_same_ratelimit_headers_as_live(client):
-    """Replay responses must emit the same X-RateLimit-* headers the
+async def test_replay_carries_same_usage_headers_as_live(client):
+    """Replay responses must emit the same quota/throttle headers the
     live path sets via `response.headers`, so clients don't see a
-    shape divergence between first-call and retry."""
+    shape divergence between first-call and retry.
+
+    Both prefixes, because they are two different signals that were one header
+    name until ax-0917-l-22: ``X-RateLimit-*`` is the per-second throttle,
+    ``X-Usage-*`` the per-period plan quota."""
     tenant_id, headers = get_test_auth()
     key = _new_key()
     body = {
@@ -168,13 +172,14 @@ async def test_replay_carries_same_ratelimit_headers_as_live(client):
     r1 = await client.post("/api/v1/memories", json=body, headers=h)
     r2 = await client.post("/api/v1/memories", json=body, headers=h)
 
-    live_rate = {
-        k: v for k, v in r1.headers.items() if k.lower().startswith("x-ratelimit-")
-    }
-    replay_rate = {
-        k: v for k, v in r2.headers.items() if k.lower().startswith("x-ratelimit-")
-    }
-    assert live_rate == replay_rate
+    def _budget_headers(resp):
+        return {
+            k: v
+            for k, v in resp.headers.items()
+            if k.lower().startswith(("x-ratelimit-", "x-usage-"))
+        }
+
+    assert _budget_headers(r1) == _budget_headers(r2)
 
 
 async def test_body_metadata_idempotency_key_replays(client):

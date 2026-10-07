@@ -57,10 +57,18 @@ async def test_the_post_variant_derives_it_too(client) -> None:
 
 
 @pytest.mark.parametrize("method", ["get", "post"])
-async def test_an_explicit_api_url_still_wins(client, method: str) -> None:
+async def test_an_allowlisted_api_url_still_wins(
+    client, method: str, monkeypatch
+) -> None:
     """Deriving is a default, not an override — the escape hatch that made the
-    cloud install possible at all must keep working."""
+    cloud install possible at all must keep working, for an origin the
+    operator allowlisted (``INSTALLER_ALLOWED_API_URLS``). Any other origin is
+    refused: the script sends the installer's key there and runs its code
+    (``test_code_delivery_and_secrets_hardening.py``)."""
+    from core_api.config import settings
+
     override = "https://caura.example.internal"
+    monkeypatch.setattr(settings, "installer_allowed_api_urls", override)
     if method == "get":
         resp = await client.get(
             f"/api/v1/install-plugin?api_url={override}", headers=CLOUD_HEADERS

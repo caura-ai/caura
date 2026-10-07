@@ -9,7 +9,7 @@ from typing import Literal
 
 import httpx
 import typer
-from caura_bus_core import Bus, PlatformError, ResponseCollector, SendMessage, load_config
+from caura_bus_core import RESYNC_EVENT, Bus, PlatformError, ResponseCollector, SendMessage, load_config
 from caura_bus_core.config import CONFIG_ENV_VAR, DEFAULT_CONFIG_PATH
 
 from .hooks import install_hooks
@@ -242,7 +242,10 @@ def discover(
     config: Path | None = typer.Option(None),
 ):
     """Find connected peers by capability and availability."""
-    execute(config, lambda bus: bus.discover(capability=capability, available_only=not include_offline))
+    execute(
+        config,
+        lambda bus: bus.discover_all(capability=capability, available_only=not include_offline),
+    )
 
 
 @app.command()
@@ -252,6 +255,12 @@ def watch(config: Path | None = typer.Option(None), after: int = 0):
     async def run():
         async with Bus(load_config(config)) as bus:
             async for event in bus.events(after=after):
+                if event["event_type"] == RESYNC_EVENT:
+                    typer.echo(
+                        f"Caura: events before #{event['seq']} were removed by retention; "
+                        "current inbox state was reloaded.",
+                        err=True,
+                    )
                 typer.echo(json.dumps(event, ensure_ascii=False))
 
     try:
@@ -262,7 +271,7 @@ def watch(config: Path | None = typer.Option(None), after: int = 0):
 
 @agents_app.command("list")
 def agents_list(fleet: str | None = None, config: Path | None = typer.Option(None)):
-    execute(config, lambda bus: bus.agents(fleet))
+    execute(config, lambda bus: bus.agents_all(fleet))
 
 
 @threads_app.command("list")

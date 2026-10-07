@@ -14,7 +14,7 @@
   "packages": {
     ".": {
       "release-type": "simple",
-      "package-name": "caura-memclaw",
+      "package-name": "caura",
       "component": "backend",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
@@ -52,7 +52,7 @@
     },
     "plugin": {
       "release-type": "node",
-      "package-name": "memclaw-plugin",
+      "package-name": "caura-plugin",
       "component": "plugin",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [

@@ -10,6 +10,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 from fastapi import APIRouter, FastAPI, HTTPException
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,6 +40,30 @@ assert not any('/bus/' in getattr(r, 'path', '') for app in (api, storage) for r
     assert result.returncode == 0, result.stderr
 
 
+class Runtime:
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def install(self, _app):
+        pass
+
+
+class PassThroughMiddleware:
+    def __init__(self, app, **_kwargs):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        await self.app(scope, receive, send)
+
+
+class OfflineCache:
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    async def close(self):
+        pass
+
+
 def module(monkeypatch, name, **attributes):
     value = ModuleType(name)
     value.__dict__.update(attributes)
@@ -58,7 +83,7 @@ async def test_api_mount_uses_verified_agent_and_human_principals(monkeypatch):
     app.openapi_schema = {"cached": True}
     mounted = []
 
-    def router(principal, storage, *_args):
+    def router(principal, storage, *_args, **_kwargs):
         mounted.append((principal, storage))
         return APIRouter()
 
@@ -82,6 +107,29 @@ async def test_api_mount_uses_verified_agent_and_human_principals(monkeypatch):
         HumanPrincipal=SimpleNamespace,
         human_router=router,
     )
+    module(monkeypatch, "caura_bus_platform.liveness", SuppressionCache=OfflineCache)
+    module(monkeypatch, "caura_bus_platform.quota", SendQuota=OfflineCache)
+    module(
+        monkeypatch,
+        "caura_bus_platform.runtime",
+        AdmissionMiddleware=PassThroughMiddleware,
+        Runtime=Runtime,
+        send_deadline=None,
+        shutdown_signals=None,
+        stop_task=None,
+    )
+    module(
+        monkeypatch,
+        "caura_bus_platform.settings",
+        settings=SimpleNamespace(request_timeout_seconds=30),
+    )
+    module(
+        monkeypatch,
+        "caura_bus_platform.timing",
+        TimingMiddleware=PassThroughMiddleware,
+        span=None,
+        http_timing_hooks=dict,
+    )
     module(monkeypatch, "core_api.app", app=app)
     module(monkeypatch, "core_api.bus_mcp", register_peer=lambda app: None)
     entry = load("core-api/src/core_api/bus_app.py")
@@ -104,7 +152,10 @@ async def test_api_mount_uses_verified_agent_and_human_principals(monkeypatch):
     with pytest.raises(HTTPException) as denied:
         await mounted[0][0](request, auth)
     assert denied.value.status_code == 401
-    assert app.openapi_schema is None
+    # Collaboration is its own workload: the memory app is left untouched.
+    assert entry.app is not app
+    assert app.openapi_schema == {"cached": True}
+    assert not any("/bus/" in getattr(r, "path", "") for r in app.routes)
 
 
 @pytest.mark.parametrize("role", ["hybrid", "reader"])
@@ -126,8 +177,13 @@ async def test_storage_mount_runs_migrations_inside_existing_lifespan(
     app.openapi_schema = {"cached": True}
 
     class Store:
-        def __init__(self, engine):
-            assert engine == "native engine"
+        def __init__(self, engine, *, leader_engine, presence_engine):
+            # Collaboration owns dedicated pools, never the native one.
+            for value in (engine, leader_engine, presence_engine):
+                assert isinstance(value, AsyncEngine)
+            self.engine = engine
+            self.leader_engine = leader_engine
+            self.presence_engine = presence_engine
 
         async def migrate(self):
             events.append("bus migrations")
@@ -150,12 +206,22 @@ async def test_storage_mount_runs_migrations_inside_existing_lifespan(
         storage_router=lambda _store: APIRouter(),
     )
     module(monkeypatch, "caura_bus_platform.store", Store=Store)
-    module(monkeypatch, "core_storage_api.app", app=app)
     module(
         monkeypatch,
-        "core_storage_api.database.init",
-        get_engine=lambda: "native engine",
+        "caura_bus_platform.settings",
+        settings=SimpleNamespace(
+            db_pool_size=2,
+            db_max_overflow=0,
+            db_pool_timeout=5,
+            presence_db_pool_size=1,
+        ),
     )
+    module(
+        monkeypatch,
+        "caura_bus_platform.timing",
+        TimingMiddleware=PassThroughMiddleware,
+    )
+    module(monkeypatch, "core_storage_api.app", app=app)
     entry = load("core-storage-api/src/core_storage_api/bus_app.py")
     async with entry.app.router.lifespan_context(app):
         assert events == (

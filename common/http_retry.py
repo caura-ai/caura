@@ -6,7 +6,7 @@ client so the two cannot silently diverge on what is safe to retry.
 History (load-bearing for the policy split):
 
 * F5 — Cloud Run logs over 7 days showed a 31% silent-failure rate on
-  ``process_entity_extraction`` on ``staging-memclaw-core-api``. Every
+  ``process_entity_extraction`` in the staging core API. Every
   failure traced to ``httpx.ConnectTimeout`` reaching core-storage-api
   (cold starts / autoscaling). Retry landed for idempotent methods
   (GET, PATCH, DELETE) only.

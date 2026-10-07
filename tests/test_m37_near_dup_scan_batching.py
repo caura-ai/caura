@@ -328,6 +328,7 @@ def _reference_serial_scan(
     """
     pairs: dict[tuple[str, str], float] = {}
     checked: list[str] = []
+    paired: set[str] = set()
     offset = 0
 
     while len(pairs) < max_pairs:
@@ -339,6 +340,7 @@ def _reference_serial_scan(
             for nb in fake._neighbours(
                 mem_id, emb, CRYSTALLIZER_DEDUP_THRESHOLD, CRYSTALLIZER_DEDUP_NEIGHBORS
             ):
+                paired.update((mem_id, nb["id"]))
                 id1, id2 = sorted([mem_id, nb["id"]])
                 if (id1, id2) not in pairs and len(pairs) < max_pairs:
                     pairs[(id1, id2)] = nb["similarity"]
@@ -348,6 +350,9 @@ def _reference_serial_scan(
         "count": len(pairs),
         "pairs": [{"id1": a, "id2": b, "similarity": s} for (a, b), s in pairs.items()],
         "checked": checked,
+        # The stamp set: swept rows with no duplicate. Paired rows are left
+        # for the crystallizer to stamp once their cluster is settled.
+        "unpaired": [mid for mid in checked if mid not in paired],
     }
 
 
@@ -362,7 +367,7 @@ async def test_same_pairs_same_similarities_same_order(scan):
         "the fused scan found different pairs, or found them in a different order"
     )
     assert result["count"] == reference["count"]
-    assert fake.marked == reference["checked"]
+    assert fake.marked == reference["unpaired"]
 
 
 async def test_the_pair_cap_bites_on_the_same_pairs(scan):
@@ -382,15 +387,19 @@ async def test_the_pair_cap_bites_on_the_same_pairs(scan):
 
     assert result["count"] == 11, "the safety valve stopped capping"
     assert result["pairs"] == reference["pairs"]
-    assert fake.marked == reference["checked"]
+    assert fake.marked == reference["unpaired"]
 
 
-async def test_every_swept_row_is_stamped_not_only_the_matched_ones(scan):
+async def test_every_swept_row_without_a_duplicate_is_stamped(scan):
     """The LEFT JOIN's reason for existing.
 
     An inner join would have stamped only rows that turned out to have a
     duplicate, so every row without one would be re-scanned on every future
     sweep — the N+1 traded for an unbounded re-scan.
+
+    Rows that DO have a duplicate are left unstamped here on purpose: whether
+    their cluster is settled is decided by ``_run_crystallization``, which
+    stamps them once it is, so a cluster it could not finish is swept again.
     """
     corpus = _corpus(10, twins=2)  # 4 rows in pairs, 6 with no neighbour at all
     fake = scan(corpus)
@@ -398,7 +407,7 @@ async def test_every_swept_row_is_stamped_not_only_the_matched_ones(scan):
     result = await _run()
 
     assert result["count"] == 2
-    assert fake.marked == [mem_id for mem_id, _ in corpus], (
+    assert fake.marked == [mem_id for mem_id, _ in corpus[4:]], (
         "rows with no near-duplicate were left unstamped"
     )
 

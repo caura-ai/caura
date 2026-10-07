@@ -5,7 +5,8 @@ Covers:
 - Invalid memory_id UUID → "Invalid memory_id" error.
 - ``op=read`` not found / found.
 - ``op=transition`` missing status, invalid status, not-found, happy path.
-- ``op=update`` with no fields → "No fields to update"; happy path.
+- ``op=update`` with no fields → "No fields to update"; a field
+  ``MemoryUpdate`` rejects → ``INVALID_ARGUMENTS``, uncharged (M-22); happy path.
 - ``op=delete`` success.
 - Service ``HTTPException`` → ``Error (…)`` envelope.
 """
@@ -21,6 +22,7 @@ from fastapi import HTTPException
 from core_api import mcp_server
 from tests._mcp_test_helpers import (
     as_text,
+    is_error_envelope,
     parse_envelope,
     strip_latency,
     stub_storage_client,
@@ -145,6 +147,23 @@ async def test_manage_transition_happy_path(mcp_env, monkeypatch):
 async def test_manage_update_no_fields_errors(mcp_env):
     out = await mcp_server.caura_manage(op="update", memory_id=VALID_UID)
     assert "No fields to update" in strip_latency(out)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [{"weight": 5.0}, {"memory_type": "bogus"}, {"status": "nope"}, {"content": ""}],
+    ids=["weight", "memory_type", "status", "content"],
+)
+async def test_manage_update_refuses_an_invalid_field_uncharged(mcp_env, field):
+    """M-22: a value ``MemoryUpdate`` rejects answers INVALID_ARGUMENTS in the
+    envelope, as caura_write and REST ``PATCH`` do, and charges no write quota.
+    It escaped as an unstructured tool error, after the charge."""
+    update = mcp_env["service"]("update_memory")
+    out = await mcp_server.caura_manage(op="update", memory_id=VALID_UID, **field)
+    assert is_error_envelope(out)
+    assert parse_envelope(out)["error"]["code"] == "INVALID_ARGUMENTS"
+    mcp_server.check_and_increment.assert_not_awaited()
+    update.assert_not_awaited()
 
 
 async def test_manage_update_happy_path(mcp_env):
