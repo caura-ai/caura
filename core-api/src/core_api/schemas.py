@@ -691,6 +691,31 @@ class PaginatedMemoryResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class HeldMemoryPage(BaseModel):
+    """A page of the review queue of held memories (g2.9)."""
+
+    items: list[MemoryOut]
+    next_cursor: str | None = None
+    total: int = Field(
+        description="Held memories in the queue, or in the session asked for; not only this page."
+    )
+
+
+class SessionRollbackRequest(BaseModel):
+    session_id: str = Field(
+        min_length=1, max_length=200, description="The broker session whose writes to undo."
+    )
+
+
+class SessionRollbackResponse(BaseModel):
+    """What a session rollback changed (g2.9)."""
+
+    session_id: str
+    outdated: list[str] = Field(description="Live memories, and the rows derived from them, now outdated.")
+    restored: list[str] = Field(description="Memories those had superseded or contradicted, active again.")
+    cancelled: list[str] = Field(description="Held memories, now rejected.")
+
+
 class SearchDiagnostic(BaseModel):
     """D12 — retrieval trace returned when ``SearchRequest.diagnostic`` is true.
 

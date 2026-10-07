@@ -8,7 +8,10 @@ with the current successor dangling last, and the answer LLM picked the
 stale value.
 
 Contract carries no new wire fields: the successor's ``supersedes_id`` names
-the stale row; the stale row's ``status`` says why it lost.
+the stale row; the stale row's ``status`` says why it lost. A contradiction's
+further losers have no edge (M-34): storage's ``successor_of`` names the row a
+successor replaced, from its ``memory_conflicts`` record, and the successor is
+placed the same way. ``successor_of`` stays off the wire.
 """
 
 import uuid
@@ -195,3 +198,35 @@ async def test_no_successors_leaves_order_untouched(monkeypatch):
     rows = [_mem_ns(a, status="conflicted"), _mem_ns(b)]
     out = await _run(rows, [], monkeypatch)
     assert [str(m.id) for m in out] == [str(a), str(b)]
+
+
+def _recorded_successor_dict(sid, replaced):
+    """A winner storage found through the ``memory_conflicts`` record of a loser
+    no edge names (M-34): ``successor_of`` names that loser."""
+    return _successor_dict(sid, replaced) | {
+        "supersedes_id": None,
+        "successor_of": str(replaced),
+    }
+
+
+async def test_a_recorded_successor_ranks_immediately_above_its_loser(monkeypatch):
+    stale, succ, other = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    rows = [
+        _mem_ns(stale, status="conflicted", content="the stale fact", score=1.4),
+        _mem_ns(other, status="active", content="unrelated", score=0.8),
+    ]
+    out = await _run(rows, [_recorded_successor_dict(succ, stale)], monkeypatch)
+    assert [str(m.id) for m in out] == [str(succ), str(stale), str(other)]
+    assert out[0].injected is True
+
+
+async def test_a_recorded_successor_recalled_below_is_promoted_above(monkeypatch):
+    stale, succ, other = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    rows = [
+        _mem_ns(stale, status="conflicted", content="stale wording", score=0.8),
+        _mem_ns(succ, status="active", content="corrected", score=0.7),
+        _mem_ns(other, score=0.1),
+    ]
+    out = await _run(rows, [_recorded_successor_dict(succ, stale)], monkeypatch)
+    assert [str(m.id) for m in out] == [str(succ), str(stale), str(other)]
+    assert out[0].score == 0.7

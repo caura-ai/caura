@@ -8,7 +8,7 @@
 # lands in the image. Runtime activation is further gated by
 # docker-entrypoint.sh on DD_API_KEY.
 ARG DD_APM_ENABLED=false
-FROM datadog/serverless-init:1@sha256:f4943347f155505156ba5f594317ea64b59678b3a6522e8c0993581af20956ff AS dd-bin
+FROM datadog/serverless-init:1@sha256:161423dc6fc3d55e20902c3f5818cef104a4849277b4d84c236fef7ecae0619f AS dd-bin
 FROM python:3.12-slim AS dd-apm-true
 COPY --from=dd-bin /datadog-init /dd/datadog-init
 FROM python:3.12-slim AS dd-apm-false

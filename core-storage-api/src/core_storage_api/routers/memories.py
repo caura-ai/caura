@@ -13,6 +13,8 @@ from common.constants import (
     CONTRADICTION_CANDIDATE_WINDOW,
     CONTRADICTION_SIMILARITY_THRESHOLD,
     CRYSTALLIZER_SHORT_CONTENT_CHARS,
+    QUARANTINE_EXITS,
+    QUARANTINED_MEMORY_STATUS,
     SQL_SCORING_REQUIRED_KEYS,
 )
 from common.events.lifecycle_purge_request import (
@@ -499,7 +501,7 @@ async def find_successors(request: Request) -> list[dict]:
         from datetime import datetime
 
         valid_at = datetime.fromisoformat(valid_at)
-    memories = await _svc.memory_find_successors(
+    successors = await _svc.memory_find_successors(
         supersedes_ids=[UUID(sid) for sid in body["supersedes_ids"]],
         tenant_id=body["tenant_id"],
         fleet_ids=body.get("fleet_ids"),
@@ -510,7 +512,9 @@ async def find_successors(request: Request) -> list[dict]:
         valid_at=valid_at,
         strict_fleet_scoping=body.get("strict_fleet_scoping", False),
     )
-    return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+    # ``successor_of`` names the row each one replaced: its ``supersedes_id``,
+    # or for a contradiction's further loser the one its record names (M-34).
+    return [{**orm_to_dict(m, MEMORY_FIELDS), "successor_of": str(replaced)} for m, replaced in successors]
 
 
 @router.post("/similar-candidates")
@@ -1247,6 +1251,48 @@ async def count_active_memories(
     return {"count": count}
 
 
+@router.get("/held")
+async def list_held_memories(
+    tenant_id: str,
+    session_id: str | None = None,
+    limit: int = 50,
+    cursor_ts: datetime | None = None,
+    cursor_id: UUID | None = None,
+) -> dict:
+    """The review queue (g2.9): held memories of ``tenant_id``, newest first.
+
+    ``{"items": [...], "total": n}``. Up to ``limit`` rows after the
+    ``(cursor_ts, cursor_id)`` cursor; core-api asks for one more than it shows
+    to find the next page. ``total`` counts the whole queue, or one broker
+    session's part of it with ``session_id``. The only bulk read of held rows:
+    core-api serves it to a person reviewing them, and to no one else.
+    """
+    if not 1 <= limit <= 1001:
+        raise HTTPException(status_code=422, detail="limit must be 1-1001")
+    memories, total = await _svc.memory_list_held(
+        tenant_id, session_id=session_id, limit=limit, cursor_ts=cursor_ts, cursor_id=cursor_id
+    )
+    return {"items": [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories], "total": total}
+
+
+@router.post("/rollback-session")
+async def rollback_session(request: Request) -> dict:
+    """Undo what the broker wrote in one session (g2.9).
+
+    Body: ``{tenant_id, session_id}``. Its live memories and the rows derived
+    from them become ``outdated``, what they had superseded or contradicted
+    ``active`` again, and its held memories ``cancelled``, in one transaction.
+    Returns ``{"outdated": [ids], "restored": [ids], "cancelled": [ids]}``, all
+    empty when there is nothing left to undo.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    session_id = _require(body, "session_id")
+    if not isinstance(tenant_id, str) or not isinstance(session_id, str):
+        raise HTTPException(status_code=422, detail="tenant_id and session_id are strings")
+    return await _svc.memory_rollback_session(tenant_id, session_id)
+
+
 @router.get("/null-embedding-ids")
 async def list_null_embedding_ids(
     tenant_id: str,
@@ -1625,11 +1671,15 @@ async def list_by_filters(request: Request) -> list[dict]:
     Body: ``{tenant_id, caller_agent_id?, caller_tenant_id?, fleet_id?,
     written_by?, memory_type?, status?, run_id?, weight_min?, weight_max?,
     created_after?, created_before?, include_deleted, sort, order, limit, offset,
-    cursor_ts?, cursor_id?, readable_tenant_ids?, visibility?}``.
+    cursor_ts?, cursor_id?, readable_tenant_ids?, visibility?,
+    include_scope_agent?}``.
     ``caller_tenant_id`` is the caller's home tenant: its own ``scope_agent``
-    rows are matched there only (defaults to ``tenant_id``). ``limit`` is the caller's desired page size; this
-    endpoint over-fetches ``limit+1`` rows internally for has_more detection and
-    the caller slices to ``limit`` / builds the next cursor. Distinct from
+    rows are matched there only (defaults to ``tenant_id``).
+    ``include_scope_agent`` lists every visibility for a caller with no
+    ``caller_agent_id`` (a signed-in person), as ``/stats-breakdown`` counts
+    them. ``limit`` is the caller's desired page size; this endpoint
+    over-fetches ``limit+1`` rows internally for has_more detection and the
+    caller slices to ``limit`` / builds the next cursor. Distinct from
     ``/admin-list`` which has NO visibility scoping.
     """
     body: dict = await request.json()
@@ -1693,6 +1743,7 @@ async def list_by_filters(request: Request) -> list[dict]:
         cursor_id=cursor_id,
         readable_tenant_ids=body.get("readable_tenant_ids"),
         visibility=body.get("visibility"),
+        include_scope_agent=bool(body.get("include_scope_agent", False)),
     )
     return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 
@@ -1701,8 +1752,10 @@ async def list_by_filters(request: Request) -> list[dict]:
 async def stats_breakdown(request: Request) -> dict:
     """Visibility-scoped stats breakdown (MCP ``caura_stats``).
 
-    Body: ``{tenant_id?, fleet_id?, agent_id?, memory_type?, status?,
-    include_deleted?, readable_tenant_ids?, include_pending?}``. Returns
+    Body: ``{tenant_id?, fleet_id?, agent_id?, caller_agent_id?, memory_type?,
+    status?, include_deleted?, readable_tenant_ids?, include_pending?}``.
+    ``agent_id`` filters by author; ``caller_agent_id`` is the identity the
+    counted rows must be visible to (M-104). Returns
     ``{total, by_type, by_agent, by_status}`` plus optional ``by_tenant`` (when
     the readable set spans >1 tenant), ``deleted`` / ``total_including_deleted``
     (when ``include_deleted``) and ``pending`` / ``settled`` (when
@@ -1744,6 +1797,7 @@ async def stats_breakdown(request: Request) -> dict:
         readable_tenant_ids=body.get("readable_tenant_ids"),
         include_pending=bool(body.get("include_pending", False)),
         caller_tenant_id=body.get("caller_tenant_id"),
+        caller_agent_id=body.get("caller_agent_id"),
     )
 
 
@@ -2028,14 +2082,15 @@ async def prior_ingest_by_doc_hash(request: Request) -> dict:
 
 
 @router.get("/{memory_id}/detail")
-async def get_memory_detail(memory_id: UUID, tenant_id: str) -> dict:
+async def get_memory_detail(memory_id: UUID, tenant_id: str, include_held: bool = False) -> dict:
     """Full memory row + entity links + server-computed embedding stats.
 
     The raw pgvector is never returned — only a first-20 preview and
     {dimensions,min,max,mean,non_zero}. 404 when the row is absent,
-    soft-deleted, or belongs to another tenant.
+    soft-deleted, or belongs to another tenant, and when it is held unless
+    ``include_held`` (core-api passes it for a person reviewing one).
     """
-    detail = await _svc.memory_get_detail(memory_id, tenant_id)
+    detail = await _svc.memory_get_detail(memory_id, tenant_id, include_held=include_held)
     if detail is None:
         raise HTTPException(status_code=404, detail="Memory not found")
     return detail
@@ -2056,7 +2111,7 @@ async def get_memory_contradictions(memory_id: UUID, tenant_id: str) -> dict:
 
 
 @router.get("/{memory_id}")
-async def get_memory(memory_id: UUID, tenant_id: str) -> dict:
+async def get_memory(memory_id: UUID, tenant_id: str, include_held: bool = False) -> dict:
     """Fetch one memory by id, within ``tenant_id``.
 
     ``tenant_id`` is a **required** query parameter. It used to default to
@@ -2068,7 +2123,8 @@ async def get_memory(memory_id: UUID, tenant_id: str) -> dict:
     "mirroring" this endpoint.
 
     404 covers "no such memory" and "not yours" alike, so this does not become
-    an existence oracle for memory UUIDs.
+    an existence oracle for memory UUIDs. A held memory is a 404 too, unless
+    ``include_held``: core-api passes it for a person reviewing one.
     """
     t_start = time.perf_counter()
     db_timer = None
@@ -2076,7 +2132,7 @@ async def get_memory(memory_id: UUID, tenant_id: str) -> dict:
     success = True
     try:
         with bind_timer() as db_timer:
-            memory = await _svc.memory_get_by_id_for_tenant(memory_id, tenant_id)
+            memory = await _svc.memory_get_by_id_for_tenant(memory_id, tenant_id, include_held=include_held)
     except Exception:
         success = False
         raise
@@ -2146,6 +2202,7 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
     supersedes_id = body.get("supersedes_id")
     unset_supersedes = bool(body.get("unset_supersedes", False))
     expected_supersedes_id = body.get("expected_supersedes_id")
+    release_hold = bool(body.get("release_hold", False))
 
     # ``tenant_id`` scopes every write path in this route (the CAS retraction,
     # the ``memory_update_status`` status flip, and the set-supersedes update)
@@ -2167,6 +2224,17 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
         raise HTTPException(
             status_code=422,
             detail="unset_supersedes=True requires expected_supersedes_id",
+        )
+    # A memory is held when it is written, never by an update; a held one
+    # leaves only by release or reject, which changes its status alone.
+    if status == QUARANTINED_MEMORY_STATUS:
+        raise HTTPException(
+            status_code=422, detail="a memory is held when it is written, never by a status update"
+        )
+    if release_hold and (status not in QUARANTINE_EXITS or supersedes_id is not None or unset_supersedes):
+        raise HTTPException(
+            status_code=422,
+            detail=f"release_hold sets the status to one of {', '.join(QUARANTINE_EXITS)} and nothing else",
         )
 
     if unset_supersedes:
@@ -2196,6 +2264,8 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                     # retraction must not rewrite the pointer of a row that has
                     # been soft-deleted out from under the caller.
                     Memory.deleted_at.is_(None),
+                    # Nor of a held one, which only release or reject moves.
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
                     or_(
                         Memory.supersedes_id == expected_uuid,
                         Memory.supersedes_id.is_(None),
@@ -2236,6 +2306,7 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                         Memory.id == memory_id,
                         Memory.tenant_id == tenant_id,
                         Memory.deleted_at.is_(None),
+                        Memory.status != QUARANTINED_MEMORY_STATUS,
                     )
                 )
                 if live is None:
@@ -2257,7 +2328,7 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
         # Before the status flip, so a pointer this tenant does not own (422)
         # refuses the whole request instead of landing after the flip.
         await _svc.memory_assert_pointers_in_tenant(tenant_id, [{"supersedes_id": supersedes_id}])
-    ok = await _svc.memory_update_status(memory_id, status, tenant_id=tenant_id)
+    ok = await _svc.memory_update_status(memory_id, status, tenant_id=tenant_id, release_hold=release_hold)
     if not ok:
         raise HTTPException(status_code=404, detail=f"memory {memory_id} not found")
 

@@ -123,6 +123,9 @@ class ClusterFingerprintInputs:
     to a centrality score in [0, 1] (e.g. PageRank within the
     cluster's entity subgraph). When present, top-K is by centrality
     DESC then tie-broken by id ASC; when absent, top-K is by id ASC.
+    Forge passes neither: it ranks a cluster's entities by how many of
+    its traces mention them and hands over exactly ENTITY_TOP_K ids
+    (``forge_service._top_entity_ids``), so this cut never drops one.
     """
 
     goal_phrase: str

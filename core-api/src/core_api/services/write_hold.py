@@ -1,0 +1,56 @@
+"""Hold an agent's write for a person's review (g2.8).
+
+An organization can hold the writes of agents below a trust level
+(``quarantine.below_trust``, overridden per fleet). A held write is stored with
+status ``quarantined``, which keeps it out of every read until a person releases
+or rejects it. Both write paths ask this module, ``create_memory``'s pipeline
+and ``create_memories_bulk``, so no entry point that reaches them can skip the
+hold: REST and MCP writes, STM promotion, ingest and interviews.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from core_api.clients.storage_client import get_storage_client
+
+if TYPE_CHECKING:
+    from core_api.services.organization_settings import ResolvedConfig
+
+# Under ``metadata["_system"]``, where the platform's own keys live: caller
+# input is stripped of that namespace, so a write can't claim to be held, or
+# released, by setting it.
+HOLD_KEY = "hold"
+
+
+async def hold_for(
+    tenant_id: str,
+    agent_id: str,
+    fleet_id: str | None,
+    config: ResolvedConfig,
+    *,
+    is_inferred: bool,
+) -> dict | None:
+    """Why a write is held, or ``None`` when it goes live.
+
+    Inferred writes (the crystallizer's and the insights pass's) are the
+    platform's own, built from memories already live, so they are never held.
+    Nothing is looked up while no level is set, so a tenant that holds nothing
+    pays nothing for this.
+
+    The agent is read from the primary: every write path creates its agent just
+    before it writes, and a replica that hasn't caught up would answer that it
+    doesn't exist. An agent that really has no row is held, as trust 0: no write
+    path should reach here without one, so a write from one is a write nobody
+    vouched for.
+    """
+    if is_inferred:
+        return None
+    below_trust = config.quarantine_below_trust(fleet_id)
+    if below_trust <= 0:
+        return None
+    agent = await get_storage_client().get_agent(agent_id, tenant_id, read=False)
+    trust_level = int((agent or {}).get("trust_level") or 0)
+    if trust_level >= below_trust:
+        return None
+    return {"reason": "below_trust", "trust_level": trust_level, "below_trust": below_trust}

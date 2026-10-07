@@ -442,6 +442,105 @@ def _reopen_sweep(stack: ExitStack):
     return organization_settings._reopen_dedup_sweep(TENANT), sc.reset_dedup_checked
 
 
+def _replay(stack: ExitStack, system: dict, *, cfg: Any = None, **over: Any):
+    """``replay_released_write`` over one released row, under the tenant's ``cfg``."""
+    from core_api.services import release_replay
+
+    row = _row(metadata_={**over.pop("metadata_", {}), "_system": system}, **over)
+    sc = _storage()
+    sc.get_memory = AsyncMock(return_value=row)
+    stack.enter_context(patch.object(release_replay, "get_storage_client", lambda: sc))
+    stack.enter_context(
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=cfg if cfg is not None else _config()),
+        )
+    )
+    return release_replay.replay_released_write(row["id"], TENANT)
+
+
+def _replay_enrich(stack: ExitStack):
+    stack.enter_context(
+        patch.object(memory_service.settings, "deployment_mode", "deferred")
+    )
+    fault = _fault(
+        stack,
+        memory_service,
+        "publish_memory_enrich_request",
+        AsyncMock(side_effect=_boom()),
+    )
+    return _replay(stack, {"write_mode": "fast", "enrichment_pending": True}), fault
+
+
+def _replay_remediation(stack: ExitStack):
+    from core_api.services import governance_remediation as gr
+
+    stack.enter_context(patch.object(gr, "get_storage_client", lambda: _storage()))
+    fault = _fault(stack, gr, "_pre_verdict_children", AsyncMock(side_effect=_boom()))
+    cfg = _config(
+        governance_pii=SimpleNamespace(enabled=True, action="drop"),
+        governance_non_business=SimpleNamespace(enabled=False, action="drop"),
+    )
+    coro = _replay(
+        stack,
+        {"write_mode": "fast"},
+        cfg=cfg,
+        metadata_={"contains_pii": True, "pii_types": ["email"]},
+    )
+    return coro, fault
+
+
+def _replay_cascade(stack: ExitStack):
+    from core_api.services import governance_remediation as gr
+
+    cascade = gr.GovernanceCascadeError(
+        "injected fault", gr.RemediationOutcome(visibility="scope_agent")
+    )
+    fault = _fault(
+        stack, gr, "remediate_after_enrichment", AsyncMock(side_effect=cascade)
+    )
+    return _replay(stack, {"write_mode": "fast"}), fault
+
+
+def _replay_fanout(stack: ExitStack):
+    from core_api import consumer
+
+    stack.enter_context(
+        patch.object(consumer, "resolve_config", new=AsyncMock(return_value=_config()))
+    )
+    fault = _fault(
+        stack, consumer, "fan_out_atomic_facts", AsyncMock(side_effect=_boom())
+    )
+    coro = _replay(
+        stack,
+        {"write_mode": "strong"},
+        metadata_={"atomic_facts": [{"content": "a"}, {"content": "b"}]},
+    )
+    return coro, fault
+
+
+def _replay_extraction(stack: ExitStack):
+    from core_api.services import entity_extraction_worker as w
+
+    fault = _fault(
+        stack, w, "process_entity_extraction", AsyncMock(side_effect=_boom())
+    )
+    cfg = _config(entity_extraction_enabled=True)
+    return _replay(stack, {"write_mode": "strong"}, cfg=cfg), fault
+
+
+def _replay_contradiction(stack: ExitStack):
+    from core_api.services import contradiction_detector as cd
+
+    sc = _storage()
+    sc.get_memory = AsyncMock(side_effect=_boom())
+    stack.enter_context(patch.object(cd, "get_storage_client", lambda: sc))
+    stack.enter_context(
+        patch.object(memory_service.settings, "contradiction_engine_enabled", False)
+    )
+    return _replay(stack, {"write_mode": "strong"}, embedding=_VEC), sc.get_memory
+
+
 @dataclass(frozen=True)
 class Scenario:
     id: str
@@ -568,6 +667,25 @@ ROSTER: dict[str, dict[str, Any]] = {
                 "contradiction-engine-path-a",
                 "contradiction_detection",
                 lambda s: _contradiction(s, engine=True, trigger_name="write"),
+            ),
+        ],
+    },
+    "replay_released_write": {
+        # g2.8. The replay goes on past a failed step, so one scenario per step:
+        # none of these raises to the wrapper, and each must still leave a row.
+        "wraps": {"replay_released_write"},
+        "scenarios": [
+            Scenario("release-replay-enrich", "release_replay", _replay_enrich),
+            Scenario(
+                "release-replay-remediation", "release_replay", _replay_remediation
+            ),
+            Scenario("release-replay-cascade", "release_replay", _replay_cascade),
+            Scenario("release-replay-fanout", "release_replay", _replay_fanout),
+            Scenario("release-replay-extraction", "release_replay", _replay_extraction),
+            Scenario(
+                "release-replay-contradiction",
+                "release_replay",
+                _replay_contradiction,
             ),
         ],
     },

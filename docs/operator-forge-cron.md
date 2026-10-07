@@ -115,8 +115,8 @@ skill goes live to agents. Use it only for fleets where:
 
 - the Sentinel rule-set is tuned for the tenant's content, and
 - the cost of a bad skill reaching agents is low / quickly reversible
-  (a human can still Reject an active skill, which poisons its
-  fingerprint and stops re-derivation).
+  (an inbox admin can still Reject an active skill: agents drop it on
+  their next sync, and its poisoned fingerprint stops re-derivation).
 
 What it does **not** bypass:
 
@@ -148,7 +148,8 @@ promoter log line breaks both out per tick.
 
 **To pause:** flip back to `false`. The next tick's clean candidates
 route to `staged` again — already-active skills are unaffected (no
-rollback), and the inbox resumes as the gate.
+automatic rollback; Reject any you want gone), and the inbox resumes
+as the gate.
 
 ## Dedup safety
 

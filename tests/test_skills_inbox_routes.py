@@ -1000,7 +1000,42 @@ async def test_reject_allowed_statuses(storage, settings, side_effects, status):
     assert r.status_code == 200, f"{status}: {r.text}"
 
 
-@pytest.mark.parametrize("status", ["active", "rejected", "deprecated"])
+async def test_reject_rolls_back_an_active_skill(storage, settings, side_effects):
+    """M-105: the rollback ``auto_promote_clean`` relies on. An auto-promoted
+    skill that turns out bad is live on every node; rejecting it poisons its
+    cluster so Forge does not derive it again, and agents drop it on their
+    next sync because it is no longer active. It used to answer 409, and the
+    only way out, deleting the document, wrote no poison row."""
+    storage.seed(forge_doc(status="active"))
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/reject", json={"reason": "bad skill"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["previous_status"] == "active"
+    assert body["new_status"] == "rejected"
+    ((_, poison_kwargs),) = side_effects.poison.calls
+    assert poison_kwargs["cluster_fingerprint"] == "fp:v1:abc123"
+    (payload,) = storage.upserts
+    assert payload["data"]["status"] == "rejected"
+
+
+async def test_reject_of_an_active_skill_409s_if_it_moved_first(
+    storage, settings, side_effects
+):
+    """The reload must still find it active, as a reload during a reject from
+    review must still find it under review."""
+    storage.doc_sequence = [
+        forge_doc(status="active"),  # initial load
+        forge_doc(status="staged"),  # reload: an admin overwrote it meanwhile
+    ]
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/reject", json={"reason": "r"})
+    assert r.status_code == 409
+    assert side_effects.poison.calls == []
+    assert storage.upserts == []
+
+
+@pytest.mark.parametrize("status", ["rejected", "deprecated"])
 async def test_reject_forbidden_statuses(storage, settings, side_effects, status):
     storage.seed(forge_doc(status=status))
     async with make_client() as client:

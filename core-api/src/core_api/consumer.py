@@ -46,8 +46,13 @@ from core_api.services.governance_remediation import (
     GovernanceCascadeError,
     remediate_after_enrichment,
 )
-from core_api.services.memory_service import _resolve_parent_weight, fan_out_atomic_facts
+from core_api.services.memory_service import (
+    _FANOUT_STRANDED_TASK,
+    _resolve_parent_weight,
+    fan_out_atomic_facts,
+)
 from core_api.services.organization_settings import invalidate_cache, resolve_config
+from core_api.services.task_tracker import record_task_failure
 
 logger = logging.getLogger(__name__)
 
@@ -107,14 +112,17 @@ async def _fan_out_persisted_atomic_facts(sc, memory: dict, payload, outcome) ->
                 parent_run_id=memory.get("run_id"),
                 parent_source_uri=memory.get("source_uri"),
             )
-        except Exception:
+        except Exception as exc:
             # Marker deliberately left in place: the facts are still stored, so a
             # redelivery or a later re-enrichment can retry, and the fan-out's own
-            # live-hash dedup stops a retry duplicating whatever did land.
+            # live-hash dedup stops a retry duplicating whatever did land. Nothing
+            # schedules either, though: the handler goes on and acks. So the
+            # failure is recorded as the inline fan-out's is, under the same name.
             logger.exception(
                 "memory-enriched: atomic-fact fan-out failed; facts left in metadata for retry",
                 extra={"memory_id": str(payload.memory_id), "tenant_id": payload.tenant_id},
             )
+            await record_task_failure(_FANOUT_STRANDED_TASK, payload.memory_id, payload.tenant_id, exc)
             return
         logger.info(
             "memory-enriched: atomic-fact fan-out created=%d deduped=%d unembedded=%d",

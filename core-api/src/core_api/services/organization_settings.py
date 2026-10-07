@@ -44,6 +44,7 @@ from core_api.config import settings as global_settings
 from core_api.constants import (
     CRYSTALLIZER_DEDUP_THRESHOLD,
     CRYSTALLIZER_MIN_CLUSTER_SIZE,
+    MAX_TRUST_LEVEL,
 )
 from core_api.services.settings_crypto import (
     decrypt_api_key,
@@ -319,6 +320,20 @@ DEFAULT_SETTINGS: dict = {
     "agents": {
         "require_agent_approval": None,
     },
+    # g2.8 — hold a write for a person's review (status ``quarantined``) when
+    # its agent's trust level is below ``below_trust``. Unset or 0 holds
+    # nothing, the default: holding writes is a decision a tenant makes, never
+    # one it inherits. Releasing or rejecting a held write takes a signed-in
+    # person, so a deployment without one keeps what it holds until rolled
+    # back or purged.
+    "quarantine": {
+        "below_trust": None,
+        # Per-fleet overrides, ``{fleet_id: level}``: a listed fleet uses its
+        # own level, and 0 holds nothing there whatever the org-wide one.
+        # Declared empty so ``_check_keys`` takes any fleet id under it;
+        # ``_validate_quarantine_overrides`` checks the levels.
+        "below_trust_by_fleet": {},
+    },
     # CAURA-444 — plugin auto-upgrade. When `auto_upgrade_enabled` is
     # true (the default), the heartbeat handler queues a `deploy`
     # command for any node whose `plugin_version` is older than
@@ -364,11 +379,12 @@ DEFAULT_SETTINGS: dict = {
         # Days a rejected cluster_fingerprint stays poison-flagged in
         # forge_rejected_fingerprints before Forge may re-propose it.
         "rejection_cooloff_days": 30,
-        # Sentinel scanner behavior. ``fail_on_critical=true`` → any
-        # critical finding flips the doc to ``status=quarantined``
-        # instead of letting it surface in the inbox.
+        # Sentinel scanner behavior. A critical finding always quarantines
+        # the doc; a reviewer releases one skill with ``override_quarantine``.
+        # A ``fail_on_critical`` key used to sit here and was read by nothing
+        # (M-114): ``false`` promised that critical findings would reach the
+        # inbox, and every such skill was quarantined all the same.
         "sentinel": {
-            "fail_on_critical": True,
             # When True, a Forge candidate that passes ALL six
             # auto-gates AND carries a clean Sentinel scan
             # (``scan.state='clean'``, ``critical=0``) is promoted
@@ -796,6 +812,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "observability.search_recall_near_miss_sample_rate": (int, float),
     "chunking.auto_chunk_enabled": bool,
     "agents.require_agent_approval": bool,
+    "quarantine.below_trust": int,
     "entity_blocklist": list,
     "memclaw.auto_upgrade_enabled": bool,  # legacy-name-floor: floor
     "write.triple_emission_enabled": bool,
@@ -808,7 +825,6 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "skills_factory.body_max_bytes": int,
     "skills_factory.inbox_max_pending": int,
     "skills_factory.rejection_cooloff_days": int,
-    "skills_factory.sentinel.fail_on_critical": bool,
     "skills_factory.sentinel.auto_promote_clean": bool,
     "skills_factory.forge.cron_interval_hours": int,
     "skills_factory.forge.min_cluster_size": int,
@@ -874,6 +890,8 @@ _LEAF_RANGES: dict[str, tuple[int, int]] = {
     # distill LLM call, and 1000 of them in one tick is already far past
     # any sane window's cluster count.
     "skills_factory.forge.max_clusters_per_run": (0, 1000),
+    # 0 holds nothing; one above the top trust level holds every agent's write.
+    "quarantine.below_trust": (0, MAX_TRUST_LEVEL + 1),
 }
 
 
@@ -891,6 +909,32 @@ def _validate_api_keys(payload: dict) -> None:
         if value is not None and not isinstance(value, str):
             raise ValueError(
                 f"Settings key 'api_keys.{name}' must be a string or null, got {type(value).__name__}"
+            )
+
+
+def _validate_quarantine_overrides(payload: dict) -> None:
+    """Raise ``ValueError`` for a per-fleet hold level that is not a level.
+
+    ``quarantine.below_trust_by_fleet`` declares no keys, since any fleet id may
+    appear under it, so neither ``_check_keys`` nor ``_validate_leaf_types``
+    looks at its values. ``null`` drops the fleet's override, as it does any
+    setting.
+    """
+    overrides = payload.get("quarantine", {}).get("below_trust_by_fleet")
+    if overrides is None:
+        return
+    if not isinstance(overrides, dict):
+        raise ValueError(
+            f"Settings key 'quarantine.below_trust_by_fleet' must be an object, got {type(overrides).__name__}"
+        )
+    lo, hi = _LEAF_RANGES["quarantine.below_trust"]
+    for fleet_id, level in overrides.items():
+        if level is None:
+            continue
+        if isinstance(level, bool) or not isinstance(level, int) or not lo <= level <= hi:
+            raise ValueError(
+                f"Settings key 'quarantine.below_trust_by_fleet.{fleet_id}' must be an int in [{lo}, {hi}], "
+                f"got {level!r}"
             )
 
 
@@ -1451,57 +1495,17 @@ class ResolvedConfig:
         val = self._ts.get("agents", {}).get("require_agent_approval")
         return bool(val) if val is not None else False
 
-    # Security audit
-    @property
-    def security_audit_schedule_enabled(self) -> bool:
-        val = self._ts.get("security_audit", {}).get("schedule_enabled")
-        if val is not None:
-            return bool(val)
-        return global_settings.security_audit_schedule_enabled
+    def quarantine_below_trust(self, fleet_id: str | None) -> int:
+        """The trust level below which a write in ``fleet_id`` is held (g2.8).
 
-    @property
-    def security_audit_schedule_cron(self) -> str:
-        val = self._ts.get("security_audit", {}).get("schedule_cron")
-        if val is not None:
-            return val
-        return global_settings.security_audit_schedule_cron
-
-    @property
-    def security_audit_alerts_enabled(self) -> bool:
-        val = self._ts.get("security_audit", {}).get("alerts_enabled")
-        if val is not None:
-            return bool(val)
-        return global_settings.security_audit_alerts_enabled
-
-    @property
-    def security_audit_alert_recipients(self) -> list[str]:
-        val = self._ts.get("security_audit", {}).get("alert_recipients")
-        if val is not None:
-            if isinstance(val, str):
-                return [val] if val else []
-            return list(val)
-        return list(global_settings.security_audit_alert_recipients)
-
-    @property
-    def security_audit_alert_score_below(self) -> float | None:
-        val = self._ts.get("security_audit", {}).get("alert_score_below")
-        if val is not None:
-            return val
-        return global_settings.security_audit_alert_score_below
-
-    @property
-    def security_audit_alert_critical_findings_min(self) -> int | None:
-        val = self._ts.get("security_audit", {}).get("alert_critical_findings_min")
-        if val is not None:
-            return val
-        return global_settings.security_audit_alert_critical_findings_min
-
-    @property
-    def security_audit_alert_score_drop_delta(self) -> float | None:
-        val = self._ts.get("security_audit", {}).get("alert_score_drop_delta")
-        if val is not None:
-            return val
-        return global_settings.security_audit_alert_score_drop_delta
+        The fleet's own level when it has one, else the org-wide one. 0 holds
+        nothing, and so does a tenant that set neither.
+        """
+        section = self._ts.get("quarantine") or {}
+        level = (section.get("below_trust_by_fleet") or {}).get(fleet_id) if fleet_id is not None else None
+        if level is None:
+            level = section.get("below_trust")
+        return int(level or 0)
 
 
 def validate_search_profile(profile: dict) -> dict:
@@ -1674,6 +1678,33 @@ def _is_display_mask(value: object) -> bool:
     return isinstance(value, str) and value.startswith(_DISPLAY_MASK)
 
 
+#: Keys a tenant could once store and nothing reads: ``fail_on_critical``
+#: (M-114) and ``llm_tokens_per_run`` (oss-0922-l-05). ``PUT`` refuses them now,
+#: but a value written before that is still in the tenant's row, and showing it
+#: would present a control that does nothing.
+_RETIRED_KEYS: tuple[tuple[str, ...], ...] = (
+    ("skills_factory", "sentinel", "fail_on_critical"),
+    ("skills_factory", "forge", "llm_tokens_per_run"),
+)
+
+
+def _without_retired(raw: dict) -> dict:
+    """``raw`` without ``_RETIRED_KEYS``, copying only the dicts on their paths."""
+    out = dict(raw)
+    for path in _RETIRED_KEYS:
+        node = out
+        for key in path[:-1]:
+            child = node.get(key)
+            if not isinstance(child, dict):
+                break
+            copied = dict(child)
+            node[key] = copied
+            node = copied
+        else:
+            node.pop(path[-1], None)
+    return out
+
+
 def _settings_display_view(settings: dict) -> dict:
     # Deliberately iterates ``items()`` and matches the section NAME as a
     # plain string instead of reading ``settings["api_keys"]``: a
@@ -1698,7 +1729,7 @@ async def get_settings_for_display(tenant_id: str) -> dict:
     keys go through ``ResolvedConfig`` / ``get_raw_settings``, never this view.
     """
     raw = await get_raw_settings(tenant_id)
-    return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, raw))
+    return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, _without_retired(raw)))
 
 
 #: The crystallizer settings a dedup stamp was settled under (M-38).
@@ -1764,6 +1795,7 @@ async def update_settings(
     _check_keys(new_settings, DEFAULT_SETTINGS)
     _validate_api_keys(new_settings)
     _validate_leaf_types(new_settings)
+    _validate_quarantine_overrides(new_settings)
     _validate_governance_enums(new_settings)
     _validate_agent_digest_cadence(new_settings)
     _validate_default_search_profile(new_settings)
@@ -1783,7 +1815,7 @@ async def update_settings(
     merged = result["settings"]
     if not result.get("changed"):
         # Identical payload — storage wrote nothing; nothing to invalidate or broadcast.
-        return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, merged))
+        return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, _without_retired(merged)))
 
     # Invalidate THIS process's cache immediately...
     invalidate_cache(tenant_id)
@@ -1819,4 +1851,4 @@ async def update_settings(
     if _SWEEP_POLICY_KEYS & set(new_settings.get("crystallizer") or {}):
         track_task(tracked_task(_reopen_dedup_sweep(tenant_id), "crystallizer_reopen_sweep", None, tenant_id))
 
-    return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, merged))
+    return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, _without_retired(merged)))

@@ -220,3 +220,68 @@ async def test_a_malformed_cursor_is_refused(client):
         headers=headers,
     )
     assert resp.status_code == 400, resp.text
+
+
+# ── 5. resource_type filter and the chain seq (M-27) ──
+
+
+async def _audit_rows(sc, tenant_id: str, agent_id: str) -> None:
+    """One agent's three audit rows, of two resource types."""
+    for resource_type, action in (
+        ("memory", "create"),
+        ("keystone", "update"),
+        ("memory", "delete"),
+    ):
+        await sc.create_audit_log(
+            {
+                "tenant_id": tenant_id,
+                "agent_id": agent_id,
+                "action": action,
+                "resource_type": resource_type,
+            }
+        )
+
+
+async def test_the_audit_log_filters_by_resource_type(client, sc):
+    """Storage filters by resource_type in SQL; the route did not expose it, so
+    a caller could not ask for one kind of resource."""
+    tenant_id, headers = get_test_auth()
+    agent = f"m27-filter-{_uid()}"
+    await _audit_rows(sc, tenant_id, agent)
+
+    async def _types(resource_type: str) -> list[str]:
+        resp = await client.get(
+            "/api/v1/audit-log",
+            params={
+                "tenant_id": tenant_id,
+                "agent_id": agent,
+                "resource_type": resource_type,
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        return [e["resource_type"] for e in resp.json()]
+
+    assert await _types("keystone") == ["keystone"]
+    assert await _types("memory") == ["memory", "memory"]
+
+
+async def test_each_audit_entry_carries_its_chain_seq(client, sc):
+    """The /verify break report names rows by seq; an entry without its seq
+    cannot be matched to the hash chain."""
+    tenant_id, headers = get_test_auth()
+    agent = f"m27-seq-{_uid()}"
+    await _audit_rows(sc, tenant_id, agent)
+    stored = {
+        str(r["id"]): r["seq"]
+        for r in await sc.list_audit_logs(tenant_id, agent_id=agent)
+    }
+    assert len(stored) == 3 and all(isinstance(s, int) for s in stored.values())
+
+    resp = await client.get(
+        "/api/v1/audit-log",
+        params={"tenant_id": tenant_id, "agent_id": agent},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert {e["id"]: e.get("seq") for e in resp.json()} == stored

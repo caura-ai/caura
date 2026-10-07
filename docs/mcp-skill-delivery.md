@@ -152,7 +152,7 @@ So the OpenClaw plugin reconciler pulls from a dedicated server surface,
 
 The policy lives entirely server-side — the plugin sends no `status`
 filter and carries no opt-in flag, so it can't be made to pull a
-non-active skill. A skill flipping `active → rejected/quarantined` drops
+non-active skill. A skill rejected while active (`active → rejected`) drops
 out of `installable` and the reconciler removes it from disk on the next
 tick. Push (OpenClaw) and pull (`caura_doc`) now agree on exactly what
 an agent may see.

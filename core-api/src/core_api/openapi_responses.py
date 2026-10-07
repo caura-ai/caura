@@ -22,6 +22,8 @@ use ``dict[str, int]``-style types rather than named models.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from core_api.schemas import MemoryOut, SearchWarning
@@ -272,6 +274,49 @@ class KeystonesEnvelope(BaseModel):
 class KeystoneDeleteResponse(BaseModel):
     deleted: bool
     doc_id: str
+
+
+class KeystoneVersionSummary(BaseModel):
+    version: int = Field(description="The tenant's change count: 1, 2, 3, ...")
+    op: Literal["set", "delete", "baseline", "resync"] = Field(
+        description=(
+            "baseline: the set versioning started from. resync: a change that reached "
+            "the set without a version (a fleet purge, say), recorded before the next "
+            "write so that write's version shows its own change alone."
+        )
+    )
+    doc_id: str | None = Field(description="The rule that changed; null for a baseline or a resync.")
+    actor_agent_id: str | None = Field(description="The agent that made the change.")
+    actor_user_id: str | None = Field(description="The person the gateway vouched for, when there was one.")
+    created_at: str
+    rule_set_hash: str | None = Field(
+        description=(
+            "The rule-set hash of the rules this version gives the fleet_id and "
+            "agent_id asked about, as the keystones list would have returned "
+            "them. Null when a rule can't be hashed."
+        )
+    )
+    rule_count: int = Field(description="How many rules that is, after the cap.")
+    truncated: bool = Field(description="Whether the cap dropped rules, as X-Truncated.")
+
+
+class KeystoneVersionsPage(BaseModel):
+    count: int
+    items: list[KeystoneVersionSummary] = Field(description="Newest first.")
+    next_before: int | None = Field(description="Pass back as before for the next page; null on the last.")
+
+
+class KeystoneVersionRule(BaseModel):
+    doc_id: str
+    fleet_id: str | None = Field(description="Null for tenant-scope rules.")
+    data: KeystoneData
+    updated_at: str
+
+
+class KeystoneVersionDetail(KeystoneVersionSummary):
+    items: list[KeystoneVersionRule] = Field(
+        description="The rules this version gives the fleet_id and agent_id asked about."
+    )
 
 
 class WeightAdjustment(BaseModel):

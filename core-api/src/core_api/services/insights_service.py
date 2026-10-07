@@ -1297,7 +1297,16 @@ def _sanitize_findings(
     for f in findings:
         if not isinstance(f, dict):
             continue
-        raw_related = [str(rid) for rid in f.get("related_memory_ids", []) if rid]
+        # Model output: the prompt shows a list, but a model may answer null for
+        # "none", or one bare id. Iterating null raised TypeError after the LLM
+        # call was paid for and failed the whole run, and a bare id was iterated
+        # character by character and dropped (M-49).
+        related = f.get("related_memory_ids")
+        if isinstance(related, str):
+            related = [related]
+        elif not isinstance(related, list):
+            related = []
+        raw_related = [str(rid) for rid in related if rid]
         kept_related = [rid for rid in raw_related if rid in shown_ids]
         dropped = len(raw_related) - len(kept_related)
         if dropped > 0:

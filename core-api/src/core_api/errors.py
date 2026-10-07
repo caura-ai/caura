@@ -135,6 +135,10 @@ AUTH_INSTALL_UUID_MISSING = "INSTALL_UUID_MISSING"
 # M-86 — an agent or install credential's interview window for a fleet node
 # must cite an unused interview_request that was delivered to that node.
 AUTH_INTERVIEW_REQUEST_REQUIRED = "INTERVIEW_REQUEST_REQUIRED"
+# g2.9 — the review of held memories (listing them, rolling a session back) is
+# a signed-in person's. An agent or an API key can't be given it, so the way
+# out is to act from the dashboard.
+AUTH_PERSON_REQUIRED = "PERSON_REQUIRED"
 
 
 # ── Code for the request-budget deadline (ax-0917-h-01/h-02) ──────────────

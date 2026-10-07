@@ -13,15 +13,17 @@ See also the [public API stability contract](public-api-stability.md) and the
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/memories` | POST | Write a memory. LLM enrichment + embedding + entity extraction + contradiction detection. `"persist": false` for extract-only preview |
-| `/memories/bulk` | POST | Write up to 100 memories. Batches embeddings, parallelizes enrichment, single transaction. Requires `X-Bulk-Attempt-Id` header (per-attempt idempotency); a retry with the same id resolves committed rows as `duplicate_attempt` instead of duplicating. Returns 200 (clean / all-error) or 207 Multi-Status (mixed) — read per-item `status` |
+| `/memories` | POST | Write a memory. LLM enrichment + embedding + entity extraction + contradiction detection. `"persist": false` for extract-only preview. Stored `quarantined` when the organization holds its agent's writes (`quarantine` in `/settings`), as are `/memories/bulk` items |
+| `/memories/bulk` | POST | Write up to 100 memories. Batches embeddings, parallelizes enrichment, single transaction. Requires `X-Bulk-Attempt-Id` header (per-attempt idempotency); a retry with the same id resolves committed rows as `duplicate_attempt` instead of duplicating. Returns 200 (clean / all-error) or 207 Multi-Status (mixed) — read per-item `status`. From the broker's install credential, an item's `metadata.rules_receipt` (`event_id`, `rule_set_hash`: the rules delivery its session was under) is kept as `system_metadata.rules_receipt`; anyone else's is dropped |
 | `/memories` | GET | List memories (filter by type, status, agent; paginate) |
 | `/memories/{id}` | GET | Full memory detail (embedding stats, entity links, RDF triple, temporal bounds) |
 | `/memories/{id}` | PATCH | Update content or metadata. Re-embeds if content changes |
-| `/memories/{id}` | DELETE | Soft delete (sets status to `deleted`) |
-| `/memories/{id}/status` | PATCH | Update lifecycle status |
+| `/memories/{id}` | DELETE | Soft delete (sets status to `deleted`). A held memory (`quarantined`) is a 404 here: it leaves quarantine only by a person's release or reject, and a reject deletes it |
+| `/memories/{id}/status` | PATCH | Update lifecycle status. A memory held for review (`quarantined`) is moved only by a person, here or by a session rollback: `active` releases it, `cancelled` rejects it. A reject also soft-deletes it, with its auto-chunks, so no read returns it, search and recall included. A release then runs, in the background, what the held write skipped: its enrichment and governance verdict, its atomic-fact children, the near-duplicate merge it meant to make, entity extraction and contradiction detection. A held write's auto-chunks move with it, and are not released or rejected on their own (409) |
+| `/memories/held` | GET | The memories held for review, newest first, with `total`; `session_id` narrows to one broker session. A held write's auto-chunks aren't listed: they move with it. A person only |
+| `/memories/rollback-session` | POST | Undo a broker session's writes (`{"session_id"}`): its live memories and the rows derived from them become `outdated`, what they had superseded or contradicted becomes `active` again (`restored`), and its held ones are rejected as a person rejects them (`cancelled` and soft-deleted), with their auto-chunks. A person only |
 | `/memories/{id}/contradictions` | GET | View contradiction chain |
-| `/memories` | DELETE | Bulk soft-delete |
+| `/memories` | DELETE | Bulk soft-delete. Skips held memories (`quarantined`), as every delete does, because a person decides on those. A fleet or tenant purge still removes them |
 | `/memories/stats` | GET | Counts by type, agent, and status, plus `pending: {embedding, enrichment, fanout}` (live rows still owed background work) and `settled` (all zero). Benchmarks and other measure-after-ingest callers should poll until `settled: true` before measuring — see [BENCHMARKS.md](../BENCHMARKS.md#reproduce-it-yourself) |
 | `/search` | POST | Hybrid semantic + keyword search with graph-enhanced retrieval |
 | `/recall` | POST | Search + LLM synthesis — `summary` is the answer to the query (the model reasons step by step internally; only its final answer is surfaced), alongside the source memories under `memories` (also mirrored to `items` for /search-shaped consumers — **`items` is deprecated and scheduled for removal in v4.0.0**; send `items_alias: false` to drop that copy now and halve the response, and read `memories`. The MCP recall brief already omits it by default). `top_k` is the result count — `limit` is accepted as an alias for it |
@@ -106,7 +108,7 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/admin/fleets` | GET | List fleets across all tenants (admin key) |
 | `/admin/memories` | GET | List memories across all tenants with filters (admin key) |
 | `/admin/memories/stats` | GET | Memory counts by tenant/type/status (admin key) |
-| `/settings` | GET / PUT | Per-tenant configuration |
+| `/settings` | GET / PUT | Per-tenant configuration. `quarantine.below_trust` (0 to 4; unset or 0 holds nothing) holds every write from an agent below that trust level as `quarantined`, for a person to release or reject; `quarantine.below_trust_by_fleet` overrides it per fleet (`{fleet_id: level}`) |
 | `/audit-log` | GET | Audit log entries |
 | `/mcp` | POST | MCP Streamable HTTP endpoint (mounted at app root, NOT under `/api/v1`) |
 
@@ -180,6 +182,9 @@ request body.
 | `agent_fleet_update` | `agent` | `PATCH /agents/{id}/fleet` | — |
 | `keystone.set` | `keystone` | `POST /keystones` | `caura_keystones_set op=set` |
 | `keystone.delete` | `keystone` | `DELETE /keystones/{doc_id}` | `caura_keystones_set op=delete` |
+| `quarantine.release` | `memory` | `PATCH /memories/{id}/status` to `active`, on a held memory | — |
+| `quarantine.reject` | `memory` | `PATCH /memories/{id}/status` to `cancelled`, on a held memory | — |
+| `session.rollback` | `memory` | `POST /memories/rollback-session`, one row per memory it changed | — |
 
 **Rate limiting (managed platform)**
 
@@ -217,6 +222,8 @@ directly. A complete `ALLOYDB_HOST`, `ALLOYDB_USER`, `ALLOYDB_PASSWORD`, and
 | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | local PostgreSQL defaults | Inputs used by migration/dev helpers; the stock Compose file hardcodes its container connection values |
 | `DATABASE_URL` | local PostgreSQL URL | Storage-service primary connection URL; set directly outside the stock Compose deployment |
 | `READ_DATABASE_URL` | *(empty)* | Optional storage-service read-replica URL |
+| `CORE_STORAGE_API_URL` | `http://localhost:8002` | Where core-api reaches the storage service (its writer, when the storage layer is split) |
+| `CORE_STORAGE_SHARED_SECRET` | *(empty)* | Secret core-api and every storage caller send as `X-Storage-Secret`. Required: core-api refuses to start without it, and storage rejects a request without it. Docker Compose generates one; `CORE_STORAGE_SHARED_SECRET_FILE` reads it from a file instead |
 | `ADMIN_API_KEY` | *(empty)* | Admin API key — bypasses tenant enforcement |
 | `ADMIN_API_KEY_FILE` | *(empty)* | File holding the admin key, read only while `ADMIN_API_KEY` is blank. Docker Compose sets it to a key `admin-key-init` generates for the bundled scheduler |
 | `CAURA_API_KEY` | *(empty)* | Shared perimeter key for a network-exposed OSS deployment |

@@ -9,6 +9,12 @@ Endpoints (under ``/api/v1``):
 * ``GET    /keystones`` — list scope-merged rules
 * ``POST   /keystones`` — upsert a rule (tiered trust; see below)
 * ``DELETE /keystones/{doc_id}`` — remove a rule (tiered trust)
+* ``GET    /keystones/versions`` — the tenant's keystone versions
+* ``GET    /keystones/versions/{version}`` — one version and its rules
+
+Storage records a version with every set and delete (plan row g1.12): the
+tenant's whole keystone set after the change, numbered per tenant, with the
+calling agent and the person the gateway vouched for as its actor.
 
 Trust gating is dynamic per the targeted rule's scope:
 
@@ -85,6 +91,11 @@ from core_api.trust_utils import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/keystones", tags=["Keystones"])
+# The versions reads (plan row g1.12) are served under /api/v1 only. app.py also
+# mounts ``router`` under the legacy prefix, for the CRUD that predates them.
+versions_router = APIRouter(prefix="/keystones/versions", tags=["Keystones"])
+# Storage numbers versions in an int4, and refuses a larger one too.
+_MAX_VERSION = 2**31 - 1
 
 
 # ── Schemas ──
@@ -299,6 +310,19 @@ def _surface_storage_error(exc: httpx.HTTPStatusError) -> HTTPException:
     return HTTPException(status_code=exc.response.status_code, detail=detail)
 
 
+def _principal(fleet_id: str | None, agent_id: str | None) -> tuple[str | None, str | None]:
+    """The ``(fleet_id, agent_id)`` whose rules a read resolves.
+
+    The agent is canonical, and dropped when there's no ``fleet_id``:
+    agent-scope rows are keyed on the (fleet_id, agent_id) pair, so an
+    agent-only filter can't resolve them. Mirrors the MCP handler's guard so
+    both surfaces return identical results for the same input.
+    """
+    if not fleet_id or agent_id is None:
+        return fleet_id, None
+    return fleet_id, canonical_service_agent_id(agent_id)
+
+
 def _rule_set_hash(rows: list[dict], tenant_id: str) -> str | None:
     """Return the rule-set hash of the rules a list returns (plan row g1.10).
 
@@ -349,18 +373,13 @@ async def list_keystones(
     caller can tell whether a set it holds is still current.
     """
     auth.enforce_readable_tenant(tenant_id)
-    if agent_id is not None:
-        agent_id = canonical_service_agent_id(agent_id)
+    fleet_id, agent_id = _principal(fleet_id, agent_id)
     sc = get_storage_client()
-    # Drop ``agent_id`` when there's no ``fleet_id`` — agent-scope rows
-    # are keyed on the (fleet_id, agent_id) pair, so an agent-only filter
-    # can't resolve them. Mirrors the MCP handler's guard so both
-    # surfaces return identical results for the same input.
     try:
         rows, truncated = await sc.list_keystones(
             tenant_id=tenant_id,
             fleet_id=fleet_id,
-            agent_id=agent_id if fleet_id else None,
+            agent_id=agent_id,
         )
     except httpx.HTTPStatusError as exc:
         raise _surface_storage_error(exc) from exc
@@ -495,6 +514,9 @@ async def upsert_keystone(
         payload["agent_id"] = body.agent_id
     if body.author_user_id is not None:
         payload["author_user_id"] = body.author_user_id
+    payload["actor_agent_id"] = caller_agent_id
+    if auth.user_id is not None:
+        payload["actor_user_id"] = auth.user_id
 
     try:
         doc = await sc.upsert_keystone(payload)
@@ -621,7 +643,12 @@ async def delete_keystone(
             detail="Keystone scope changed during operation; aborting delete.",
         )
     try:
-        deleted = await sc.delete_keystone(tenant_id=tenant_id, doc_id=doc_id)
+        deleted = await sc.delete_keystone(
+            tenant_id=tenant_id,
+            doc_id=doc_id,
+            actor_agent_id=caller_agent_id,
+            actor_user_id=auth.user_id,
+        )
     except httpx.HTTPStatusError as exc:
         raise _surface_storage_error(exc) from exc
     if not deleted:
@@ -639,3 +666,60 @@ async def delete_keystone(
         detail={"doc_id": doc_id, "via": "rest", **auth.audit_actor()},
     )
     return {"deleted": True, "doc_id": doc_id}
+
+
+@versions_router.get("", responses={200: {"model": _oar.KeystoneVersionsPage}})
+async def list_keystone_versions(
+    tenant_id: str = Query(...),
+    fleet_id: str | None = Query(default=None),
+    agent_id: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+    before: int | None = Query(
+        default=None,
+        ge=1,
+        le=_MAX_VERSION,
+        description="The next_before of the previous page: versions below it.",
+    ),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """The tenant's keystone versions, newest first (plan row g1.12).
+
+    Each version's ``rule_set_hash`` is the hash of what it gives
+    ``(fleet_id, agent_id)``: the rules the keystones list would have returned
+    them then. A receipt's hash names its version that way. Without ``fleet_id``
+    that is the tenant-wide rules alone, as for the list, and ``agent_id``
+    without ``fleet_id`` is dropped, as there.
+
+    Tenant-scoped like ``/audit-log``: the history names who made each change.
+    """
+    auth.enforce_tenant(tenant_id)
+    fleet_id, agent_id = _principal(fleet_id, agent_id)
+    try:
+        return await get_storage_client().list_keystone_versions(
+            tenant_id, fleet_id=fleet_id, agent_id=agent_id, limit=limit, before=before
+        )
+    except httpx.HTTPStatusError as exc:
+        raise _surface_storage_error(exc) from exc
+
+
+@versions_router.get("/{version}", responses={200: {"model": _oar.KeystoneVersionDetail}})
+async def get_keystone_version(
+    version: int = Path(..., ge=1, le=_MAX_VERSION),
+    tenant_id: str = Query(...),
+    fleet_id: str | None = Query(default=None),
+    agent_id: str | None = Query(default=None),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """One keystone version, with the rules it gives ``(fleet_id, agent_id)``
+    as ``items``, in the list's order. Compare two versions to diff them."""
+    auth.enforce_tenant(tenant_id)
+    fleet_id, agent_id = _principal(fleet_id, agent_id)
+    try:
+        found = await get_storage_client().get_keystone_version(
+            tenant_id, version, fleet_id=fleet_id, agent_id=agent_id
+        )
+    except httpx.HTTPStatusError as exc:
+        raise _surface_storage_error(exc) from exc
+    if found is None:
+        raise HTTPException(status_code=404, detail="Keystone version not found")
+    return found

@@ -119,7 +119,7 @@ _MUST_STAY_ON_THE_WRITER = {
 # in this module, so they are not independently convertible: whichever caller
 # they serve decides, and converting one in isolation would give a single
 # request two sessions with different views of the same rows.
-_INTERNAL_HELPERS = {"_describe_content_hash_winner", "_guard_document_shrink"}
+_INTERNAL_HELPERS = {"_describe_content_hash_winner"}
 
 
 def _source() -> tuple[str, ast.Module, list[str]]:
@@ -293,12 +293,21 @@ def test_the_writer_session_population_is_pinned() -> None:
     open a session. They share ``_soft_delete`` (M-52, M-53), which opens the
     one writer session and soft-deletes the rows and their derived rows with
     ``sql_update``, a write.
+
+    143 -> 142 (pure 65 -> 64): ``_guard_document_shrink`` no longer opens a
+    session. Both upserts pass it theirs, so the shrink check and the write
+    share one transaction, the one a keystone write records its version in
+    (g1.12). It was an internal helper, so the convertible count stays at 56.
+
+    142 -> 143 (pure unchanged at 64): ``memory_rollback_session`` is new (g2.9).
+    It outdates a session's rows and rejects its held ones with ``sql_update``,
+    a write. Its sibling ``memory_list_held`` reads on the replica.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
     assert len(methods) == 143, f"{len(methods)} methods open a writer session"
-    assert len(pure) == 65, f"{len(pure)} of them show no write marker"
+    assert len(pure) == 64, f"{len(pure)} of them show no write marker"
 
 
 @pytest.mark.parametrize(
@@ -340,9 +349,9 @@ def test_every_method_that_must_stay_on_the_writer_still_looks_like_a_pure_read(
 def test_the_convertible_population_is_pinned() -> None:
     """What is left after the caller analysis, so a conversion has a target.
 
-    64 methods show no write marker. Six of them must stay on the writer anyway
-    because of what CALLS them, and two are private helpers that inherit their
-    caller's session. The remaining 56 are the candidates — the number a
+    64 methods show no write marker. Seven of them must stay on the writer
+    anyway because of what CALLS them, and one is a private helper that
+    inherits its caller's session. The remaining 56 are the candidates — the number a
     conversion PR is allowed to move, and the only number in this file that
     SHOULD go down.
 

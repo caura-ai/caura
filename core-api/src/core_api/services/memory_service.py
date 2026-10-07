@@ -36,7 +36,7 @@ except ImportError:
         pass  # type: ignore[misc]
 
 
-from common.constants import VECTOR_DIM
+from common.constants import QUARANTINED_MEMORY_STATUS, VECTOR_DIM
 from common.embedding import (
     embedding_configured,
     get_embedding,
@@ -109,6 +109,7 @@ from core_api.search_trim import (
     resolve_include_derived,
     trim_reserving_fts_matches,
 )
+from core_api.services.contradiction_detector import _pick_older, revert_unheld_loser
 from core_api.services.entity_extraction_worker import process_entity_extraction
 from core_api.services.entity_tokens import extract_entity_tokens
 from core_api.services.governance_gate import (
@@ -121,6 +122,7 @@ from core_api.services.governance_gate import (
 )
 from core_api.services.hooks import get_hooks
 from core_api.services.organization_settings import validate_search_profile
+from core_api.services.rules_receipt import RULES_RECEIPT_KEY, rules_receipt_from
 from core_api.services.system_metadata import (
     CALLER_OWNABLE_KEYS,
     SYSTEM_NAMESPACE,
@@ -131,6 +133,7 @@ from core_api.services.system_metadata import (
     set_system_value,
 )
 from core_api.services.task_tracker import record_task_failure, tracked_task
+from core_api.services.write_hold import HOLD_KEY, hold_for
 
 logger = logging.getLogger(__name__)
 
@@ -1343,6 +1346,9 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         )
 
         child_payloads = []
+        # g2.8 — a held parent's chunks are held with it (``fields["status"]``
+        # below), and carry its hold record, so each says why it is held.
+        parent_hold = (parent_metadata.get(SYSTEM_NAMESPACE) or {}).get(HOLD_KEY)
         for fact, child_embedding in zip(facts, child_embeddings):
             child_ch = _content_hash(data.tenant_id, data.fleet_id, fact["content"])
             child_meta = {
@@ -1354,6 +1360,8 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
             # from the row they were cut out of.
             _inherit_governance_signals(child_meta, parent_metadata)
             _mark_child_embedding_pending(child_meta, child_embedding)
+            if parent_hold is not None:
+                child_meta.setdefault(SYSTEM_NAMESPACE, {})[HOLD_KEY] = parent_hold
             child_payloads.append(
                 {
                     "tenant_id": data.tenant_id,
@@ -1509,8 +1517,12 @@ async def create_memories_bulk(
     bulk_attempt_id: str,
     memory_type_is_agent_set: bool | None = None,
     is_inferred: bool = False,
+    trusted_receipts: bool = False,
 ) -> BulkMemoryResponse:
     """Create multiple memories with per-attempt idempotency (CAURA-602).
+
+    ``trusted_receipts`` keeps the rules receipt each item's metadata carries
+    (``rules_receipt``); only the bulk route sets it, for an install credential.
 
     Each item is bound to a stable ``client_request_id`` of the form
     ``f"{bulk_attempt_id}:{content_hash[:16]}"``. Storage's per-item unique
@@ -1563,6 +1575,14 @@ async def create_memories_bulk(
     # exactly that with ``memory_type_agent_set``; it now passes
     # ``memory_type_is_agent_set`` instead, which is a parameter and therefore
     # not reachable from a request body.
+    #
+    # g2.8 — the broker's rules receipts are taken out first, since the
+    # sanitation strips the key; ``trusted_receipts`` is only set for a broker.
+    receipts = (
+        {i: receipt for i, item in enumerate(items) if (receipt := rules_receipt_from(item.metadata))}
+        if trusted_receipts
+        else {}
+    )
     for item in items:
         if item.metadata:
             item.metadata = sanitize_caller_metadata(item.metadata)
@@ -1635,6 +1655,10 @@ async def create_memories_bulk(
     from core_api.services.organization_settings import resolve_config
 
     tenant_config = await resolve_config(data.tenant_id)
+    # g2.8 — one agent writes the whole batch, so one answer holds it or not.
+    hold = await hold_for(
+        data.tenant_id, data.agent_id, data.fleet_id, tenant_config, is_inferred=is_inferred
+    )
 
     # -- Batch embeddings + parallel enrichment (valid items only). Short
     # and oversized items are skipped so we don't spend provider budget on
@@ -2096,6 +2120,12 @@ async def create_memories_bulk(
 
         # Never from enrichment — see ``MergeEnrichmentFields``.
         status = item.status or "active"
+        # g2.8 — nor the caller's, for a batch held for review above.
+        if hold is not None:
+            status = QUARANTINED_MEMORY_STATUS
+            metadata.setdefault(SYSTEM_NAMESPACE, {})[HOLD_KEY] = hold
+        if i in receipts:
+            metadata.setdefault(SYSTEM_NAMESPACE, {})[RULES_RECEIPT_KEY] = receipts[i]
 
         entity_link_dicts = [
             {"entity_id": str(link.entity_id), "role": link.role} for link in item.entity_links
@@ -4241,6 +4271,48 @@ async def _revert_superseded_row(sc, tenant_id: str, superseded_id: str, editor_
         logger.warning("supersession retract: could not revert %s to active", superseded_id, exc_info=True)
 
 
+async def _revert_unlinked_losers(sc, tenant_id: str, winner: dict) -> None:
+    """Revert the losers detection recorded for ``winner`` without a chain edge (M-34).
+
+    ``winner``'s one ``supersedes_id`` reaches its first loser only, and
+    ``_revert_superseded_row`` revives that one. Every other loser of the run is
+    known only from its ``memory_conflicts`` record (caura PR #1815). Each verdict
+    was about the text this edit replaced, so each of those losers is reverted
+    under the rule a dismissal applies (``revert_unheld_loser``): only when
+    nothing else holds it, setting aside every record that names ``winner``. A
+    record ``winner`` lost (the other row is the newer) is not this edit's to
+    undo. The records stay as they are, as on the edge path.
+
+    Failures are logged, not raised, for the reason ``_revert_superseded_row``
+    gives.
+    """
+    winner_id = str(winner["id"])
+    edge_loser = str(winner.get("supersedes_id") or "")
+    seen: set[str] = set()
+    try:
+        for record in await sc.list_memory_conflicts(tenant_id, limit=200, memory_id=winner_id, read=False):
+            if record.get("review_status") == "dismissed":
+                continue
+            new_side, old_side = str(record.get("new_memory_id")), str(record.get("old_memory_id"))
+            other_id = old_side if new_side == winner_id else new_side
+            if other_id in seen or other_id in (winner_id, edge_loser):
+                continue
+            seen.add(other_id)
+            loser = await sc.get_memory(other_id, tenant_id, read=False)
+            if not loser or _pick_older(winner, loser) is not loser:
+                continue
+            await revert_unheld_loser(
+                sc,
+                tenant_id,
+                loser,
+                ignore=lambda r: winner_id in (str(r.get("new_memory_id")), str(r.get("old_memory_id"))),
+            )
+    except Exception:
+        logger.warning(
+            "supersession retract: could not revert the unlinked losers of %s", winner_id, exc_info=True
+        )
+
+
 #: H-07 — what enrichment and governance concluded about a row's TEXT. A content
 #: edit makes each one a claim about text that is gone, so the edit clears them
 #: and the re-enrichment it schedules judges the new text.
@@ -4883,6 +4955,8 @@ async def update_memory(
         # Same non-raising policy as the reset above, for the same reason.
         if mem.get("supersedes_id") is not None:
             await _revert_superseded_row(sc, tenant_id, str(mem.get("supersedes_id")), str(memory_id))
+        # M-34: and the losers detection recorded for it without an edge.
+        await _revert_unlinked_losers(sc, tenant_id, mem)
         # A failed re-embed leaves ``embedding=NULL`` above, deliberately, so
         # the repair paths can see the row. But unlike EVERY create path this
         # one then did nothing further: no ``embedding_pending`` for the caller

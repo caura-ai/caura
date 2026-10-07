@@ -49,8 +49,9 @@ assert anyway. Two such callers are live today:
   service, justified by the Pub/Sub redelivery budget rather than a request
   budget, and deliberately out of scope.
 
-No provider calls and no LLM calls: the interview surface runs its fallback
-chain's ``fake_fn``, and every stalled hop is a patched semaphore.
+No provider calls and no LLM calls: the interview surface's tenant is on the
+``fake`` provider, so its fallback chain's ``fake_fn`` stands in a report, and
+every stalled hop is a patched semaphore.
 """
 
 from __future__ import annotations
@@ -360,9 +361,11 @@ async def _drive_interview_submit(ctx) -> dict | None:
     ctx.monkeypatch.setattr(cfg.settings, "interview_async_submit", False)
     ctx.monkeypatch.setattr(cfg.settings, "storage_bulk_timeout_seconds", 30.0)
     tenant_id, headers = get_test_auth(new_tenant_id())
+    # ``fake`` named explicitly: the suite's provider is ``none`` in CI, and with
+    # no LLM the window now fails before it reaches the bulk write (M-50).
     enable = await ctx.client.put(
         f"/api/v1/settings?tenant_id={tenant_id}",
-        json={"interviewer": {"enabled": True}},
+        json={"interviewer": {"enabled": True}, "enrichment": {"provider": "fake"}},
         headers=headers,
     )
     assert enable.status_code == 200, enable.text

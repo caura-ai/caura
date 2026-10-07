@@ -139,26 +139,28 @@ UQ_LIVE_CONTENT_HASH_SQL = (
 )
 
 
-def load_migration_040():
-    """Load migration 040 as a module.
+def load_migration(filename: str):
+    """Load a migration as a module.
 
     By path because the versions directory is not an importable package and the
-    filename starts with a digit. Shared so the fixture below and the migration's
-    own tests both execute the REAL ``CLEANUP_SQL`` — a re-typed copy in either
-    place could drift from the migration and still pass.
+    filename starts with a digit. Tests execute a migration's REAL SQL this way
+    — a re-typed copy could drift from the migration and still pass.
     """
     import importlib.util
     import pathlib
 
-    path = (
-        pathlib.Path("core-storage-api/src/core_storage_api/database/migrations/versions")
-        / "040_memories_content_hash_unique.py"
-    )
-    spec = importlib.util.spec_from_file_location("migration_040", path)
+    path = pathlib.Path("core-storage-api/src/core_storage_api/database/migrations/versions") / filename
+    spec = importlib.util.spec_from_file_location(f"migration_{filename[:3]}", path)
     assert spec is not None and spec.loader is not None, f"cannot load {path}"
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_migration_040():
+    """Migration 040, shared so the fixture below and the migration's own tests
+    both execute the REAL ``CLEANUP_SQL``."""
+    return load_migration("040_memories_content_hash_unique.py")
 
 
 @pytest.fixture

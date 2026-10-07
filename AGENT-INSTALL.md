@@ -66,13 +66,20 @@ psql -U postgres -c "CREATE USER caura WITH PASSWORD 'changeme';"
 psql -U postgres -c "CREATE DATABASE caura OWNER caura;"
 psql -U caura -d caura -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
-# 6. Start the storage service. It applies Alembic migrations during startup.
+# 6. Export .env, then start the storage service. Some settings are read from
+#    the process environment only, so each service's shell exports .env first
+#    (POSIX shells; on Windows set the variables in the environment instead).
+#    Sourcing hands .env to the shell: single-quote any value you add that
+#    contains spaces, quotes, $, &, ; or backticks (the sample above is safe).
+#    The storage service applies Alembic migrations during startup.
+set -a; . ./.env; set +a
 PYTHONPATH=.:core-storage-api/src uvicorn core_storage_api.app:app \
   --host 127.0.0.1 --port 8002
 
 # 7. In a second terminal, activate the same venv, return to the repo root,
-#    and start core-api. It talks to the storage service on port 8002.
+#    export .env, and start core-api. It talks to the storage service on port 8002.
 source venv/bin/activate
+set -a; . ./.env; set +a
 PYTHONPATH=.:core-api/src uvicorn core_api.app:app \
   --host 127.0.0.1 --port 8000
 
@@ -279,7 +286,7 @@ USE_LLM_FOR_MEMORY_CREATION=true
 OPENAI_API_KEY=sk-...
 ```
 
-Then restart the server (`docker compose restart core-api` or re-run uvicorn).
+Then restart the server: `docker compose restart core-api`, or export `.env` again (`set -a; . ./.env; set +a`) and re-run uvicorn. An exported value takes precedence over `.env`, so skipping the export keeps the old one.
 
 ## What You Now Have
 

@@ -24,6 +24,41 @@ from common.env_utils import read_float_env, read_int_env
 # explicitly instead.
 LIVE_MEMORY_STATUSES = ("active", "confirmed", "pending")
 
+# A memory held for a person's review: written, but not live until a person
+# releases it (back to ``active``) or rejects it (``cancelled``). Nothing else
+# moves it, and nothing moves a written memory into it. Being outside
+# ``LIVE_MEMORY_STATUSES`` keeps it out of nothing on its own: search and
+# recall return most statuses, and many reads filter only on ``deleted_at IS
+# NULL``. So every read excludes it by name: no agent, search, count, graph or
+# background pass sees a held memory, only a person reviewing it. Raw SQL in
+# core-storage-api spells the value out as ``'quarantined'``.
+QUARANTINED_MEMORY_STATUS = "quarantined"
+# A rejected held memory's status. A reject also soft-deletes it
+# (``deleted_at``): ``cancelled`` is a status enrichment gives ordinary
+# memories, and search and recall return it, so the status alone would let a
+# write a person turned down reach agents. A session rollback rejects the
+# session's held memories the same way.
+QUARANTINE_REJECTED = "cancelled"
+# What a held memory may become: released (``active``) or rejected.
+QUARANTINE_EXITS = ("active", QUARANTINE_REJECTED)
+
+# The two statuses contradiction detection writes on a losing row — and the only
+# two any retraction path may revert FROM. Anything else on a contradicted row
+# means another writer has moved it since (a human confirmed it, the crystallizer
+# archived it, a different chain superseded it), so stamping "active" over that
+# would discard someone else's decision.
+#
+# One definition because five call sites read it and every one of them is a
+# destructive-write guard: ``contradiction_detector``'s Path-C retraction,
+# ``memory_service``'s edit-time revert, the supersedes-chain follow in
+# ``pipeline.steps.search.load_and_serialize``, outcome inference's failure
+# evidence, and core-storage-api's session rollback (g2.9), which is why it lives
+# here rather than in ``core_api.constants``. It previously lived in
+# ``outcome_inference.contradictions`` under a comment telling readers to keep it
+# in sync BY HAND with the detector's writes — which is the strongest possible
+# argument that it belongs in one place.
+CONTRADICTED_STATUSES: tuple[str, ...] = ("outdated", "conflicted")
+
 # ── Embeddings ──
 # Native dim of the default embedder (BAAI/bge-m3, see local-embedder docs).
 # Schema upgrade lives in alembic migration 012_vector_dim_1024.py — keep

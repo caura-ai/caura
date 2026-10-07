@@ -36,7 +36,7 @@ from core_api.errors import (
 )
 from core_api.schemas import ConflictListResponse, ConflictOut, ConflictResolveRequest
 from core_api.services.audit_service import log_action
-from core_api.services.contradiction_detector import _pick_older
+from core_api.services.contradiction_detector import _pick_older, revert_unheld_loser
 from core_api.services.trust_service import require_trust as _require_trust
 
 logger = logging.getLogger(__name__)
@@ -184,27 +184,16 @@ async def _revert_unlinked_loser(sc, conflict: dict, new: dict, old: dict) -> st
     at it, and no other record that is not dismissed says it lost to a live,
     newer row. Then it is read again, last, and reverted only if detection's
     status is still on it, as the edge path does. Every read goes to the writer.
+    The rule is ``revert_unheld_loser``'s, which a winner's content edit and
+    Path C's retraction apply too.
     Returns ``"undone"`` or ``"not_applied"``. A storage error is raised, for the
     caller to record as ``"failed"``: nothing has been written.
     """
-    tenant_id = str(conflict["tenant_id"])
-    loser_id = str(_pick_older(new, old)["id"])
-    if await sc.find_by_supersedes_id(tenant_id, loser_id, read=False):
-        return "not_applied"
-    loser = new if loser_id == str(new["id"]) else old
-    for record in await sc.list_memory_conflicts(tenant_id, limit=200, memory_id=loser_id, read=False):
-        if str(record.get("id")) == str(conflict.get("id")) or record.get("review_status") == "dismissed":
-            continue
-        new_side, old_side = str(record.get("new_memory_id")), str(record.get("old_memory_id"))
-        rival = await sc.get_memory(old_side if new_side == loser_id else new_side, tenant_id, read=False)
-        if rival and rival.get("deleted_at") is None and _pick_older(loser, rival) is loser:
-            logger.info("dismissal left %s demoted: conflict %s still holds it", loser_id, record.get("id"))
-            return "not_applied"
-    fresh = await sc.get_memory(loser_id, tenant_id, read=False)
-    if not fresh or fresh.get("deleted_at") is not None or fresh.get("status") not in CONTRADICTED_STATUSES:
-        return "not_applied"
-    await sc.update_memory_status(loser_id, "active", tenant_id=tenant_id)
-    return "undone"
+    tenant_id, conflict_id = str(conflict["tenant_id"]), str(conflict.get("id"))
+    reverted = await revert_unheld_loser(
+        sc, tenant_id, _pick_older(new, old), ignore=lambda r: str(r.get("id")) == conflict_id
+    )
+    return "undone" if reverted else "not_applied"
 
 
 @router.patch("/conflicts/{conflict_id}/resolve", responses={200: {"model": _oar.ConflictOut}})

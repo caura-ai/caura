@@ -41,8 +41,7 @@ class WriteSTMNote:
             stored = await stm.post_note(data.tenant_id, data.agent_id, entry)
             ttl = settings.stm_notes_ttl
         else:
-            fleet_id = ctx.data.get("stm_fleet_id") or data.fleet_id or "default"
-            stored = await stm.post_bulletin(data.tenant_id, fleet_id, entry)
+            stored = await stm.post_bulletin(data.tenant_id, ctx.data["stm_fleet_id"], entry)
             ttl = settings.stm_bulletin_ttl
 
         # The receipt below is only true if the entry is actually in the

@@ -155,7 +155,7 @@ jobs:
             type=semver,pattern=v{{major}}.{{minor}},value=${{ steps.resolve.outputs.tag }}
             type=semver,pattern=v{{major}},value=${{ steps.resolve.outputs.tag }}
             type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
-            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && inputs.push_latest == 'true' }}
+            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && inputs.push_latest == true }}
           labels: |
             org.opencontainers.image.title=${{ matrix.image }}
             org.opencontainers.image.description=Caura ${{ matrix.name }} — fleet memory for AI agents

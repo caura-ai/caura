@@ -9,12 +9,14 @@ database.  Run with:
 from __future__ import annotations
 
 import hashlib
+import json
 import struct
 import uuid
 
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from common.constants import VECTOR_DIM
 from core_storage_api.config import settings
@@ -2522,6 +2524,78 @@ class TestKeystones:
         resp = await client.post(f"{PREFIX}/keystones", json=payload)
         assert resp.status_code == 422, resp.text
         assert "doc_id must match" in resp.text
+
+    @pytest.mark.parametrize("field", ["title", "content", "agent_id", "author_user_id", "fleet_id"])
+    @pytest.mark.parametrize(
+        "char", ["\x00", "\ud800", "\udfff"], ids=["nul", "unpaired-high-surrogate", "unpaired-low-surrogate"]
+    )
+    async def test_text_postgres_cannot_read_back_is_refused(
+        self,
+        client: AsyncClient,
+        field: str,
+        char: str,
+    ) -> None:
+        """Stored, one such rule would fail every agent's list in its tenant
+        (see ``_UNREADABLE_TEXT_RE``). Each case has a tenant of its own, as a
+        rule stored by mistake would fail the session-wide ``tenant_id``'s
+        list for every later test."""
+        tenant_id, fleet_id = f"test-tenant-ks-{_uid()}", f"fleet-{_uid()}"
+        payload = {
+            "tenant_id": tenant_id,
+            **self._payload(doc_id=f"ks-{_uid()}", scope="agent", fleet_id=fleet_id, agent_id="a1"),
+            "author_user_id": "u1",
+        }
+        payload[field] = f"before{char}after"
+        # Raw bytes: httpx's own JSON encoding refuses an unpaired surrogate.
+        resp = await client.post(
+            f"{PREFIX}/keystones",
+            content=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 422, resp.text
+        assert any(error.startswith(f"{field} ") for error in resp.json()["detail"]), resp.text
+
+        listed = await client.get(
+            f"{PREFIX}/keystones",
+            params={"tenant_id": tenant_id, "fleet_id": fleet_id, "agent_id": "a1"},
+        )
+        assert (listed.status_code, listed.json()) == (200, [])
+
+    async def test_a_rule_stored_before_the_check_is_repaired_through_the_api(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        """A NUL already stored fails its tenant's whole list. The ordinary
+        overwrite and delete never read the text through ``->>``, so they
+        repair it."""
+        tenant_id = f"test-tenant-ks-{_uid()}"
+        stored = {"title": "rule", "content": "a\x00b", "weight": 50, "scope": "tenant"}
+        rows = [
+            {"t": tenant_id, "d": doc_id, "data": json.dumps(stored)}
+            for doc_id in ("ks-overwritten", "ks-deleted")
+        ]
+        async with _svc_session() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO documents (tenant_id, collection, doc_id, data) "
+                    "VALUES (:t, '_keystones', :d, CAST(:data AS json))"
+                ),
+                rows,
+            )
+        with pytest.raises(DBAPIError, match="unsupported Unicode escape sequence"):
+            await client.get(f"{PREFIX}/keystones", params={"tenant_id": tenant_id})
+
+        resp = await client.post(
+            f"{PREFIX}/keystones",
+            json={"tenant_id": tenant_id, **self._payload(doc_id="ks-overwritten", scope="tenant")},
+        )
+        assert resp.status_code == 200, resp.text
+        resp = await client.delete(f"{PREFIX}/keystones/ks-deleted", params={"tenant_id": tenant_id})
+        assert resp.status_code == 200, resp.text
+
+        listed = await client.get(f"{PREFIX}/keystones", params={"tenant_id": tenant_id})
+        assert listed.status_code == 200, listed.text
+        assert [r["doc_id"] for r in listed.json()] == ["ks-overwritten"]
 
     async def test_scope_union(
         self,

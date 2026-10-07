@@ -36,8 +36,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections import Counter
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -670,6 +671,19 @@ class _SentinelFatalSkip(Exception):
     fingerprint skips."""
 
 
+def _top_entity_ids(traces: list[SessionTraceRow]) -> list[str]:
+    """The ``ENTITY_TOP_K`` entities most of the cluster's traces mention, ascending.
+
+    Ranked by how many traces mention each entity, ids breaking ties, before the
+    cut (M-45). A plain id sort kept the K smallest random UUIDs, so one new trace
+    mentioning one more entity could push a real one out, move the fingerprint and
+    let a Rejected cluster back in past its poison cooloff.
+    """
+    mentions = Counter(e for trace in traces for e in set(trace.entity_ids))
+    ranked = sorted(mentions, key=lambda e: (-mentions[e], e))
+    return sorted(ranked[:ENTITY_TOP_K])
+
+
 async def _distill_cluster(
     cluster_traces: list[SessionTraceRow],
     *,
@@ -720,11 +734,9 @@ async def _distill_cluster(
         tenant_id=tenant_id,
         fleet_id=fleet_id,
         traces=snapshots,
-        # Cap at ENTITY_TOP_K to bound prompt size and to mirror the
-        # fingerprint's centrality cut — the LLM sees the same top-K
-        # entities the fingerprint stamps, so prompt and fp agree on
-        # cluster identity.
-        top_entity_ids=sorted({e for trace in cluster_traces for e in trace.entity_ids})[:ENTITY_TOP_K],
+        # Cap at ENTITY_TOP_K to bound prompt size. The fingerprint stamps
+        # these same ids, so prompt and fp agree on cluster identity.
+        top_entity_ids=_top_entity_ids(cluster_traces),
         hint_domain=None,
     )
 
@@ -749,10 +761,9 @@ async def _distill_cluster(
             "that flow lands in Phase 4 alongside v2 diff cards."
         )
 
-    # Compute fingerprint from LLM-extracted goal/domain/steps +
-    # cluster entities (entity centralities omitted in MVP; SF-105
-    # eval harness will measure whether stability is good enough
-    # without them).
+    # Compute fingerprint from LLM-extracted goal/domain/steps + the
+    # cluster's top entities, already ranked by mentions and cut to
+    # ENTITY_TOP_K by ``_top_entity_ids``, so no centralities are needed.
     fp_inputs = ClusterFingerprintInputs(
         goal_phrase=parsed["goal_phrase"],
         domain=parsed["domain"],
@@ -762,14 +773,26 @@ async def _distill_cluster(
     )
     fingerprint = compute_fingerprint(fp_inputs)
 
-    # Poison check — short-circuits any further write.
-    if await poison_checker(fingerprint.fp):
-        logger.info(
-            "forge: cluster fingerprint %s is poisoned; skipping (slug=%s)",
-            fingerprint.fp,
-            parsed["slug"],
-        )
-        raise _PoisonedClusterSkip()
+    # Poison check — short-circuits any further write. A rejection recorded
+    # before M-45 holds the fingerprint of the old selection, the K smallest
+    # ids. A poison row keeps only that string (the goal and steps behind it
+    # are not stored), so it cannot be back-filled: check the old selection's
+    # fingerprint as well. FINGERPRINT_FORMULA_VERSION stays v1 because the
+    # canonical form is unchanged, and a bump would orphan every cooloff
+    # instead of only these. Drop the second check once every cooloff written
+    # before this change has run out (rejection_cooloff_days is at most 365).
+    old_selection = sorted({e for trace in cluster_traces for e in trace.entity_ids})[:ENTITY_TOP_K]
+    poison_fps = [fingerprint.fp]
+    if old_selection != cluster_inputs.top_entity_ids:
+        poison_fps.append(compute_fingerprint(replace(fp_inputs, entity_ids=old_selection)).fp)
+    for fp in poison_fps:
+        if await poison_checker(fp):
+            logger.info(
+                "forge: cluster fingerprint %s is poisoned; skipping (slug=%s)",
+                fp,
+                parsed["slug"],
+            )
+            raise _PoisonedClusterSkip()
 
     # Assemble the candidate doc ready for caura_doc upsert.
     now_iso = datetime.now(UTC).isoformat(timespec="seconds")

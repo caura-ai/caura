@@ -285,6 +285,10 @@ class _CoreApiLifecycleAdapter:
                 "tenant_id": org_id,
                 **({"fleet_id": fleet_id} if fleet_id else {}),
             },
+            # M-18: ``BackfillEntityEmbeddings`` embeds entity names with this, so
+            # they land in the tenant's embedding space (provider, model, key) as
+            # its memories do. Without it they took the process-wide provider.
+            tenant_config=config,
         )
         pipeline = build_full_entity_linking_pipeline()
         result = await pipeline.run(ctx)

@@ -119,6 +119,9 @@ class LoadAndSerialize:
         rows = list(ctx.data["filtered_rows"])
 
         # Follow supersedes chain: inject successors for outdated/conflicted memories
+        # (loser id, successor id) for each successor storage found through the
+        # loser's ``memory_conflicts`` record, not an edge (M-34).
+        recorded: list[tuple[str, str]] = []
         outdated_ids = [
             row.Memory.id if hasattr(row.Memory, "id") else row.Memory.get("id")
             for row in rows
@@ -193,7 +196,12 @@ class LoadAndSerialize:
             # exists to prevent.
             newest_by_predecessor: dict[str, dict] = {}
             for successor in successors:
-                predecessor_id = str(successor.get("supersedes_id"))
+                # ``successor_of`` names the row it replaced: its
+                # ``supersedes_id``, or for a contradiction's further loser,
+                # which no edge names, the loser its record names (M-34).
+                predecessor_id = str(successor.get("successor_of") or successor.get("supersedes_id"))
+                if predecessor_id != str(successor.get("supersedes_id")):
+                    recorded.append((predecessor_id, str(successor.get("id"))))
                 incumbent = newest_by_predecessor.get(predecessor_id)
                 if incumbent is None or _successor_recency(successor) > _successor_recency(incumbent):
                     newest_by_predecessor[predecessor_id] = successor
@@ -238,12 +246,18 @@ class LoadAndSerialize:
         # earned position (it is reached first in the walk). Chains
         # (C supersedes B supersedes A) resolve newest-first via recursion.
         # No new wire fields: ``supersedes_id`` names the loser, its
-        # ``status`` says why it lost.
+        # ``status`` says why it lost. A loser no edge names (M-34) is paired
+        # with the successor storage found through its record, and the
+        # adjacency alone says so.
         succ_of: dict[str, list] = {}
         for row in rows:
             sup = _mem_field(row.Memory, "supersedes_id")
             if sup:
                 succ_of.setdefault(str(sup), []).append(row)
+        by_id = {str(_mem_field(row.Memory, "id")): row for row in rows}
+        for predecessor_id, successor_id in recorded:
+            if predecessor_id in by_id and successor_id in by_id:
+                succ_of.setdefault(predecessor_id, []).append(by_id[successor_id])
         if succ_of:
             placed: set[str] = set()
             reordered: list = []
