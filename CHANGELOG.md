@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.27.0](https://github.com/caura-ai/caura/compare/backend-v3.26.4...backend-v3.27.0) (2026-10-07)
+
+
+### Features
+
+* **memories:** hold the broker's gate-refused writes for review (g2.5) ([#1985](https://github.com/caura-ai/caura/issues/1985)) ([2892bc9](https://github.com/caura-ai/caura/commit/2892bc93cf1f3a44de96bea14ffb0d7be6854cf3))
+
+
+### Bug Fixes
+
+* **ci:** check every service lock and build core-worker's image (M-01) ([#1983](https://github.com/caura-ai/caura/issues/1983)) ([54040d8](https://github.com/caura-ai/caura/commit/54040d8823e577b6d3323a4bec816e12014a6563))
+* **memories:** decide a write again when the hold changed after it was decided ([#1984](https://github.com/caura-ai/caura/issues/1984)) ([7ce0212](https://github.com/caura-ai/caura/commit/7ce0212e61c430150524a5ce918230c1a901f248))
+
 ## [3.26.4](https://github.com/caura-ai/caura/compare/backend-v3.26.3...backend-v3.26.4) (2026-10-07)
 
 
