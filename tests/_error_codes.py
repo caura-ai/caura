@@ -5,7 +5,7 @@ compared against something independent of itself. Lives in ``tests/_*.py``
 because this scan — not the assertions built on it — is the part that can be
 wrong, and that shape of file is the one the review pipeline reads.
 
-THREE PATHS REACH A CALLER, and a scan that follows fewer than all three
+FOUR PATHS REACH A CALLER, and a scan that follows fewer than all four
 under-reports, which is the failure mode that passes:
 
 1. ``_error_response("CODE", …)`` called inside the handler.
@@ -18,6 +18,10 @@ under-reports, which is the failure mode that passes:
    the codes MOST widely emitted and the ones a function-scoped walk misses
    entirely — the first version of this scan missed 19 of 52 that way, and
    reported ``UNAUTHORIZED`` as emitted by no tool at all.
+4. A code passed by NAME rather than spelled: ``_check_plan_limit`` calls
+   ``_error_response(AUTH_PLAN_LIMIT, …)`` with a constant imported from
+   ``core_api.errors``. A literal-only scan reported ``PLAN_LIMIT_READ_ONLY``
+   as emitted by no tool (L-138); the name is resolved through ``mcp_server``.
 
 Helper calls are followed transitively within ``mcp_server`` only. Codes
 raised deeper in the service layer are out of scope on purpose: those surface
@@ -35,8 +39,18 @@ import inspect
 _FORMATTERS = frozenset({"_error_response", "make_error_payload"})
 
 
+def _named_code(node: ast.AST) -> str | None:
+    """The code a NAME stands for in ``mcp_server`` (path 4), if it is one."""
+    if not isinstance(node, ast.Name):
+        return None
+    from core_api import mcp_server
+
+    value = getattr(mcp_server, node.id, None)
+    return value if isinstance(value, str) and value.isupper() else None
+
+
 def _literal_codes(node: ast.AST) -> set[str]:
-    """Codes written as literals anywhere under ``node`` (paths 1 and 2)."""
+    """Codes written as literals, or passed by name, under ``node`` (1, 2, 4)."""
     found: set[str] = set()
     for sub in ast.walk(node):
         if isinstance(sub, ast.Call):
@@ -45,18 +59,22 @@ def _literal_codes(node: ast.AST) -> set[str]:
                 first = sub.args[0]
                 if isinstance(first, ast.Constant) and isinstance(first.value, str):
                     found.add(first.value)
+                elif (code := _named_code(first)) is not None:
+                    found.add(code)
         elif isinstance(sub, ast.Dict):
             # Always parallel: a ``**expr`` unpacking yields a None KEY, not a
             # missing one, so a length mismatch would mean this assumption is wrong.
             for key, value in zip(sub.keys, sub.values, strict=True):
+                if not (isinstance(key, ast.Constant) and key.value == "code"):
+                    continue
                 if (
-                    isinstance(key, ast.Constant)
-                    and key.value == "code"
-                    and isinstance(value, ast.Constant)
+                    isinstance(value, ast.Constant)
                     and isinstance(value.value, str)
                     and value.value.isupper()
                 ):
                     found.add(value.value)
+                elif (code := _named_code(value)) is not None:
+                    found.add(code)
     return found
 
 

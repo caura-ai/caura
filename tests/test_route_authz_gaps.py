@@ -341,6 +341,32 @@ async def test_redistribute_moves_the_rows_and_promotes_scope_agent(
         assert (row["agent_id"], row["visibility"]) == ("target-agent", "scope_team")
 
 
+async def test_a_status_change_is_audited_as_its_caller_not_the_owner(
+    client, as_auth, sc, monkeypatch
+):
+    """L-09: the audit row named the memory's owner as the one who acted.
+
+    MCP's ``caura_manage op=transition`` had the same attribution; its test is
+    in tests/test_mcp_matches_rest.py.
+    """
+    from core_api.routes import memories as memories_route
+
+    tenant = f"tenant-{_uid()}"
+    memory_id = await _seed_owned_memory(sc, tenant, "bob", "scope_team")
+    audit = AsyncMock()
+    monkeypatch.setattr(memories_route, "log_action", audit)
+
+    as_auth(tenant, agent_id=None)
+    resp = await client.patch(
+        f"/api/v1/memories/{memory_id}/status?tenant_id={tenant}",
+        json={"status": "archived"},
+    )
+    assert resp.status_code == 200, resp.text
+    sent = audit.await_args.kwargs
+    assert sent["agent_id"] != "bob"
+    assert sent["detail"]["owner_agent_id"] == "bob"
+
+
 # ---------------------------------------------------------------------------
 # S4 — STM write endpoints honor read-only / agent binding
 # ---------------------------------------------------------------------------

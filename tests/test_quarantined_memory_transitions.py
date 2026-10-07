@@ -81,6 +81,7 @@ async def test_a_person_releases_or_rejects_a_held_memory(storage, exit_status, 
     assert audit["detail"] == {
         "old_status": QUARANTINED_MEMORY_STATUS,
         "new_status": exit_status,
+        "owner_agent_id": "a1",
         "user_id": "user-7",
         "surface": "prism",
     }
@@ -132,7 +133,11 @@ async def test_an_ordinary_transition_is_unchanged(storage, auth):
     assert storage["update"].await_args.kwargs["release_hold"] is False
     audit = storage["audit"].await_args.kwargs
     assert audit["action"] == "status_update"
-    assert audit["detail"] == {"old_status": "active", "new_status": "outdated"}
+    assert audit["detail"] == {
+        "old_status": "active",
+        "new_status": "outdated",
+        "owner_agent_id": "a1",
+    }
 
 
 @pytest.mark.parametrize(

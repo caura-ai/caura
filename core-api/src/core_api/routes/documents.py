@@ -1,7 +1,6 @@
 """Document Store — structured JSONB records for agents."""
 
 import logging
-import re
 from datetime import datetime
 
 import httpx
@@ -14,7 +13,7 @@ from core_api import openapi_responses as _oar
 from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
-from core_api.constants import DEFAULT_DOC_SEARCH_TOP_K, MAX_DOC_SEARCH_TOP_K
+from core_api.constants import DEFAULT_DOC_SEARCH_TOP_K, MAX_DOC_SEARCH_TOP_K, SKILL_SLUG_RE
 from core_api.errors import AUTH_AGENT_TRUST_TOO_LOW, coded_detail
 from core_api.middleware.idempotency import (
     IDEMPOTENCY_HEADER,
@@ -61,13 +60,10 @@ router = APIRouter(tags=["Document Store"])
 # data["description"] for the skills collection only — see
 # core_api.services.doc_indexing).
 SKILLS_COLLECTION = "skills"
-# Optional ``forge/`` or ``agent/`` prefix supports the Skill Factory's
-# doc_id namespacing (plan §3): Forge candidates land as ``forge/<slug>``
-# and synchronous agent-direct writes via ``caura_doc`` land as
-# ``agent/<slug>``. Without this, Forge's own writes 422 themselves at
-# the route boundary. ``manual``/``imported`` rows keep the plain
-# ``<slug>`` shape — the prefix is opt-in, not required.
-_SKILL_SLUG_RE = re.compile(r"^(?:forge/|agent/)?[a-z0-9][a-z0-9._-]{0,99}$")
+# Shared with MCP ``caura_doc``; see ``core_api.constants.SKILL_SLUG_RE`` for
+# the ``forge/`` / ``agent/`` namespacing. Without the prefix, Forge's own
+# writes would 422 themselves at the route boundary.
+_SKILL_SLUG_RE = SKILL_SLUG_RE
 
 # Skill Factory SF-005 — Rollback metadata for applied skills.
 #

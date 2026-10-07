@@ -2,6 +2,7 @@
 
 import importlib.metadata
 import os
+import re
 from pathlib import Path
 
 # Re-export DB-query constants from common (shared with core-storage-api).
@@ -1192,3 +1193,12 @@ KEYSTONES_EMPTY_HINT = (
     "call failed. Until rules exist, standing constraints have to travel in "
     "recall instead of being pinned here."
 )
+
+
+# A ``skills`` doc_id, on REST ``POST /documents`` and MCP ``caura_doc`` alike
+# (L-105: MCP kept its own copy without the prefix). Slugs become directory
+# names on plugin-side reconciliation, so the shape is filesystem-safe. The
+# optional ``forge/`` or ``agent/`` prefix is the Skill Factory's doc_id
+# namespacing: Forge candidates land as ``forge/<slug>`` and agent-direct
+# writes as ``agent/<slug>``; ``manual``/``imported`` rows keep plain ``<slug>``.
+SKILL_SLUG_RE = re.compile(r"^(?:forge/|agent/)?[a-z0-9][a-z0-9._-]{0,99}$")

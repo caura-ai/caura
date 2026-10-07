@@ -11,17 +11,18 @@ from ._registry import register
 from ._types import OpSpec, ToolSpec
 
 # Served to BOTH surfaces: MCP reads it from the registry, and the plugin gets
-# the same text via /tool-descriptions. The plugin dispatches over REST and has
-# no endpoint for bulk_delete or lineage, so naming them MCP-only is
-# load-bearing — and the two clauses about them travel together or not at all,
-# since naming lineage without the caveat advertises it to the one surface that
-# cannot serve it.
+# the same text via /tool-descriptions. The plugin has no dispatch for
+# bulk_delete or lineage, so naming that gap is load-bearing — and the two
+# clauses about them travel together or not at all, since naming lineage
+# without the caveat advertises it to the one surface that cannot serve it. It
+# is the PLUGIN's gap, not MCP's: REST serves both (POST /memories/bulk-delete,
+# GET /memories/{id}/contradictions), so "MCP-only" was wrong (L-137).
 #
 # Every token here is charged to every session's tools/list
 # (tests/test_mcp_token_budget.py records the arithmetic), so say only what the
 # inputSchema does not already carry.
 _DESCRIPTION = (
-    "Per-memory lifecycle. bulk_delete and lineage are MCP-only; lineage returns "
+    "Per-memory lifecycle. bulk_delete and lineage are not in the plugin; lineage returns "
     "the supersession chain. "
     "update patches fields and re-embeds if content changes. "
     "transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). "

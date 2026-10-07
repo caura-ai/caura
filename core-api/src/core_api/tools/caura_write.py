@@ -33,6 +33,7 @@ _SPEC = ToolSpec(
         "INVALID_ARGUMENTS",
         "INVALID_BATCH_ITEM",
         "MISSING_AGENT_ID",
+        "PLAN_LIMIT_READ_ONLY",
         "UNAUTHORIZED",
     ),
 )

@@ -2226,13 +2226,21 @@ async def update_memory_status(
     # A release or reject names the person who decided it.
     await log_action(
         tenant_id=tenant_id,
-        agent_id=memory.get("agent_id"),
+        # Whoever acted, not the row's owner, which goes in ``detail`` (L-09). A
+        # tenant credential carries no agent, so it logs none rather than the
+        # owner's; the actor fields name the person on a release or reject.
+        agent_id=auth.agent_id,
         action=("quarantine.release" if status == "active" else "quarantine.reject")
         if held
         else "status_update",
         resource_type="memory",
         resource_id=memory_id,
-        detail={"old_status": old_status, "new_status": status, **(auth.audit_actor() if held else {})},
+        detail={
+            "old_status": old_status,
+            "new_status": status,
+            "owner_agent_id": memory.get("agent_id"),
+            **(auth.audit_actor() if held else {}),
+        },
     )
     if held and status == "active":
         # g2.8 — the work the held write skipped (enrichment, governance, its

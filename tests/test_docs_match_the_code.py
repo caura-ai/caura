@@ -192,7 +192,12 @@ def test_l156_plugin_upgrade_table_matches_the_manifest_deploy() -> None:
 def test_l157_agent_key_provisioning_is_marked_managed_only() -> None:
     from core_api.app import app
 
-    assert [r for r in app.routes if "agent-keys" in getattr(r, "path", "")] == []
+    # The schema, not ``app.routes``, where included routers are opaque and a
+    # walk finds nothing (tests/_route_table.py); the first assert proves this
+    # one sees the API at all.
+    paths = app.openapi()["paths"]
+    assert "/api/v1/memories" in paths
+    assert [path for path in paths if "agent-keys" in path] == []
     docs = (
         "README.md",
         "docs/public-api-stability.md",
