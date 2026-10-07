@@ -30,7 +30,7 @@ when to add or move an operation.
 | Bulk delete | REST + MCP (`caura_manage op=bulk_delete`) | Admin sometimes; agents cleaning up after themselves sometimes. |
 | Memory lineage walk | REST + MCP (`caura_manage op=lineage`) | Agents reviewing their own writes need to trace supersession chains. |
 | Knowledge graph / `/graph` | REST only | Aggregation surface for UIs and analytics tools. Agents that need entity context use `caura_entity_get` (single entity) and `caura_recall` (with entity_links in results). |
-| Memory stats | REST + MCP (`caura_stats`) | Aggregate counts (total + breakdown by type, agent, status; opt-in `include_deleted=true` adds `deleted` and `total_including_deleted`) — useful for admin/dashboard usage on REST and for agent self-introspection on MCP. Read-only aggregations don't need a use-case gate. |
+| Memory stats | REST + MCP (`caura_stats`) | Aggregate counts (total + breakdown by type, agent, status; opt-in `include_deleted=true` adds `deleted` and `total_including_deleted`; trust 3 for agent credentials on both surfaces) — useful for admin/dashboard usage on REST and for agent self-introspection on MCP. Read-only aggregations don't need a use-case gate. |
 | Skill sharing | REST (`/documents` + `/documents/search` on `collection="skills"`) + MCP (`caura_doc op=write\|read\|query\|delete\|search collection=skills`) | Skill sharing rides the generic document surface. Slugs (`doc_id`) are constrained to `^[a-z0-9][a-z0-9._-]{0,99}$` (filesystem-safe), and skills writes require `data["summary"]` (with back-compat fallback to `data["description"]`) so the catalog is semantic-searchable without ceremony. The dedicated `memclaw_share_skill`/`memclaw_unshare_skill` <!-- legacy-name-floor: names the removed share/unshare tools --> tools and `/skills/*` REST routes were dropped 2026-05; fleet auto-install (push to every node) is restored by Phase A's plugin-side reconciler. Trust ≥ 1 (inherited from `caura_doc`). |
 | Keystones (mandatory rules) | REST (`/keystones`; supported legacy route `/memclaw/keystones` <!-- legacy-name-floor: documents the compatibility route -->) + MCP (`caura_keystones` read, `caura_keystones_set` set\|delete) | Governance policies that agents MUST obey — fetched deterministically (no semantic search) and injected into every session by the OpenClaw plugin. Storage lives in the system-managed `_keystones` collection on `documents`; the dedicated surface exists so the read tool stays discoverable in MCP `instructions` and the write surface can be trust-gated separately. Reads are open. Writes are tiered: a freshly-registered (trust ≥ 1) agent can author its own rule — `scope=agent` carrying an explicit `agent_id` equal to the caller, i.e. self-authored autonomy — but `scope=fleet`, `scope=tenant`, cross-agent `scope=agent`, and `scope=agent` with `agent_id` omitted all stay at trust ≥ 2 so a default-trust agent (or a prompt-injected one) can't plant a tenant-wide rule. The explicit `agent_id` is the precondition for the self-author tier: a payload that names no target agent isn't self-authored, so it gets the ≥ 2 bar (and storage rejects the shape anyway — "scope=agent requires agent_id"). |
 | Tenant settings | REST only | Settings are a tenant-administrator concern; not safe for arbitrary agents to flip global config. |
@@ -87,10 +87,14 @@ independently of ownership decisions:
 - **Response shape drift on `recall`**: REST `/recall` returns
   `{query, summary, memory_count, memories, items, recall_ms}`; MCP
   `caura_recall(include_brief=true)` returns
-  `{results, items, count, brief: <REST-recall-response>}`. Both dual-emit
-  the row list under `items` now, so that key is the safe one to read on
-  either surface — but the rest of the envelope (and the nesting of the
-  brief) still differs for one conceptual operation. Pick one and align.
+  `{results, items, count, brief: <REST-recall-response>}`. `memories` is
+  the key to read on a recall brief and `items` on a search result: both
+  first-party SDKs already do exactly that. The `items` mirror on REST
+  `/recall` is back-compat only — it doubles the payload (ax-0917-h-03),
+  so REST callers can send `items_alias: false` and the MCP brief has
+  already dropped it, since that payload carries the same rows under
+  `results`/`items` anyway. The rest of the envelope (and the nesting of
+  the brief) still differs for one conceptual operation. Pick one and align.
   `summary` behaves the same on both: the model is prompted to reason step
   by step and to close with a `**Answer:**` line, and the server surfaces
   only that final answer — callers get the answer, not the scaffold, and

@@ -30,7 +30,6 @@ from core_api.middleware.request_timeout import RequestTimeoutMiddleware
 from core_api.suppression import use_suppression_lookup
 
 
-
 async def _suppression_lookup(tenant):
     return await get_presence_storage_client().is_tenant_suppressed(tenant)
 

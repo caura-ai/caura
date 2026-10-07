@@ -16,10 +16,15 @@ First dedicated coverage for ``core_api.routes.skills_inbox``:
   tenant member; everything is behind ``skills_factory.enabled``.
 - Per-action status matrices, body validation (422s), and the TOCTOU
   409 guards.
+- Quarantined skills (M-120, owner decision 2026-10-05): the list's
+  ``status=quarantined`` view, and approve's ``override_quarantine``,
+  which needs a reason, is audited, and never lifts a fatal finding.
 
 All tests are pure unit tests — storage, settings, Sentinel, and the
 skill-write validator are patched at the module seam; no DB.
 """
+
+import logging
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -29,7 +34,7 @@ from core_api import errors
 from core_api.app import http_exception_handler as _http_exception_handler
 from core_api.auth import AuthContext, get_auth_context
 from core_api.routes import skills_inbox as si
-from core_api.services.forge.sentinel_scan import ScanResult
+from core_api.services.forge.sentinel_scan import ScanFinding, ScanResult
 
 pytestmark = pytest.mark.unit
 
@@ -265,6 +270,7 @@ def make_client(
     # every pre-existing test in this file keeps exercising the same caller.
     capabilities: set[str] | None = None,
     is_demo: bool = False,
+    user_id: str | None = None,
 ) -> AsyncClient:
     app = FastAPI()
     app.include_router(si.router, prefix="/api/v1")
@@ -281,6 +287,7 @@ def make_client(
         is_admin=is_admin,
         capabilities=capabilities,
         is_demo=is_demo,
+        user_id=user_id,
     )
 
     async def _auth_dep():
@@ -787,6 +794,168 @@ async def test_approve_concurrent_status_flip_409(storage, settings, side_effect
 
 
 # ---------------------------------------------------------------------------
+# Quarantined skills: review and override (M-120)
+# ---------------------------------------------------------------------------
+
+DESTRUCTIVE = ScanFinding(
+    code="DESTRUCTIVE_COMMAND",
+    severity="critical",
+    message="rm -rf / in content",
+    locator="data.content",
+)
+OVERRIDABLE_SCAN = ScanResult(
+    state="quarantined",
+    scanned_at="2026-07-20T00:00:00+00:00",
+    critical=1,
+    warn=0,
+    info=0,
+    findings=(DESTRUCTIVE,),
+)
+OVERRIDE = {"override_quarantine": True, "reason": "reviewed: it wipes a sandbox"}
+
+
+def quarantined_doc() -> dict:
+    return forge_doc(
+        status="quarantined",
+        quarantined_at="2026-07-20T00:00:00+00:00",
+        quarantine_reason="sentinel",
+        scan=OVERRIDABLE_SCAN.as_doc_field(),
+    )
+
+
+async def test_list_shows_quarantined_skills_with_their_findings(storage, settings):
+    storage.query_rows = [quarantined_doc()]
+    async with make_client() as client:
+        r = await client.get(BASE, params={"status": "quarantined"})
+    assert r.status_code == 200, r.text
+    (query,) = storage.queries
+    assert query["where"] == {"status": "quarantined"}
+    (card,) = r.json()["items"]
+    assert card["status"] == "quarantined"
+    assert card["sentinel_scan"]["findings"][0]["code"] == "DESTRUCTIVE_COMMAND"
+
+
+async def test_list_still_defaults_to_staged(storage, settings):
+    async with make_client() as client:
+        r = await client.get(BASE)
+    assert r.status_code == 200, r.text
+    assert storage.queries[0]["where"] == {"status": "staged"}
+
+
+@pytest.mark.parametrize("status", ["active", "candidate", "rejected"])
+async def test_list_refuses_any_other_status(storage, settings, status):
+    async with make_client() as client:
+        r = await client.get(BASE, params={"status": status})
+    assert r.status_code == 422, r.text
+    assert storage.queries == []
+
+
+async def test_an_override_approves_a_quarantined_skill_and_is_audited(
+    storage, settings, side_effects
+):
+    side_effects.scan.result = OVERRIDABLE_SCAN
+    storage.seed(quarantined_doc())
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=OVERRIDE)
+    assert r.status_code == 200, r.text
+    assert r.json()["previous_status"] == "quarantined"
+    assert r.json()["new_status"] == "active"
+    (payload,) = storage.upserts
+    data = payload["data"]
+    assert data["status"] == "active"
+    # The verdict it was approved over stays on the skill, with the override.
+    assert data["scan"] == OVERRIDABLE_SCAN.as_doc_field()
+    assert data["quarantine_override"]["reason"] == OVERRIDE["reason"]
+    ((_, audit),) = side_effects.log.calls
+    assert audit["critical"] is True
+    assert audit["detail"]["override_quarantine"] is True
+    assert audit["detail"]["reason"] == OVERRIDE["reason"]
+    assert audit["detail"]["critical_codes"] == ["DESTRUCTIVE_COMMAND"]
+
+
+@pytest.mark.parametrize(
+    ("client_kw", "approver"),
+    [
+        ({"user_id": "user-7"}, "user-7"),
+        ({"org_role": None, "is_admin": True}, "admin-api-key"),
+    ],
+    ids=["gateway_user", "admin_key"],
+)
+async def test_an_override_always_names_its_approver(
+    storage, settings, side_effects, client_kw, approver
+):
+    """The admin API key carries no user, and the override must still say who
+    approved it, on the doc and in the audit row."""
+    side_effects.scan.result = OVERRIDABLE_SCAN
+    storage.seed(quarantined_doc())
+    async with make_client(**client_kw) as client:
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=OVERRIDE)
+    assert r.status_code == 200, r.text
+    assert storage.upserts[0]["data"]["quarantine_override"]["approved_by"] == approver
+    ((_, audit),) = side_effects.log.calls
+    assert audit["detail"]["approved_by"] == approver
+
+
+async def test_an_override_moves_the_quarantine_markers_into_its_record(
+    storage, settings, side_effects
+):
+    """An active skill must not look quarantined; the markers stay, as history,
+    inside ``quarantine_override``."""
+    side_effects.scan.result = OVERRIDABLE_SCAN
+    storage.seed(quarantined_doc())
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=OVERRIDE)
+    assert r.status_code == 200, r.text
+    data = storage.upserts[0]["data"]
+    assert "quarantined_at" not in data and "quarantine_reason" not in data
+    record = data["quarantine_override"]
+    assert record["quarantined_at"] == "2026-07-20T00:00:00+00:00"
+    assert record["quarantine_reason"] == "sentinel"
+
+
+async def test_an_override_approves_a_staged_skill_whose_rescan_is_critical(
+    storage, settings, side_effects
+):
+    side_effects.scan.result = OVERRIDABLE_SCAN
+    storage.seed(forge_doc())
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=OVERRIDE)
+    assert r.status_code == 200, r.text
+    assert storage.upserts[0]["data"]["status"] == "active"
+
+
+@pytest.mark.parametrize(
+    "body", [{"override_quarantine": True}, {**OVERRIDE, "reason": ""}]
+)
+async def test_an_override_needs_a_reason(storage, settings, side_effects, body):
+    storage.seed(quarantined_doc())
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=body)
+    assert r.status_code == 422, r.text
+    assert storage.upserts == []
+
+
+async def test_an_override_never_lifts_a_fatal_finding(storage, settings, side_effects):
+    too_big = ScanFinding(
+        code="BODY_TOO_LARGE", severity="critical", message="too big", fatal=True
+    )
+    side_effects.scan.result = ScanResult(
+        state="quarantined",
+        scanned_at="2026-07-20T00:00:00+00:00",
+        critical=1,
+        warn=0,
+        info=0,
+        findings=(too_big,),
+    )
+    storage.seed(quarantined_doc())
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=OVERRIDE)
+    assert r.status_code == 422, r.text
+    assert "rescan refused" in r.json()["detail"]
+    assert storage.upserts == []
+
+
+# ---------------------------------------------------------------------------
 # Reject
 # ---------------------------------------------------------------------------
 
@@ -807,6 +976,9 @@ async def test_reject_happy_path_default_cooloff(storage, settings, side_effects
     (payload,) = storage.upserts
     assert payload["data"]["status"] == "rejected"
     assert payload["data"]["rejection_reason"] == "duplicate"
+    ((_, audit),) = side_effects.log.calls
+    assert audit["detail"]["fingerprint"] == "fp:v1:abc123"
+    assert audit["detail"]["cooloff_days"] == 30
 
 
 async def test_reject_custom_cooloff(storage, settings, side_effects):
@@ -845,15 +1017,6 @@ async def test_reject_missing_reason_422(storage, settings, side_effects):
     assert side_effects.poison.calls == []
 
 
-async def test_reject_no_fingerprint_422(storage, settings, side_effects):
-    storage.seed(forge_doc(cluster_fingerprint=None))
-    async with make_client() as client:
-        r = await client.post(f"{BASE}/{SLUG}/reject", json={"reason": "r"})
-    assert r.status_code == 422
-    assert "fingerprint" in r.json()["detail"]
-    assert side_effects.poison.calls == []
-
-
 async def test_reject_concurrent_approve_409_before_poison(
     storage, settings, side_effects
 ):
@@ -868,6 +1031,138 @@ async def test_reject_concurrent_approve_409_before_poison(
     assert r.status_code == 409
     assert side_effects.poison.calls == []
     assert storage.upserts == []
+
+
+async def test_reject_concurrent_approve_at_the_second_reload_409_before_poison(
+    storage, settings, side_effects
+):
+    """A Forge candidate still gets both reloads before the poison write: an
+    Approve that lands after the first one must still stop the reject."""
+    storage.doc_sequence = [
+        forge_doc(),  # initial load: staged
+        forge_doc(),  # first reload: staged
+        forge_doc(status="active"),  # second reload: concurrently approved
+    ]
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/reject", json={"reason": "r"})
+    assert r.status_code == 409
+    assert side_effects.poison.calls == []
+    assert storage.upserts == []
+
+
+async def test_reject_fingerprint_gone_on_reload_still_422(
+    storage, settings, side_effects
+):
+    """A Forge candidate whose fingerprint is gone on the reload is refused,
+    not rejected the way an agent's skill is: it came from a cluster, and
+    that cluster is what its reject has to poison."""
+    storage.doc_sequence = [forge_doc(), forge_doc(cluster_fingerprint=None)]
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/reject", json={"reason": "r"})
+    assert r.status_code == 422
+    assert "no fingerprint after reload" in r.json()["detail"]
+    assert side_effects.poison.calls == []
+    assert storage.upserts == []
+
+
+# A skill an agent wrote through the documents API, as the lifecycle stages it
+# when the factory is on. Forge did not derive it, so it has no cluster: no
+# ``cluster_fingerprint``, and none of a cluster's evidence.
+AGENT_SLUG = "rotate-staging-keys"
+
+
+def agent_doc(**data_overrides) -> dict:
+    doc = forge_doc(
+        slug=AGENT_SLUG,
+        source="agent",
+        origin={"agent_id": "agent-7"},
+        **data_overrides,
+    )
+    for key in ("cluster_fingerprint", "cites", "evidence", "goal"):
+        doc["data"].pop(key, None)
+    doc["doc_id"] = AGENT_SLUG
+    return doc
+
+
+@pytest.mark.parametrize("status", ["staged", "quarantined"])
+async def test_reject_without_a_fingerprint_skips_the_poison_write(
+    storage, settings, side_effects, status
+):
+    """An agent's skill has no cluster to poison. Reject used to answer 422
+    for it, so no skill an agent staged could be rejected at all."""
+    storage.seed(agent_doc(status=status))
+    async with make_client() as client:
+        r = await client.post(
+            f"{BASE}/{AGENT_SLUG}/reject", json={"reason": "not ours"}
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["previous_status"] == status
+    assert body["new_status"] == "rejected"
+    assert body["detail"] == "no cluster fingerprint, so no cooloff was set"
+    assert side_effects.poison.calls == []
+    (payload,) = storage.upserts
+    assert payload["data"]["status"] == "rejected"
+    assert payload["data"]["rejection_reason"] == "not ours"
+    # Audited as any reject is, with nothing put on cooloff.
+    ((_, audit),) = side_effects.log.calls
+    assert audit["action"] == "skill_inbox_reject"
+    assert audit["detail"]["fingerprint"] is None
+    assert audit["detail"]["cooloff_days"] is None
+
+
+async def test_reject_without_a_fingerprint_ignores_cooloff_days(
+    storage, settings, side_effects
+):
+    """With no cluster, an explicit cooloff has nothing to act on. The reject
+    goes through and says so, rather than failing over an option that would
+    change nothing."""
+    storage.seed(agent_doc())
+    async with make_client() as client:
+        r = await client.post(
+            f"{BASE}/{AGENT_SLUG}/reject", json={"reason": "r", "cooloff_days": 7}
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["detail"] == (
+        "no cluster fingerprint, so no cooloff was set; cooloff_days was ignored"
+    )
+    assert side_effects.poison.calls == []
+    ((_, audit),) = side_effects.log.calls
+    assert audit["detail"]["cooloff_days"] is None
+
+
+async def test_reject_without_a_fingerprint_409s_on_a_concurrent_approve(
+    storage, settings, side_effects
+):
+    """With no poison write to guard, the reload still guards the status flip:
+    an Approve that lands first must not be overwritten with ``rejected``."""
+    storage.doc_sequence = [
+        agent_doc(),  # initial load: staged
+        agent_doc(status="active"),  # reload: concurrently approved
+    ]
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{AGENT_SLUG}/reject", json={"reason": "r"})
+    assert r.status_code == 409
+    assert storage.upserts == []
+
+
+async def test_reject_without_a_fingerprint_failed_flip_reports_no_poison_row(
+    storage, settings, side_effects, monkeypatch, caplog
+):
+    """A failed status flip after a poison write is logged as needing manual
+    repair. No poison row was written for an agent's skill, and saying one
+    was would send an operator looking for a row that doesn't exist."""
+    storage.seed(agent_doc())
+
+    async def fail(payload):
+        raise RuntimeError("storage down")
+
+    monkeypatch.setattr(storage, "upsert_document", fail)
+    with caplog.at_level(logging.ERROR, logger=si.logger.name):
+        async with make_client() as client:
+            with pytest.raises(RuntimeError):
+                await client.post(f"{BASE}/{AGENT_SLUG}/reject", json={"reason": "r"})
+    assert "poison" not in caplog.text
 
 
 # ---------------------------------------------------------------------------

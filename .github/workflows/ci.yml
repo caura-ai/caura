@@ -2,13 +2,30 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev, feat/agent-collaboration, feat/collaboration-benchmark]
 
 env:
   PYTHON_VERSION: "3.13"
   UV_VERSION: "0.9.26"
 
 jobs:
+  evidence-registry:
+    name: Evidence registry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned JSON Schema validator
+        run: python3 -m pip install --disable-pip-version-check -r scripts/requirements-evidence.txt
+
+      - name: Validate claims and generated benchmark copy
+        run: python3 scripts/evidence_registry.py --check
+
   ci:
     name: CI
     runs-on: ubuntu-latest
@@ -39,6 +56,9 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
+
+      - name: Install reviewer sandbox and smoke-test pinned CLI (no API calls)
+        run: bash .github/scripts/install_review_sandbox.sh
 
       - name: Check plugin version-sync (gen-version.sh → src/version.ts)
         # Fails fast if plugin/src/version.ts has drifted from
@@ -151,7 +171,7 @@ jobs:
           fi
 
       - name: Run Ruff linter (core-api)
-        run: uv run ruff check core-api/src/
+        run: uv run ruff check core-api/src/ core-api/tests/
 
       - name: Run Ruff linter (core-storage-api)
         run: uv run ruff check core-storage-api/src/
@@ -223,7 +243,7 @@ jobs:
         run: uv run ruff check tests/
 
       - name: Run Ruff formatter check (core-api)
-        run: uv run ruff format --check core-api/src/
+        run: uv run ruff format --check core-api/src/ core-api/tests/
 
       - name: Run Ruff formatter check (core-storage-api)
         run: uv run ruff format --check core-storage-api/src/
@@ -550,6 +570,22 @@ jobs:
             --include="core-storage-api/src/core_storage_api/*" || status=1
           exit "$status"
 
+      - name: Run core-api unit tests
+        # core-api/tests/ is core-api's own tree, separate from the repo-root
+        # tests/ above, and no step ran it — an explicit path overrides the
+        # root pytest.ini's ``testpaths``. It holds the only regression cover
+        # for the tenantless ``AuthContext.enforce_tenant(None)`` write gate
+        # and for broker write attribution (``_broker_write_agent_id``), so a
+        # revert of either would have merged green.
+        # ``tests/test_ci_runs_every_service_test_tree.py`` now fails if any
+        # service tree drops out of the pytest or ruff steps.
+        #
+        # No env, deliberately: these are pure unit tests (no database, no
+        # settings), and the root pytest.ini — which pytest resolves for this
+        # path, since core-api/pyproject.toml carries no pytest table — puts
+        # core-api/src and the repo root on the path.
+        run: uv run pytest core-api/tests/ -v --tb=short
+
       - name: Create the storage-suite database
         # Its own database, NOT the one `tests/` uses. The two suites provision
         # differently — `tests/` conftest calls Base.metadata.create_all, the
@@ -652,7 +688,7 @@ jobs:
           COVERAGE_FILE: .coverage.core-worker
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ./coverage.xml
           fail_ci_if_error: false
@@ -749,6 +785,20 @@ jobs:
           )"
           docker tag core-storage-api-readmetest "$compose_image"
 
+      # M-109: the stock stack runs the lifecycle scheduler. ``--no-build`` below
+      # needs its image too, under the name Compose resolves for it.
+      - name: Build core-operations image for README quickstart
+        run: |
+          docker build --platform linux/amd64 --target runtime \
+            -t core-operations-readmetest \
+            -f core-operations/Dockerfile .
+          compose_image="$(
+            docker compose --env-file /dev/null --file docker-compose.yml \
+              --project-name "$README_COMPOSE_PROJECT" config --format json |
+              python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["core-operations"]["image"])'
+          )"
+          docker tag core-operations-readmetest "$compose_image"
+
       - name: Start the documented keyless stack
         run: |
           if [ ! -f .env.example ] || [ -L .env.example ]; then
@@ -764,6 +814,27 @@ jobs:
 
       - name: Run README write-and-search curl block
         run: python3 scripts/check_readme_quickstart.py
+
+      # M-109: every scheduler tick calls an admin-only core-api endpoint with the
+      # key admin-key-init generated. If the two services resolved different keys,
+      # every tick would 403 while both containers report healthy, so call one
+      # read-only admin endpoint from inside the scheduler's container, with the
+      # key its own settings resolved.
+      - name: Assert the bundled scheduler reaches core-api's admin plane
+        run: |
+          docker compose --env-file /dev/null --file docker-compose.yml \
+            --project-name "$README_COMPOSE_PROJECT" \
+            exec -T core-operations python -c '
+          import httpx
+          from core_operations.config import settings
+          resp = httpx.get(
+              f"{settings.core_api_url}/api/v1/admin/lifecycle/embedding-coverage",
+              headers={"X-API-Key": settings.core_api_admin_api_key},
+              timeout=30,
+          )
+          print(resp.status_code, resp.text[:200])
+          resp.raise_for_status()
+          '
 
       - name: Show README quickstart logs on failure
         if: failure()

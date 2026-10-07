@@ -31,6 +31,12 @@ def pool_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "core_api", ModuleType("core_api"))
     monkeypatch.setitem(sys.modules, "core_api.clients", package)
     monkeypatch.setitem(sys.modules, "core_api.clients.storage_client", client_module)
+    monkeypatch.setitem(
+        sys.modules, "caura_bus_platform", ModuleType("caura_bus_platform")
+    )
+    timing_module = ModuleType("caura_bus_platform.timing")
+    timing_module.http_timing_hooks = lambda: {}
+    monkeypatch.setitem(sys.modules, "caura_bus_platform.timing", timing_module)
     settings_module = ModuleType("caura_bus_platform.settings")
     settings_module.settings = SimpleNamespace(
         http_pool_size=1,

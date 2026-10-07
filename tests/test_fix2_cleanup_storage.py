@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text
 
 from common.models import Memory
@@ -36,7 +37,7 @@ from common.models.recall_log import (  # noqa: F401 — registers tables
     RecallCandidate,
     RecallEvent,
 )
-from core_storage_api.services.postgres_service import get_session
+from core_storage_api.services.postgres_service import PostgresService, get_session
 from tests.conftest import new_tenant_id
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -63,6 +64,8 @@ async def _seed_memory(
     metadata_: dict | None = None,
     status: str = "active",
     deleted: bool = False,
+    agent_id: str = "agent-1",
+    fleet_id: str | None = None,
 ) -> str:
     mem_id = uuid4()
     async with get_session() as session:
@@ -70,7 +73,8 @@ async def _seed_memory(
             Memory(
                 id=mem_id,
                 tenant_id=tenant_id,
-                agent_id="agent-1",
+                fleet_id=fleet_id,
+                agent_id=agent_id,
                 memory_type=memory_type,
                 content=content,
                 run_id=run_id,
@@ -453,11 +457,26 @@ async def test_capability_usage_bad_ts_bucket_422(storage_http):
 # ===========================================================================
 
 
-async def test_prior_ingest_returns_newest_run(storage_http):
+# The caller the preview path names: ``_seed_memory``'s default agent, no fleet.
+_CALLER = {"agent_id": "agent-1", "fleet_id": None}
+
+
+async def _prior(storage_http, tenant, doc_hash, **scope):
+    resp = await storage_http.post(
+        f"{_PREFIX}/memories/prior-ingest-by-doc-hash",
+        json={"tenant_id": tenant, "doc_hash": doc_hash, **(scope or _CALLER)},
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["rows"]
+
+
+async def test_prior_ingest_returns_every_live_run_newest_first(storage_http):
+    """M-47: the union of the caller's runs, not just the newest one.
+
+    Keeping only the newest run served a re-ingest's complement (the facts an
+    earlier partial run had not stored) as the whole document."""
     tenant = _t()
     doc_hash = f"hash-{uuid4().hex}"
-    # Two prior ingests of the same content; the lookup returns only the
-    # NEWEST run's memories.
     old = await _seed_memory(
         tenant_id=tenant,
         content="old run fact",
@@ -473,21 +492,63 @@ async def test_prior_ingest_returns_newest_run(storage_http):
         metadata_={"doc_hash": doc_hash, "source": "ingest"},
     )
 
-    resp = await storage_http.post(
-        f"{_PREFIX}/memories/prior-ingest-by-doc-hash",
-        json={"tenant_id": tenant, "doc_hash": doc_hash},
-    )
-    assert resp.status_code == 200
-    rows = resp.json()["rows"]
-    ids = {r["id"] for r in rows}
-    # Newest run wins; the older run's memory is excluded.
-    assert ids == {new}
-    assert old not in ids
-    # Shape carries what ingest_preview consumes (run_id, content, no vector).
+    rows = await _prior(storage_http, tenant, doc_hash)
+    assert [r["id"] for r in rows] == [new, old]
+    # The newest run's row leads: preview checks that run's parent.
     r = rows[0]
     assert r["run_id"] == "run-new"
     assert r["content"] == "new run fact"
+    # Shape carries what ingest_preview consumes (run_id, content, no vector).
     assert "embedding" not in r
+    assert rows[1]["metadata_"]["salience"] == 0.5
+
+
+async def test_prior_ingest_keeps_one_row_per_fact(storage_http):
+    """The same fact stored by two runs is served once, from the newer run."""
+    tenant = _t()
+    doc_hash = f"hash-{uuid4().hex}"
+    for run_id in ("run-1", "run-2"):
+        last = await _seed_memory(
+            tenant_id=tenant,
+            content="the same fact",
+            run_id=run_id,
+            metadata_={"doc_hash": doc_hash, "source": "ingest"},
+        )
+    rows = await _prior(storage_http, tenant, doc_hash)
+    assert [r["id"] for r in rows] == [last]
+
+
+async def test_prior_ingest_serves_only_the_callers_agent_and_fleet(storage_http):
+    """L-74 / L-31: a peer's or another fleet's run is never the caller's cache.
+
+    Tenant-wide, a peer's commit carrying the same (caller-supplied) doc_hash was
+    served to everyone as the cached extraction, with the peer's run_id."""
+    tenant = _t()
+    doc_hash = f"hash-{uuid4().hex}"
+    meta = {"doc_hash": doc_hash, "source": "ingest"}
+    mine = await _seed_memory(
+        tenant_id=tenant, content="mine", run_id="run-mine", metadata_=meta
+    )
+    await _seed_memory(
+        tenant_id=tenant,
+        content="a peer's",
+        run_id="run-peer",
+        metadata_=meta,
+        agent_id="agent-2",
+    )
+    in_f2 = await _seed_memory(
+        tenant_id=tenant,
+        content="mine in f2",
+        run_id="run-f2",
+        metadata_=meta,
+        fleet_id="f2",
+    )
+
+    assert [r["id"] for r in await _prior(storage_http, tenant, doc_hash)] == [mine]
+    in_fleet = await _prior(
+        storage_http, tenant, doc_hash, agent_id="agent-1", fleet_id="f2"
+    )
+    assert [r["id"] for r in in_fleet] == [in_f2]
 
 
 async def test_prior_ingest_no_match_returns_empty(storage_http):
@@ -498,12 +559,7 @@ async def test_prior_ingest_no_match_returns_empty(storage_http):
         run_id="run-1",
         metadata_={"doc_hash": "hash-A", "source": "ingest"},
     )
-    resp = await storage_http.post(
-        f"{_PREFIX}/memories/prior-ingest-by-doc-hash",
-        json={"tenant_id": tenant, "doc_hash": "hash-DIFFERENT"},
-    )
-    assert resp.status_code == 200
-    assert resp.json() == {"rows": []}
+    assert await _prior(storage_http, tenant, "hash-DIFFERENT") == []
 
 
 async def test_prior_ingest_ignores_deleted_and_non_ingest(storage_http):
@@ -523,21 +579,15 @@ async def test_prior_ingest_ignores_deleted_and_non_ingest(storage_http):
         run_id="run-other",
         metadata_={"doc_hash": doc_hash, "source": "mcp_write"},
     )
-    resp = await storage_http.post(
-        f"{_PREFIX}/memories/prior-ingest-by-doc-hash",
-        json={"tenant_id": tenant, "doc_hash": doc_hash},
-    )
-    assert resp.status_code == 200
-    assert resp.json() == {"rows": []}
+    assert await _prior(storage_http, tenant, doc_hash) == []
 
 
-async def test_prior_ingest_null_run_id_returns_single_newest(storage_http):
-    # When matching rows have run_id IS NULL, the newest-run filter must NOT
-    # collapse every null-run_id ingest into one result (Python None==None).
-    # The guard returns only the single newest row.
+async def test_prior_ingest_keeps_rows_without_a_run_id(storage_http):
+    # Rows with run_id IS NULL are live facts of the document like any other;
+    # the union keeps them, newest first.
     tenant = _t()
     doc_hash = f"hash-{uuid4().hex}"
-    await _seed_memory(
+    old = await _seed_memory(
         tenant_id=tenant,
         content="anon old",
         run_id=None,
@@ -549,13 +599,25 @@ async def test_prior_ingest_null_run_id_returns_single_newest(storage_http):
         run_id=None,
         metadata_={"doc_hash": doc_hash, "source": "ingest"},
     )
-    resp = await storage_http.post(
-        f"{_PREFIX}/memories/prior-ingest-by-doc-hash",
-        json={"tenant_id": tenant, "doc_hash": doc_hash},
+    rows = await _prior(storage_http, tenant, doc_hash)
+    assert [r["id"] for r in rows] == [new, old]
+
+
+async def test_prior_ingest_never_loads_the_vectors():
+    """L-192: the lookup leaves the 1024-dim embedding and the tsvector unread."""
+    tenant = _t()
+    doc_hash = f"hash-{uuid4().hex}"
+    await _seed_memory(
+        tenant_id=tenant,
+        content="a fact",
+        run_id="run-1",
+        metadata_={"doc_hash": doc_hash, "source": "ingest"},
     )
-    assert resp.status_code == 200
-    rows = resp.json()["rows"]
-    assert {r["id"] for r in rows} == {new}
+    rows = await PostgresService().find_prior_ingest_by_doc_hash(
+        tenant, doc_hash, **_CALLER
+    )
+    assert len(rows) == 1
+    assert {"embedding", "search_vector"} <= sa_inspect(rows[0]).unloaded
 
 
 async def test_malformed_json_body_returns_422(storage_http):
@@ -579,12 +641,7 @@ async def test_prior_ingest_tenant_isolation(storage_http):
         metadata_={"doc_hash": doc_hash, "source": "ingest"},
     )
     # Tenant B asks for the same doc_hash → must not see tenant A's memory.
-    resp = await storage_http.post(
-        f"{_PREFIX}/memories/prior-ingest-by-doc-hash",
-        json={"tenant_id": t_b, "doc_hash": doc_hash},
-    )
-    assert resp.status_code == 200
-    assert resp.json() == {"rows": []}
+    assert await _prior(storage_http, t_b, doc_hash) == []
 
 
 async def test_prior_ingest_missing_tenant_422(storage_http):
@@ -599,5 +656,14 @@ async def test_prior_ingest_missing_doc_hash_422(storage_http):
     resp = await storage_http.post(
         f"{_PREFIX}/memories/prior-ingest-by-doc-hash",
         json={"tenant_id": "t"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_prior_ingest_missing_agent_422(storage_http):
+    """The cache is the caller's own; a lookup that names no caller is refused."""
+    resp = await storage_http.post(
+        f"{_PREFIX}/memories/prior-ingest-by-doc-hash",
+        json={"tenant_id": "t", "doc_hash": "h"},
     )
     assert resp.status_code == 422

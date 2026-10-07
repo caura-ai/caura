@@ -6,6 +6,27 @@ from pydantic import Field, field_validator
 
 from .protocol import StrictModel
 
+AGENT_DESCRIPTION_MAX_LENGTH = 1000
+
+
+class AgentDescription(StrictModel):
+    """Registered, durable expertise text shown in the agent directory.
+
+    Unlike ``Presence.description`` (runtime, expires with the session), this
+    survives while the agent is offline. ``null`` or blank clears it.
+    """
+
+    description: str | None = Field(max_length=AGENT_DESCRIPTION_MAX_LENGTH)
+
+    @field_validator("description")
+    @classmethod
+    def normalized(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if any(ord(c) < 32 and c not in "\n\t" for c in value):
+            raise ValueError("description must not contain control characters")
+        return value.strip() or None
+
 
 class Presence(StrictModel):
     session_id: str = Field(min_length=1, max_length=128)

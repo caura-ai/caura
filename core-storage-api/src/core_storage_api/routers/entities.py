@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from common.constants import VECTOR_DIM
 from core_storage_api.routers._validation import _require, _require_number
@@ -62,6 +62,18 @@ async def create_entity(request: Request) -> dict:
     return orm_to_dict(entity, ENTITY_FIELDS)
 
 
+def _reader_fleets(fleet_ids: list[str] | None, bound: bool) -> list[str] | None:
+    """The agent reader's readable fleets for the entity summaries below.
+
+    ``None`` means "may cross fleets". A query string cannot carry an empty
+    list, so a reader bound to no fleet at all (only fleet-less and org rows)
+    arrives as ``caller_fleet_bound=true`` with no ``caller_fleet_ids``.
+    """
+    if not bound:
+        return None
+    return list(fleet_ids or [])
+
+
 @router.get("")
 async def list_entities(
     tenant_id: str,
@@ -70,6 +82,10 @@ async def list_entities(
     search: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    caller_agent_id: str | None = None,
+    caller_tenant_id: str | None = None,
+    caller_fleet_ids: list[str] | None = Query(default=None),
+    caller_fleet_bound: bool = False,
 ) -> list[dict]:
     # C22 — accept and forward the filters entity_list has always supported;
     # core-api declared them publicly but this hop dropped them.
@@ -80,6 +96,9 @@ async def list_entities(
         search=search,
         limit=limit,
         offset=offset,
+        caller_agent_id=caller_agent_id,
+        caller_tenant_id=caller_tenant_id,
+        caller_fleet_ids=_reader_fleets(caller_fleet_ids, caller_fleet_bound),
     )
     return [orm_to_dict(e, ENTITY_FIELDS) for e in entities]
 
@@ -123,13 +142,27 @@ async def get_entities_by_ids(request: Request) -> dict:
 async def find_exact_entity(
     tenant_id: str,
     name: str,
-    entity_type: str = "default",
+    entity_type: str | None = None,
     fleet_id: str | None = None,
 ) -> dict:
-    entity = await _svc.entity_find_exact(tenant_id, entity_type, name, fleet_id)
-    if entity is None:
+    """Exact match on the natural key; an omitted ``entity_type`` matches any.
+
+    Untyped, one name can belong to several entities, so more than one match
+    is a 409 rather than an arbitrary pick (M-25). It used to default to type
+    ``"default"``, which nothing writes, so an untyped lookup never matched.
+    """
+    if entity_type is not None:
+        entity = await _svc.entity_find_exact(tenant_id, entity_type, name, fleet_id)
+        matches = [entity] if entity is not None else []
+    else:
+        matches = await _svc.entity_find_exact_any_type(tenant_id, name, fleet_id)
+    if not matches:
         raise HTTPException(status_code=404, detail="Entity not found")
-    return orm_to_dict(entity, ENTITY_FIELDS)
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=409, detail="ambiguous: entities of more than one type share this name"
+        )
+    return orm_to_dict(matches[0], ENTITY_FIELDS)
 
 
 # ------------------------------------------------------------------
@@ -366,8 +399,18 @@ async def expand_graph(request: Request) -> dict:
 async def get_full_graph(
     tenant_id: str,
     fleet_id: str | None = None,
+    caller_agent_id: str | None = None,
+    caller_tenant_id: str | None = None,
+    caller_fleet_ids: list[str] | None = Query(default=None),
+    caller_fleet_bound: bool = False,
 ) -> dict:
-    entities, relations = await _svc.entity_get_full_graph(tenant_id, fleet_id)
+    entities, relations = await _svc.entity_get_full_graph(
+        tenant_id,
+        fleet_id,
+        caller_agent_id=caller_agent_id,
+        caller_tenant_id=caller_tenant_id,
+        caller_fleet_ids=_reader_fleets(caller_fleet_ids, caller_fleet_bound),
+    )
     return {
         "entities": [orm_to_dict(e, ENTITY_FIELDS) for e in entities],
         "relations": [orm_to_dict(r, RELATION_FIELDS) for r in relations],
@@ -391,6 +434,10 @@ async def create_relation(request: Request) -> dict:
         # already resolved as 409. A caller naming an entity it does not own is
         # a client error.
         raise HTTPException(status_code=409, detail=str(e))
+    except PermissionError as e:
+        # M-84: an agent's relation reaching outside its fleet. Nothing else
+        # here answers 403, so core-api can tell it from the 409 above.
+        raise HTTPException(status_code=403, detail=str(e))
     return orm_to_dict(relation, RELATION_FIELDS)
 
 
@@ -496,7 +543,14 @@ async def count_memories_per_entity(request: Request) -> dict:
     # this reads the field it was already being sent.
     tenant_id = _require(body, "tenant_id")
     entity_ids = [UUID(eid) for eid in body["entity_ids"]]
-    counts = await _svc.entity_count_memories_per_entity(entity_ids, tenant_id)
+    fleets = body.get("caller_fleet_ids")
+    counts = await _svc.entity_count_memories_per_entity(
+        entity_ids,
+        tenant_id,
+        caller_agent_id=body.get("caller_agent_id"),
+        caller_tenant_id=body.get("caller_tenant_id"),
+        caller_fleet_ids=_reader_fleets(fleets, fleets is not None),
+    )
     return {str(eid): count for eid, count in counts.items()}
 
 
@@ -614,15 +668,23 @@ async def infer_relations(request: Request) -> dict:
 async def list_null_embeddings(request: Request) -> dict:
     """Entities needing a name embedding (read half of backfill).
 
-    Body ``{tenant_id, fleet_id?, batch_size}``. Returns
-    ``{rows:[{id, canonical_name}, ...]}``."""
+    Body ``{tenant_id, fleet_id?, batch_size, after_id?}``. Returns
+    ``{rows:[{id, canonical_name}, ...]}`` ordered by id, after ``after_id``
+    when given (L-174)."""
     body: dict = await request.json()
     tenant_id = _require(body, "tenant_id")
     batch_size = int(_require_number(body, "batch_size"))
+    after_id = body.get("after_id")
+    if after_id is not None:
+        try:
+            after_id = str(UUID(str(after_id)))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="'after_id' must be a UUID")
     rows = await _svc.entity_list_null_embeddings(
         tenant_id=tenant_id,
         fleet_id=body.get("fleet_id"),
         batch_size=batch_size,
+        after_id=after_id,
     )
     return {"rows": rows}
 
@@ -669,12 +731,26 @@ async def set_embeddings(request: Request) -> dict:
 
 
 @router.get("/{entity_id}")
-async def get_entity(entity_id: UUID, tenant_id: str) -> dict:
+async def get_entity(
+    entity_id: UUID,
+    tenant_id: str,
+    caller_agent_id: str | None = None,
+    caller_tenant_id: str | None = None,
+    caller_fleet_ids: list[str] | None = Query(default=None),
+    caller_fleet_bound: bool = False,
+) -> dict:
     # Read guard, the mirror of ``PATCH /entities/{entity_id}`` above: the route
     # took a bare UUID and returned the whole row, so knowing an id was enough to
     # read another tenant's entity. ``tenant_id`` is a required query parameter —
-    # omitting it is a 422, not a fetch by primary key.
-    entity = await _svc.entity_get_by_id(entity_id, tenant_id)
+    # omitting it is a 422, not a fetch by primary key. An agent reader also gets
+    # the 404 for an entity the list hides from it (M-83).
+    entity = await _svc.entity_get_by_id(
+        entity_id,
+        tenant_id,
+        caller_agent_id=caller_agent_id,
+        caller_tenant_id=caller_tenant_id,
+        caller_fleet_ids=_reader_fleets(caller_fleet_ids, caller_fleet_bound),
+    )
     if entity is None:
         raise HTTPException(status_code=404, detail="Entity not found")
     return orm_to_dict(entity, ENTITY_FIELDS)
@@ -696,17 +772,50 @@ async def update_entity(entity_id: UUID, request: Request) -> dict:
     return orm_to_dict(entity, ENTITY_FIELDS)
 
 
+@router.post("/{entity_id}/merge")
+async def merge_entity(entity_id: UUID, request: Request) -> dict:
+    """An upsert's write into an existing entity (L-46): merge, never replace.
+
+    ``attributes`` are what the upsert adds: a key it names takes its value,
+    every other stored key stays, and ``_aliases`` is the union. An optional
+    ``name_embedding`` only fills a row that has none. ``PATCH`` above is the
+    replacing edit; this is what the REST upsert uses instead of PATCHing back
+    a snapshot it merged itself, which lost a concurrent writer's keys. Same
+    tenant guard and 404 as ``PATCH``. Returns the merged row.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    attributes = body.get("attributes") or {}
+    if not isinstance(attributes, dict):
+        raise HTTPException(status_code=422, detail="'attributes' must be an object")
+    entity = await _svc.entity_merge(entity_id, tenant_id, attributes, body.get("name_embedding"))
+    if entity is None:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    return orm_to_dict(entity, ENTITY_FIELDS)
+
+
 @router.get("/{entity_id}/with-memories")
 async def get_entity_with_linked_memories(
     entity_id: UUID,
     tenant_id: str,
+    caller_agent_id: str | None = None,
+    caller_tenant_id: str | None = None,
+    caller_fleet_ids: list[str] | None = Query(default=None),
+    caller_fleet_bound: bool = False,
 ) -> dict:
     # ``tenant_id`` was optional and fell back to ``entity.tenant_id`` — the
     # tenant of the row being addressed. That is not a check: it is satisfied by
     # construction for any id, and an attacker closes it by simply omitting the
     # parameter. The allowlist note calling it "self-authorizing" is retired
     # with it. Required now; the downstream link read was already scoped.
-    entity = await _svc.entity_get_by_id(entity_id, tenant_id)
+    # An agent reader gets the 404 for an entity the list hides from it (M-83).
+    entity = await _svc.entity_get_by_id(
+        entity_id,
+        tenant_id,
+        caller_agent_id=caller_agent_id,
+        caller_tenant_id=caller_tenant_id,
+        caller_fleet_ids=_reader_fleets(caller_fleet_ids, caller_fleet_bound),
+    )
     if entity is None:
         raise HTTPException(status_code=404, detail="Entity not found")
     rows = await _svc.entity_get_linked_memories(entity_id, tenant_id)

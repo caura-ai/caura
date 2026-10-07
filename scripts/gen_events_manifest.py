@@ -7,7 +7,7 @@ subscribes to in **PubSub / SaaS deployment mode** — i.e. the topics for which
 (see caura-enterprise ``terraform/.../pubsub``). It is the contract that
 lets the enterprise repo's ``check_pubsub_provisioning.py`` fail CI when OSS adds
 a consumed topic without the matching Terraform subscription — the gap that took
-staging down when ``memclaw.lifecycle.insights-requested`` shipped unprovisioned.
+staging down when an insights-requested lifecycle topic shipped unprovisioned.
 
 Lifecycle topics are captured **dynamically** by invoking the real registration
 helpers against a recording bus, so a new ``bus.subscribe`` added to a helper is

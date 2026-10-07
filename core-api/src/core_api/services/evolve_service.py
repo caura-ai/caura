@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 RULE_SKIP_REASONS: tuple[str, ...] = (
     "not_failure_or_partial",  # success outcomes don't generate rules
     "no_related_ids",  # failure/partial but no memories supplied
+    "all_out_of_scope",  # failure/partial, ids supplied, every one dropped by the scope filter (L-130)
     "no_memories_fetched",  # every storage fetch failed
     "llm_failed",  # provider raised or returned non-dict
     "below_confidence_threshold",  # rule generated but conf < threshold
@@ -802,6 +803,7 @@ async def report_outcome(
     # let the deeper stage override on a more-specific failure.
     out_of_scope_count = 0
     weight_adjustment_skipped_reason: str | None = None
+    ids_supplied = bool(related_ids)
     if not related_ids:
         weight_adjustment_skipped_reason = "no_related_ids"
     else:
@@ -847,6 +849,7 @@ async def report_outcome(
         config,
         agent_id,
         fleet_id,
+        ids_supplied=ids_supplied,
     )
 
     return await _apply_outcome_to_db(
@@ -873,6 +876,8 @@ async def _maybe_generate_rule(
     config,
     agent_id: str,
     fleet_id: str | None,
+    *,
+    ids_supplied: bool = False,
 ) -> tuple[dict | None, str | None]:
     """Decide whether to invoke ``_generate_rule`` and return ``(rule, skip_reason)``.
 
@@ -880,6 +885,11 @@ async def _maybe_generate_rule(
     first and pass it in. Lets the MCP tool fire this between two
     independent DB sessions so the multi-second LLM round-trip doesn't
     pin a pooled connection (audit P3).
+
+    ``related_ids`` is the scope-filtered list; ``ids_supplied`` says whether
+    the request named any before filtering (L-130). An empty list then means
+    ``all_out_of_scope`` rather than ``no_related_ids``, which A10 defines as
+    "no memories supplied".
 
     Returns:
       - ``(rule_dict, None)`` on a successful generation.
@@ -891,7 +901,7 @@ async def _maybe_generate_rule(
         _log_rule_skip(reason, tenant_id, outcome_type)
         return None, reason
     if not related_ids:
-        reason = "no_related_ids"
+        reason = "all_out_of_scope" if ids_supplied else "no_related_ids"
         _log_rule_skip(reason, tenant_id, outcome_type)
         return None, reason
     gen_reason, rule_result = await _generate_rule(

@@ -4,35 +4,37 @@ Operator-grade companion to the public benchmarks write-up. The blog answers *"i
 
 ## Public benchmark results
 
-|  | LoCoMo | LongMemEval | Search latency |
-|---|---|---|---|
-| Accuracy (LLM-judge) | **77.6%** | **92.2%** | — |
-| Token savings vs full context | **96.6%** | **79.2%** | — |
-| Latency | — | — | **23 ms p50 · 27 ms p95** (warm) |
+<!-- BEGIN GENERATED: evidence-benchmarks -->
+- **LoCoMo accuracy:** Caura scored 77.9% (1,199/1,540) under its documented LoCoMo semantic-judge protocol using the retrieval-augmented agentic-v1 pipeline.
+- **LongMemEval reference judge:** Caura answered 461 of 500 LongMemEval_S questions correctly (92.2%) under the benchmark's GPT-4o reference judge.
+- **LongMemEval secondary judge:** The same 500 frozen LongMemEval_S answers scored 90.2% (451/500) under the secondary Gemini 3.5 Flash-Lite judge.
+- **LongMemEval token efficiency:** On LongMemEval_S, the median compact retrieved context was 22,410 tokens versus a 107,706-token full haystack: 79.2% context-only savings; counting every reader call yields 75.4%.
 
-LoCoMo and LongMemEval are the two most-cited public agent-memory benchmarks. Both measure one agent, one user, one long conversation — the single-chatbot shape. Accuracy across the leading systems (Caura, Mem0, Zep) clusters in a narrow band.
-
-**Source:** LongMemEval, [Caura scores 92.2% on LongMemEval](https://caura.ai/blog/caura-longmemeval)
-(2026-09-15; harness and per-question verdicts at
-[caura-ai/caura-longmemeval](https://github.com/caura-ai/caura-longmemeval)).
-LoCoMo and search latency, [Fast, Token-Efficient, and Built for
-Fleets](https://caura.ai/blog/caura-benchmarks) (2026-04-19).
-
-**Last updated:** 2026-04-19. These numbers move when we re-run; check the blog for the current canonical version.
+Only active, approved claims appear here. Control, withdrawn, and withheld
+records remain in the evidence registry and are excluded from promotional copy.
+See [`../evidence/claims.json`](../evidence/claims.json) and
+[`../EVIDENCE.md`](../EVIDENCE.md). Do not hand-edit this block.
+<!-- END GENERATED: evidence-benchmarks -->
 
 ## What we optimize for
 
-Accuracy sits inside the leading cluster. That's not the axis we push hardest along.
+The approved results above cover accuracy and token efficiency. Production
+fleet decisions also require workload-specific latency and governance
+validation; no current public production-latency figure is claimed.
 
 - **Latency** — a few hundred ms of search disappears behind one LLM call when you run one agent. The same overhead, multiplied across thousands of agents making millions of recall calls a day, decides whether a deployment is viable.
-- **Token efficiency** — recall returns the relevant slice, not the full transcript. Token savings vs sending the full context to the LLM: 96–98% on the two benchmarks. That ratio is the bill at fleet scale.
+- **Token efficiency** — recall returns the relevant slice, not the full
+  transcript. Use the approved LongMemEval accounting above and keep its two
+  denominators distinct; no current LoCoMo savings figure is claimed.
 - **Governance correctness** — write a memory at the wrong scope and you've leaked data across teams. The retrieval surface enforces scope filtering by default; the audit log records every cross-scope read.
 
 ## What we measure
 
 - **Accuracy** — LLM-judge over benchmark-defined questions, not `recall@k` over a fixed gold set. The retrieval-then-answer pipeline as a whole gets the credit; this is the metric that maps to product behavior.
 - **Token efficiency** — total tokens sent to the answering LLM, divided by the same prompt + full prior context (the "no memory system" baseline).
-- **Search latency** — p50 / p95 of `POST /search` against a warm cache, single-tenant load. Cold-cache p50 is higher; we publish warm because that's the steady-state condition under real load.
+- **Search latency** — p50 / p95 of `POST /search` under an explicitly stated
+  cache state and load profile. No current public latency figure is approved;
+  publish the raw result or a reproducible harness before promoting a number.
 
 ## What these benchmarks can't measure
 
@@ -58,12 +60,13 @@ Caura differentiates on the dimensions a single-agent benchmark can't see:
 | Scoped memory (agent / fleet / cross-fleet) | A write at the wrong scope is a data leak across teams |
 | Per-agent trust tiers | Lets you trust some agents more than others without rewriting the recall path |
 | Cross-agent outcome propagation (`caura_evolve` → `caura_insights`) | One agent's mistake becomes a preventive rule the rest of the fleet sees before repeating it |
-| Latency at fleet load | 23 ms p50 search × millions of calls/day stays affordable; 250 ms doesn't |
-| Token efficiency | 96–98% savings vs full context is the bill, not a microbenchmark curiosity |
+| Latency at fleet load | Benchmark search under expected fleet concurrency; small per-call overhead compounds across a fleet |
+| Token efficiency | Context reduction compounds across every recall; measure the same denominator in your deployment |
 
 ## What to verify in your own deployment
 
-The published numbers are warm-cache, single-tenant, on our reference hardware. Before relying on them in capacity planning:
+No current public latency figure is approved. Before relying on any local
+measurement in capacity planning:
 
 - Run [`/whoami`](integration-without-plugin.md#2-verify-your-identity-whoami) round-trips against your deployment to anchor a baseline.
 - Hit `POST /search` under your expected concurrency to confirm latency holds — the search-path optimizer assumes a warm pgvector cache.

@@ -165,6 +165,10 @@ SELF_ID_PARAMS_EXCLUDED: dict[str, str] = {
         "IS gated on it"
     ),
     "agents": "fleet/heartbeat's node roster: a report about agents, not a claim to be one",
+    "bind_agent_id": (
+        "fleet node release's target: the agent key a tenant credential binds the "
+        "node to, not a claim about who the caller is (agent credentials are refused)"
+    ),
     "agent": "install-skill's runtime selector (claude-code | codex | both)",
 }
 # ``written_by`` is the nearest miss and is deliberately not here: it is an
@@ -290,7 +294,10 @@ NON_ADMIN_PLANE_ROUTERS: dict[str, str] = {
     "evolve": "agent-plane: agents report their own outcomes",
     "insights": "agent-plane: generated for the calling agent",
     "reports": "agent-plane for the digest trigger; the admin run is enforce_admin",
-    "crystallizer": "agent-plane trigger; the all-tenants sweep is enforce_admin",
+    "crystallizer": (
+        "trust-plane trigger: below trust 3 an agent runs only its own fleet; "
+        "the all-tenants sweep is enforce_admin"
+    ),
     "interview": "agent-plane submit; the scheduler run is enforce_admin",
     "plugin": "bootstrap: unauthenticated install-script rendering, no auth context",
     # TRUST-plane, not admin-plane, and the distinction is the whole design.
@@ -367,11 +374,11 @@ PLANE_GATE_ALLOWLIST: dict[str, str] = {
     # NODE-plane, not admin-plane. The plugin holds whatever credential the
     # install was given, and both of these are how a node stays live and
     # reports back (``plugin/src/heartbeat.ts`` posts them). Refusing an
-    # agent-scoped credential here would take fleets offline, which is worse
-    # than the gap it would close. Note the over-refusal guards in
-    # ``tests/test_route_authz_gaps.py`` cover read-only and demo credentials
-    # on these routes, NOT agent-scoped ones — so this line is a judgement
-    # about the deployment, not a restatement of something already tested.
+    # agent-scoped credential here would take fleets offline. What the gate
+    # would have closed is closed by binding instead (M-85): each node is bound
+    # to the credential that heartbeats it, so an agent or install credential
+    # acts only as its own node. ``tests/test_fleet_node_binding.py`` covers
+    # that, and keeps agent credentials working on the nodes bound to them.
     "POST /api/v1/fleet/heartbeat": "node-plane: the plugin's own check-in",
     "POST /api/v1/fleet/commands/{command_id}/result": "node-plane: the plugin's own ack",
     # SELF-plane. An agent tuning its OWN search profile is the documented
@@ -442,6 +449,10 @@ SELF_GATE_ALLOWLIST: dict[str, str] = {
         "filter: narrows a digest on a surface that is cross-agent by design — "
         "GET /reports builds a per_agent breakdown of the tenant"
     ),
+    "GET /api/v1/audit-log": (
+        "filter: narrows the tenant's audit log, which the same enforce_tenant "
+        "already lets the caller read unfiltered"
+    ),
     # READS of the agent row itself. Tenant-readable by design, and gating one
     # spelling would leave the identical payload one hop away: both call
     # sc.get_agent and return the same AgentOut under the same enforce_tenant.
@@ -456,30 +467,22 @@ SELF_GATE_ALLOWLIST: dict[str, str] = {
     # a caller of the gate; see the note in AuthContext.enforce_self_agent.
     "POST /api/v1/evolve/report": "bound by resolve_caller_and_gate: the verified identity wins",
     "POST /api/v1/insights/generate": "bound by resolve_caller_and_gate: the verified identity wins",
-    # INERT. Both reach ``ingest_preview``, which never reads
-    # ``request.agent_id`` — its first use is on the commit path, which is the
-    # entry below. "Persists nothing" is also true but argues the write axis,
-    # and this invariant opens by saying it is not about mutation; the
-    # parameter being unread is the fact that settles a read too.
-    "POST /api/v1/ingest/file": "inert: ingest_preview never reads the agent_id it is handed",
-    "POST /api/v1/ingest/preview": "inert: ingest_preview never reads the agent_id it is handed",
     # NODE-plane in intent — the interviewer runs under the install's
     # credential and reports on the worker node it watches, so ``agent_id``
     # names the SUBJECT and ``enforce_self_agent`` would refuse the case the
     # route exists for (``routes/interview.py`` declares it required and its own
     # comment calls it "the WORKER agent the window belongs to").
     #
-    # Recorded as a gap anyway, because by this file's taxonomy that is what it
-    # is: ``interview_service`` persists memories with
-    # ``agent_id=<caller-named>``, the same property the two ``POST /memories``
-    # lines below record. Narrower in blast radius — visibility is forced to
-    # ``scope_team``, so nothing lands in a peer's private scope — and the
-    # ``metadata.written_by`` the service comment offers as the mitigation is
-    # the constant string ``"interviewer"``, not the submitting credential, so
-    # no row identifies who sent it.
+    # It now runs the write-identity chain the memory routes use
+    # (``_resolve_rest_write_agent_id`` then ``resolve_write_agent``), so an
+    # agent-scoped credential submits as itself and an install credential gets
+    # the broker ownership boundary. What is left is the residual the
+    # ``POST /memories`` lines below record: a reserved verified ``main`` still
+    # names its subject until the reserved-id policy reaches reject.
     "POST /api/v1/interview/submit": (
-        "KNOWN GAP: node-plane by intent, but persists memories attributed to "
-        "a caller-named agent; scope_team caps the blast radius"
+        "KNOWN GAP: node-plane by intent; _resolve_rest_write_agent_id binds "
+        "normal verified identities, but reserved main remains caller-named "
+        "until policy=reject"
     ),
     # The handlers expose a caller-named ``agent_id`` field. The default-on
     # ``bind_write_identity_to_auth`` control replaces it for normal verified
@@ -495,14 +498,12 @@ SELF_GATE_ALLOWLIST: dict[str, str] = {
         "KNOWN GAP: bind_write_identity_to_auth uses normal verified identities, "
         "but reserved main remains caller-named until policy=reject"
     ),
-    # Named without the flag, deliberately: this handler never reads it, and
-    # ``test_allowlist_reasons_that_name_a_mechanism_are_corroborated`` is what
-    # said so. The two entries above DO read it, which is the difference — this
-    # path would still be caller-named with Phase 2 fully enabled.
+    # Now runs the bulk route's chain (``_resolve_rest_write_agent_id`` →
+    # ``resolve_write_agent`` → ``enforce_fleet_write``), so it is left with
+    # exactly the residual the two entries above record, and no other.
     "POST /api/v1/ingest/commit": (
-        "KNOWN GAP: attribution is caller-named; broker_owned_agent_id gates "
-        "install ownership only, and nothing here binds the write to the "
-        "calling credential"
+        "KNOWN GAP: bind_write_identity_to_auth uses normal verified identities, "
+        "but reserved main remains caller-named until policy=reject"
     ),
 }
 

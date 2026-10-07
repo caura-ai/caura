@@ -371,7 +371,7 @@ class _CoreApiLifecycleAdapter:
         # in the structured log line above.
         return int(stats.get("candidates_written", 0)) + int(stats.get("promoted", 0))
 
-    async def has_recent_lifecycle_success(self, *, org_id: str, action: str, since_hours: int) -> bool:
+    async def has_recent_lifecycle_success(self, *, org_id: str, action: str, since_hours: float) -> bool:
         return await self._storage.has_recent_lifecycle_success(
             org_id=org_id, action=action, since_hours=since_hours
         )

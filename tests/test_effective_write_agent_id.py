@@ -8,7 +8,12 @@ overridden by the body (no spoofing of a properly-provisioned cred).
 
 import pytest
 
-from core_api.agent_ids import effective_write_agent_id
+from core_api.agent_ids import (
+    DOC_INDEXER_AGENT_ID,
+    INSIGHTER_AGENT_ID,
+    effective_read_agent_id,
+    effective_write_agent_id,
+)
 
 
 @pytest.mark.parametrize(
@@ -37,7 +42,24 @@ from core_api.agent_ids import effective_write_agent_id
             "mcp-agent",
         ),  # preserved for _refuse_default_agent_on_gateway
         (None, None, None),
+        ("memclaw-insighter", None, INSIGHTER_AGENT_ID),  # legacy-name-ok: input alias
+        (
+            None,
+            "memclaw-doc-indexer",  # legacy-name-ok: input alias
+            DOC_INDEXER_AGENT_ID,
+        ),
     ],
 )
 def test_effective_write_agent_id(verified, body, expected):
     assert effective_write_agent_id(verified, body) == expected
+
+
+@pytest.mark.parametrize(
+    "supplied,expected",
+    [
+        ("memclaw-insighter", INSIGHTER_AGENT_ID),  # legacy-name-ok: input alias
+        ("memclaw-doc-indexer", DOC_INDEXER_AGENT_ID),  # legacy-name-ok: input alias
+    ],
+)
+def test_effective_read_agent_id_normalizes_retired_client_input(supplied, expected):
+    assert effective_read_agent_id(None, supplied) == expected

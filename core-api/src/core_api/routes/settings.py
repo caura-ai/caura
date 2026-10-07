@@ -55,8 +55,13 @@ async def update_tenant_settings(
     it as it was — omission means "don't touch", never "clear". To return a
     setting to its default, send it explicitly as ``null``:
 
-        {"search": {"recall_boost": null}}          # one leaf back to default
-        {"search": {"default_profile": null}}       # a whole section back to default
+        {"search": {"recall_boost": null}}                  # one leaf back to default
+        {"search": {"default_profile": {"top_k": null}}}    # one profile knob back to default
+        {"search": {"default_profile": null}}               # every profile knob back to default
+
+    A ``null`` removes the stored override rather than storing ``null``, so a
+    GET afterwards shows the default. Only keys that exist are accepted: an
+    unknown key is still a 422, ``null`` or not.
 
     Sending ``{}`` for a section is a NO-OP, not a reset — an empty dict merges
     nothing. That reads like a clear and is the shape operators reach for first,
@@ -93,8 +98,10 @@ async def update_tenant_settings(
     # named the missing call; the omission is the decision, not an oversight.
     # Tenant settings include security-relevant toggles (e.g. require_agent_approval,
     # which governs whether new agents start quarantined). An agent-scoped
-    # credential must not be able to flip them.
+    # credential must not be able to flip them, and neither may an org member
+    # (L-72): the Skills Inbox already keeps its actions to org admins.
     auth.enforce_not_agent_credential("change tenant settings")
+    auth.enforce_not_org_member("change tenant settings")
     # Only trust X-Changed-By from admin-key callers (the enterprise proxy).
     # Regular users could forge this header otherwise.
     changed_by: str | None

@@ -60,12 +60,20 @@ canonical requests replay the original receipt; different payloads return 409.
 ## MCP interface
 
 The local stdio server exposes one `peer` tool with `op` and an optional `args`
-object. Opcodes are `discover`, `send`, `recent`, `collect`, `agents`, `threads`, `status`,
+object. Opcodes are `discover`, `send`, `recent`, `collect`, `agents`, `describe`, `threads`, `status`,
 `human`, `wait`, `ack`, `reply`, `progress`, `checkpoint` and `memory_context`. Each opcode validates its
 own required fields and rejects extra
 arguments. All operations use the same authenticated Caura client and platform
 authorization. Directory and thread results are wrapped in `agents` and
-`threads` lists; other results retain their API object shape. The seven former
+`threads` lists; other results retain their API object shape. `discover` and
+`agents` return one bounded page (`limit` 1-100, default 50) with `next_cursor`
+and `has_more`; a page is never the whole directory while `has_more` is true.
+`to=["*"]` expansion and the CLI follow every page.
+Directory entries carry `description`, the agent's registered expertise (at most
+1000 characters, `null` when unset). It persists while the agent is offline and
+is distinct from live runtime state: `availability` (ready/busy/offline) and
+`sessions[]`, whose own `description` is the session's runtime text. `describe`
+sets or clears (null or blank) only the calling agent's description. The seven former
 tool names are replaced; clients should restart MCP and refresh their tool list.
 See [agent instructions](PEER_AGENT_CLAUDE_template.md) for arguments.
 
@@ -206,8 +214,17 @@ The sender sees its outgoing messages. Recipient status views show only that
 recipient's delivery; the sender sees the complete fan-out. Filters run in SQL
 before limits. History is descending by database sequence, with an opaque
 continuation value exposed as next_cursor. Threads list the most recent 100
-conversations; agent discovery is bounded to 1000. Further pagination is a GA
-requirement.
+conversations.
+
+The agent directory (`GET /agents`, `GET /discover`, `GET /human/agents`) pages
+with an opaque keyset cursor: pass `limit` (1-500, default 100) and/or `cursor`
+to receive `{"agents": [...], "next_cursor": ...}`; `next_cursor` is null only
+on the last page. Pages are ordered by agent ID, and visibility and filters run
+before the page bound. A cursor is bound to the caller's tenant, view and
+filters; a malformed, tampered or foreign cursor is rejected. Membership changes
+between pages never repeat an agent. Without `cursor` or `limit` the historical
+bare list (first 1000 rows) is returned. The SDK exposes `agents_page`,
+`discover_page`, `agents_all` and `discover_all`.
 
 ## Local environment
 
@@ -227,7 +244,8 @@ tenant policy controls both limits. The platform pauses overdue work when a
 renewal or delivery operation evaluates it, so offline platform time is not a
 promise of immediate notification. Paused reply/ack/progress/checkpoint operations
 return 409 with context. Atomic reply defaults ack=true; ack=false supports
-multi-step work. See [the runtime contract](AGENT_COLLABORATION.md) for
+multi-step work, but any correlated reply marks the request replied, so agents
+acknowledge receipt with progress and send one reply with the deliverable. See [the runtime contract](AGENT_COLLABORATION.md) for
 interruption levels, operator recovery, and honest client wake limitations.
 
 ## GA release gates still outstanding

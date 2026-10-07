@@ -17,7 +17,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, chmodSync } from "fs";
-import { CAURA_API_URL, CAURA_API_KEY, CAURA_API_PREFIX } from "./env.js";
+import { CAURA_API_URL, CAURA_API_KEY, CAURA_API_PREFIX, assertKeyTransportAllowed } from "./env.js";
 import { getSecretsPath } from "./paths.js";
 import { withUserAgent } from "./user-agent.js";
 import { logError } from "./logger.js";
@@ -32,6 +32,16 @@ const AGENT_AUTH_ENABLED = Boolean(CAURA_API_KEY);
 // --- In-memory cache ---
 
 const keyCache = new Map<string, string>();
+const provisioningInFlight = new Map<string, Promise<string | null>>();
+const provisioningRetryAfter = new Map<string, number>();
+const PROVISION_RETRY_DELAY_MS = 60_000;
+
+// Set once the server answers the provision route with 404: the route is not
+// mounted there (OSS core-api does not implement it, caura#845), so every later
+// attempt would 404 too. Callers already fall back to the tenant key; this only
+// stops the repeat request and warning on every cold resolution. Resets on
+// restart, so a server that gains the route is picked up then.
+let provisioningUnavailable = false;
 
 // --- Secrets file I/O ---
 
@@ -68,10 +78,13 @@ function writeSecretsFile(secrets: SecretsFile): void {
 async function provisionAgentKey(
   agentId: string,
 ): Promise<{ raw_key: string; key_prefix: string } | null> {
+  if (provisioningUnavailable) return null;
   try {
+    assertKeyTransportAllowed();
     const url = new URL(`${CAURA_API_PREFIX}/admin/agent-keys/provision`, CAURA_API_URL);
     const res = await fetch(url.toString(), {
       method: "POST",
+      redirect: "error",
       headers: withUserAgent({
         "Content-Type": "application/json",
         "X-API-Key": CAURA_API_KEY,
@@ -79,6 +92,13 @@ async function provisionAgentKey(
       body: JSON.stringify({ agent_id: agentId }),
       signal: AbortSignal.timeout(10_000),
     });
+    if (res.status === 404) {
+      provisioningUnavailable = true;
+      console.info(
+        "[caura] Server does not support agent key provisioning (404); using the tenant key for all agents",
+      );
+      return null;
+    }
     if (!res.ok) {
       console.warn(
         `[caura] Agent key provisioning failed for '${agentId}': ${res.status}`,
@@ -127,11 +147,31 @@ export async function resolveAgentKey(
     return entry.key;
   }
 
-  // 3. Provision
-  const result = await provisionAgentKey(agentId);
-  if (!result) return null;
+  // 3. Coalesce cold requests for this agent and cool down failed attempts.
+  // Cached or externally installed keys above remain usable during cooldown.
+  const inFlight = provisioningInFlight.get(agentId);
+  if (inFlight) return inFlight;
+  if (Date.now() < (provisioningRetryAfter.get(agentId) ?? 0)) return null;
+  const pending = provisionAndCacheAgentKey(agentId);
+  provisioningInFlight.set(agentId, pending);
+  try {
+    return await pending;
+  } finally {
+    provisioningInFlight.delete(agentId);
+  }
+}
 
-  // 4. Persist
+async function provisionAndCacheAgentKey(agentId: string): Promise<string | null> {
+  const result = await provisionAgentKey(agentId);
+  if (!result) {
+    provisioningRetryAfter.set(agentId, Date.now() + PROVISION_RETRY_DELAY_MS);
+    return null;
+  }
+  provisioningRetryAfter.delete(agentId);
+
+  // Re-read after the network await: another agent may have persisted a key
+  // while this request was in flight. Keep its entry as well as this one.
+  const secrets = readSecretsFile();
   secrets.keys[agentId] = {
     key: result.raw_key,
     prefix: result.key_prefix,

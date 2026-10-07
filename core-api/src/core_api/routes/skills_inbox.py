@@ -7,9 +7,13 @@ revision) on the existing skill doc.
 
 Endpoints (all under ``/v1/skills-inbox``):
 
-  GET    /                       — list staged candidates
-  POST   /{slug}/approve         — staged → active   (+ pre-apply rescan)
-  POST   /{slug}/reject          — staged → rejected (+ poison-table write)
+  GET    /                       — list staged candidates (or, with
+                                   ?status=quarantined, quarantined ones)
+  POST   /{slug}/approve         — staged → active   (+ pre-apply rescan);
+                                   with override_quarantine, also
+                                   quarantined → active
+  POST   /{slug}/reject          — staged → rejected (+ poison-table write
+                                   for a Forge candidate)
   POST   /{slug}/quarantine      — staged → quarantined  (security review)
   POST   /{slug}/defer           — no-op; stamps ``deferred_at`` (Forge can revise)
   POST   /{slug}/edit            — revise content / description / summary;
@@ -30,11 +34,12 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.errors import (
@@ -320,7 +325,11 @@ class RejectRequest(BaseModel):
         default=None,
         ge=1,
         le=365,
-        description="Override poison-table cooloff. Defaults to org_settings.skills_factory.rejection_cooloff_days.",
+        description=(
+            "Override poison-table cooloff. Defaults to org_settings.skills_factory.rejection_cooloff_days. "
+            "Ignored for a skill with no cluster fingerprint, such as one an agent wrote: there is no "
+            "Forge cluster to cool off."
+        ),
     )
 
 
@@ -345,6 +354,46 @@ class EditRequest(BaseModel):
 
     def has_changes(self) -> bool:
         return any(v is not None for v in (self.content, self.description, self.summary))
+
+
+# What quarantine leaves on a doc. An override approve moves them into
+# ``quarantine_override``: on an active skill they would say it is quarantined.
+_QUARANTINE_MARKERS = ("quarantined_at", "quarantine_reason")
+
+
+def _approver(auth: AuthContext) -> str:
+    """Who approved an override (M-120), for the doc and the audit row.
+
+    The gateway user when there is one, else the calling agent. The admin API key
+    carries neither, so it is named by its credential, as is a tenant key.
+    """
+    if auth.user_id:
+        return auth.user_id
+    if auth.agent_id:
+        return str(auth.agent_id)
+    return "admin-api-key" if auth.is_admin else "tenant-api-key"
+
+
+class ApproveRequest(BaseModel):
+    """Approve's optional body: only an override needs one (M-120)."""
+
+    model_config = STRICT_WRITE_BODY
+
+    override_quarantine: bool = Field(
+        default=False,
+        description=(
+            "Approve although Sentinel holds the skill: a quarantined skill, or a staged one whose "
+            "pre-apply rescan is critical. Needs a reason and is recorded in the audit log. Never lifts "
+            "a fatal finding (a size or path limit)."
+        ),
+    )
+    reason: str | None = Field(default=None, min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def _an_override_gives_a_reason(self) -> ApproveRequest:
+        if self.override_quarantine and self.reason is None:
+            raise ValueError("override_quarantine needs a reason")
+        return self
 
 
 class ActionResponse(BaseModel):
@@ -608,9 +657,13 @@ async def list_inbox(
     # Full SKILL.md bodies are heavy (body_max_bytes times the page limit); the
     # list stays lean by default and the edit UI opts in explicitly.
     include_content: bool = Query(False),
+    # M-120: reviewers open quarantined skills here too, to approve one with an
+    # override or reject it. Other statuses are not the inbox's: a candidate
+    # is the promoter's, and active and rejected skills are done with.
+    status: Literal["staged", "quarantined"] = Query("staged"),
     auth: AuthContext = Depends(get_auth_context),
 ) -> InboxListResponse:
-    """List ``status='staged'`` skill candidates for the tenant.
+    """List the tenant's skills in ``status`` (``staged`` by default).
 
     Caps default to ``org_settings.skills_factory.inbox_max_pending``;
     beyond that, auto-defer is the relief valve (Phase 2 worker
@@ -636,7 +689,7 @@ async def list_inbox(
     # ``fleet_id`` into ``data``, which is brittle. Pass it as the
     # dedicated top-level parameter so we filter on the indexed
     # column directly.
-    where: dict = {"status": "staged"}
+    where: dict = {"status": status}
 
     # The storage layer's ``where`` is JSONB scalar equality and does
     # NOT support an ``IS NULL`` predicate (see ``document_query`` in
@@ -719,6 +772,7 @@ async def list_inbox(
 @router.post("/{slug:path}/approve", response_model=ActionResponse)
 async def approve(
     slug: str,
+    body: ApproveRequest | None = None,
     # Tenant selector for admin credentials — see list_inbox / WT-4.
     tenant_id: str | None = Query(None),
     auth: AuthContext = Depends(get_auth_context),
@@ -726,6 +780,12 @@ async def approve(
     """Promote ``staged → active``. Pre-apply rescan via Sentinel
     blocks the transition if the doc became unsafe between propose
     and apply.
+
+    With ``override_quarantine`` (M-120, owner decision 2026-10-05) a
+    reviewer may also approve a quarantined skill, or a staged one whose
+    rescan is critical. A fatal finding still refuses. The override, its
+    reason and the codes it overrode are kept on the doc and in a
+    critical audit row.
     """
     auth.enforce_read_only()
     tenant_id = _require_tenant(auth, tenant_id)
@@ -735,15 +795,22 @@ async def approve(
     body_max = (sf or {}).get("body_max_bytes", 40_000)
     desc_max = (sf or {}).get("description_max_bytes", 160)
 
+    body = body or ApproveRequest()
+    override = body.override_quarantine
+    approvable = {"staged", "quarantined"} if override else {"staged"}
+
     # Initial cheap pre-flight: bail out fast if the doc is obviously
-    # not in a staged state. The expensive Sentinel rescan only runs
+    # not in an approvable state. The expensive Sentinel rescan only runs
     # against the doc we'll actually approve (see TOCTOU guard below).
     doc = await _load_doc_or_404(tenant_id=tenant_id, slug=slug)
     data = doc.get("data") or {}
-    if data.get("status") != "staged":
+    if data.get("status") not in approvable:
         raise HTTPException(
             status_code=409,
-            detail=f"skill {slug!r} status={data.get('status')!r}; can only approve from 'staged'",
+            detail=(
+                f"skill {slug!r} status={data.get('status')!r}; can only approve from 'staged'"
+                + (" or 'quarantined'" if override else " ('quarantined' needs override_quarantine)")
+            ),
         )
 
     # TOCTOU guard FIRST — a concurrent Edit between the initial load
@@ -757,7 +824,7 @@ async def approve(
     # the operator's prerogative anyway. We narrow the window from
     # "across rescan" to "across a single upsert", which is the
     # tightest we can get without a per-doc lock.
-    doc = await _reload_and_assert_status(tenant_id=tenant_id, slug=slug, expected_statuses={"staged"})
+    doc = await _reload_and_assert_status(tenant_id=tenant_id, slug=slug, expected_statuses=approvable)
     data = doc.get("data") or {}
     # Snapshot the content_hash BEFORE the rescan. After the rescan
     # we check that the content hasn't drifted — a concurrent Edit
@@ -783,7 +850,7 @@ async def approve(
     # Third TOCTOU reload — catches Reject/Quarantine races (status
     # changed away from 'staged'). Plus the content_hash check below
     # catches Edit races (status stayed 'staged' but content changed).
-    doc = await _reload_and_assert_status(tenant_id=tenant_id, slug=slug, expected_statuses={"staged"})
+    doc = await _reload_and_assert_status(tenant_id=tenant_id, slug=slug, expected_statuses=approvable)
     third_data = doc.get("data") or {}
     if third_data.get("content_hash") != pre_scan_content_hash:
         raise HTTPException(
@@ -804,7 +871,10 @@ async def approve(
     scan_result = await scan_skill_doc(
         third_data, mode="pre-apply", body_max_bytes=body_max, description_max_bytes=desc_max
     )
-    if not (scan_result.state == "clean" and not scan_result.any_fatal):
+    # An override lifts a critical verdict, never a fatal finding: that is a
+    # size or path limit on what may be stored at all.
+    passes = scan_result.state == "clean" or (override and scan_result.state == "quarantined")
+    if scan_result.any_fatal or not passes:
         raise HTTPException(
             status_code=422,
             detail=(
@@ -813,6 +883,16 @@ async def approve(
             ),
         )
     rescan_payload = scan_result.as_doc_field()
+    # The rescan's verdict is persisted either way, so an overridden skill keeps
+    # the findings it was approved over, next to who approved it and why.
+    patches: dict[str, Any] = {"scan": rescan_payload}
+    if override:
+        patches["quarantine_override"] = {
+            "reason": body.reason,
+            "critical_codes": [f.code for f in scan_result.findings if f.severity == "critical"],
+            "approved_by": _approver(auth),
+            **{key: third_data[key] for key in _QUARANTINE_MARKERS if key in third_data},
+        }
 
     prev, new_data = await _persist_status_transition(
         tenant_id=tenant_id,
@@ -820,12 +900,13 @@ async def approve(
         slug=slug,
         doc=doc,
         new_status="active",
-        extra_data_patches={"scan": rescan_payload},
+        extra_data_patches=patches,
         # Approving crystallizes the doc to ``active``; clear the
         # transient defer markers so an active skill never carries
         # a stale "deferred_at" timestamp. Mirrors the same pop in
-        # the edit handler.
-        remove_keys=("deferred_at", "defer_reason"),
+        # the edit handler. An override also clears the quarantine
+        # markers, which ``quarantine_override`` now holds.
+        remove_keys=("deferred_at", "defer_reason", *(_QUARANTINE_MARKERS if override else ())),
     )
     # Best-effort audit: the status transition already landed in
     # storage via the upsert above. Failing to write the audit row
@@ -833,6 +914,7 @@ async def approve(
     try:
         await log_action(
             tenant_id=tenant_id,
+            agent_id=auth.agent_id,
             action="skill_inbox_approve",
             resource_type="document",
             # ``log_action`` types ``resource_id`` as ``UUID | None`` but
@@ -841,7 +923,14 @@ async def approve(
             # human-readable and grep-friendly in the audit log; keep
             # the directive intact and suppress the type warning.
             resource_id=doc.get("doc_id") or slug,  # type: ignore[arg-type]
-            detail={"slug": slug, "previous_status": prev},
+            detail={
+                "slug": slug,
+                "previous_status": prev,
+                **({"override_quarantine": True, **patches["quarantine_override"]} if override else {}),
+            },
+            # An override is a compliance event: a full audit queue writes it
+            # synchronously instead of dropping it.
+            critical=override,
         )
     except Exception:
         logger.error(
@@ -860,9 +949,17 @@ async def reject(
     tenant_id: str | None = Query(None),
     auth: AuthContext = Depends(get_auth_context),
 ) -> ActionResponse:
-    """Reject ``staged → rejected`` and write the cluster fingerprint
-    to ``forge_rejected_fingerprints`` so the next Forge run skips
-    that cluster for ``cooloff_days``.
+    """Reject ``staged → rejected``. For a Forge candidate, also write its
+    cluster fingerprint to ``forge_rejected_fingerprints`` so the next
+    Forge run skips that cluster for ``cooloff_days``.
+
+    A skill an agent wrote through the documents API has no fingerprint:
+    Forge did not derive it from a cluster and will not propose it again,
+    so there is nothing to cool off. It is rejected without the poison
+    write, and an explicit ``cooloff_days`` is ignored, as the response's
+    ``detail`` says. The agent cannot stage it again under the same slug:
+    a non-admin write to a rejected slug is refused
+    (``PROTECTED_LIVE_STATUSES`` in ``skill_lifecycle``).
 
     Fix 2 Ph5a: the poison write goes through core-storage-api
     (``write_rejected_fingerprint`` → ``sc.forge_write_rejected_fingerprint``)
@@ -891,10 +988,10 @@ async def reject(
         )
     fingerprint = data.get("cluster_fingerprint")
     if not isinstance(fingerprint, str) or not fingerprint:
-        raise HTTPException(
-            status_code=422,
-            detail=f"skill {slug!r} has no fingerprint; cannot poison cluster",
-        )
+        # Only a Forge candidate has a cluster to poison. Any other skill,
+        # such as one an agent staged, is rejected without the poison
+        # write; this used to answer 422, so none of them could be.
+        fingerprint = None
 
     # TOCTOU guard: re-fetch the doc and confirm it's still in a
     # rejectable status BEFORE we poison the cluster. Without this,
@@ -902,6 +999,8 @@ async def reject(
     # our initial load and this point — we'd then poison a cluster
     # that just shipped (and the next Forge run would refuse to
     # re-derive the now-deleted+re-needed skill for cooloff_days).
+    # With no cluster, it still guards the status flip, which would
+    # otherwise overwrite that Approve with ``rejected``.
     #
     # Ph5a NOTE: the poison write now commits storage-side immediately
     # (no shared SQLAlchemy transaction to roll back), so the pre-Ph5a
@@ -918,39 +1017,40 @@ async def reject(
         slug=slug,
         expected_statuses={"staged", "candidate", "quarantined"},
     )
-    # Re-derive fingerprint from the FRESH doc — an Edit may have
-    # changed adjacent fields but content_hash + fingerprint stay
-    # bound to the cluster identity, so this is belt-and-suspenders.
-    data = doc.get("data") or {}
-    fingerprint = data.get("cluster_fingerprint")
-    if not isinstance(fingerprint, str) or not fingerprint:
-        raise HTTPException(
-            status_code=422,
-            detail=f"skill {slug!r} has no fingerprint after reload; cannot poison cluster",
-        )
+    if fingerprint is not None:
+        # Re-derive fingerprint from the FRESH doc — an Edit may have
+        # changed adjacent fields but content_hash + fingerprint stay
+        # bound to the cluster identity, so this is belt-and-suspenders.
+        data = doc.get("data") or {}
+        fingerprint = data.get("cluster_fingerprint")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            raise HTTPException(
+                status_code=422,
+                detail=f"skill {slug!r} has no fingerprint after reload; cannot poison cluster",
+            )
 
-    # Second TOCTOU reload — narrows the window before the poison write.
-    doc = await _reload_and_assert_status(
-        tenant_id=tenant_id,
-        slug=slug,
-        expected_statuses={"staged", "candidate", "quarantined"},
-    )
-
-    try:
-        await write_rejected_fingerprint(
+        # Second TOCTOU reload — narrows the window before the poison write.
+        doc = await _reload_and_assert_status(
             tenant_id=tenant_id,
-            fleet_id=doc.get("fleet_id"),
-            cluster_fingerprint=fingerprint,
-            rejected_by_agent=auth.agent_id or "unknown",
-            reason=body.reason,
-            cooloff_days=cooloff,
+            slug=slug,
+            expected_statuses={"staged", "candidate", "quarantined"},
         )
-    except ValueError as exc:
-        # ``write_rejected_fingerprint`` raises ValueError on cooloff_days < 1
-        # or an empty fingerprint. Pydantic's ``ge=1`` on the request body
-        # catches the former, but a stale org_settings.rejection_cooloff_days
-        # could still inject 0; surface as 422 rather than 500.
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        try:
+            await write_rejected_fingerprint(
+                tenant_id=tenant_id,
+                fleet_id=doc.get("fleet_id"),
+                cluster_fingerprint=fingerprint,
+                rejected_by_agent=(canonical_service_agent_id(auth.agent_id) if auth.agent_id else "unknown"),
+                reason=body.reason,
+                cooloff_days=cooloff,
+            )
+        except ValueError as exc:
+            # ``write_rejected_fingerprint`` raises ValueError on cooloff_days < 1
+            # or an empty fingerprint. Pydantic's ``ge=1`` on the request body
+            # catches the former, but a stale org_settings.rejection_cooloff_days
+            # could still inject 0; surface as 422 rather than 500.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     try:
         prev, _ = await _persist_status_transition(
@@ -962,21 +1062,22 @@ async def reject(
             extra_data_patches={"rejection_reason": body.reason},
         )
     except Exception:
-        # The poison row already committed storage-side (no shared txn to roll
-        # back). If the status flip fails HERE, the cluster is poisoned for
-        # cooloff_days while the doc still reads as a rejectable status — an
-        # inconsistent state an operator must reconcile by hand. Surface it
-        # loudly rather than letting it read as a generic 500, then re-raise.
-        logger.error(
-            "skill_inbox: reject status-flip FAILED after poison write for slug=%s — "
-            "the poison row is committed but the doc was NOT flipped to 'rejected'; "
-            "the cluster is silently blocked for %d days. Manual intervention required.",
-            slug,
-            cooloff,
-            exc_info=True,
-        )
+        if fingerprint is not None:
+            # The poison row already committed storage-side (no shared txn to
+            # roll back). If the status flip fails HERE, the cluster is poisoned
+            # for cooloff_days while the doc still reads as a rejectable status —
+            # an inconsistent state an operator must reconcile by hand. Surface
+            # it loudly rather than letting it read as a generic 500.
+            logger.error(
+                "skill_inbox: reject status-flip FAILED after poison write for slug=%s — "
+                "the poison row is committed but the doc was NOT flipped to 'rejected'; "
+                "the cluster is silently blocked for %d days. Manual intervention required.",
+                slug,
+                cooloff,
+                exc_info=True,
+            )
         raise
-    # Best-effort audit. The poison row already committed storage-side and
+    # Best-effort audit. Any poison row already committed storage-side and
     # the doc-status upsert already landed in storage; an audit-row
     # failure must not 500 a successful reject.
     try:
@@ -993,7 +1094,7 @@ async def reject(
             detail={
                 "slug": slug,
                 "previous_status": prev,
-                "cooloff_days": cooloff,
+                "cooloff_days": cooloff if fingerprint is not None else None,
                 "fingerprint": fingerprint,
             },
         )
@@ -1003,11 +1104,17 @@ async def reject(
             slug,
             exc_info=True,
         )
+    if fingerprint is not None:
+        detail = f"cluster fingerprint poisoned for {cooloff} days"
+    else:
+        detail = "no cluster fingerprint, so no cooloff was set"
+        if body.cooloff_days is not None:
+            detail += "; cooloff_days was ignored"
     return ActionResponse(
         slug=slug,
         previous_status=prev,
         new_status="rejected",
-        detail=f"cluster fingerprint poisoned for {cooloff} days",
+        detail=detail,
     )
 
 
@@ -1219,7 +1326,7 @@ async def edit(
     # validator's admin-only branches (e.g. setting ``source='forge'`` for
     # re-installs) stay consistent with what the surrounding endpoint allows.
     ctx = SkillWriteContext(
-        caller_agent_id=auth.agent_id,
+        caller_agent_id=(canonical_service_agent_id(auth.agent_id) if auth.agent_id else None),
         is_admin=auth.is_org_admin,
         is_internal_forge=False,
         description_max_bytes=desc_max,

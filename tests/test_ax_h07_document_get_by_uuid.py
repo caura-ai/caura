@@ -27,7 +27,9 @@ pytestmark = pytest.mark.unit
 def _route_src() -> str:
     from core_storage_api.routers import documents
 
-    return inspect.getsource(documents.get_document)
+    # The lookup both read routes share: the path route and, since M-14, the
+    # body-addressed ``POST /documents/get``.
+    return inspect.getsource(documents._get_document)
 
 
 # ── the lookup exists and is tenant-scoped ───────────────────────────────

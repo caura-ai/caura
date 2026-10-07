@@ -259,6 +259,42 @@ class ScheduleBackgroundTasks:
                 )
             )
 
+        # L-117: the atomic facts an enrichment run on the request path found.
+        # Fast mode turns them into child rows after its background enrichment,
+        # a deferred deployment through the ENRICHED consumer; nothing here read
+        # them, so the same content gave a fast write a child per fact and a
+        # strong write none. Fanned out after the commit, as fast mode does, and
+        # from the row as written, as the consumer does: governance gave its
+        # verdict before the write, so the row's visibility is the one the
+        # children must inherit (#808).
+        atomic_facts = getattr(enrichment, "atomic_facts", None) or []
+        if atomic_facts:
+            from core_api.services.memory_service import _resolve_parent_weight, fan_out_atomic_facts
+
+            track_task(
+                tracked_task(
+                    fan_out_atomic_facts(
+                        get_storage_client(),
+                        atomic_facts=atomic_facts,
+                        memory_id=memory_id,
+                        tenant_id=data.tenant_id,
+                        fleet_id=data.fleet_id,
+                        agent_id=data.agent_id,
+                        parent_metadata=memory.get("metadata_") or {},
+                        parent_visibility=memory.get("visibility") or "scope_team",
+                        parent_weight=_resolve_parent_weight(memory.get("weight")),
+                        parent_ts_start=memory.get("ts_valid_start"),
+                        tenant_config=tenant_config,
+                        parent_expires_at=memory.get("expires_at"),
+                        parent_run_id=memory.get("run_id"),
+                        parent_source_uri=memory.get("source_uri"),
+                    ),
+                    "atomic_fact_fanout",
+                    memory_id,
+                    data.tenant_id,
+                )
+            )
+
         # Entity extraction (fire-and-forget).
         #
         # CAURA-595 (shortcut form): entity extraction is "off the hot

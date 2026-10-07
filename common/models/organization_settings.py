@@ -43,6 +43,14 @@ class OrganizationSettingsAudit(Base):
             "org_id",
             text("created_at DESC"),
         ),
+        # Set by migration 056, whose head fingerprint it is; declared so
+        # autogenerate does not propose dropping it.
+        {
+            "comment": (
+                "Settings change history. Values at secret paths are masked "
+                "(migration 056, M-99)."
+            )
+        },
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)

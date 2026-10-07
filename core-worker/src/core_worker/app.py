@@ -20,8 +20,9 @@ Lifespan ordering:
    ``Topics.Memory.EMBED_REQUESTED``.
 4. ``bus.start()`` spawns Pub/Sub pull loops (no-op for inprocess bus).
 
-Shutdown reverses: stop the bus (drains in-flight messages), close the
-shared httpx client, log.
+Shutdown reverses: stop the bus (lets handlers already running finish
+within a short grace, then cancels the rest; undispatched messages go back
+for redelivery), close the shared httpx client, log.
 """
 
 from __future__ import annotations

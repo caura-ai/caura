@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import contextlib
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import insert
 from sqlalchemy import text as sa_text
 from sqlalchemy.dialects import postgresql
 
 import core_storage_api.services.postgres_service as ps
+from common.models.audit import AuditLog
 
 pytestmark = pytest.mark.asyncio
 
@@ -29,11 +32,21 @@ pytestmark = pytest.mark.asyncio
 _P = "/api/v1/storage"
 
 
-async def _audit(client, tenant: str, *, action: str, resource_type: str = "memory") -> None:
-    r = await client.post(
-        f"{_P}/audit-logs",
-        json={"tenant_id": tenant, "action": action, "resource_type": resource_type},
-    )
+async def _audit(
+    client,
+    tenant: str,
+    *,
+    action: str,
+    resource_type: str = "memory",
+    agent_id: str | None = None,
+    resource_id: uuid.UUID | None = None,
+) -> None:
+    body: dict = {"tenant_id": tenant, "action": action, "resource_type": resource_type}
+    if agent_id is not None:
+        body["agent_id"] = agent_id
+    if resource_id is not None:
+        body["resource_id"] = str(resource_id)
+    r = await client.post(f"{_P}/audit-logs", json=body)
     assert r.status_code == 200, r.text
 
 
@@ -571,3 +584,98 @@ async def test_both_memory_pages_break_ties_on_id(monkeypatch, label, call, orde
     direction = "DESC" if order == "desc" else "ASC"
     expected = f"ORDER BY memories.created_at {direction}, memories.id {direction}"
     assert expected in sql, f"{label} ({order}) must pair the sort column with id:\n{sql}"
+
+
+# ---------------------------------------------------------------------------
+# Governance build plan row p1.40 — agent / resource filters and a keyset cursor,
+# so the memory-core half of the one audit trail (g3.2) can be paged without
+# OFFSET drift and narrowed to one agent, action or memory.
+# ---------------------------------------------------------------------------
+
+
+async def _walk(client, tenant: str, *, limit: int, **filters) -> list[dict]:
+    """Every row, one cursor page at a time, as a caller of the route would.
+
+    Bounded, so a cursor the route ignores fails the test instead of hanging it.
+    """
+    rows: list[dict] = []
+    cursor: dict[str, str] = {}
+    for _ in range(100):
+        page = (
+            await client.get(
+                f"{_P}/audit-logs",
+                params={"tenant_id": tenant, "limit": limit, **filters, **cursor},
+            )
+        ).json()
+        rows.extend(page)
+        if len(page) < limit:
+            return rows
+        cursor = {"cursor_ts": page[-1]["created_at"], "cursor_id": page[-1]["id"]}
+    raise AssertionError(f"no last page after 100 pages of {limit}: the cursor is not advancing")
+
+
+async def test_the_cursor_walks_500_rows_sharing_timestamps_exactly_once(client):
+    """The p1.40 done-when: paging is stable over 500 rows.
+
+    Rows written through the API land milliseconds apart, so they are inserted
+    here with 13 rows on each of 40 timestamps. A page boundary then falls inside
+    a tie again and again, which is where a cursor that does not match the ORDER
+    BY serves a row twice or skips one.
+    """
+    tenant = f"t-audit-cursor-{uuid.uuid4().hex[:8]}"
+    base = datetime(2026, 10, 1, tzinfo=UTC)
+    rows = [
+        {
+            "id": uuid.uuid4(),
+            "tenant_id": tenant,
+            "action": "walk",
+            "resource_type": "memory",
+            "created_at": base + timedelta(seconds=i // 13),
+        }
+        for i in range(520)
+    ]
+    async with ps.get_session() as session:
+        await session.execute(insert(AuditLog), rows)
+
+    walked = await _walk(client, tenant, limit=37)
+
+    expected = [str(r["id"]) for r in sorted(rows, key=lambda r: (r["created_at"], r["id"]), reverse=True)]
+    assert len(walked) == 520
+    assert [w["id"] for w in walked] == expected, "the cursor walk skipped, repeated or reordered rows"
+
+
+async def test_agent_and_resource_filters_search_the_whole_log(client):
+    """In SQL, like ``action``: the matches are older than the newest page."""
+    tenant = f"t-audit-who-{uuid.uuid4().hex[:8]}"
+    memory = uuid.uuid4()
+    await _audit(client, tenant, action="memory.update", agent_id="agent-a", resource_id=memory)
+    await _audit(client, tenant, action="memory.update", agent_id="agent-b", resource_id=memory)
+    for _ in range(5):
+        await _audit(client, tenant, action="memory.update", agent_id="agent-c", resource_id=uuid.uuid4())
+
+    async def _get(**filters) -> list[dict]:
+        return (
+            await client.get(f"{_P}/audit-logs", params={"tenant_id": tenant, "limit": 3, **filters})
+        ).json()
+
+    assert [x["agent_id"] for x in await _get(agent_id="agent-a")] == ["agent-a"]
+    assert sorted(x["agent_id"] for x in await _get(resource_id=str(memory))) == ["agent-a", "agent-b"]
+    assert [x["agent_id"] for x in await _get(agent_id="agent-b", resource_id=str(memory))] == ["agent-b"]
+
+
+async def test_the_cursor_is_a_row_value_in_the_tiebreak_order(monkeypatch):
+    """Statement-shape: the boundary and the ORDER BY must agree."""
+    sql = await _captured_sql(
+        monkeypatch,
+        lambda: ps.PostgresService().audit_list_by_tenant(
+            "t",
+            limit=5,
+            agent_id="a",
+            resource_id=uuid.uuid4(),
+            cursor_ts=datetime(2026, 10, 1, tzinfo=UTC),
+            cursor_id=uuid.uuid4(),
+        ),
+    )
+    assert "ORDER BY audit_log.created_at DESC, audit_log.id DESC" in sql, sql
+    assert "(audit_log.created_at, audit_log.id) <" in sql, sql
+    assert "audit_log.agent_id" in sql and "audit_log.resource_id" in sql, sql

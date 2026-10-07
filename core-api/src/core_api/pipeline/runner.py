@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import Step, StepOutcome, StepResult
+from core_api.request_phase import phase
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,13 @@ class Pipeline:
         for step in self._steps:
             t_step = time.perf_counter()
             try:
-                step_result = await step.execute(ctx)
+                # The per-step timing below only exists for steps that FINISH.
+                # A request cancelled by the budget dies inside a step, so the
+                # step that ate the time is precisely the one with no log line
+                # — the absence an operator has to notice rather than read.
+                # ``phase`` records the entry, so the unwind reports it.
+                with phase(f"{self._name}.{step.name}"):
+                    step_result = await step.execute(ctx)
                 if step_result is None:
                     step_result = StepResult(outcome=StepOutcome.SUCCESS)
             except HTTPException:

@@ -1,10 +1,10 @@
 import logging
 import tempfile
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode
 
 from common.embedding._registry import DEFAULT_LOCAL_EMBEDDING_MODEL
 from common.provider_names import DEFAULT_EMBEDDING_PROVIDER
@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # ``db_pool_*`` settings + ``database_url`` were removed with the engine.
     api_key: str | None = None  # legacy, deprecated
     admin_api_key: str | None = None
+    # A file holding the admin key, read only when ``admin_api_key`` is unset or
+    # blank (M-109): the compose stack generates one so its bundled scheduler can
+    # reach the admin endpoints. An operator's ADMIN_API_KEY wins.
+    admin_api_key_file: str = ""
     # Optional: when set, all non-admin requests must present this key. Both
     # spellings are accepted as INPUTS; ``_prefer_the_new_api_key_name`` below
     # collapses them onto the second field, the only one downstream code reads —
@@ -133,8 +137,11 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     openrouter_api_key: str | None = None
+    atlascloud_api_key: str | None = None
     gemini_api_key: str | None = None
-    entity_extraction_provider: str = "openai"  # none | fake | openai | anthropic | openrouter | gemini
+    # none | fake | openai | openrouter | gemini — NOT anthropic, see
+    # ``_reject_anthropic_structured_output``.
+    entity_extraction_provider: str = "openai"
     entity_extraction_model: str = "gpt-5.4-nano"
     # E3 — reasoning-effort for the contradiction judge's LLM calls.
     # Valid values are MODEL-SPECIFIC (gpt-5.4 family, wet-tested:
@@ -182,6 +189,14 @@ class Settings(BaseSettings):
     caura_telemetry_state_dir: str = str(Path(tempfile.gettempdir()) / "caura-heartbeat")
     redis_url: str = ""  # e.g. redis://localhost:6379/0. Empty = in-memory fallback.
     cors_origins: str = "http://localhost:3000"
+    # Extra origins the installer endpoints (``/install-plugin``,
+    # ``/install-skill``) may bake into a generated script via ``api_url``,
+    # comma-separated, e.g. ``https://caura.example.com``. The origin that
+    # served the request is always allowed; set this only when a proxy hides
+    # the public host from this service. Anything else is refused, because
+    # the script sends the installer's API key to that URL and runs code it
+    # downloads from there.
+    installer_allowed_api_urls: str = ""
     # Request-wide budget enforced by RequestTimeoutMiddleware. 45s fits
     # comfortably under the 120s gateway/Cloud Run cap (CAURA-623 raised
     # the nginx ``proxy_read_timeout`` from 60s to 120s; the staging
@@ -241,6 +256,37 @@ class Settings(BaseSettings):
     # raise the platform timeout BEFORE raising this budget (the
     # startup validator enforces the ceiling).
     interview_request_timeout_seconds: float = 90.0
+    # Per-``tools/call`` budget on the MCP transport (oss-0924-h-02).
+    #
+    # ``RequestTimeoutMiddleware`` skips ``/mcp`` on purpose — the mount
+    # serves long-lived streaming responses and a blanket cancel would
+    # cut them — so until this existed a ``tools/call`` had NO
+    # server-side deadline at all. That is not merely a missing feature:
+    # ``per_tenant_storage_slot`` justifies its UNBOUNDED acquire queue
+    # with "the outer request budget already caps total wall time", and
+    # ``caura_recall`` reaches that exact semaphore through
+    # ``search_memories``. The invariant the code asserts was true on
+    # REST and false on the surface agents actually use. This budget is
+    # what makes it true on both, which is why it is a restoration
+    # rather than a new policy.
+    #
+    # Scoped to ONE tool dispatch, not to the mount: the SSE/streamable
+    # response that carries the session is untouched, so the reason the
+    # middleware skips ``/mcp`` does not apply here.
+    #
+    # 90s, matching ``bulk_request_timeout_seconds`` rather than the 45s
+    # hot-path ``request_timeout_seconds``, because the MCP surface
+    # serves the union of both shapes: ``caura_write`` with a batch calls
+    # ``create_memories_bulk`` directly (mcp_server.py), with none of the
+    # bulk ROUTE's own ``asyncio.wait_for`` around it, and ``caura_doc``
+    # ingest is comparable. At 45s this budget would cancel MCP work that
+    # REST grants 90s — shedding load in the name of restoring a cap,
+    # which is the one thing this change is not for. 90s also keeps
+    # bulk's and interview's 30s headroom under the 120s platform ceiling
+    # (``PLATFORM_REQUEST_CEILING_SECONDS``), above which a budget is
+    # dead config: nginx / Cloud Run sever the connection first. The
+    # startup validator enforces that ceiling.
+    mcp_request_timeout_seconds: float = 90.0
     # Async interview submit (#665). When True (default), the submit route
     # persists the masked window as a durable ``interview_jobs`` doc,
     # advances the watermark, and returns 200 ``accepted`` immediately;
@@ -305,6 +351,19 @@ class Settings(BaseSettings):
     audit_queue_max_size: int = 10000
     audit_queue_flush_threshold: int = 50
     audit_queue_flush_interval_seconds: float = 1.0
+    # Cap on the audit flusher's wait for one tenant's ``storage_write``
+    # slot (oss-0927-m-04). The flusher is a background loop, so no
+    # request budget sits over that acquire, and it gathers every tenant
+    # of a chunk: without this, one tenant with saturated storage slots
+    # holds the whole flush cycle, the queue stops draining, and at
+    # ``audit_queue_max_size`` every tenant's events drop at enqueue.
+    # On expiry only that tenant's slice is lost (logged, counted in
+    # ``failed_count``). Caps the acquire only — the storage POST that
+    # follows is bounded by the storage client's own timeouts. 10s is
+    # ten flush intervals: long enough to ride out a burst of that
+    # tenant's own writes holding the slot, short enough that the other
+    # tenants' events wait seconds rather than a whole request budget.
+    audit_flush_slot_timeout_seconds: float = 10.0
     # Capability-usage adoption counters (services/capability_usage.py).
     # In-process aggregation flushed to the ``capability_usage`` table on
     # this interval — the data behind the per-capability / per-transport /
@@ -353,8 +412,10 @@ class Settings(BaseSettings):
     # max_instances`` should sit comfortably below the storage-writer
     # pool size (10/instance x 11 = 110 fleet-wide today) so a single
     # tenant can't park more than ~20% of pool slots. Acquire is
-    # unbounded — a saturated tenant queues here while the route
-    # budget caps total wait time; see ``per_tenant_storage_slot``.
+    # unbounded — a saturated tenant queues here while the CALLER's
+    # budget caps total wait time: the request budget on request paths,
+    # ``audit_flush_slot_timeout_seconds`` on the background audit
+    # flusher. The full roster is on ``per_tenant_storage_slot``.
     per_tenant_storage_write_concurrency: int = 2
     per_tenant_storage_search_concurrency: int = 4
     # Fail-fast budget when the cap is exhausted. Long enough to absorb
@@ -451,6 +512,15 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def resolve_admin_api_key(self) -> Self:
+        # Blank as well as unset: .env.example ships ``ADMIN_API_KEY=``.
+        if not self.admin_api_key and self.admin_api_key_file:
+            self.admin_api_key = read_shared_secret_file(
+                self.admin_api_key_file, env_name="ADMIN_API_KEY_FILE"
+            )
+        return self
+
     # Enterprise SaaS splits core-storage-api into writer + reader Cloud Run
     # services (CAURA-591 Part B). When this is set, the storage client
     # routes GET + tagged-read POST calls here instead of ``core_storage_api_url``;
@@ -472,20 +542,34 @@ class Settings(BaseSettings):
     meter_recall_as_recall: bool = False
     # Meter the MCP batch write (``caura_write(items=[...])``) against the
     # write counter, one unit per item, as REST's ``POST /memories/bulk``
-    # already does. Off by default for the same reason as the D13 flag above,
-    # and the reason is stronger here: that path charges NOTHING today, so
-    # flipping this does not correct a miscount — it starts billing writes
-    # that have been free. Tenants that batch over MCP will consume quota they
-    # did not before, and some will cross their plan limit for the first time.
+    # already does. ON since caura-ai/caura#1638 — before that this path
+    # charged NOTHING, so the same tenant writing the same N memories was
+    # billed differently depending on the transport it happened to use.
     #
-    # Crossing it bites on REST FIRST. Over-plan mode is computed from these
-    # counters and stamped as ``x-org-read-only``, which core-api turns into a
-    # 403 on ~22 REST write routes — while the MCP surface only OBSERVES it
-    # (see ``_check_plan_limit``). So enabling this can refuse a tenant's
-    # REST writes because of what it wrote over MCP. That is the intended end
-    # state, but it is not a deploy side effect. Off = the historical (unbilled)
-    # behavior. See caura-ai/caura#1220.
-    meter_mcp_bulk_writes: bool = False
+    # WHAT ENABLING IT COSTS A TENANT TODAY: quota, and nothing else. An
+    # earlier revision of this comment said "crossing it bites on REST FIRST",
+    # because over-plan mode is computed from these counters, stamped as
+    # ``x-org-read-only``, and turned into a 403 on ~22 REST write routes. Every
+    # link in that chain is real EXCEPT THE ONE THAT WOULD START IT.
+    #
+    # Metering only records: ``allowed`` has no reader in core-api (see
+    # ``usage_service._meter``), so the meter itself refuses nothing.
+    # Enforcement arrives via ``x-org-read-only``, whose org half is
+    # ``organizations.is_read_only`` in caura-enterprise. The only writer of
+    # that flag to True is the Paddle ``subscription.canceled`` downgrade
+    # (``platform-admin-api/routers/billing.py``). Usage does decide INSIDE
+    # that event — over the free tier, or unverifiable, sets it — but nothing
+    # evaluates usage OUTSIDE it: no periodic sweep, no request-time check, and
+    # the ``check-read-only`` endpoint returns early unless the org is ALREADY
+    # flagged and only ever writes ``False``. It exists to LIFT the lock.
+    #
+    # So a tenant that grows over its plan on a healthy subscription is never
+    # flagged, and turning this on cannot by itself refuse anybody. That is a
+    # hole in the enforcement chain, not a licence to treat these counters as
+    # decorative — the moment anything sets the flag from usage, this flag
+    # decides whether MCP-first tenants were ever measured. Reversible by env
+    # without a redeploy.
+    meter_mcp_bulk_writes: bool = True
     # Refuse MCP writes when the org is over its plan limit, as the ~22 REST
     # write routes already do. Off by default, and this is the sharpest of the
     # three flags above it: the other two change what is COUNTED, this one
@@ -500,12 +584,18 @@ class Settings(BaseSettings):
     # wrong. A code-only change would need a rollback to undo.
     #
     # Read ``_check_plan_limit``'s docstring before enabling. A quiet
-    # observation log is NOT evidence that nothing will be refused — the
-    # counters over-plan mode is computed from barely move for MCP-first
-    # tenants while ``meter_mcp_bulk_writes`` is off, which is the population
-    # this refusal is aimed at. The two flags interact: turning THIS on while
-    # that one is off enforces a limit against counters the MCP surface hardly
-    # contributes to. See caura-ai/caura#1205.
+    # observation log is STILL NOT evidence that nothing will be refused, but
+    # the reason changed with caura-ai/caura#1638 and the old one is gone:
+    # ``meter_mcp_bulk_writes`` above is now ON, so the batch path does move the
+    # counters over-plan mode is computed from, and MCP-first tenants are no
+    # longer invisible to them.
+    #
+    # WHAT REPLACES IT IS WORSE. Nothing stamps an org read-only from usage
+    # growth at all — see that flag's comment for the verification. So the
+    # observation log is quiet for reasons that have nothing to do with how many
+    # tenants are over plan, and enabling THIS would enforce against a signal
+    # almost nobody can currently receive. Settle what should set the flag
+    # before reading the log as a blast radius. See caura-ai/caura#1205.
     enforce_mcp_plan_limits: bool = False
     stm_backend: str = "memory"  # memory | redis
     stm_notes_ttl: int = 86400  # 24h
@@ -528,7 +618,10 @@ class Settings(BaseSettings):
     security_audit_schedule_enabled: bool = False
     security_audit_schedule_cron: str = "0 2 * * *"  # daily 02:00 by default
     security_audit_alerts_enabled: bool = False
-    security_audit_alert_recipients: list[str] = []  # comma-separated env → list
+    # Comma-separated env → list. ``NoDecode`` hands the raw env string to
+    # ``_split_recipients``; without it pydantic-settings JSON-decodes
+    # ``list[str]`` first and a plain ``a@x.com,b@y.com`` crashes at import.
+    security_audit_alert_recipients: Annotated[list[str], NoDecode] = []
     security_audit_alert_score_below: float | None = None
     security_audit_alert_critical_findings_min: int | None = None
     security_audit_alert_score_drop_delta: float | None = None
@@ -556,6 +649,26 @@ class Settings(BaseSettings):
     def _split_recipients(cls, v: object) -> object:
         if isinstance(v, str):
             return [s.strip() for s in v.split(",") if s.strip()]
+        return v
+
+    @field_validator(
+        "per_tenant_search_concurrency",
+        "per_tenant_write_concurrency",
+        "per_tenant_embed_concurrency",
+        "per_tenant_storage_write_concurrency",
+        "per_tenant_storage_search_concurrency",
+        "contradiction_detection_concurrency",
+    )
+    @classmethod
+    def _concurrency_cap_must_be_positive(cls, v: int, info: ValidationInfo) -> int:
+        # ``asyncio.Semaphore(0)`` is valid Python but every ``acquire()``
+        # blocks forever: the route-entry caps would 429 every request, the
+        # unbounded storage slots and the detection gate would stall until
+        # the caller's budget expires. 0 is not a disable switch — reject at
+        # config load so the misconfig surfaces at startup (core-worker
+        # rejects its storage-write cap the same way).
+        if v < 1:
+            raise ValueError(f"{info.field_name} must be >= 1; 0 would block every acquire of that cap")
         return v
 
     @model_validator(mode="after")
@@ -604,6 +717,31 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"interview_request_timeout_seconds "
                 f"({self.interview_request_timeout_seconds}s) must be <= "
+                f"PLATFORM_REQUEST_CEILING_SECONDS "
+                f"({PLATFORM_REQUEST_CEILING_SECONDS}s); raise the platform "
+                "timeout (nginx proxy_read_timeout / Cloud Run) and update "
+                "the constant before raising this budget."
+            )
+        if self.audit_flush_slot_timeout_seconds <= 0:
+            # ``asyncio.timeout(0)`` expires before the first acquire can
+            # succeed, so every tenant's slice would be dropped on every
+            # flush — a budget that silently turns audit ingestion off.
+            raise ValueError(
+                f"audit_flush_slot_timeout_seconds "
+                f"({self.audit_flush_slot_timeout_seconds}s) must be > 0; "
+                "set audit_queue_max_size = 0 to bypass the queue instead."
+            )
+        if self.mcp_request_timeout_seconds > PLATFORM_REQUEST_CEILING_SECONDS:
+            # Same rule as interview's, for the same reason: past the
+            # platform ceiling the budget can never fire, because the
+            # gateway severs the connection while the tool keeps running.
+            # Worth enforcing here specifically — this budget exists to make
+            # a cap that the code already CLAIMS actually exist, so a value
+            # that cannot fire would restore the claim in config and leave
+            # ``per_tenant_storage_slot``'s docstring lying exactly as before.
+            raise ValueError(
+                f"mcp_request_timeout_seconds "
+                f"({self.mcp_request_timeout_seconds}s) must be <= "
                 f"PLATFORM_REQUEST_CEILING_SECONDS "
                 f"({PLATFORM_REQUEST_CEILING_SECONDS}s); raise the platform "
                 "timeout (nginx proxy_read_timeout / Cloud Run) and update "
@@ -779,14 +917,14 @@ class Settings(BaseSettings):
             )
             object.__setattr__(self, "embedding_provider", "openai")
             # A user coming from Vertex likely has no OPENAI_API_KEY — without a
-            # key the registry silently falls back to FakeEmbeddingProvider,
-            # which breaks semantic search with no clear signal. Escalate.
+            # key memories are stored without embeddings, so semantic search
+            # finds nothing new. Escalate.
             if not self.openai_api_key and not self.platform_embedding_provider:
                 logger.error(
                     "EMBEDDING_PROVIDER was remapped from 'vertex' to 'openai', but "
                     "OPENAI_API_KEY is unset and PLATFORM_EMBEDDING_PROVIDER is not "
-                    "configured. Semantic search will use FakeEmbeddingProvider and "
-                    "produce zero-vectors. Set OPENAI_API_KEY or configure "
+                    "configured. Memories will be stored without embeddings (keyword "
+                    "search only). Set OPENAI_API_KEY or configure "
                     "PLATFORM_EMBEDDING_PROVIDER=openai to restore embeddings."
                 )
         if self.entity_extraction_provider == "vertex":
@@ -806,6 +944,29 @@ class Settings(BaseSettings):
                     "OPENAI_API_KEY or configure PLATFORM_LLM_PROVIDER to restore "
                     "enrichment."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_anthropic_structured_output(self) -> "Settings":
+        """Refuse ``ENTITY_EXTRACTION_PROVIDER=anthropic`` at startup.
+
+        oss-0915-m-01. This provider drives enrichment, entity extraction and
+        the contradiction judge — all structured-output (``complete_json``)
+        calls — and Anthropic's OpenAI-compatible endpoint 400s on every one of
+        them (``ANTHROPIC_JSON_UNSUPPORTED`` in the OpenAI provider has the two
+        error shapes). At runtime that degraded to the fake provider while
+        writes reported success, so a crash here is the kinder failure.
+        String literal for the same circular-import reason as
+        ``_remap_deprecated_vertex``.
+        """
+        if self.entity_extraction_provider == "anthropic":
+            raise ValueError(
+                "ENTITY_EXTRACTION_PROVIDER=anthropic is not supported: "
+                "enrichment, entity extraction and contradiction detection use "
+                "structured JSON output, which Anthropic's OpenAI-compatible "
+                "endpoint rejects (HTTP 400 on every call). Set "
+                "ENTITY_EXTRACTION_PROVIDER to openai, openrouter or gemini."
+            )
         return self
 
     @property
@@ -853,6 +1014,7 @@ def bridge_credentials_to_environ() -> None:
         "OPENAI_API_KEY": settings.openai_api_key or "",
         "ANTHROPIC_API_KEY": settings.anthropic_api_key or "",
         "OPENROUTER_API_KEY": settings.openrouter_api_key or "",
+        "ATLASCLOUD_API_KEY": settings.atlascloud_api_key or "",
         "GEMINI_API_KEY": settings.gemini_api_key or "",
         # Default provider + model used by ``common.enrichment.service``.
         "ENTITY_EXTRACTION_PROVIDER": settings.entity_extraction_provider or "",

@@ -108,7 +108,9 @@ async def test_entity_filters_scope_agent_and_cross_fleet(fake_storage, patch_lo
     )
     patch_lookup(fleet_id="fleet-alpha", trust_level=1)  # bob: fleet-alpha, trust 1
 
-    out = await get_entity(uuid.uuid4(), "t", caller_agent_id="bob")
+    out = await get_entity(
+        uuid.uuid4(), "t", caller_agent_id="bob", caller_tenant_id="t"
+    )
     contents = {m.content for m in out.linked_memories}
     assert "alice private" not in contents
     assert "other fleet team" not in contents
@@ -122,7 +124,9 @@ async def test_entity_unfiltered_for_tenant_credential(fake_storage):
     from core_api.services.entity_service import get_entity
 
     fake_storage([_mem("alice", "scope_agent", "fleet-beta", "alice private")])
-    out = await get_entity(uuid.uuid4(), "t", caller_agent_id=None)
+    out = await get_entity(
+        uuid.uuid4(), "t", caller_agent_id=None, caller_tenant_id="t"
+    )
     assert "alice private" in {m.content for m in out.linked_memories}
 
 

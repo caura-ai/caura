@@ -470,6 +470,148 @@ def test_embed_backfill_topic_string() -> None:
     )
 
 
+# Suffixes worth reading: every text format in this tree in which somebody could
+# state a topic name to a human or a machine. A name cannot reach a provisioner
+# through a binary.
+_SCANNED_SUFFIXES = frozenset(
+    {
+        ".env",
+        ".json",
+        ".md",
+        ".py",
+        ".sh",
+        ".tf",
+        ".toml",
+        ".ts",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
+)
+_EXEMPT_DIRS = frozenset(
+    {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        "site-packages",
+    }
+)
+
+
+@pytest.mark.unit
+def test_publisher_subscriber_and_provisioning_mentions_agree_on_one_name() -> None:
+    """Publisher, subscriber and every stated name resolve to the SAME topic.
+
+    The invariant is agreement, not the literal — ``test_embed_backfill_topic_string``
+    above pins the literal, and pinning it twice would only mean editing two lines
+    the day it legitimately changes. What this asserts is that nothing can name
+    this topic differently from the name the bus will actually use.
+
+    That is three layers, and the third is the one that broke. The first two are
+    structural: publisher (``publish_embed_backfill_request``) and subscriber
+    (``core_worker.consumer.register_consumers``) both go through the single enum
+    member, and the ``lifecycle`` family is flipped AND contracted, so
+    ``publish_name`` and ``subscribe_names`` agree at either ``dual``. No amount
+    of drift in a comment can desynchronise those two; a reviewer looking for a
+    code-level mismatch here will not find one and should stop looking.
+
+    The third layer is prose, and prose is how this topic actually gets its name.
+    It has never been created — ``embed_backfill_enabled`` defaults False
+    precisely because it is Terraform-provisioned and the Terraform has not been
+    written — so the first person to provision it reads a sentence in this
+    repository and types what it says. Until this test existed, the route's own
+    ``PROVISION THE TOPIC BEFORE TRIGGERING THIS`` comment said the pre-rebrand
+    spelling, under a ``legacy-name-floor`` marker asserting it was the live
+    topic. It was not live; the family's legacy-prefixed resources are gone. But
+    the marker took the line out of the legacy-name ratchet's count, so the one
+    gate that reads these strings stopped reading that one, and the sentence a
+    provisioner is most likely to obey was the sentence nothing checked.
+
+    Provisioning the other spelling is the quiet failure this whole subsystem
+    specialises in: ``PubSubEventBus.publish`` does not block on the publish
+    future, so publishing into a topic nothing subscribes raises nowhere, the
+    fanout returns 200, and the audit row sits at ``pending`` forever. The sweep
+    would run nightly, report success and move no rows.
+
+    Deliberately scoped to this one topic rather than all nine lifecycle members.
+    The others have no stale mentions to catch, and ``audit`` is genuinely
+    pre-flip, so a blanket guard would assert a thing that is not yet true.
+
+    Known limit, stated rather than fixed: the scan is line-local, so a mention
+    wrapped across two lines is invisible to it — which is exactly how this
+    comment was written before #1672 re-flowed it onto one line. Closing that
+    means normalising comment continuations before matching, which is a decision
+    of its own rather than a rider on this fix.
+    """
+    import json
+    import os
+    import pathlib
+    import re
+
+    from common.events.topics import Topics, publish_name, subscribe_names
+
+    topic = Topics.Lifecycle.EMBED_BACKFILL_REQUESTED
+
+    # Layer 1 — the two ends of the wire. Derive the expected name from the
+    # publisher rather than restating it, so this stays an agreement test.
+    expected = publish_name(topic)
+    assert subscribe_names(topic, dual=False) == (expected,)
+    assert subscribe_names(topic, dual=True) == (expected,)
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+
+    # Layer 2 — the machine-checkable provisioning contract. caura-enterprise's
+    # ``check_pubsub_provisioning.py`` reads this file and turns it into a
+    # required Terraform subscription, which makes it the one place a wrong name
+    # would be caught by something other than a person.
+    manifest = json.loads(
+        (repo / "common" / "events" / "events_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert expected in manifest["services"]["core-worker"]
+
+    # Layer 3 — every name stated to a reader. Matched by the brand-independent
+    # tail so this test never has to spell the outgoing brand itself; writing the
+    # old literal here to search for it is what the ratchet's ``legacy-name-absent``
+    # marker exists for, and not needing the marker is strictly better.
+    brand, _, tail = expected.partition(".")
+    mention = re.compile(rf"([\w-]+)\.{re.escape(tail)}")
+
+    offenders: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(repo):
+        dirnames[:] = [d for d in dirnames if d not in _EXEMPT_DIRS]
+        for filename in filenames:
+            path = pathlib.Path(dirpath) / filename
+            if path.suffix not in _SCANNED_SUFFIXES:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):  # pragma: no cover - unreadable
+                continue
+            if tail not in text:
+                continue
+            for lineno, line in enumerate(text.splitlines(), 1):
+                offenders += [
+                    f"{path.relative_to(repo)}:{lineno}: {line.strip()}"
+                    for found in mention.findall(line)
+                    if found != brand
+                ]
+
+    assert not offenders, (
+        f"These lines name the embed-backfill topic with a brand other than "
+        f"{brand!r}, which is the only name this repo can publish or subscribe. "
+        f"The topic is not provisioned yet, so a stated name is an instruction "
+        f"someone will follow:\n" + "\n".join(offenders)
+    )
+
+
 @pytest.mark.asyncio
 async def test_embed_backfill_handler_refuses_a_fleet_scoped_request() -> None:
     """A fleet-scoped request must fail loudly, not sweep the whole org.
@@ -579,13 +721,16 @@ def test_embed_backfill_inflight_cap_rejects_zero() -> None:
 
 
 @pytest.mark.asyncio
-async def test_embed_backfill_sweeps_even_if_in_progress_update_fails() -> None:
-    """Bookkeeping must not decide whether the work happens.
+async def test_embed_backfill_nacks_when_its_claim_cannot_be_written() -> None:
+    """A claim that could not be written is not a claim (L-04).
 
-    ``_run_action`` marks ``in_progress`` best-effort for this reason: letting
-    it raise would nack before the sweep started, skipping an op the operator
-    asked for because a status write failed. The sweep is idempotent, so
-    running it against a stale row beats not running it.
+    This used to sweep anyway, on the grounds that ``_run_action`` marked
+    ``in_progress`` best-effort too. Both now nack instead. A 404 (pruned row)
+    already arrives as ``{}`` and still sweeps; what raises here is a transport
+    or server error after the client's own retries. Sweeping then bypasses the
+    claim, and a concurrent delivery republishes an embed request for every row
+    still queued, doubling provider calls for the backlog. The nack retries the
+    claim once storage answers.
     """
     from core_worker import consumer
 
@@ -598,10 +743,11 @@ async def test_embed_backfill_sweeps_even_if_in_progress_update_fails() -> None:
         patch.object(
             consumer,
             "update_lifecycle_audit_row",
-            # in_progress raises; the finalising call succeeds.
+            # in_progress raises; a finalising call would succeed.
             AsyncMock(side_effect=[RuntimeError("status write blip"), None]),
         ),
     ):
-        await consumer.handle_embed_backfill_request(_backfill_event())
+        with pytest.raises(RuntimeError, match="status write blip"):
+            await consumer.handle_embed_backfill_request(_backfill_event())
 
-    swept.assert_awaited_once(), "a failed status write must not skip the sweep"
+    swept.assert_not_awaited()

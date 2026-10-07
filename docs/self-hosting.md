@@ -39,9 +39,14 @@ USE_LLM_FOR_MEMORY_CREATION=true
 OPENAI_API_KEY=sk-...
 ```
 
-Without AI keys the stack still starts. Its dummy providers return
-non-semantic embeddings, which are useful for exercising the API surface but
-not for evaluating semantic recall.
+Without AI keys the stack still starts. With the default
+`EMBEDDING_PROVIDER=openai` and no key (and no `PLATFORM_EMBEDDING_*`),
+memories are stored **without** an embedding — keyword search still finds
+them, and core-api logs one ERROR naming the missing key — so they are not
+mistaken for embedded rows once a key is configured. Set
+`EMBEDDING_PROVIDER=fake` to store deterministic, non-semantic test vectors
+instead; that is useful for exercising the API surface but not for evaluating
+semantic recall.
 
 > **Want zero cloud API calls?** v2.0+ includes a self-hosted embedder profile
 > (`BAAI/bge-m3` on a
@@ -58,12 +63,14 @@ not for evaluating semantic recall.
 |---|---|---|
 | **OpenAI** (default) | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=openai` | `OPENAI_API_KEY` |
 | **Google Gemini** | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=gemini` | `GEMINI_API_KEY` + `OPENAI_API_KEY` |
-| **Anthropic** | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=anthropic` | `ANTHROPIC_API_KEY` + `OPENAI_API_KEY` |
 | **OpenRouter** | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=openrouter` | `OPENROUTER_API_KEY` + `OPENAI_API_KEY` |
 | **Self-hosted (TEI / bge-m3)** | `--profile embed-local` + `OPENAI_EMBEDDING_BASE_URL=http://tei:80/v1`<br>+ `OPENAI_EMBEDDING_MODEL=BAAI/bge-m3`<br>+ `OPENAI_EMBEDDING_SEND_DIMENSIONS=false` | none — runs locally |
 
-Anthropic, Gemini, and OpenRouter do not provide embedding APIs here, so pair
-them with OpenAI or TEI for embeddings. Gemini uses the Google AI Studio
+Gemini and OpenRouter do not provide embedding APIs here, so pair them with
+OpenAI or TEI for embeddings. `ENTITY_EXTRACTION_PROVIDER=anthropic` is not
+supported: enrichment, entity extraction and contradiction detection need
+structured JSON output, which Anthropic's OpenAI-compatible endpoint rejects,
+so core-api refuses to start with it. Gemini uses the Google AI Studio
 key-auth Developer API; it does not require a GCP project or application
 default credentials. TEI keeps `EMBEDDING_PROVIDER=openai` because it exposes
 an OpenAI-compatible API.
@@ -108,7 +115,7 @@ wins.
 
 - If the image is cached, `docker compose up -d --pull never` starts without a registry request.
 - If no image is cached, `docker compose up --build --pull never` builds from source.
-- For a strict no-network guarantee, add a `docker-compose.override.yml` that sets `pull_policy: never` for both application services. Compose then fails fast when an image is absent.
+- For a strict no-network guarantee, add a `docker-compose.override.yml` that sets `pull_policy: never` for the three application services. Compose then fails fast when an image is absent.
 
 ### Service URLs
 
@@ -123,8 +130,8 @@ network; it has no host URL.
 
 ### What the stack contains
 
-`docker compose up` starts four long-running containers and a one-shot
-`storage-secret-init` container:
+`docker compose up` starts five long-running containers and two one-shot
+containers, `storage-secret-init` and `admin-key-init`:
 
 | Container | Role |
 |---|---|
@@ -132,6 +139,15 @@ network; it has no host URL.
 | `redis` | Cache and rate limiting |
 | `core-storage-api` | Storage service (SQL + vector search) |
 | `core-api` | REST + MCP surface; embedding and enrichment run in-process (`deployment_mode=inline`) |
+| `core-operations` | Lifecycle scheduler: nightly expiry, stale archival, purge, crystallization, entity linking and insights, plus hourly reconciliation (02:00 UTC by default) |
+
+`core-operations` calls core-api's admin-only endpoints. When `ADMIN_API_KEY`
+is blank, `admin-key-init` generates a key into a private volume that only
+`core-api` and `core-operations` mount, so the schedule works on a bare
+`docker compose up`. An `ADMIN_API_KEY` set in `.env` replaces it for both. To
+stop the schedule, stop the `core-operations` service or set
+`IS_STANDALONE: "true"` in its `environment`; nothing expires, archives or is
+purged without it.
 
 The optional `tei` service starts only with `--profile embed-local`.
 `core-worker`, platform-tier services, and the Google Pub/Sub event bus are
@@ -184,6 +200,31 @@ write rather than globally.
 
 `POST /search` returns matches in an `items` array. Each item contains the full
 memory plus its `similarity` score.
+
+## Upgrading
+
+Pull the new images and run `docker compose up -d`. `core-storage-api` applies
+any pending schema migrations when it starts, before it serves traffic. If a
+migration is interrupted (the container is killed or the database drops the
+connection), restart the service. Each migration either rolls back completely
+or is written to be retried, so the restart runs it again from the start.
+
+Restore a database with a full `pg_dump`, which includes the `alembic_version`
+table that records the schema revision. If that table is missing (a dump of
+selected tables, or one dropped by hand), the service records the current
+revision only when the schema shows the newest migration was applied. Otherwise
+it refuses to start, because it cannot tell how many migrations still need to
+run. Find the revision the database was really at (from the `alembic_version`
+of the database it was copied from, or the release it last ran), record it,
+and start the service. It then applies the remaining migrations. From a source
+checkout, run `alembic stamp <revision>` from the repository root. With the
+compose stack, write the same row directly:
+
+```bash
+docker compose exec db psql -U caura -d caura -c \
+  "CREATE TABLE alembic_version (version_num varchar(32) PRIMARY KEY);
+   INSERT INTO alembic_version VALUES ('<revision>');"
+```
 
 ## Authentication modes
 

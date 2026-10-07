@@ -189,6 +189,25 @@ async def test_admin_key_with_explicit_tenant_can_clear(stm_on, seams):
     assert seams.clear_bulletin == [(TENANT, FLEET)]
 
 
+async def test_retired_service_input_uses_canonical_note_key(stm_on, seams):
+    retired = "memclaw-insighter"  # legacy-name-ok: supported client input alias
+    canonical = "caura-insighter"
+    async with admin_client() as client:
+        read = await client.get(
+            "/api/v1/stm/notes",
+            params={"agent_id": retired, "tenant_id": TENANT},
+        )
+        cleared = await client.delete(
+            "/api/v1/stm/notes",
+            params={"agent_id": retired, "tenant_id": TENANT},
+        )
+
+    assert read.status_code == 200, read.text
+    assert cleared.status_code == 200, cleared.text
+    assert seams.read_notes == [(TENANT, canonical)]
+    assert seams.clear_notes == [(TENANT, canonical)]
+
+
 async def test_admin_key_with_explicit_tenant_can_promote(stm_on, seams):
     async with admin_client() as client:
         r = await client.post(

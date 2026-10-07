@@ -31,12 +31,14 @@ import {
   CAURA_NODE_NAME,
   CAURA_FLEET_ID,
   CAURA_REQUIRE_SIGNED_COMMANDS,
+  CAURA_CLEARTEXT_REMOTE,
   CAURA_INTERVIEWER,
   CAURA_INTERVIEWER_TASKS,
   INTERVIEW_SUBMIT_MAX_EVENTS,
   INTERVIEW_SUBMIT_TIMEOUT_MS,
   BUILD_TIMEOUT_MS,
   MAX_SOURCE_SIZE,
+  assertKeyTransportAllowed,
   ensureTenantId,
   readEnv,
 } from "./env.js";
@@ -387,6 +389,8 @@ function cleanupStaleBackups(): void {
   }
 }
 
+let _insecureSkillsSyncWarned = false;
+
 export async function sendHeartbeat(): Promise<void> {
   cleanupStaleBackups();
   verifyDeployPostRestart();
@@ -399,10 +403,23 @@ export async function sendHeartbeat(): Promise<void> {
   // installed on this node, plus deltas/skips) rides the heartbeat for
   // operator observability. Left undefined if reconciliation throws.
   let reconcile: ReconcileSummary | undefined;
-  try {
-    reconcile = await reconcileSkills();
-  } catch (e: unknown) {
-    logError("reconcileSkills failed", e);
+  if (CAURA_CLEARTEXT_REMOTE) {
+    // L-80: over plain HTTP anyone on the path could forge the catalog and
+    // write skills the agents follow. Keep the skills already on disk and
+    // report no summary, the same as a tick whose reconcile threw.
+    if (!_insecureSkillsSyncWarned) {
+      console.warn(
+        "[caura] skills sync is disabled: CAURA_API_URL is plain HTTP to another host. " +
+          "Installed skills are kept. Point CAURA_API_URL at https:// to sync them.",
+      );
+      _insecureSkillsSyncWarned = true;
+    }
+  } else {
+    try {
+      reconcile = await reconcileSkills();
+    } catch (e: unknown) {
+      logError("reconcileSkills failed", e);
+    }
   }
 
   const pluginDir = getPluginDir();
@@ -700,6 +717,29 @@ async function processCommand(cmd: {
     return;
   }
 
+  // L-80: plain HTTP to a remote host carries these commands and the plugin
+  // source a deploy fetches, so anyone on the path could push code, or the
+  // instructions educate writes into agent workspaces, here. Signing is no
+  // defence: commands are signed with CAURA_API_KEY, which the same channel
+  // carries in cleartext when CAURA_ALLOW_INSECURE_HTTP is set, and a node with
+  // no key accepts unsigned commands. So this follows the channel, not the opt-in.
+  const writesLasting = ["deploy", "update_plugin", "educate"].includes(cmd.command);
+  if (CAURA_CLEARTEXT_REMOTE && writesLasting) {
+    const error =
+      `Refused ${cmd.command}: CAURA_API_URL is plain HTTP to another host, where anyone on the ` +
+      `path could forge it. Point CAURA_API_URL at https:// to use it.`;
+    console.warn(`[caura] ${error}`);
+    try {
+      await apiCall("POST", `/fleet/commands/${encodeURIComponent(cmd.id)}/result`, {
+        status: "rejected",
+        result: { error },
+      });
+    } catch {
+      // Report failed
+    }
+    return;
+  }
+
   let status = "done";
   let result: Record<string, unknown> = {};
   // CAURA-000: set inside the deploy/restart success branches; the
@@ -789,9 +829,13 @@ async function processCommand(cmd: {
           // gateway; the bootstrap-router alias path is the
           // unauthenticated route for fresh installs.
           const mHeaders: Record<string, string> = withUserAgent();
-          if (CAURA_API_KEY) mHeaders["X-API-Key"] = CAURA_API_KEY;
+          if (CAURA_API_KEY) {
+            assertKeyTransportAllowed();
+            mHeaders["X-API-Key"] = CAURA_API_KEY;
+          }
           const mRes = await fetch(mUrl, {
             headers: mHeaders,
+            redirect: "error",
             signal: AbortSignal.timeout(10_000),
           });
           if (mRes.ok) {

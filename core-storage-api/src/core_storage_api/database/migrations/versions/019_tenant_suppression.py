@@ -1,8 +1,7 @@
 """Create ``tenant_suppression`` table (CAURA-694).
 
 OSS-side mirror of the enterprise org-deletion lifecycle. The enterprise
-``platform-admin-api`` publishes one
-``memclaw.org.suppression-changed`` event per soft-delete + restore;
+``platform-admin-api`` publishes one suppression-change event per soft-delete + restore;
 core-worker (or core-api in OSS standalone) subscribes and upserts one
 row per affected tenant_id here. The core-api boundary guard reads this
 table to reject reads/writes for suppressed tenants synchronously.
@@ -38,6 +37,8 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+
+TOPIC = "memclaw.org.suppression-changed"  # legacy-name-floor: deployed topic
 
 revision: str = "019"
 down_revision: str | None = "018"

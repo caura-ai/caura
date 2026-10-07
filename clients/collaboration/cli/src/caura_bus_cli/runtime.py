@@ -13,12 +13,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
-from caura_bus_core import Bus, PlatformError
+from caura_bus_core import RESYNC_EVENT, Bus, PlatformError
 from caura_bus_core.collaboration import Presence
 
 WAKE_TEXT = (
     "Caura: check inbox. Call peer wait, handle each delivery, and repeat until delivery is null. "
-    "Read notices too. Stop if paused."
+    "Read notices too. Stop if paused. Acknowledge with peer progress; send one reply with the result."
 )
 OVERDUE_TEXT = "Caura: a request you sent is overdue. Call peer wait."
 WAKE_EVENTS = {
@@ -28,6 +28,8 @@ WAKE_EVENTS = {
     "request.cancelled",
     "message.available",
     "delivery.available",
+    # Retention removed history after our cursor: reconcile from REST state.
+    RESYNC_EVENT,
     "human.decided",
     "delivery.interrupt",
     "delivery.acked",
@@ -58,9 +60,20 @@ def lock(path):
         os.close(fd)
 
 
+# A failed or interrupted native queue is retried on a later snapshot, spaced
+# by a capped exponential backoff that survives restarts (wall-clock based).
+WAKE_RETRY_BASE_SECONDS = 5.0
+WAKE_RETRY_MAX_SECONDS = 300.0
+
+
+def wake_retry_delay(attempts):
+    return min(WAKE_RETRY_BASE_SECONDS * 2 ** min(attempts - 1, 16), WAKE_RETRY_MAX_SECONDS)
+
+
 class WakeState:
-    def __init__(self, path):
+    def __init__(self, path, clock=time.time):
         self.path = Path(path)
+        self.clock = clock
 
     def load(self):
         return json.loads(self.path.read_text()) if self.path.exists() else {}
@@ -100,17 +113,36 @@ class WakeState:
             recovering = recovery is not None and recovery != saved.get("recovery_key")
             if same_burst and not recovering:
                 return False
-            # Persist before handing control to a runtime. A crash/ambiguous
-            # queue failure must not enqueue duplicate prompts on restart.
-            current = {**saved, marker: generation, "recovery_key": recovery or saved.get("recovery_key")}
-            self.save(current)
+            # The burst is recorded as woken only after the runtime confirms the
+            # queue. Before handing control to it, persist the attempt with its
+            # backoff deadline: a failed, timed-out or crashed queue is retried
+            # on a later snapshot (also after a restart), but never in a storm.
+            attempt = saved.get("wake_attempt") or {}
+            now = self.clock()
+            if now < attempt.get("retry_at", 0):
+                return False
+            attempts = attempt.get("attempts", 0) + 1
+            self.save(
+                {
+                    **saved,
+                    "wake_attempt": {"attempts": attempts, "retry_at": now + wake_retry_delay(attempts)},
+                }
+            )
             if snapshot.get("wake_reason") == "request_overdue":
                 await emit(OVERDUE_TEXT)
             else:
                 await emit()
             # Inventory records only confirmed queue delivery or emitted hook
-            # output; an ambiguous runtime failure never becomes a successful wake.
-            self.save({**current, "last_wake_at": datetime.now(UTC).isoformat()})
+            # output; a runtime failure never becomes a successful wake.
+            current = {k: v for k, v in saved.items() if k != "wake_attempt"}
+            self.save(
+                {
+                    **current,
+                    marker: generation,
+                    "recovery_key": recovery or saved.get("recovery_key"),
+                    "last_wake_at": datetime.now(UTC).isoformat(),
+                }
+            )
             return True
 
 
@@ -202,7 +234,12 @@ async def run_waker(config, runtime, state, emit=None):
             )
         )
         if emit is not None:
-            await state.notify(snapshot, emit)
+            try:
+                await state.notify(snapshot, emit)
+            except Exception as exc:
+                # The attempt and its backoff are persisted; a later snapshot
+                # retries. Losing the waker here would strand the wake.
+                print(f"Caura: native wake failed, will retry: {exc!r}", file=sys.stderr, flush=True)
         state.health("healthy")
         return snapshot
 

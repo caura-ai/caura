@@ -57,6 +57,13 @@ def install_batch_status_replay_shim(mock_sc: Any) -> None:
                 kwargs["unset_supersedes"] = row["unset_supersedes"]
             if "expected_supersedes_id" in row:
                 kwargs["expected_supersedes_id"] = row["expected_supersedes_id"]
+            # ``expect_supersedes_null`` (09/22 M-01) is deliberately NOT
+            # forwarded, and that is not an omission. It asks the BATCH route
+            # for the NULL compare-and-set that ``PATCH /memories/{id}/status``
+            # — the call this shim replays into — has always applied to its set
+            # path unconditionally. Forwarding it would mean inventing a
+            # parameter the single-row client does not take, to request
+            # behaviour that call already has.
             await update_mock(mid, status, **kwargs)
         return {"ok": True, "skipped": []}
 

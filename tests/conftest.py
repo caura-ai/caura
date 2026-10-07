@@ -1,9 +1,12 @@
 """Shared fixtures for the P0 algorithmic improvements test suite.
 
-Unit tests (marked @pytest.mark.unit) run without any database.
-Integration tests (marked @pytest.mark.integration) require a running
-PostgreSQL instance with pgvector — configure via TEST_DATABASE_URL env var
-or the defaults below.
+Tests marked ``@pytest.mark.unit`` (and not ``integration``) run without any
+database: the autouse storage bridge skips schema setup for them, so
+``pytest -m unit`` works with no PostgreSQL reachable. Every other test —
+marked ``integration`` or unmarked — gets the schema, because unmarked tests
+reach the database through that bridge without asking for a DB fixture. Those
+require a running PostgreSQL instance with pgvector — configure via
+TEST_DATABASE_URL env var or the defaults below.
 """
 
 import asyncio
@@ -406,13 +409,41 @@ _storage_sc = None
 _storage_app = None
 
 
+def _needs_no_database(node) -> bool:
+    """Whether a test has declared itself database-free.
+
+    Opt-out rather than opt-in: most tests carry no marker and still reach the
+    database through the storage bridge, so only an explicit ``unit`` marker
+    (without ``integration``) skips schema setup.
+    """
+    return (
+        node.get_closest_marker("unit") is not None
+        and node.get_closest_marker("integration") is None
+    )
+
+
+@pytest.fixture
+def _schema_unless_database_free(request):
+    """Set up the schema unless the test is marked database-free.
+
+    ``_setup_schema`` cannot skip itself: it is session-scoped, so an early
+    return for a first (unit) test would be cached for every later one. This
+    fixture is sync on purpose — ``getfixturevalue`` on an async fixture from
+    inside an async one re-enters the running event loop.
+    """
+    if not _needs_no_database(request.node):
+        request.getfixturevalue("_setup_schema")
+
+
 @pytest.fixture(autouse=True)
-async def _patch_storage_client(_engine, _setup_schema):
+async def _patch_storage_client(_engine, _schema_unless_database_free):
     """Replace the storage client's httpx transport with an ASGI bridge.
 
     Routes all storage client HTTP calls to the core-storage-api FastAPI app
     in-process, so tests don't need a running server on port 8002.
     The core-storage-api session factory is pointed at the test engine.
+    Neither the engine nor the bridge connects until a query runs, so a
+    database-free test gets the bridge without needing PostgreSQL.
     """
     global _storage_asgi_http, _storage_sc, _storage_app
     import httpx

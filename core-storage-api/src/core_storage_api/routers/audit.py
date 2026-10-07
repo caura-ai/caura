@@ -7,7 +7,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from common import permanent_failure
 from core_storage_api.schemas import AUDIT_LOG_FIELDS, orm_to_dict
+from core_storage_api.services.audit_chain import PIIInAuditError
 from core_storage_api.services.postgres_service import PostgresService
 
 router = APIRouter(prefix="/audit-logs", tags=["Audit"])
@@ -27,6 +29,20 @@ _REQUIRED_AUDIT_FIELDS = frozenset({"tenant_id", "action", "resource_type"})
 # multiple of the default flush_threshold and keeps any single INSERT
 # bounded for predictable AlloyDB transaction time.
 _MAX_BATCH_SIZE = 500
+
+
+def _pii_refusal(exc: PIIInAuditError) -> HTTPException:
+    """422, marked not retryable, for a ``detail`` the chain refused.
+
+    Unreachable by construction — the writer scrubs card/SSN-shaped spans with
+    the same patterns the assertion checks (``audit_chain.scrub_pii``) — and
+    mapped anyway: the failure is deterministic, so the bare 500 it used to be
+    told core-api's flusher to retry an identical batch and then drop it.
+    """
+    return HTTPException(
+        status_code=422,
+        detail=permanent_failure.permanent_detail(cause="pii_in_audit_detail", message=str(exc)),
+    )
 
 
 def _parse_resource_id(rid: object) -> UUID | None:
@@ -51,14 +67,17 @@ def _parse_resource_id(rid: object) -> UUID | None:
 @router.post("")
 async def create_audit_log(request: Request) -> dict:
     body: dict = await request.json()
-    await _svc.audit_add(
-        tenant_id=body["tenant_id"],
-        agent_id=body.get("agent_id"),
-        action=body["action"],
-        resource_type=body["resource_type"],
-        resource_id=_parse_resource_id(body.get("resource_id")),
-        detail=body.get("detail"),
-    )
+    try:
+        await _svc.audit_add(
+            tenant_id=body["tenant_id"],
+            agent_id=body.get("agent_id"),
+            action=body["action"],
+            resource_type=body["resource_type"],
+            resource_id=_parse_resource_id(body.get("resource_id")),
+            detail=body.get("detail"),
+        )
+    except PIIInAuditError as exc:
+        raise _pii_refusal(exc) from exc
     return {"ok": True}
 
 
@@ -141,7 +160,11 @@ async def create_audit_logs_bulk(request: Request) -> dict:
         if rid is not None:
             normalised_event["resource_id"] = UUID(rid)
         normalised.append(normalised_event)
-    await _svc.audit_add_batch(normalised)
+    try:
+        await _svc.audit_add_batch(normalised)
+    except PIIInAuditError as exc:
+        # Other tenants' groups in the batch were still committed.
+        raise _pii_refusal(exc) from exc
     return {"ok": True, "count": len(normalised)}
 
 
@@ -189,7 +212,11 @@ async def list_audit_logs(
     offset: int = 0,
     action: str | None = None,
     resource_type: str | None = None,
+    agent_id: str | None = None,
+    resource_id: UUID | None = None,
     since: datetime | None = None,
+    cursor_ts: datetime | None = None,
+    cursor_id: UUID | None = None,
 ) -> list[dict]:
     # EVERY parameter filters in SQL. ``since`` already did (OSS 08/14 M-11);
     # ``action`` / ``resource_type`` / ``offset`` were applied here, in Python,
@@ -203,6 +230,10 @@ async def list_audit_logs(
         offset=offset,
         action=action,
         resource_type=resource_type,
+        agent_id=agent_id,
+        resource_id=resource_id,
         since=since,
+        cursor_ts=cursor_ts,
+        cursor_id=cursor_id,
     )
     return [orm_to_dict(log, AUDIT_LOG_FIELDS) for log in logs]

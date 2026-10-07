@@ -16,6 +16,7 @@ cloud:
 | GET    | `/api/v1/memories/{memory_id}`  | `GetMemory` (`memory_recall`)    |
 | PATCH  | `/api/v1/memories/{memory_id}`  | `UpdateMemory` (`memory_update`) |
 | DELETE | `/api/v1/memories/{memory_id}`  | `DeleteMemory` (`memory_delete`) |
+| GET    | `/api/v1/keystones`             | `ListKeystones` (the hook agent's rules, g1.1) |
 
 Selection is **method-level** (`BROKER_OPERATIONS` in
 `gen_broker_openapi.py`), not path-level: `/api/v1/memories` also serves POST

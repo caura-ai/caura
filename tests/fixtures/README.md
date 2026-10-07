@@ -34,3 +34,13 @@ Regenerate whenever a `ToolSpec` description, a tool's parameter annotations, or
 the registry contents change. `plugin/tools.json` is a separate artifact with its
 own generator — `python scripts/export_tool_specs.py` — and
 `test_tools_export_in_sync.py` will fail until you run that too.
+
+## Rule-set hash vectors
+
+`ruleset-hash-vectors.json` holds the shared cases for the rule-set hash
+(`common/governance/ruleset_hash.py`, tested by `test_ruleset_hash.py`). It is
+not generated from this code: the expected bytes come from an independent
+RFC 8785 oracle in node (caura-ai/caura-daemon
+`internal/ruleset/testdata/gen-vectors.mjs`), and the same file sits byte for
+byte beside it, where the broker's Go suite runs it too. Both suites pin the
+file's sha256, so edit both copies and both pins in the same pair of PRs.

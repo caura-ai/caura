@@ -24,6 +24,46 @@ function runtimeTag(): string {
   return node ? ` (node/${node.split(".")[0]})` : "";
 }
 
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "::1" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+  );
+}
+
+function envAllowsInsecureHttp(): boolean {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  return ["true", "1"].includes(env?.CAURA_ALLOW_INSECURE_HTTP ?? "");
+}
+
+/**
+ * Refuse to send the API key in cleartext to another machine (L-66): https, or
+ * plain http to a loopback host, or an explicit opt-in. The same rule as the
+ * OpenClaw plugin's `keyTransportPolicy`.
+ */
+function assertKeyTransportAllowed(baseUrl: string, allowInsecureHttp: boolean | undefined): void {
+  const expected = "baseUrl must start with https:// (or http:// for a loopback host)";
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error(`${expected}; got an invalid URL`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`${expected}; got ${url.protocol}`);
+  }
+  if (url.protocol === "https:" || isLoopbackHost(url.hostname)) return;
+  if (allowInsecureHttp ?? envAllowsInsecureHttp()) return;
+  throw new Error(
+    `Refusing to send the API key to ${url.host}: baseUrl uses plain HTTP to a non-loopback host, ` +
+      `so the key would cross the network in cleartext. Use https://, or pass allowInsecureHttp: true ` +
+      `(or set CAURA_ALLOW_INSECURE_HTTP=true) to accept the risk, e.g. on a trusted private network.`,
+  );
+}
+
 export class CauraError extends Error {}
 
 /** Raised on network failures or timeouts, retaining the original error as cause. */
@@ -87,6 +127,12 @@ export interface CauraOptions {
   timeoutMs?: number;
   /** Inject a custom fetch (e.g. for tests). Defaults to global fetch. */
   fetch?: typeof globalThis.fetch;
+  /**
+   * Send the API key over plain http to a non-loopback host. Off by default: the
+   * key would cross the network in cleartext. Unset defers to
+   * `CAURA_ALLOW_INSECURE_HTTP` (`true` or `1`); an explicit `false` beats it.
+   */
+  allowInsecureHttp?: boolean;
 }
 
 export interface WriteOptions {
@@ -143,6 +189,7 @@ export class Caura {
     this.tenantId = options.tenantId;
     this.agentId = options.agentId;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
+    assertKeyTransportAllowed(this.baseUrl, options.allowInsecureHttp);
     this.timeoutMs = options.timeoutMs ?? 30000;
     this.headers = {
       "X-API-Key": apiKey,
@@ -237,21 +284,35 @@ export class Caura {
     const serializedBody = body !== undefined ? JSON.stringify(body) : undefined;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    let res: Response;
     try {
-      res = await this.fetchImpl(this.baseUrl + path, {
-        method,
-        headers: this.headers,
-        body: serializedBody,
-        signal: controller.signal,
-      });
-    } catch (cause) {
-      throw new TransportError(cause);
+      let res: Response;
+      try {
+        res = await this.fetchImpl(this.baseUrl + path, {
+          method,
+          headers: this.headers,
+          body: serializedBody,
+          signal: controller.signal,
+          // fetch re-sends X-API-Key to a redirect target, even cross-origin
+          // or from https to http, so a redirect is an error (L-66).
+          redirect: "error",
+        });
+      } catch (cause) {
+        throw new TransportError(cause);
+      }
+      await raiseForStatus(res);
+      return await readResponseJson(res);
     } finally {
       clearTimeout(timer);
     }
-    await raiseForStatus(res);
-    return res.json();
+  }
+}
+
+async function readResponseJson(res: Response): Promise<any> {
+  try {
+    return await res.json();
+  } catch (cause) {
+    if (cause instanceof SyntaxError) throw cause;
+    throw new TransportError(cause);
   }
 }
 
@@ -259,8 +320,9 @@ async function raiseForStatus(res: Response): Promise<void> {
   if (res.ok) return;
   let payload: any = {};
   try {
-    payload = await res.json();
-  } catch {
+    payload = await readResponseJson(res);
+  } catch (cause) {
+    if (!(cause instanceof SyntaxError)) throw cause;
     payload = {};
   }
   let message = "";

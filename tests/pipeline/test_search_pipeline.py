@@ -559,8 +559,13 @@ async def test_parallel_embed_gather_has_timeout():
 # ---------------------------------------------------------------------------
 # Integration tests (require PostgreSQL)
 # ---------------------------------------------------------------------------
+#
+# Marked ``integration`` so a DB-less ``-m "not integration"`` run deselects
+# them (oss-0909-l-04); the header alone never did. CI runs them regardless
+# (``-m "not benchmark"``).
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_pipeline_search_returns_results():
     """Pipeline search path returns MemoryOut results for seeded memories."""
@@ -587,6 +592,7 @@ async def test_pipeline_search_returns_results():
         memory_service._USE_PIPELINE_SEARCH = original
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_legacy_search_returns_results():
     """Legacy search path returns results (baseline)."""
@@ -612,6 +618,7 @@ async def test_legacy_search_returns_results():
         memory_service._USE_PIPELINE_SEARCH = original
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_search_pipeline_equivalence():
     """Pipeline and legacy paths produce equivalent results (order, scores to 4 decimals, entity links)."""
@@ -658,6 +665,7 @@ async def test_search_pipeline_equivalence():
         assert leg_links == pip_links, f"Row {i}: entity_links mismatch"
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_search_pipeline_empty_results():
     """Pipeline search returns empty list for no-match query."""
@@ -683,6 +691,7 @@ async def test_search_pipeline_empty_results():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
 async def test_recall_returns_memory_with_pending_embedding(
     db, monkeypatch, use_pipeline

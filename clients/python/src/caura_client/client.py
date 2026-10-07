@@ -6,6 +6,8 @@ A thin wrapper over the Caura REST API. Point it at a managed
 
 from __future__ import annotations
 
+import os
+import re
 import sys
 import urllib.parse
 from typing import Any
@@ -27,6 +29,40 @@ It names the package, its version and the Python major.minor, nothing more;
 no other identifying information is added and the client never contacts
 anything but ``base_url``.
 """
+
+
+_LOOPBACK_V4 = re.compile(r"127\.\d{1,3}\.\d{1,3}\.\d{1,3}")
+
+
+def _is_loopback(host: str) -> bool:
+    """The plugin's ``isLoopbackHost``: traffic to these never leaves the machine."""
+    host = host.lower()
+    return host in ("localhost", "::1") or host.endswith(".localhost") or bool(_LOOPBACK_V4.fullmatch(host))
+
+
+def _check_key_transport(base_url: str, allow_insecure_http: bool | None) -> None:
+    """Refuse to send the API key in cleartext to another machine (L-66).
+
+    https, or plain http to a loopback host, or an explicit opt-in: the same rule
+    the OpenClaw plugin applies. ``None`` defers to ``CAURA_ALLOW_INSECURE_HTTP``.
+    """
+    parts = urllib.parse.urlsplit(base_url)
+    if parts.scheme not in ("http", "https"):
+        raise ValueError(
+            f"base_url must start with https:// (or http:// for a loopback host); got scheme {parts.scheme!r}"
+        )
+    if parts.scheme == "https" or _is_loopback(parts.hostname or ""):
+        return
+    if allow_insecure_http is None:
+        allow_insecure_http = os.environ.get("CAURA_ALLOW_INSECURE_HTTP") in ("true", "1")
+    if not allow_insecure_http:
+        host = parts.netloc.rpartition("@")[2]  # never echo userinfo
+        raise ValueError(
+            f"Refusing to send the API key to {host}: base_url uses plain HTTP to a "
+            "non-loopback host, so the key would cross the network in cleartext. Use https://, or "
+            "pass allow_insecure_http=True (or set CAURA_ALLOW_INSECURE_HTTP=true) to accept the "
+            "risk, e.g. on a trusted private network."
+        )
 
 
 class Caura:
@@ -51,11 +87,13 @@ class Caura:
         agent_id: str | None = None,
         timeout: float = 30.0,
         transport: httpx.BaseTransport | None = None,
+        allow_insecure_http: bool | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("api_key is required")
         if not tenant_id:
             raise ValueError("tenant_id is required")
+        _check_key_transport(base_url, allow_insecure_http)
         self.tenant_id = tenant_id
         self.agent_id = agent_id
         self._http = httpx.Client(
@@ -250,7 +288,7 @@ class Caura:
     def close(self) -> None:
         self._http.close()
 
-    def __enter__(self) -> Caura:
+    def __enter__(self) -> Caura:  # noqa: PYI034 - Self is unavailable on supported Python 3.9.
         return self
 
     def __exit__(self, *exc: object) -> None:

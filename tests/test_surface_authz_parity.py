@@ -289,9 +289,11 @@ async def _count_with(monkeypatch, auth, *, fleet_id=None) -> dict:
             status=None,
             exclude_scope_agent=False,
             caller_agent_id=None,
+            caller_tenant_id=None,
         ):
             seen["exclude_scope_agent"] = exclude_scope_agent
             seen["caller_agent_id"] = caller_agent_id
+            seen["caller_tenant_id"] = caller_tenant_id
             return 7
 
     monkeypatch.setattr(mem_routes, "get_storage_client", lambda: _SC())

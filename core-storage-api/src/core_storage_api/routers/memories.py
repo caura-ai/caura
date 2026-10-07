@@ -198,6 +198,7 @@ async def scored_search(request: Request) -> list[dict]:
                 query=body["query"],
                 fleet_ids=body.get("fleet_ids"),
                 caller_agent_id=body.get("caller_agent_id"),
+                caller_tenant_id=body.get("caller_tenant_id"),
                 filter_agent_id=body.get("filter_agent_id"),
                 memory_type_filter=body.get("memory_type_filter"),
                 status_filter=body.get("status_filter"),
@@ -341,6 +342,7 @@ async def load_by_ids(request: Request) -> list[dict]:
                 tenant_id=tenant_id,
                 fleet_ids=body.get("fleet_ids"),
                 caller_agent_id=body.get("caller_agent_id"),
+                caller_tenant_id=body.get("caller_tenant_id"),
                 filter_agent_id=body.get("filter_agent_id"),
                 memory_type_filter=body.get("memory_type_filter"),
                 status_filter=body.get("status_filter"),
@@ -396,6 +398,26 @@ async def find_semantic_duplicate(request: Request) -> dict:
     return payload
 
 
+@router.post("/agent-scope-probe")
+async def agent_scope_probe(request: Request) -> dict:
+    """CAURA-723 — why an agent-filtered search came back empty.
+
+    POST rather than GET despite being a read: ``fleet_ids`` and
+    ``readable_tenant_ids`` are lists, and a JSON body is how every other
+    list-taking read here (``scored-search``) carries them.
+    """
+    body: dict = await request.json()
+    return await _svc.memory_agent_scope_probe(
+        tenant_id=body["tenant_id"],
+        agent_id=body["agent_id"],
+        fleet_ids=body.get("fleet_ids") or None,
+        readable_tenant_ids=body.get("readable_tenant_ids") or None,
+        # Default True keeps an older core-api (which does not send the key)
+        # getting both halves, as it expects.
+        include_agent_registered=bool(body.get("include_agent_registered", True)),
+    )
+
+
 @router.post("/entity-overlap-candidates")
 async def find_entity_overlap_candidates(request: Request) -> list[dict]:
     body: dict = await request.json()
@@ -425,15 +447,17 @@ async def find_by_supersedes_id(tenant_id: str, supersedes_id: str) -> list[dict
 
 @router.get("/by-parent-id")
 async def find_children_by_parent_id(tenant_id: str, parent_id: str) -> list[dict]:
-    """H-10 — live rows derived from a parent, for governance cascade.
+    """H-10 — live rows derived from a parent, for governance cascade and, since
+    B25, every single delete.
 
     ``parent_id`` is matched against child ``metadata.parent_memory_id`` and is
     NOT parsed as a UUID here: it is compared as the string the writer stored,
     so a malformed value matches nothing instead of 500ing the remediation that
-    is trying to enforce a drop.
+    is trying to enforce a drop. ``MEMORY_LIST_FIELDS``: both callers read the
+    id, agent, content and visibility, never the vectors.
     """
     memories = await _svc.memory_find_children_by_parent_id(tenant_id=tenant_id, parent_id=parent_id)
-    return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+    return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 
 
 @router.post("/reset-entity-artifacts")
@@ -480,6 +504,7 @@ async def find_successors(request: Request) -> list[dict]:
         tenant_id=body["tenant_id"],
         fleet_ids=body.get("fleet_ids"),
         caller_agent_id=body.get("caller_agent_id"),
+        caller_tenant_id=body.get("caller_tenant_id"),
         filter_agent_id=body.get("filter_agent_id"),
         memory_type_filter=body.get("memory_type_filter"),
         valid_at=valid_at,
@@ -650,15 +675,18 @@ async def set_subject_entity_if_null(memory_id: UUID, request: Request) -> dict:
     """A63 — conditional write-back of the extraction-derived subject.
 
     Sets ``memories.subject_entity_id`` ONLY when it is currently NULL —
-    the write-time triple path's value always wins. Returns
-    ``{"updated": bool}``; ``false`` covers absent / deleted /
-    foreign-tenant / already-set rows alike (callers treat it as a skip).
+    the write-time triple path's value always wins. An optional ``content``
+    also requires the row to still hold the text the subject was extracted
+    from (M-39). Returns ``{"updated": bool}``; ``false`` covers absent /
+    deleted / foreign-tenant / already-set / edited rows alike (callers treat
+    it as a skip).
     """
     body: dict = await request.json()
     updated = await _svc.memory_set_subject_entity_if_null(
         memory_id=memory_id,
         tenant_id=body["tenant_id"],
         subject_entity_id=UUID(body["subject_entity_id"]),
+        content=body.get("content"),
     )
     return {"updated": updated}
 
@@ -669,8 +697,9 @@ async def set_predicate_if_null(memory_id: UUID, request: Request) -> dict:
 
     Sibling of ``/subject-entity`` (A63). Sets ``predicate`` and
     ``object_value`` ONLY when ``predicate`` is currently NULL — the write-time
-    triple path's value always wins. Returns ``{"updated": bool}``; ``false``
-    covers absent / deleted / foreign-tenant / already-set rows alike.
+    triple path's value always wins, and an optional ``content`` must still be
+    the row's text (M-39). Returns ``{"updated": bool}``; ``false`` covers
+    absent / deleted / foreign-tenant / already-set / edited rows alike.
     """
     body: dict = await request.json()
     updated = await _svc.memory_set_predicate_if_null(
@@ -678,6 +707,7 @@ async def set_predicate_if_null(memory_id: UUID, request: Request) -> dict:
         tenant_id=body["tenant_id"],
         predicate=body["predicate"],
         object_value=body["object_value"],
+        content=body.get("content"),
     )
     return {"updated": updated}
 
@@ -772,6 +802,25 @@ async def mark_dedup_checked(request: Request) -> dict:
     return {"ok": True}
 
 
+#: Rows one reset call clears (M-38). One bounded transaction, so a large tenant
+#: is drained across calls rather than in one request that outlives its timeout.
+_DEDUP_RESET_BATCH = 5000
+
+
+@router.post("/reset-dedup-checked")
+async def reset_dedup_checked(request: Request) -> dict:
+    """M-38 — return up to one batch of the tenant's settled rows to the dedup sweep.
+
+    ``done`` is false while stamped rows may remain; the caller repeats the call.
+    """
+    body: dict = await request.json()
+    tenant_id = body.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=422, detail="tenant_id is required")
+    reset = await _svc.memory_reset_dedup_checked(tenant_id, limit=_DEDUP_RESET_BATCH)
+    return {"reset": reset, "done": reset < _DEDUP_RESET_BATCH}
+
+
 @router.post("/entity-links")
 async def get_entity_links_for_memories(request: Request) -> dict:
     body: dict = await request.json()
@@ -806,13 +855,27 @@ async def batch_update_status(request: Request) -> dict:
         precedence over ``supersedes_id`` if both are present
       - ``expected_supersedes_id`` (optional, UUID): CAS gate — skip the
         row unless its current ``supersedes_id`` matches this value
+      - ``expect_supersedes_null`` (optional, bool): apply ``supersedes_id``
+        under a compare-and-set against NULL, so the first writer to land
+        owns the chain edge. This is what ``PATCH /memories/{id}/status``
+        has always done on its set path; 09/22 M-01 found that this route
+        did not, while six comments in the contradiction detector cited the
+        missing guard as their reason for omitting others. Opt-in so the
+        prior unconditional behaviour is unchanged for callers that want it.
 
     Backward-compatible with the prior 2-field shape — rows containing
     only ``memory_id`` + ``status`` behave exactly as before.
 
-    Returns ``{"ok": True, "skipped": [memory_id, ...]}`` listing rows
-    that failed the CAS gate (or pointed at a deleted / nonexistent id).
-    Callers that don't use the CAS field can safely ignore ``skipped``.
+    Returns ``{"ok": True, "skipped": [...], "edge_skipped": [...]}``.
+
+    ``skipped`` lists rows whose STATUS write did not land — the
+    ``expected_supersedes_id`` gate failed, or the row is deleted /
+    nonexistent / foreign-tenant. ``edge_skipped`` lists rows whose status
+    DID land but whose ``expect_supersedes_null`` CAS lost to a concurrent
+    writer, so the row kept the pointer it already had. The two are
+    disjoint, and a row in ``edge_skipped`` is not an error: it means
+    someone else owns that edge. Callers using neither CAS field can ignore
+    both lists.
     """
     body: dict = await request.json()
 
@@ -833,7 +896,7 @@ async def batch_update_status(request: Request) -> dict:
     # what got written. The validation pass is O(N) memory + zero DB
     # work, so the cost is negligible compared to the partial-commit
     # surprise it prevents.
-    parsed: list[tuple[UUID, str, UUID | None, bool, UUID | None]] = []
+    parsed: list[tuple[UUID, str, UUID | None, bool, UUID | None, bool]] = []
     for item in body.get("updates", []):
         try:
             sup_id = item.get("supersedes_id")
@@ -845,6 +908,7 @@ async def batch_update_status(request: Request) -> dict:
                     UUID(sup_id) if sup_id else None,
                     bool(item.get("unset_supersedes", False)),
                     UUID(exp_sup_id) if exp_sup_id else None,
+                    bool(item.get("expect_supersedes_null", False)),
                 )
             )
         except (ValueError, KeyError) as exc:
@@ -863,19 +927,39 @@ async def batch_update_status(request: Request) -> dict:
                 ),
             )
 
+    # Every pointer the batch would write, checked before ANY row is: the
+    # per-row writers check too, but a refusal there would land after rows
+    # 0..K-1 committed — the partial batch the validation pass above exists
+    # to prevent. Raises ``PointerNotInTenantError`` → 422 (app-wide handler).
+    await _svc.memory_assert_pointers_in_tenant(
+        tenant_id, [{"supersedes_id": p[2]} for p in parsed if p[2] is not None and not p[3]]
+    )
+
     skipped: list[str] = []
-    for mid, new_status, sup_uuid, unset_sup, exp_sup_uuid in parsed:
+    edge_skipped: list[str] = []
+    for mid, new_status, sup_uuid, unset_sup, exp_sup_uuid, expect_null in parsed:
+        # Under ``expect_supersedes_null`` the pointer is written by the CAS
+        # method instead of being folded into the status UPDATE, so the two
+        # outcomes stay separable: the caller asked for a status flip AND an
+        # edge, and losing a race for the edge is not a reason to drop the
+        # flip. Same split, and same reason, as the single-row route.
+        cas_edge = sup_uuid if (expect_null and not unset_sup) else None
         ok = await _svc.memory_update_status(
             mid,
             new_status,
             tenant_id=tenant_id,
-            supersedes_id=sup_uuid,
+            supersedes_id=None if cas_edge else sup_uuid,
             unset_supersedes=unset_sup,
             expected_supersedes_id=exp_sup_uuid,
         )
         if not ok:
             skipped.append(str(mid))
-    return {"ok": True, "skipped": skipped}
+            continue
+        if cas_edge is not None and not await _svc.memory_set_supersedes_if_null(
+            mid, cas_edge, tenant_id=tenant_id
+        ):
+            edge_skipped.append(str(mid))
+    return {"ok": True, "skipped": skipped, "edge_skipped": edge_skipped}
 
 
 # ------------------------------------------------------------------
@@ -1140,6 +1224,7 @@ async def count_active_memories(
     status: str | None = None,
     exclude_scope_agent: bool = False,
     caller_agent_id: str | None = None,
+    caller_tenant_id: str | None = None,
 ) -> dict:
     """Count live memories (``LIVE_MEMORY_STATUSES``), not just literal ``active``.
 
@@ -1157,6 +1242,7 @@ async def count_active_memories(
         status=status,
         exclude_scope_agent=exclude_scope_agent,
         caller_agent_id=caller_agent_id,
+        caller_tenant_id=caller_tenant_id,
     )
     return {"count": count}
 
@@ -1338,12 +1424,18 @@ async def list_memory_conflicts(
     review_status: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    memory_id: str | None = None,
 ) -> list[dict]:
     """D11 — the review queue. Tenant-scoped; see the service docstring for why
-    that is a boundary rather than a filter."""
+    that is a boundary rather than a filter. ``memory_id`` narrows it to the
+    records naming that memory (M-102)."""
     try:
         rows = await _svc.memory_conflicts_list(
-            tenant_id=tenant_id, review_status=review_status, limit=limit, offset=offset
+            tenant_id=tenant_id,
+            review_status=review_status,
+            limit=limit,
+            offset=offset,
+            memory_id=UUID(memory_id) if memory_id is not None else None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -1530,10 +1622,12 @@ async def admin_list(request: Request) -> list[dict]:
 async def list_by_filters(request: Request) -> list[dict]:
     """Non-admin memory list WITH visibility scoping (MCP ``caura_list``).
 
-    Body: ``{tenant_id, caller_agent_id?, fleet_id?, written_by?, memory_type?,
-    status?, run_id?, weight_min?, weight_max?, created_after?, created_before?,
-    include_deleted, sort, order, limit, offset, cursor_ts?, cursor_id?,
-    readable_tenant_ids?, visibility?}``. ``limit`` is the caller's desired page size; this
+    Body: ``{tenant_id, caller_agent_id?, caller_tenant_id?, fleet_id?,
+    written_by?, memory_type?, status?, run_id?, weight_min?, weight_max?,
+    created_after?, created_before?, include_deleted, sort, order, limit, offset,
+    cursor_ts?, cursor_id?, readable_tenant_ids?, visibility?}``.
+    ``caller_tenant_id`` is the caller's home tenant: its own ``scope_agent``
+    rows are matched there only (defaults to ``tenant_id``). ``limit`` is the caller's desired page size; this
     endpoint over-fetches ``limit+1`` rows internally for has_more detection and
     the caller slices to ``limit`` / builds the next cursor. Distinct from
     ``/admin-list`` which has NO visibility scoping.
@@ -1579,6 +1673,7 @@ async def list_by_filters(request: Request) -> list[dict]:
     memories = await _svc.memory_list_by_filters(
         tenant_id=tenant_id,
         caller_agent_id=body.get("caller_agent_id"),
+        caller_tenant_id=body.get("caller_tenant_id"),
         fleet_id=body.get("fleet_id"),
         written_by=body.get("written_by"),
         memory_type=memory_type,
@@ -1607,10 +1702,11 @@ async def stats_breakdown(request: Request) -> dict:
     """Visibility-scoped stats breakdown (MCP ``caura_stats``).
 
     Body: ``{tenant_id?, fleet_id?, agent_id?, memory_type?, status?,
-    include_deleted?, readable_tenant_ids?}``. Returns ``{total, by_type,
-    by_agent, by_status}`` plus optional ``by_tenant`` (when the readable set
-    spans >1 tenant) and ``deleted`` / ``total_including_deleted`` (when
-    ``include_deleted``). Distinct from ``/admin-stats`` (no scoping) and
+    include_deleted?, readable_tenant_ids?, include_pending?}``. Returns
+    ``{total, by_type, by_agent, by_status}`` plus optional ``by_tenant`` (when
+    the readable set spans >1 tenant), ``deleted`` / ``total_including_deleted``
+    (when ``include_deleted``) and ``pending`` / ``settled`` (when
+    ``include_pending``). Distinct from ``/admin-stats`` (no scoping) and
     ``/stats`` (health-stats shape).
     """
     body: dict = await request.json()
@@ -1646,6 +1742,8 @@ async def stats_breakdown(request: Request) -> dict:
         include_deleted=bool(body.get("include_deleted", False)),
         include_scope_agent=bool(body.get("include_scope_agent", False)),
         readable_tenant_ids=body.get("readable_tenant_ids"),
+        include_pending=bool(body.get("include_pending", False)),
+        caller_tenant_id=body.get("caller_tenant_id"),
     )
 
 
@@ -1728,7 +1826,8 @@ async def quality_metrics(request: Request) -> dict:
 
 @router.post("/soft-delete-by-filter")
 async def soft_delete_by_filter(request: Request) -> dict:
-    """Soft-delete every matching live memory for a tenant.
+    """Soft-delete every matching live memory for a tenant, and the rows
+    derived from them (``deleted`` counts both).
 
     Body: ``{tenant_id, fleet_id?, agent_id?, memory_type?, status?,
     exclude_ids?[], metadata_filter?{k:v}}``. The ≤20-pair + string-value
@@ -1760,8 +1859,9 @@ async def soft_delete_by_filter(request: Request) -> dict:
 
 @router.post("/soft-delete-by-ids")
 async def soft_delete_by_ids(request: Request) -> dict:
-    """Soft-delete live memories by id (tenant-scoped). Body: ``{tenant_id,
-    ids[]}``. The 1-1000 cap stays in core-api."""
+    """Soft-delete live memories by id (tenant-scoped), and the rows derived
+    from them (``deleted`` counts both). Body: ``{tenant_id, ids[]}``. The
+    1-1000 cap stays in core-api."""
     body: dict = await request.json()
     tenant_id = body.get("tenant_id")
     if not tenant_id:
@@ -1777,8 +1877,8 @@ async def soft_delete_by_ids(request: Request) -> dict:
 @router.post("/soft-delete-by-run")
 async def soft_delete_by_run(request: Request) -> dict:
     """Soft-delete live memories tagged with ``run_id`` AND
-    ``metadata.source = metadata_source``. Body: ``{tenant_id, run_id,
-    metadata_source}``."""
+    ``metadata.source = metadata_source``, and the rows derived from them
+    (``deleted`` counts both). Body: ``{tenant_id, run_id, metadata_source}``."""
     body: dict = await request.json()
     tenant_id = body.get("tenant_id")
     run_id = body.get("run_id")
@@ -1900,11 +2000,14 @@ async def prior_ingest_by_doc_hash(request: Request) -> dict:
     """Doc-hash idempotency lookup for the ingest write path.
 
     Ports ``ingest_service._find_prior_ingest_by_doc_hash``: returns the
-    memories of the most-recent prior ingest of identical content for this
-    tenant (``metadata_->>'doc_hash'`` match, ``source='ingest'``, not deleted),
-    or ``[]``. Body: ``{"tenant_id": str, "doc_hash": str}`` → ``{"rows":
+    caller's memories from its prior ingests of identical content
+    (``metadata_->>'doc_hash'`` match, ``source='ingest'``, not deleted, this
+    agent and fleet), newest first, or ``[]``. Body: ``{"tenant_id": str,
+    "doc_hash": str, "agent_id": str, "fleet_id": str | null}`` → ``{"rows":
     [memory dicts]}``. POST (not GET) keeps body-based validation consistent
-    with the sibling endpoints. Fail-closed 422 on a missing field. Rows use
+    with the sibling endpoints. Fail-closed 422 on a missing field; the cache
+    is the caller's own (L-74), so a lookup naming no agent is refused. An
+    absent ``fleet_id`` is the NULL fleet. Rows use
     ``MEMORY_LIST_FIELDS`` (no embedding/search_vector) — ``ingest_preview``
     consumes ``run_id``, ``content``, ``memory_type``, ``source_uri`` and
     ``metadata_`` (salience), none of which is the vector.
@@ -1912,7 +2015,10 @@ async def prior_ingest_by_doc_hash(request: Request) -> dict:
     body: dict = await request.json()
     tenant_id = _require(body, "tenant_id")
     doc_hash = _require(body, "doc_hash")
-    rows = await _svc.find_prior_ingest_by_doc_hash(tenant_id, doc_hash)
+    agent_id = _require(body, "agent_id")
+    rows = await _svc.find_prior_ingest_by_doc_hash(
+        tenant_id, doc_hash, fleet_id=body.get("fleet_id"), agent_id=agent_id
+    )
     return {"rows": [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in rows]}
 
 
@@ -2008,13 +2114,21 @@ async def update_memory(memory_id: UUID, request: Request) -> dict:
     # core-api, future tooling) get the same coercion at the API
     # boundary.
     _parse_datetimes(body)
+    # B25 (M-53): ``derived`` carries this PATCH to the parent's derived rows,
+    # in the same transaction (see ``memory_update``). Its expiry arrives as
+    # JSON, so it gets the coercion the top-level fields get. The children a
+    # content edit deleted come back in the answer, for core-api to audit.
+    derived = body.get("derived")
+    if isinstance(derived, dict):
+        _parse_datetimes(derived)
+    derived_deleted: list[dict] = []
     # No empty-body short-circuit here: ``memory_update`` runs the
     # existence check first and returns False for absent/soft-deleted
     # rows regardless of whether the body has actionable columns. An
     # earlier short-circuit would let a PATCH ``{}`` on a deleted row
     # answer 200 — inconsistent with the 404 the same row gets on a
     # non-empty PATCH.
-    found = await _svc.memory_update(memory_id, tenant_id, body or {})
+    found = await _svc.memory_update(memory_id, tenant_id, body or {}, derived_deleted=derived_deleted)
     if not found:
         # Pre-this-fix the route returned ``200 {"ok": True}`` regardless
         # of whether the row was missing or soft-deleted, so a PATCH on
@@ -2022,7 +2136,7 @@ async def update_memory(memory_id: UUID, request: Request) -> dict:
         # silently no-op'ing. Surface as 404 so clients can distinguish
         # "applied" from "ignored because the row is gone."
         raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found")
-    return {"ok": True}
+    return {"ok": True, "derived_deleted": derived_deleted} if derived else {"ok": True}
 
 
 @router.patch("/{memory_id}/status")
@@ -2139,6 +2253,10 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
     # Set or status-only paths. ``memory_update_status`` returns False
     # when the target row doesn't exist (or was already deleted); surface
     # as 404 so the caller doesn't silently treat a no-op as success.
+    if supersedes_id is not None:
+        # Before the status flip, so a pointer this tenant does not own (422)
+        # refuses the whole request instead of landing after the flip.
+        await _svc.memory_assert_pointers_in_tenant(tenant_id, [{"supersedes_id": supersedes_id}])
     ok = await _svc.memory_update_status(memory_id, status, tenant_id=tenant_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"memory {memory_id} not found")
@@ -2150,26 +2268,14 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
         # core_api.services.contradiction_detector to defend the
         # CAURA-000 ``NEW.supersedes_id = OLD.id`` rule against re-fired
         # detection on already-resolved memories.
-        from sqlalchemy import update as sql_update
-
-        from common.models import Memory
-        from core_storage_api.services.postgres_service import get_session
-
-        async with get_session() as session:
-            await session.execute(
-                sql_update(Memory)
-                .where(
-                    Memory.id == memory_id,
-                    Memory.tenant_id == tenant_id,
-                    # Unreachable today — ``memory_update_status`` above now
-                    # 404s on a deleted row before we get here — but this
-                    # statement should not depend on the liveness of a check
-                    # someone could reorder or make conditional later.
-                    Memory.deleted_at.is_(None),
-                    Memory.supersedes_id.is_(None),
-                )
-                .values(supersedes_id=UUID(supersedes_id))
-            )
+        #
+        # 09/22 M-01 — this used to be an inline UPDATE here, which is why
+        # ``POST /memories/batch-update-status`` never had it: the clause was
+        # a property of THIS ROUTE, not of the write. Now both routes call the
+        # same named service method, so neither can quietly lose the guard.
+        # The pointer write stays separate from the status flip above: losing
+        # the CAS must cost the edge only, never the status.
+        await _svc.memory_set_supersedes_if_null(memory_id, UUID(supersedes_id), tenant_id=tenant_id)
     return {"ok": True}
 
 
@@ -2245,8 +2351,12 @@ async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> dict:
     is what let this one drift. It also filters ``deleted_at IS NULL``, so
     deleting an already-deleted memory is a 404 rather than a silent re-stamp
     that moved the retention clock forward.
+
+    The one delete that does NOT take the memory's derived rows with it (B25):
+    both callers delete and audit each child themselves — ``soft_delete_memory``
+    and governance remediation, which must audit a child before deleting it.
     """
-    deleted = await _svc.memory_soft_delete_by_ids(tenant_id, [memory_id])
+    deleted = await _svc.memory_soft_delete_by_ids(tenant_id, [memory_id], with_derived=False)
     if not deleted:
         raise HTTPException(status_code=404, detail="Memory not found")
     return {"ok": True}

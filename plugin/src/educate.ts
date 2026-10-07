@@ -26,6 +26,19 @@ import { getOpenClawBaseDir } from "./paths.js";
 import { CAURA_TOOLS } from "./tools.js";
 import { logError } from "./logger.js";
 
+interface WorkspacePathOps {
+  resolve(...paths: string[]): string;
+}
+
+/** @internal Exported to inject platform-specific path operations in tests. */
+export function resolveWorkspacePath(
+  baseDir: string,
+  workspaceDir: string,
+  pathOps: WorkspacePathOps = { resolve },
+): string {
+  return pathOps.resolve(baseDir, workspaceDir);
+}
+
 /**
  * Resolve all agent workspace directories using the canonical 4-source
  * discovery, deduplicated and existence-filtered:
@@ -59,7 +72,7 @@ export function discoverAgentWorkspaces(
 
   function addWs(dir: string, id: string): void {
     if (!id) return;
-    const resolved = dir.startsWith("/") ? resolve(dir) : resolve(join(baseDir, dir));
+    const resolved = resolveWorkspacePath(baseDir, dir);
     if (!isContainedPath(resolved, baseDir)) {
       console.warn(
         `[caura] Rejected workspace path outside openclawDir: ${resolved}`,

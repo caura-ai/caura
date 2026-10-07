@@ -17,6 +17,8 @@ Exercise:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from common.events.base import Event
@@ -30,12 +32,19 @@ from tests._legacy_contracts import frozen_topic
 class _FakeAdapter(SuppressionStorageAdapter):
     def __init__(self, *, raise_on_tenant: str | None = None) -> None:
         self.calls: list[tuple[str, str, str | None]] = []
+        self.occurred_at: list[datetime | None] = []
         self._raise_on_tenant = raise_on_tenant
 
     async def set_tenant_suppression(
-        self, *, tenant_id: str, action: str, updated_by: str | None
+        self,
+        *,
+        tenant_id: str,
+        action: str,
+        updated_by: str | None,
+        occurred_at: datetime | None = None,
     ) -> None:
         self.calls.append((tenant_id, action, updated_by))
+        self.occurred_at.append(occurred_at)
         if self._raise_on_tenant is not None and tenant_id == self._raise_on_tenant:
             raise RuntimeError("simulated storage failure")
 
@@ -135,3 +144,17 @@ async def test_missing_correlation_id_defaults_updated_by() -> None:
     assert evt.correlation_id is None
     await _handle_suppression_changed(evt, adapter=adapter)
     assert adapter.calls == [("t1", "suppress", "core-worker")]
+
+
+@pytest.mark.asyncio
+async def test_event_time_rides_through_to_every_upsert() -> None:
+    """Storage orders suppress/restore by EVENT time, so the handler must
+    hand the envelope's ``occurred_at`` to the adapter for every tenant —
+    a redelivered stale event is then a no-op instead of undoing a newer
+    one."""
+    adapter = _FakeAdapter()
+    when = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    event = _event({"tenant_ids": ["t1", "t2"], "action": "restore"})
+    event = event.model_copy(update={"occurred_at": when})
+    await _handle_suppression_changed(event, adapter=adapter)
+    assert adapter.occurred_at == [when, when]

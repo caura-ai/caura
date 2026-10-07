@@ -23,14 +23,20 @@ def is_storage_shared_secret_rejection(response: httpx.Response) -> bool:
     )
 
 
-def read_shared_secret_file(path: str) -> str:
-    """Read a non-empty shared secret from ``path`` when one is configured."""
+def read_shared_secret_file(
+    path: str, *, env_name: str = "CORE_STORAGE_SHARED_SECRET_FILE"
+) -> str:
+    """Read a non-empty shared secret from ``path`` when one is configured.
+
+    ``env_name`` is the setting that named the file, for the error message; the
+    admin key reads its file through here too.
+    """
     if not path:
         return ""
     try:
         secret = Path(path).read_text().strip()
     except OSError as exc:
-        raise ValueError(f"cannot read CORE_STORAGE_SHARED_SECRET_FILE: {exc}") from exc
+        raise ValueError(f"cannot read {env_name}: {exc}") from exc
     if not secret:
-        raise ValueError("CORE_STORAGE_SHARED_SECRET_FILE is empty")
+        raise ValueError(f"{env_name} is empty")
     return secret

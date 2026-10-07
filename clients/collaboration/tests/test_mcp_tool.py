@@ -61,6 +61,7 @@ async def test_only_one_tool_is_advertised():
         "recent",
         "collect",
         "agents",
+        "describe",
         "threads",
         "status",
         "requests",
@@ -154,6 +155,10 @@ async def test_opcodes_use_authenticated_platform_operations(tool, payload, meth
         {"op": "human", "args": {"reason": "Missing delivery"}},
         {"op": "threads", "args": {"to": ["b"]}},
         {"op": "discover", "args": {"available_only": "false"}},
+        {"op": "describe"},
+        {"op": "describe", "args": {"description": "x" * 1001}},
+        {"op": "describe", "args": {"description": "mine", "agent_id": "b"}},
+        {"op": "describe", "args": {"description": 7}},
         {"op": "recent", "args": {"limit": 0}},
         {"op": "status", "args": {"message_id": "m1", "tenant_id": "other"}},
         {
@@ -214,3 +219,108 @@ def test_entrypoint_answers_help_and_version_without_serving(monkeypatch, capsys
     out = capsys.readouterr().out
     assert "usage: caura-bus-mcp" in out
     assert "caura-bus-mcp 0." in out
+
+
+DIRECTORY = [
+    {
+        "agent_id": "b",
+        "display_name": "Billing",
+        "description": "Owns invoices, refunds and Stripe webhooks.",
+        "description_updated_at": "2026-10-06T12:00:00+00:00",
+        "availability": "ready",
+        "capabilities": ["billing"],
+        "sessions": [{"session_id": "s", "description": "codex on host-1", "status": "ready"}],
+    },
+    {
+        "agent_id": "c",
+        "display_name": "Database",
+        "description": "PostgreSQL migrations and query plans.",
+        "description_updated_at": "2026-10-05T12:00:00+00:00",
+        "availability": "offline",
+        "capabilities": [],
+        "sessions": [],
+    },
+    {
+        "agent_id": "d",
+        "display_name": None,
+        "description": None,
+        "description_updated_at": None,
+        "availability": "offline",
+        "capabilities": [],
+        "sessions": [],
+    },
+]
+
+
+@pytest.fixture
+async def directory_tool():
+    requests = []
+
+    async def handle(request):
+        requests.append(request)
+        path = request.url.path.removeprefix("/api/v1/bus")
+        if path in {"/agents", "/discover"}:
+            return httpx.Response(200, json=[{"agent_id": "a", "description": "self"}, *DIRECTORY])
+        body = json.loads(request.content or b"{}")
+        return httpx.Response(
+            200,
+            json={
+                "agent_id": "a",
+                "description": body.get("description"),
+                "description_updated_at": "2026-10-06T12:00:00+00:00",
+                "description_updated_by": "a",
+            },
+        )
+
+    config = AgentConfig(
+        api_url="https://caura.test", agent={"agent_id": "a", "tenant_id": "tenant"}, peers=["*"]
+    )
+    bus = Bus(config, api_key="test-key", transport=httpx.MockTransport(handle))
+    context = Context(
+        request_context=SimpleNamespace(lifespan_context=AppContext(config, bus)), mcp_server=mcp
+    )
+
+    async def call(payload):
+        result = await mcp.call_tool("peer", payload, context=context)
+        return json.loads(result.content[0].text)
+
+    try:
+        yield call, requests, bus
+    finally:
+        await bus.close()
+
+
+async def test_discovery_descriptions_survive_unchanged_online_offline_and_missing(directory_tool):
+    call, _, _ = directory_tool
+    found = (await call({"op": "discover", "args": {"available_only": False}}))["agents"]
+    assert found[1:] == DIRECTORY
+    # Registered expertise and live runtime state stay distinct fields.
+    online, offline, missing = found[1:]
+    assert online["description"] != online["sessions"][0]["description"]
+    assert offline["availability"] == "offline" and offline["description"]
+    assert missing["description"] is None
+    peers = (await call({"op": "agents"}))["agents"]
+    assert peers == DIRECTORY
+
+
+@pytest.mark.parametrize("description", ["Reviews database changes.", None, "x" * 1000])
+async def test_describe_updates_only_the_calling_agent(directory_tool, description):
+    call, requests, _ = directory_tool
+    result = await call({"op": "describe", "args": {"description": description}})
+    assert result["agent_id"] == "a" and result["description"] == description
+    (request,) = requests
+    assert request.method == "PUT" and request.url.path == "/api/v1/bus/agents/me/description"
+    assert request.headers["X-API-Key"] == "test-key"
+    assert json.loads(request.content) == {"description": description}
+
+
+async def test_sdk_description_round_trip_normalizes_and_bounds(directory_tool):
+    _, requests, bus = directory_tool
+    assert (await bus.describe("  Owns billing.\n"))["description"] == "Owns billing."
+    assert (await bus.describe("   "))["description"] is None
+    assert (await bus.description())["agent_id"] == "a"
+    assert [r.method for r in requests] == ["PUT", "PUT", "GET"]
+    for invalid in ("x" * 1001, "bell\x07"):
+        with pytest.raises(ValueError):
+            await bus.describe(invalid)
+    assert len(requests) == 3

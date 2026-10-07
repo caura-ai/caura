@@ -5,10 +5,15 @@ enforcement across Cloud Run instances — and falls back to an
 in-process store otherwise so OSS standalone deployments work
 unchanged.
 
-Keying precedence: API key (preferred, stable across IPs) → remote IP.
-Per-tenant and per-agent-key keying is a follow-up (tracked separately);
-see the enterprise gateway nginx.conf per-IP limits for the current
-coarse fallback.
+Keying: the bucket auth named (``request.state.rate_limit_key``, L-69), hashed,
+else the remote IP. Auth names it after what it verified: the admin key or
+``CAURA_API_KEY``, or behind the gateway the request's sole credential or else
+the gateway-set identity (see ``auth._gateway_rate_limit_key``). A header nothing
+checked never names a bucket, since a fresh one per request would be a fresh
+budget. In every hosted environment auth names a bucket for each request it
+admits (core-api will not boot there without a gateway secret or
+``CAURA_API_KEY``), so the IP fallback is for development and standalone, where
+behind a proxy every caller shares the proxy's address.
 
 Exported decorators are applied surgically to the hot-path routes that
 the loadtest showed as unprotected:
@@ -62,12 +67,13 @@ _STORAGE_OPTIONS: dict[str, object] = (
 
 
 def _key_func(request: Request) -> str:
-    """Rate-limit key. Prefers API key over IP so NAT'd agents don't
-    cannibalise each other's budget.
+    """Rate-limit key: the bucket auth named, else the client IP. Naming it
+    after a credential or identity rather than the IP keeps NAT'd agents from
+    cannibalising each other's budget.
 
-    The API key is hashed so the full secret never lands in the
-    storage backend or access logs, while keeping buckets unique for
-    keys that happen to share a prefix.
+    The name is hashed so a credential never lands in the storage backend
+    or access logs, while keeping buckets unique for keys that happen to
+    share a prefix.
     """
     # Fail-open seed for slowapi 0.1.10's swallow_errors gap. slowapi sets
     # ``request.state.view_rate_limit`` only AFTER it hits the storage backend
@@ -92,13 +98,13 @@ def _key_func(request: Request) -> str:
     if not hasattr(request.state, "view_rate_limit"):
         request.state.view_rate_limit = None
 
-    api_key = request.headers.get("x-api-key")
-    if not api_key:
-        auth = request.headers.get("authorization", "")
-        if auth.startswith("Bearer "):
-            api_key = auth[len("Bearer ") :]
-    if api_key:
-        return f"key:{hashlib.sha256(api_key.encode()).hexdigest()[:32]}"
+    # Never the raw key headers (L-69): standalone checks no key, header trust
+    # without a gateway secret takes the caller's own headers, and behind the
+    # gateway core-api cannot tell which credential was accepted. slowapi runs
+    # this inside the route, after the auth dependency, so any name is set.
+    rate_limit_key = getattr(request.state, "rate_limit_key", None)
+    if rate_limit_key:
+        return f"key:{hashlib.sha256(rate_limit_key.encode()).hexdigest()[:32]}"
     return f"ip:{get_remote_address(request)}"
 
 

@@ -30,6 +30,7 @@ import {
 import { assertSafePathSegment } from "./validation.js";
 import { resolveAgentIdQuiet } from "./resolve-agent.js";
 import { getSpec } from "./tool-specs.js";
+import { fetchKeystonesPayload } from "./keystones.js";
 
 interface ToolResult {
   content: Array<{ type: string; text: string }>;
@@ -206,6 +207,9 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       fleet_ids: { type: "array", items: { type: "string" }, description: "Restrict to fleets" },
       include_brief: { type: "boolean", description: "Append LLM-synthesized summary paragraph" },
       top_k: { type: "integer", description: "Max results (1-200)" },
+      valid_at: { type: "string", description: "As-of ISO 8601 date or timestamp for temporal retrieval" },
+      min_similarity: { type: "number", minimum: 0, maximum: 1, description: "Override the minimum semantic similarity for this recall" },
+      diagnostic: { type: "boolean", description: "Include retrieval diagnostics without incrementing recall counts" },
     },
   },
 
@@ -254,7 +258,8 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       memory_type: WRITABLE_MEMORY_TYPE_SCHEMA,
       weight: { type: "number", description: "For op=update (0-1)" },
       title: { type: "string", description: "For op=update" },
-      metadata: { type: "object", description: "For op=update (replaces dict)" },
+      metadata: { type: "object", description: "For op=update. Merges keys by default; use metadata_mode='replace' to replace the whole dict." },
+      metadata_mode: { type: "string", enum: ["merge", "replace"], description: "For op=update with metadata. Omitted: merge keys; replace: overwrite the whole dict." },
       source_uri: { type: "string", description: "For op=update" },
       agent_id: { type: "string", description: "Caller agent ID" },
     },
@@ -343,6 +348,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     type: "object",
     required: [],
     properties: {
+      agent_id: { type: "string", description: "Agent whose retrieval defaults to tune; defaults to the configured or install-scoped identity" },
       top_k: { type: "integer", description: "Max results per search (1-200)" },
       min_similarity: { type: "number", description: "Min similarity threshold (0.1-0.9)" },
       fts_weight: { type: "number", description: "Keyword vs semantic blend (0=semantic, 1=keyword)" },
@@ -397,6 +403,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       fleet_id: { type: "string", description: "Restrict aggregate to a fleet" },
       memory_type: MEMORY_TYPE_FILTER_SCHEMA,
       status: STATUS_SCHEMA,
+      include_deleted: { type: "boolean", description: "Include deleted counts (trust 3 required for agent credentials)" },
     },
   },
 
@@ -578,21 +585,24 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   },
 
   caura_doc: async (params, signal) => {
-    const enriched = await enrichBody(params);
-    const op = enriched.op as DocOp;
+    const op = params.op as DocOp;
+    if (["write", "read", "query", "delete"].includes(op) &&
+        (typeof params.collection !== "string" || !params.collection.trim())) {
+      throw new Error(`[caura] caura_doc op=${op} requires a non-empty collection`);
+    }
+    const enriched = await enrichBody(params, { resolveIdentity: op === "write" });
     const collection = enriched.collection as string | undefined;
     const tenant_id = enriched.tenant_id as string;
     if (op === "write") {
-      // SAFE-01: no ``agent_id``. ``DocWriteRequest`` has never declared one —
-      // the document routes take the writer's identity from the authenticated
-      // credential, not the body — so this key was accepted and dropped on
-      // every plugin-routed doc write, and POST /documents now 422s on it.
+      // DocWriteRequest records the author. Passing the resolved identity also
+      // lets apiCall select that agent's credential, as it does for caura_write.
       return apiCall("POST", "/documents", {
         tenant_id,
         collection,
         doc_id: enriched.doc_id,
         data: enriched.data,
         fleet_id: enriched.fleet_id,
+        agent_id: enriched.agent_id,
       }, undefined, signal);
     }
     if (op === "read") {
@@ -725,7 +735,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
       if (k === "agent_id" && !enriched.fleet_id) continue;
       query[k] = String(v);
     }
-    return apiCall("GET", "/memclaw/keystones", undefined, query, signal); // legacy-name-floor: live compatibility route
+    return fetchKeystonesPayload(query, signal);
   },
 
 };

@@ -20,6 +20,7 @@ empty → no write, no audit row).
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 
 from core_storage_api.services.postgres_service import PostgresService
 
@@ -62,3 +63,21 @@ async def update_organization_settings(org_id: str, request: Request) -> dict:
         new_settings=new_settings,
         changed_by=changed_by,
     )
+
+
+class EncryptApiKeysRequest(BaseModel):
+    expected: dict[str, str]
+    encrypted: dict[str, str]
+    changed_by: str | None = None
+
+
+@router.post("/{org_id}/encrypt-api-keys")
+async def encrypt_organization_api_keys(org_id: str, body: EncryptApiKeysRequest) -> dict:
+    """Swap plaintext provider keys for ciphertext, each only while unchanged (M-99).
+
+    ``expected`` maps each key name to the plaintext core-api read, ``encrypted``
+    to its ciphertext. Returns ``{"swapped": [names]}``. core-api encrypts; this
+    only checks, under the row lock, that each key still holds ``expected``.
+    """
+    swapped = await _svc.organization_settings_encrypt_api_keys(org_id=org_id, **body.model_dump())
+    return {"swapped": swapped}

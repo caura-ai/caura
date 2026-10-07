@@ -162,6 +162,9 @@ DOCUMENT_FIELDS: list[str] = [
     "collection",
     "doc_id",
     "data",
+    # ax-0917-m-14 — author attribution. Present but NULL on every row
+    # written before the column existed.
+    "agent_id",
     "created_at",
     "updated_at",
 ]
@@ -192,6 +195,7 @@ FLEET_NODE_FIELDS: list[str] = [
     "tools_json",
     "channels_json",
     "extra",
+    "owner_principal",
     "last_heartbeat",
     "created_at",
 ]

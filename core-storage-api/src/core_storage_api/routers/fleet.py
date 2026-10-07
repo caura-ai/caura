@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 
-from core_storage_api.routers._validation import _require
+from core_storage_api.routers._validation import _require, _require_uuid
 from core_storage_api.schemas import FLEET_COMMAND_FIELDS, FLEET_NODE_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import UNSCOPED, PostgresService
 
@@ -65,8 +65,30 @@ async def upsert_node(request: Request) -> dict:
     for dt_key in ("last_heartbeat",):
         if isinstance(body.get(dt_key), str):
             body[dt_key] = datetime.fromisoformat(body[dt_key])
-    node_id = await _svc.fleet_upsert_node(values=body)
+    # The credential the heartbeat came from (M-85), applied under the binding
+    # rule ``fleet_upsert_node`` documents rather than written as a column.
+    owner_principal = body.pop("owner_principal", None)
+    if owner_principal is not None and not isinstance(owner_principal, str):
+        raise HTTPException(status_code=422, detail="'owner_principal' must be a string or null")
+    node_id = await _svc.fleet_upsert_node(values=body, owner_principal=owner_principal)
+    if node_id is None:
+        raise HTTPException(status_code=409, detail="Node is bound to another credential")
     return {"id": str(node_id)}
+
+
+@router.post("/nodes/{node_id}/release")
+async def release_node(node_id: UUID, request: Request) -> dict:
+    """Clear a node's binding, or bind it straight to ``owner_principal`` (M-85)."""
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    owner_principal = body.get("owner_principal")
+    if owner_principal is not None and not isinstance(owner_principal, str):
+        raise HTTPException(status_code=422, detail="'owner_principal' must be a string or null")
+    if not await _svc.fleet_release_node(
+        tenant_id=tenant_id, node_id=node_id, owner_principal=owner_principal
+    ):
+        raise HTTPException(status_code=404, detail="Node not found")
+    return {"ok": True}
 
 
 @router.get("/nodes")
@@ -199,6 +221,7 @@ async def list_commands(
     status: str | None = None,
     command: str | None = None,
     limit: int = 50,
+    owner_principal: str | None = None,
 ) -> list[dict]:
     # ``node_id`` accepted directly (OSS 09/02 M-26) as well as by name. The
     # service has always filtered on the id; only ``node_name`` was reachable
@@ -225,6 +248,7 @@ async def list_commands(
         status=status,
         command=command,
         limit=limit,
+        owner_principal=owner_principal,
     )
     return [orm_to_dict(c, FLEET_COMMAND_FIELDS) for c in commands]
 
@@ -307,6 +331,9 @@ async def update_command_status(command_id: UUID, request: Request) -> dict:
             status_code=422,
             detail="'tenant_id' must be a string or null",
         )
+    owner_principal = body.get("owner_principal")
+    if owner_principal is not None and not isinstance(owner_principal, str):
+        raise HTTPException(status_code=422, detail="'owner_principal' must be a string or null")
     completed_at_raw = body.get("completed_at")
     matched = await _svc.fleet_update_command_result(
         command_id=command_id,
@@ -314,8 +341,25 @@ async def update_command_status(command_id: UUID, request: Request) -> dict:
         tenant_id=UNSCOPED if raw_tenant_id is None else raw_tenant_id,
         result=body.get("result"),
         completed_at=(datetime.fromisoformat(completed_at_raw) if completed_at_raw else datetime.now(UTC)),
+        owner_principal=owner_principal,
     )
     return {"ok": matched}
+
+
+@router.post("/commands/{command_id}/claim")
+async def claim_interview_request(command_id: UUID, request: Request) -> dict:
+    """Spend a delivered ``interview_request`` on one interview window (M-86).
+
+    ``ok`` is True only the first time, and only for this tenant's request,
+    queued for ``node_id`` and acked by that node's heartbeat.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    node_id = _require_uuid(body, "node_id")
+    claimed = await _svc.fleet_claim_interview_request(
+        tenant_id=tenant_id, command_id=command_id, node_id=node_id
+    )
+    return {"ok": claimed}
 
 
 @router.post("/commands/ack")

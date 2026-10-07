@@ -4,7 +4,8 @@
 Wraps the ``openai`` SDK (AsyncOpenAI) to implement the
 ``LLMProvider`` protocol. Supports OpenAI, Anthropic (via OpenAI-
 compatible endpoint), and OpenRouter by varying the ``base_url``
-parameter.
+parameter. Anthropic is ``complete_text`` only — see
+``ANTHROPIC_JSON_UNSUPPORTED``.
 
 The previous ``settings.openai_request_timeout_seconds`` import has
 been replaced with a constructor arg defaulting to
@@ -19,7 +20,7 @@ import json
 import logging
 import time
 
-import httpx
+import httpx2 as httpx
 import openai
 
 from common.llm.call_context import llm_call_label
@@ -35,6 +36,9 @@ from common.llm.constants import (
 )
 from common.llm.providers._shape_error import ProviderResponseShapeError
 from common.llm.providers._truncation import raise_if_truncated
+from common.llm.providers._unsupported import (
+    UnsupportedStructuredOutputError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +56,30 @@ class OpenAIResponseShapeError(ProviderResponseShapeError):
     def __reduce__(self) -> tuple:
         # See VertexResponseShapeError.__reduce__ for rationale.
         return (type(self), (self.args[1], self.args[2]))
+
+
+# oss-0915-m-01 — Anthropic's OpenAI-compatible endpoint rejects BOTH
+# ``response_format`` shapes this provider sends, with HTTP 400:
+#
+#   json_object               -> "response_format.type: Input should be
+#                                'json_schema'"
+#   json_schema, strict=False -> "response_format.json_schema.strict: Input
+#                                should be True"
+#
+# Strict mode is not an option either: the enrichment and contradiction-judge
+# callers pass no schema at all, and the Pydantic-generated ones that do exist
+# are not strict-compatible (see the ``strict=False`` note in ``complete_json``).
+# Every structured call therefore 400'd, ``call_with_fallback`` retried and fell
+# back to the fake provider, and the write reported success. Refuse before the
+# request instead: no doomed round-trips, and the reason is in the log rather
+# than an upstream validation message.
+ANTHROPIC_JSON_UNSUPPORTED = (
+    "structured output (complete_json) is not supported for provider "
+    "'anthropic': Anthropic's OpenAI-compatible endpoint rejects the "
+    "response_format this provider sends (it requires type=json_schema with "
+    "strict=true). Use openai, openrouter or gemini for "
+    "ENTITY_EXTRACTION_PROVIDER / the tenant LLM provider."
+)
 
 
 def _usage_tokens(response) -> tuple[int, int, int]:
@@ -225,6 +253,8 @@ class OpenAILLMProvider:
         reject it with a 400. Sending it also drops ``temperature`` —
         see the inline note at the call.
         """
+        if self._provider_name == "anthropic":
+            raise UnsupportedStructuredOutputError(ANTHROPIC_JSON_UNSUPPORTED)
         t0 = time.perf_counter()
         if response_schema is not None:
             response_format: dict = {
