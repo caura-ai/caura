@@ -10,6 +10,15 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.26.4](https://github.com/caura-ai/caura/compare/backend-v3.26.3...backend-v3.26.4) (2026-10-07)
+
+
+### Bug Fixes
+
+* **docker:** the service images pin python and uv by digest (L-67) ([3cf0112](https://github.com/caura-ai/caura/commit/3cf0112789c5ac0d7a5f087990a63702b19f7e95))
+* **release:** PyPI packages build in a job without the publish token, from hash-pinned tools (L-235) ([3cf0112](https://github.com/caura-ai/caura/commit/3cf0112789c5ac0d7a5f087990a63702b19f7e95))
+* **release:** the PyPI publish steps run a pinned commit, and the npm publish installs its lockfile (L-64) ([3cf0112](https://github.com/caura-ai/caura/commit/3cf0112789c5ac0d7a5f087990a63702b19f7e95))
+
 ## [3.26.3](https://github.com/caura-ai/caura/compare/backend-v3.26.2...backend-v3.26.3) (2026-10-07)
 
 
