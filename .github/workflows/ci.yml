@@ -903,3 +903,31 @@ jobs:
 
       - name: Load-bearing strings survive
         run: python3 scripts/do_not_touch_sentinel.py
+
+  pypi-packages-build:
+    # L-235: the PyPI publish workflows build in a job without ``id-token: write``,
+    # from tools hash-pinned in .github/pypi-build/requirements.txt, with
+    # --no-isolation so no newer setuptools is fetched. They run only on a release
+    # tag, so a bad pin, or a Dependabot bump of one, would otherwise first fail
+    # mid-release. This builds every package they publish the same way.
+    name: PyPI packages build from the pinned tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the pinned build tools
+        run: pip install --require-hashes -r .github/pypi-build/requirements.txt
+
+      - name: Build every package the PyPI workflows publish
+        run: |
+          for pyproject in clients/*/pyproject.toml; do
+            python -m build --no-isolation --outdir "${RUNNER_TEMP}/dist" "$(dirname "${pyproject}")"
+          done
