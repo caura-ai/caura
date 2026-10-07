@@ -22,7 +22,7 @@ through Caura. Supply the fields for the selected opcode inside `args`:
 | `reply` | `delivery_id`, `body`, `idempotency_key` | `reply_to`, `ack` (default true) |
 | `progress` | `delivery_id`, `summary`, `idempotency_key` | — |
 | `checkpoint` | progress fields plus `proposed_action` | `action_type` (read/write/external/destructive), `confidence`, `missing_information`, `conflicting_results`, `request_human` |
-| `recent` | — | `thread_id`, `agent_id`, `limit` (1–100; default 20), `before` |
+| `recent` | — | `thread_id`, `agent_id`, `reply_to` (your request ID; responses only), `limit` (1–100; default 20), `before` |
 | `threads` | — | — |
 | `status` | `message_id` | — |
 | `memory_context` | exactly one of `delivery_id`, `message_id` | — |
@@ -166,6 +166,16 @@ the first call returns `state=resumed` with `resume_context`, so follow it and
 retry. `state=unavailable` means the delivery was rejected, cancelled or
 reassigned: drop that work and do not replay it.
 
+Reclaim before reply. A lease can be lost while you hold an answer, for example
+when Caura is rebuilt or the lease expires. Send the `reply` as usual: MCP
+re-reads Caura first, reclaims the same delivery for this session with a fresh
+private token when Caura still offers it unchanged, and then sends your answer.
+Keep the same `idempotency_key` when retrying the same answer, so a reply that
+was already committed returns its stored receipt instead of a second message.
+If the call returns `state=resumed`, the instructions changed: rework the answer
+and use a new key. If it returns `state=unavailable`, the delivery was
+completed, cancelled or reassigned: do not send the answer anywhere else.
+
 Write an explicit Caura memory after (1) receiving a human decision via
 `resume_context`, (2) sending or receiving a completion report, and (3) making a
 design ruling. Save only the decision/outcome text, not bodies of other messages
@@ -205,3 +215,14 @@ environment, without committing it):
   }
 }
 ```
+
+## Asking a peer while already working
+
+Keep the original delivery leased. Send a request to the helper and keep the returned
+message ID. Use `peer(op="recent", args={"reply_to": "<request ID>"})` to read its
+responses; normal `wait` would return your original delivery. Empty results mean no
+response yet; use bounded retries and report progress on the original work as needed.
+After replying to or acknowledging the original work, normal `wait` will deliver the
+helper response again. Acknowledge it without repeating work already performed.
+Do not acknowledge unfinished original work just to unblock the inbox. Honor a pause
+returned by any Caura operation.

@@ -267,8 +267,9 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
     wait: timeout=50 (0-50 seconds, below host timeout). Returns delivery (possibly null) and durable notices. Read notices even when delivery is null.
       On a wake hint, handle deliveries and repeat wait until delivery is null; drain notices too.
       One delivery at a time; stop if paused. Honor resume_context on human resumption.
-      After a pause, other ops re-check Caura: state=resumed shows new instructions, then retry;
-      state=unavailable means the work was withdrawn, so do not replay it.
+      After a pause or lost lease, other ops re-check Caura and reclaim the same work when
+      still permitted: state=resumed shows new instructions, so revise and retry;
+      state=unavailable means the work was withdrawn or completed, so do not replay it.
     ack: delivery_id*. Explicit completion, idempotent even after restart.
     reply: delivery_id*, body*, idempotency_key*, reply_to, ack=true. Atomic reply+ack.
       Send exactly one reply per delivery, carrying the deliverable: any correlated reply,
@@ -323,13 +324,18 @@ async def dispatch(
         target = getattr(params, "delivery_id", None)
         if isinstance(params, Send) and params.reply_to in app.delivery.reply_deliveries:
             target = app.delivery.reply_deliveries[params.reply_to][0]
-        await app.delivery.guard(target)
+        # Retrying a sent reply (same key) or an ack may return Caura's stored result.
+        replay = type(params) is Ack
+        if isinstance(params, (Reply, Send)):
+            replay = (target, params.idempotency_key) in app.delivery.reply_attempts
+        await app.delivery.guard(target, replay)
     match params:
         case MemoryContext():
             return await app.bus.memory_context(**params.model_dump())
         case Wait():
             return await app.delivery.wait(params.timeout)
         case Reply():
+            app.delivery.reply_attempts.add((params.delivery_id, params.idempotency_key))
             result = await app.bus.reply(**params.model_dump(), token=app.delivery.token(params.delivery_id))
             app.delivery.reply_keys.add((params.delivery_id, params.idempotency_key))
             if params.ack:
@@ -378,6 +384,7 @@ async def dispatch(
                 delivery_id, sender, thread = reply_context
                 if params.to != [sender] or params.thread_id not in {None, thread}:
                     raise ValueError("reply recipient and thread must match the claimed message")
+                app.delivery.reply_attempts.add((delivery_id, params.idempotency_key))
                 result = await app.bus.reply(
                     delivery_id,
                     token=app.delivery.token(delivery_id),

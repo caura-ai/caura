@@ -221,6 +221,15 @@ def test_entrypoint_answers_help_and_version_without_serving(monkeypatch, capsys
     assert "caura-bus-mcp 0." in out
 
 
+async def test_recent_forwards_response_filter_without_claiming(tool):
+    call, requests, _ = tool
+    result = await call({"op": "recent", "args": {"reply_to": "request-123"}})
+    assert result["messages"] == []
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert requests[0].url.params["reply_to"] == "request-123"
+
+
 DIRECTORY = [
     {
         "agent_id": "b",

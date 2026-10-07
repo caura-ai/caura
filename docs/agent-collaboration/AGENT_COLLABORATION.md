@@ -231,6 +231,15 @@ and elapsed time so humans can assess repeatedly extended work.
   explicit ack. Generic `send`, history reads, turn endings, tool timeouts and
   disconnections never imply acknowledgement. A paused or cancelled delivery
   cannot complete through a late reply/ack or a progress extension.
+- **Reclaim before reply.** When a lease is lost mid-task (expiry, platform
+  rebuild), the stale token fails every lease operation. Before the stdio MCP
+  sends a reply, ack, progress or checkpoint for that work it re-reads Caura
+  through its authenticated session wait. It proceeds only on a fresh claim of
+  the same delivery, with no unseen human instructions, using the new private
+  token and the caller's unchanged idempotency key. Changed instructions return
+  `resumed`; a cancelled, completed or reassigned delivery returns
+  `unavailable`, and its in-hand answer is never replayed. A retry of a reply
+  this session already sent keeps its key, so Caura can return the stored receipt.
 
 ### What interruption promises
 
@@ -317,3 +326,17 @@ The preview uses paired `caura` and `caura-enterprise` checkouts. Enterprise's
 `platform-collaboration-api/sources.json` is the single OSS revision pin. Public
 source checkout needs no private repository secret. Docker accepts the OSS tree
 as a named build context. There are no patch overlays or synchronization jobs.
+
+## Consolidated messaging boundary
+
+Keep the durable PostgreSQL ledger, private stdio lease tokens and one outstanding
+delivery. Same-fleet messaging is the default; admins may explicitly enable
+tenant-wide messaging through `messaging_scope=tenant`. Existing accepted work
+and history survive policy changes. See SPEC.md for correlated response reads
+that permit a nested consultation without releasing the original lease.
+
+A waker retries after an OS error proves the runtime process never started.
+Once a process has started, timeout, cancellation or a nonzero exit can be
+ambiguous: retain the wake marker and inspect the runtime before clearing it.
+These guarantees prevent a missing executable from permanently suppressing work
+without claiming exactly-once runtime execution.
