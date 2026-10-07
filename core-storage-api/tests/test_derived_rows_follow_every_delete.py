@@ -14,12 +14,12 @@ import uuid
 
 import pytest
 from sqlalchemy import select, text
-from sqlalchemy.dialects import postgresql
 
 from common.models import Memory
 from core_storage_api.database.init import get_engine
 from core_storage_api.services import postgres_service
 from core_storage_api.services.postgres_service import PostgresService
+from tests.conftest import plan_with_only_index
 
 pytestmark = pytest.mark.asyncio
 
@@ -112,15 +112,12 @@ async def test_the_single_row_delete_leaves_derived_rows_to_its_caller(client):
 async def test_the_derived_row_lookup_can_use_the_index(_ensure_schema):
     """The cost claim, checked against the planner rather than asserted.
 
-    ``enable_seqscan`` is off because on a near-empty table a sequential scan is
-    legitimately cheaper; the question is whether migration 058's index CAN serve
-    the predicate every cascade and ``memory_find_children_by_parent_id`` use.
+    Planned with migration 058's index as the table's only one
+    (``plan_with_only_index``): the question is whether that index CAN serve the
+    predicate every cascade and ``memory_find_children_by_parent_id`` use.
     """
     stmt = select(Memory.id).where(
         *postgres_service.derived_rows_where("b25-plan", ["00000000-0000-0000-0000-000000000001"])
     )
-    sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
-    async with get_engine().connect() as conn:
-        await conn.execute(text("SET LOCAL enable_seqscan = off"))
-        plan = "\n".join(r[0] for r in (await conn.execute(text(f"EXPLAIN {sql}"))).all())
+    plan = await plan_with_only_index(stmt, "ix_memories_parent_memory_id")
     assert "ix_memories_parent_memory_id" in plan, plan

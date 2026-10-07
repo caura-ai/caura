@@ -12,12 +12,11 @@ is what the predicate and the index expression have to agree on in production.
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select, text
-from sqlalchemy.dialects import postgresql
+from sqlalchemy import select
 
 from common.models import Memory
-from core_storage_api.database.init import get_engine
 from core_storage_api.services import postgres_service
+from tests.conftest import plan_with_only_index
 
 pytestmark = pytest.mark.asyncio
 
@@ -26,16 +25,12 @@ pytestmark = pytest.mark.asyncio
 async def test_the_doc_hash_lookup_can_use_the_index(_ensure_schema, fleet_id):
     """The cost claim, checked against the planner rather than asserted.
 
-    ``enable_seqscan`` is off because on a near-empty table a sequential scan is
-    legitimately cheaper; the question is whether migration 059's index CAN serve
-    the predicate ``find_prior_ingest_by_doc_hash`` runs, with a fleet and without.
+    Planned with migration 059's index as the table's only one
+    (``plan_with_only_index``): the question is whether that index CAN serve the
+    predicate ``find_prior_ingest_by_doc_hash`` runs, with a fleet and without.
     """
     where = postgres_service.prior_ingest_where(
         "l193-plan", "sha256:l193", fleet_id=fleet_id, agent_id="agent-1"
     )
-    stmt = select(Memory.id).where(*where)
-    sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
-    async with get_engine().connect() as conn:
-        await conn.execute(text("SET LOCAL enable_seqscan = off"))
-        plan = "\n".join(r[0] for r in (await conn.execute(text(f"EXPLAIN {sql}"))).all())
+    plan = await plan_with_only_index(select(Memory.id).where(*where), "ix_memories_ingest_doc_hash")
     assert "ix_memories_ingest_doc_hash" in plan, plan

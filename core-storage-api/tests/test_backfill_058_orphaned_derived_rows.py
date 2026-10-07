@@ -18,11 +18,11 @@ import uuid
 
 import pytest
 from sqlalchemy import select, text
-from sqlalchemy.dialects import postgresql
 
 from common.models import Memory
 from core_storage_api.database.init import get_engine
 from core_storage_api.services.postgres_service import PostgresService
+from tests.conftest import plan_with_only_index
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("_ensure_schema")]
 
@@ -126,12 +126,9 @@ async def test_a_run_scoped_to_one_tenant_leaves_the_others():
 
 
 async def test_the_walk_reads_migration_058s_index():
-    """``enable_seqscan`` is off because on a near-empty table a sequential scan
-    is legitimately cheaper; the question is whether the index CAN serve the walk,
-    resumed from a cursor, which is the shape of every batch after the first."""
+    """Planned with the index as the table's only one (``plan_with_only_index``):
+    the question is whether it CAN serve the walk, resumed from a cursor, which is
+    the shape of every batch after the first."""
     stmt = _backfill()._walk(tenant_id="o12-plan", after=("o12-plan", "a"), batch=100)
-    sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
-    async with get_engine().connect() as conn:
-        await conn.execute(text("SET LOCAL enable_seqscan = off"))
-        plan = "\n".join(r[0] for r in (await conn.execute(text(f"EXPLAIN {sql}"))).all())
+    plan = await plan_with_only_index(stmt, "ix_memories_parent_memory_id")
     assert "ix_memories_parent_memory_id" in plan, plan

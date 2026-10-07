@@ -22,10 +22,9 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import text
 
-from core_storage_api.database.init import get_engine
 from core_storage_api.services.postgres_service import PostgresService
+from tests.conftest import plan_with_only_index
 
 pytestmark = pytest.mark.asyncio
 
@@ -142,12 +141,10 @@ async def test_the_count_can_be_served_by_the_partial_index(_ensure_schema):
     """The cost claim, checked against the planner rather than asserted.
 
     The partial index is only usable if the query's WHERE implies its predicate,
-    which is why both are built from the same constant. ``enable_seqscan`` is
-    turned off because on a near-empty test table a seq scan is legitimately
-    cheaper; the question here is whether the index CAN serve the query.
+    which is why both are built from the same constant. Planned with that index
+    as the table's only one (``plan_with_only_index``): the question here is
+    whether the index CAN serve the query.
     """
-    from sqlalchemy.dialects import postgresql
-
     from common.models import Memory
     from core_storage_api.services.postgres_service import pending_work_count_stmt
 
@@ -156,8 +153,5 @@ async def test_the_count_can_be_served_by_the_partial_index(_ensure_schema):
     stmt = pending_work_count_stmt(
         [Memory.deleted_at.is_(None), Memory.tenant_id == "m03-plan", Memory.visibility != "scope_agent"]
     )
-    sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
-    async with get_engine().connect() as conn:
-        await conn.execute(text("SET LOCAL enable_seqscan = off"))
-        plan = "\n".join(r[0] for r in (await conn.execute(text(f"EXPLAIN {sql}"))).all())
+    plan = await plan_with_only_index(stmt, "ix_memories_pending_work")
     assert "ix_memories_pending_work" in plan, plan

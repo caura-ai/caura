@@ -38,6 +38,7 @@ os.environ.setdefault("CORE_STORAGE_SHARED_SECRET", "test-storage-secret")
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from core_storage_api.config import settings
@@ -105,6 +106,52 @@ async def client(_ensure_schema) -> AsyncClient:
         headers={"X-Storage-Secret": settings.core_storage_shared_secret.get_secret_value()},
     ) as c:
         yield c
+
+
+# ---------------------------------------------------------------------------
+# Index plans — whether one index can serve a statement
+# ---------------------------------------------------------------------------
+
+
+async def plan_with_only_index(stmt, index: str) -> str:
+    """``EXPLAIN`` of ``stmt`` on an empty copy of ``memories`` with ``index`` as its only index.
+
+    A plan test asks whether a migration's index CAN serve a statement. On the
+    real table most predicates have several indexes that could serve them, and
+    the planner picks one by cost, which follows the table's statistics: the
+    rows earlier tests left and whether autovacuum has analyzed them yet. So the
+    same plan check passed on one run and failed on the next:
+    ``ix_memories_held`` lost to ``ix_memories_status``, and
+    ``ix_memories_ingest_doc_hash`` to ``ix_memories_tenant_agent``.
+
+    The copy gets the index's definition from the migrated schema, so a missing
+    index still fails here. ``pg_temp`` comes first on the search path, so the
+    statement's ``memories`` is the copy. With no other index and sequential
+    scans off, the plan names the index exactly when the index can serve the
+    statement. The copy goes with the transaction.
+    """
+    from core_storage_api.database.init import get_engine
+
+    sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    async with get_engine().connect() as conn:
+        found = await conn.execute(
+            text(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE schemaname = 'public' AND tablename = 'memories' AND indexname = :name"
+            ),
+            {"name": index},
+        )
+        definition = found.scalar_one_or_none()
+        assert definition is not None, f"{index} is not on the migrated memories table"
+        assert " ON public.memories " in definition, definition
+        await conn.execute(text("CREATE TEMP TABLE memories (LIKE public.memories) ON COMMIT DROP"))
+        await conn.execute(text(definition.replace(" ON public.memories ", " ON pg_temp.memories ", 1)))
+        shadowed = await conn.execute(
+            text("SELECT 'memories'::regclass::oid = 'pg_temp.memories'::regclass::oid")
+        )
+        assert shadowed.scalar_one(), "memories does not resolve to the copy"
+        await conn.execute(text("SET LOCAL enable_seqscan = off"))
+        return "\n".join(row[0] for row in (await conn.execute(text(f"EXPLAIN {sql}"))).all())
 
 
 # ---------------------------------------------------------------------------
