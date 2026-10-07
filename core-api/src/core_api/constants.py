@@ -1097,6 +1097,14 @@ LIFECYCLE_BATCH_SIZE = 500  # max memories per status transition batch
 # ``common`` so core-worker can read the same value without depending
 # on core-api.
 
+# ── Entity extraction: asking again after every provider failed ──
+# Seconds to wait before each further run of the whole provider chain, when every
+# provider was reached and failed on something asking again may fix (a 429, a
+# 5xx, a timeout), before extraction settles for the regex heuristic. A per-minute
+# quota like Vertex's clears in about a minute; the second wait covers a longer
+# burst. Extraction runs in a background task, so no request waits on these.
+ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S: tuple[float, ...] = (60.0, 300.0)
+
 # ── Entity extraction quality filter ──
 MIN_ENTITY_NAME_LENGTH = 2  # single-char "entities" are never meaningful
 ENTITY_NAME_BLOCKLIST: frozenset[str] = frozenset(

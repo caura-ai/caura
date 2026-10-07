@@ -2,7 +2,9 @@
 
 import asyncio
 import logging
+import random
 import re
+import traceback
 from typing import Any, Final, Literal
 from uuid import UUID
 
@@ -10,18 +12,25 @@ from common import entity_naming as _entity_naming
 from common.constants import SINGLE_VALUE_PREDICATES
 from common.embedding import get_embedding
 from common.entity_naming import canonical_match_key
+from common.llm.constants import LLM_RETRY_JITTER_FRACTION
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
     CROSS_LINK_MEMORY_BATCH_SIZE,
     CROSS_LINK_SIMILARITY_THRESHOLD,
     CROSS_LINK_TEXT_VERIFY,
+    ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S,
     ENTITY_NAME_BLOCKLIST,
     ENTITY_RESOLUTION_THRESHOLD,
     MIN_ENTITY_NAME_LENGTH,
 )
 from core_api.schemas import RelationUpsert
 from core_api.services.audit_service import log_action
-from core_api.services.entity_extraction import extract_entities_from_content
+from core_api.services.entity_extraction import (
+    ExtractedGraph,
+    ProvidersUnavailableError,
+    degraded_graph,
+    extract_entities_from_content,
+)
 from core_api.services.entity_service import upsert_relation
 from core_api.services.task_tracker import record_task_failure
 
@@ -356,6 +365,131 @@ async def _recheck_row_after_writes(
     return "dropped"
 
 
+# ``background_task_log.task_name`` for an extraction that settled for the regex
+# heuristic because every provider kept failing through ``_extract_asking_again``'s
+# retries. Apart from ``entity_extraction``: the run did not fail, it wrote the
+# heuristic's graph (which may be empty), and that is what an operator counts.
+_DEGRADED_TASK = "entity_extraction_degraded"
+
+
+async def _still_wants_extraction(memory_id: UUID, tenant_id: str, content: str) -> bool:
+    """Is the row still live, and still holding this text?
+
+    From the writer, as the check after extraction reads it. A row that is gone
+    or held (a held row reads as gone, and its release replays extraction) or
+    was edited (the edit scheduled its own extraction) gains nothing from
+    another try.
+
+    A read that fails says nothing about the row, so it answers yes, as
+    ``_recheck_row_after_writes`` treats an unknown read: the extraction goes on
+    and still ends in a graph, and the check after extraction reads the row
+    again before anything is written.
+    """
+    try:
+        live = await get_storage_client().get_memory(str(memory_id), tenant_id, read=False)
+    except Exception:
+        logger.warning(
+            "entity extraction: could not read memory %s to decide whether to ask again; going on",
+            memory_id,
+            exc_info=True,
+        )
+        return True
+    return live is not None and live.get("deleted_at") is None and not _content_changed(live, content)
+
+
+async def _extract_asking_again(
+    memory_id: UUID, tenant_id: str, content: str, memory_type: str, tenant_cfg: Any
+) -> tuple[ExtractedGraph, ProvidersUnavailableError | None] | None:
+    """Extract, and if every provider fails, ask again later before the heuristic.
+
+    A provider failure is usually brief. On staging (2026-10-07) a Vertex 429
+    during a release fell straight through to the regex heuristic, which found
+    nothing, and the memory kept no entities with nothing to retry it. So the
+    whole provider chain runs again after each of
+    ``ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S``, and only then does this
+    settle for the heuristic. A failure asking again cannot fix (output that
+    does not parse, no usable provider) is not retried: the extractor degrades
+    it at once, as before.
+
+    This runs in a background task, so the waits cost no request anything.
+
+    The tradeoff, chosen over settling for the heuristic at once: the
+    heuristic's graph, which used to be written within seconds, now waits
+    behind the retries, up to about 7.5 minutes. If the instance shuts down
+    during a wait, the task is cancelled and nothing is written; ``tracked_task``
+    records it (``entity_extraction``, ``cancelled``), as it does every task in
+    flight at shutdown. Writing the heuristic's graph on that cancellation would
+    not finish: shutdown gives tasks 2 s to drain and 0.5 s to settle
+    (``core_api.tasks``), and a graph write is several storage calls and an
+    embedding per entity name. Writing it first and replacing it later would
+    leave the tenant with the heuristic's untyped entities, which resetting a
+    memory's extraction does not remove.
+
+    Returns the graph and, when it is the heuristic's after a provider failure,
+    that failure. ``None`` when the row stopped wanting this extraction while
+    the providers were failing.
+    """
+
+    async def _extract() -> ExtractedGraph:
+        return await extract_entities_from_content(
+            content, memory_type, tenant_config=tenant_cfg, raise_on_provider_failure=True
+        )
+
+    async def _wanted() -> bool:
+        if await _still_wants_extraction(memory_id, tenant_id, content):
+            return True
+        logger.info(
+            "entity extraction: memory %s is gone, held or edited; not asking the failing providers again",
+            memory_id,
+        )
+        return False
+
+    for delay in ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S:
+        try:
+            return await _extract(), None
+        except ProvidersUnavailableError as exc:
+            if not await _wanted():
+                return None
+            # Lengthened by the retry layer's jitter, never shortened: a bulk
+            # write's extractions fail together and would otherwise all ask
+            # again in the same second, into the limit that refused them.
+            wait = delay + random.uniform(0.0, LLM_RETRY_JITTER_FRACTION * delay)
+            logger.warning(
+                "entity extraction: every provider failed for memory %s (%s); asking again in %.0fs",
+                memory_id,
+                exc,
+                wait,
+            )
+            await asyncio.sleep(wait)
+    try:
+        return await _extract(), None
+    except ProvidersUnavailableError as exc:
+        if not await _wanted():
+            return None
+        return degraded_graph(content, tenant_cfg), exc
+
+
+async def _record_degraded(memory_id: UUID, tenant_id: str, exc: ProvidersUnavailableError) -> None:
+    """One ``background_task_log`` row for an extraction the heuristic finished.
+
+    The provider's own error goes in the message. The traceback prints it first,
+    and ``record_task_failure`` keeps only the traceback's tail, so behind a deep
+    SDK stack it would be cut off.
+    """
+    tries = len(ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S) + 1
+    cause = exc.__cause__ or exc
+    await record_task_failure(
+        _DEGRADED_TASK,
+        memory_id,
+        tenant_id,
+        RuntimeError(
+            f"{exc}, on all {tries} tries; the regex heuristic was used. "
+            f"Last error: {type(cause).__name__}: {cause}"
+        ),
+        tb="".join(traceback.format_exception(exc)),
+    )
+
+
 async def process_entity_extraction(
     memory_id: UUID,
     tenant_id: str,
@@ -394,8 +528,28 @@ async def process_entity_extraction(
 
         tenant_cfg = await resolve_config(tenant_id)
 
-        graph = await extract_entities_from_content(content, memory_type, tenant_config=tenant_cfg)
+        extracted = await _extract_asking_again(memory_id, tenant_id, content, memory_type, tenant_cfg)
+        if extracted is None:
+            return
+        graph, degraded_by = extracted
+        # Only an extraction the heuristic finished is marked, so the audit
+        # entries of every other run read as they always have.
+        degraded = {"degraded": True} if degraded_by is not None else {}
+        if degraded_by is not None:
+            await _record_degraded(memory_id, tenant_id, degraded_by)
         if not graph.entities:
+            if degraded_by is not None:
+                # The heuristic found nothing. Without this entry the memory
+                # reads as "never extracted" in the audit trail, which is how
+                # the staging miss went unseen.
+                await log_action(
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    action="entity_extraction",
+                    resource_type="memory",
+                    resource_id=memory_id,
+                    detail={"entities_count": 0, "relations_count": 0, **degraded},
+                )
             return
 
         sc = get_storage_client()
@@ -1144,6 +1298,7 @@ async def process_entity_extraction(
             detail={
                 "entities_count": len(name_to_id),
                 "relations_count": rel_count,
+                **degraded,
             },
         )
 
