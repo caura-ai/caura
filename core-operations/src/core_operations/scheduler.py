@@ -124,6 +124,21 @@ def seconds_until_next_utc_half_past(*, now: datetime | None = None) -> float:
     return (target - current).total_seconds()
 
 
+def seconds_until_next_utc_minute_past(minute: int, *, now: datetime | None = None) -> float:
+    """Seconds from ``now`` until the next ``:minute`` UTC of any hour.
+
+    The general form of :func:`seconds_until_next_utc_half_past`, with the same
+    strict-future guarantee: always positive, at most 1h.
+    """
+    if not 0 <= minute <= 59:
+        raise ValueError(f"minute must be in 0..59, got {minute}")
+    current = now or datetime.now(UTC)
+    target = current.replace(minute=minute, second=0, microsecond=0)
+    if target <= current:
+        target += timedelta(hours=1)
+    return (target - current).total_seconds()
+
+
 def seconds_until_next_utc_weekday_hour(weekday: int, hour: int, *, now: datetime | None = None) -> float:
     """Seconds from ``now`` until the next ``weekday``@``hour``:00 UTC.
 

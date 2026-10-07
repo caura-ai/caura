@@ -316,11 +316,15 @@ def test_the_writer_session_population_is_pinned() -> None:
     selects, on the writer by design — see its ``_MUST_STAY_ON_THE_WRITER``
     entry — so the convertible count below does not move. It replaces
     ``organization_settings_get``'s replica read, which now calls it.
+
+    144 -> 145 (pure unchanged at 65): ``task_mark_handled`` is new. It moves
+    open ``background_task_log`` rows to a handled status with ``sql_update``,
+    a write. Its sibling ``task_list_open_failures`` reads on the replica.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 144, f"{len(methods)} methods open a writer session"
+    assert len(methods) == 145, f"{len(methods)} methods open a writer session"
     assert len(pure) == 65, f"{len(pure)} of them show no write marker"
 
 

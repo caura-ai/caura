@@ -35,15 +35,19 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 #
 # 063 only drops ``ix_memories_recall_count``, so its probe is that index's
 # absence. 062's indexes stay in it: the absence alone also holds on an older
-# database the index was dropped from by hand.
-_HEAD_FINGERPRINT_REVISION = "063"
+# database the index was dropped from by hand. 064 adds
+# ``background_task_log.handled_at``, so that column joins the probe; 062's and
+# 063's checks stay with it.
+_HEAD_FINGERPRINT_REVISION = "064"
 _HEAD_FINGERPRINT_SQL: str | None = (
     "SELECT (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
     "WHERE n.nspname = 'public' AND c.relname IN ('ix_memories_session', 'ix_memories_held') "
     "AND i.indisvalid) = 2 "
     "AND NOT EXISTS (SELECT 1 FROM pg_indexes "
-    "WHERE schemaname = 'public' AND indexname = 'ix_memories_recall_count')"
+    "WHERE schemaname = 'public' AND indexname = 'ix_memories_recall_count') "
+    "AND EXISTS (SELECT 1 FROM information_schema.columns "
+    "WHERE table_schema = 'public' AND table_name = 'background_task_log' AND column_name = 'handled_at')"
 )
 
 _engine: AsyncEngine | None = None

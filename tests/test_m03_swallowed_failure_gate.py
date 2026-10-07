@@ -336,6 +336,38 @@ def _extraction(stack: ExitStack):
     ), fault
 
 
+def _rerun_of(stack: ExitStack, storage: MagicMock):
+    from core_api.services import extraction_rerun
+
+    stack.enter_context(
+        patch.object(extraction_rerun, "get_storage_client", lambda: storage)
+    )
+    return extraction_rerun._rerun(_row(), TENANT)
+
+
+def _rerun_reset(stack: ExitStack):
+    sc = _storage()
+    sc.reset_entity_artifacts = AsyncMock(side_effect=_boom())
+    return _rerun_of(stack, sc), sc.reset_entity_artifacts
+
+
+def _rerun_extraction(stack: ExitStack):
+    from core_api.services import entity_extraction_worker as w
+
+    stack.enter_context(
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=_config()),
+        )
+    )
+    fault = _fault(
+        stack, w, "extract_entities_from_content", AsyncMock(side_effect=_boom())
+    )
+    sc = _storage()
+    sc.reset_entity_artifacts = AsyncMock()
+    return _rerun_of(stack, sc), fault
+
+
 def _bulk(stack: ExitStack, storage: MagicMock, batch: AsyncMock):
     _memsvc_env(stack, mode="inline", storage=storage)
     stack.enter_context(patch.object(memory_service, "get_embeddings_batch", new=batch))
@@ -604,6 +636,14 @@ ROSTER: dict[str, dict[str, Any]] = {
     "process_entity_extraction": {
         "wraps": {"process_entity_extraction"},
         "scenarios": [Scenario("extraction", "entity_extraction", _extraction)],
+    },
+    "_rerun": {
+        # The re-run sweep's reset, then extraction (services.extraction_rerun).
+        "wraps": {"_rerun"},
+        "scenarios": [
+            Scenario("rerun-reset", "entity_extraction", _rerun_reset),
+            Scenario("rerun-extraction", "entity_extraction", _rerun_extraction),
+        ],
     },
     "_reembed_memories_bulk": {
         "wraps": {"_reembed_memories_bulk"},

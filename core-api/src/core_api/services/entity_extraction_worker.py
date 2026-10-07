@@ -414,16 +414,16 @@ async def _extract_asking_again(
     This runs in a background task, so the waits cost no request anything.
 
     The tradeoff, chosen over settling for the heuristic at once: the
-    heuristic's graph, which used to be written within seconds, now waits
-    behind the retries, up to about 7.5 minutes. If the instance shuts down
-    during a wait, the task is cancelled and nothing is written; ``tracked_task``
-    records it (``entity_extraction``, ``cancelled``), as it does every task in
-    flight at shutdown. Writing the heuristic's graph on that cancellation would
-    not finish: shutdown gives tasks 2 s to drain and 0.5 s to settle
+    heuristic's graph, which used to be written within seconds, now waits behind
+    the retries, up to about 7.5 minutes. If the instance shuts down during a
+    wait, the task is cancelled and nothing is written; ``tracked_task`` records
+    it (``entity_extraction``, ``cancelled``), as it does every task in flight
+    at shutdown. Writing the heuristic's graph on that cancellation would not
+    finish: shutdown gives tasks 2 s to drain and 0.5 s to settle
     (``core_api.tasks``), and a graph write is several storage calls and an
-    embedding per entity name. Writing it first and replacing it later would
-    leave the tenant with the heuristic's untyped entities, which resetting a
-    memory's extraction does not remove.
+    embedding per entity name. The cancelled row is what brings it back: the
+    hourly re-run sweep (``services.extraction_rerun``) resets the memory's
+    extraction and runs it again.
 
     Returns the graph and, when it is the heuristic's after a provider failure,
     that failure. ``None`` when the row stopped wanting this extraction while

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any, Literal, NotRequired, TypedDict
 from uuid import UUID
@@ -3691,6 +3691,36 @@ class CoreStorageClient:
 
     async def add_task_failure(self, data: dict) -> dict:
         return await self._post("/tasks/failures", data)  # type: ignore[return-value]
+
+    async def list_open_task_failures(
+        self,
+        tenant_id: str,
+        task_names: Sequence[str],
+        *,
+        since: datetime,
+        limit: int,
+        memory_id: str | None = None,
+        max_reruns_per_memory: int | None = None,
+    ) -> list[dict]:
+        """A tenant's task rows still ``failed`` or ``cancelled``, oldest first."""
+        params: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "task_name": list(task_names),
+            "since": since.isoformat(),
+            "limit": limit,
+        }
+        if memory_id is not None:
+            params["memory_id"] = memory_id
+        if max_reruns_per_memory is not None:
+            params["max_reruns_per_memory"] = max_reruns_per_memory
+        return await self._get_list("/tasks/failures", **params)
+
+    async def mark_task_failures_handled(self, tenant_id: str, ids: Sequence[str], status: str) -> int:
+        """Move open task rows to a handled status (``rerun`` / ``skipped``); returns how many moved."""
+        result = await self._post(
+            "/tasks/failures/handled", {"tenant_id": tenant_id, "ids": list(ids), "status": status}
+        )
+        return int(result.get("updated", 0)) if isinstance(result, dict) else 0
 
     # =====================================================================
     # Tenant suppression (CAURA-694)

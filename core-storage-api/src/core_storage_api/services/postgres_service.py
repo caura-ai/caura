@@ -1858,6 +1858,17 @@ def _node_ids_bound_to(owner_principal: str, tenant_id: str | Unscoped) -> Selec
     return stmt
 
 
+# ``background_task_log.status``. A row is written ``failed`` (the work raised)
+# or ``cancelled`` (a shutdown stopped it); both are OPEN until something
+# handles them. A sweep that re-ran the work marks it ``rerun``, and one that
+# found nothing left to do (the memory is gone) marks it ``skipped``. The re-run
+# reports its own outcome as a fresh row, so a handled row never reopens.
+TASK_OPEN_STATUSES = ("failed", "cancelled")
+TASK_RERUN = "rerun"
+TASK_SKIPPED = "skipped"
+TASK_HANDLED_STATUSES = frozenset({TASK_RERUN, TASK_SKIPPED})
+
+
 class PostgresService:
     """Single point of DB access for all core tables.
 
@@ -15072,6 +15083,95 @@ class PostgresService:
                 )
             )
             await session.flush()
+
+    async def task_list_open_failures(
+        self,
+        *,
+        tenant_id: str,
+        task_names: Sequence[str],
+        since: datetime,
+        limit: int,
+        memory_id: UUID | None = None,
+        max_reruns_per_memory: int | None = None,
+    ) -> list[dict]:
+        """A tenant's task outcomes nothing has handled yet, oldest first.
+
+        The read half of this table, which had none: rows still ``failed`` or
+        ``cancelled`` for a memory, written since ``since``. A row leaves this
+        list when ``task_mark_handled`` moves it on, so a sweep does not pick it
+        again.
+
+        ``max_reruns_per_memory`` leaves out every memory whose rows of these
+        tasks have been marked ``rerun`` that many times already. A re-run that
+        fails writes a fresh row, and without the cap a memory whose work keeps
+        failing would be re-run on every sweep until its rows aged out. One
+        re-run marks all the memory's open rows in one call, so the cap counts
+        distinct ``handled_at`` values, not rows.
+
+        On the replica: a sweep that misses a row written a moment ago finds
+        it on its next pass.
+        """
+        log = BackgroundTaskLog
+        stmt = select(log.id, log.task_name, log.memory_id, log.status, log.created_at).where(
+            log.tenant_id == tenant_id,
+            log.status.in_(TASK_OPEN_STATUSES),
+            log.task_name.in_(task_names),
+            log.memory_id.is_not(None),
+            log.created_at >= since,
+        )
+        if memory_id is not None:
+            stmt = stmt.where(log.memory_id == memory_id)
+        if max_reruns_per_memory is not None:
+            spent = (
+                select(log.memory_id)
+                .where(
+                    log.tenant_id == tenant_id,
+                    log.task_name.in_(task_names),
+                    log.status == TASK_RERUN,
+                    log.memory_id.is_not(None),
+                )
+                .group_by(log.memory_id)
+                .having(func.count(distinct(log.handled_at)) >= max_reruns_per_memory)
+            )
+            stmt = stmt.where(log.memory_id.not_in(spent))
+        stmt = stmt.order_by(log.created_at, log.id).limit(limit)
+        async with get_read_session() as session:
+            rows = (await session.execute(stmt)).all()
+        return [
+            {
+                "id": str(row.id),
+                "task_name": row.task_name,
+                "memory_id": str(row.memory_id),
+                "status": row.status,
+                "created_at": row.created_at.isoformat(),
+            }
+            for row in rows
+        ]
+
+    async def task_mark_handled(self, *, tenant_id: str, ids: Sequence[UUID], status: str) -> int:
+        """Move a tenant's open task rows to ``status``; returns how many moved.
+
+        Only rows still ``failed`` or ``cancelled`` move, so two sweeps that
+        picked the same row cannot both claim it, and a handled row is never
+        reopened by a late mark. The rows moved get one ``handled_at``.
+        """
+        if status not in TASK_HANDLED_STATUSES:
+            raise ValueError(f"status must be one of {sorted(TASK_HANDLED_STATUSES)}")
+        if not ids:
+            return 0
+        async with get_session() as session:
+            result = await session.execute(
+                sql_update(BackgroundTaskLog)
+                .where(
+                    BackgroundTaskLog.tenant_id == tenant_id,
+                    BackgroundTaskLog.id.in_(list(ids)),
+                    BackgroundTaskLog.status.in_(TASK_OPEN_STATUSES),
+                )
+                # ``now()`` is the transaction's time, so every row this call
+                # moves gets the same ``handled_at``: what the re-run cap counts.
+                .values(status=status, handled_at=func.now())
+            )
+            return result.rowcount or 0  # type: ignore[attr-defined]
 
     # ══════════════════════════════════════════════════════════════════════
     # Idempotency inbox
