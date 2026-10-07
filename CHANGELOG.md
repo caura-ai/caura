@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.29.0](https://github.com/caura-ai/caura/compare/backend-v3.28.0...backend-v3.29.0) (2026-10-07)
+
+
+### Features
+
+* **storage:** count a window's held writes and the decisions on them (g4.3) ([#2002](https://github.com/caura-ai/caura/issues/2002)) ([85fb2ee](https://github.com/caura-ai/caura/commit/85fb2ee0b36e9c45a23f97a84a7ffa321ae61ce3))
+
+
+### Bug Fixes
+
+* **search:** search reads by the rules its contract states ([#2000](https://github.com/caura-ai/caura/issues/2000)) ([1dd8c2e](https://github.com/caura-ai/caura/commit/1dd8c2e8d908fc95add96f63a888c7dcb9061b42))
+
 ## [3.28.0](https://github.com/caura-ai/caura/compare/backend-v3.27.1...backend-v3.28.0) (2026-10-07)
 
 
