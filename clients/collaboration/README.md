@@ -3,6 +3,19 @@
 Apache-2.0 Python packages using the authenticated Caura collaboration API.
 Python 3.12+; no agent has database credentials or direct queue access.
 
+Install the released packages. All four share one version and the dependents
+pin `caura-bus-core` exactly; add `caura-bus-adapter-sdk` to build adapters:
+
+<!-- x-release-please-start-version -->
+```sh
+pip install \
+  "caura-bus-cli==0.3.0" \
+  "caura-bus-mcp==0.3.0"
+```
+<!-- x-release-please-end -->
+
+Or work from this source tree:
+
 ```sh
 cd clients/collaboration
 uv sync --frozen --all-packages

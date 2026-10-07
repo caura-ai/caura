@@ -4,12 +4,13 @@ Caura (formerly MemClaw) follows [Semantic Versioning](https://semver.org/) and 
 [release-please](https://github.com/googleapis/release-please) to manage
 releases automatically from [Conventional Commits](https://www.conventionalcommits.org/).
 
-The repo ships **two independently-versioned packages**:
+The repo ships **three independently-versioned release-please components**:
 
 | Package | Path     | Tag format       | Baseline |
 | ------- | -------- | ---------------- | -------- |
 | backend | `.`      | `backend-vX.Y.Z` | 2.5.0    |
 | plugin  | `plugin/`| `plugin-vX.Y.Z`  | 2.5.0    |
+| collaboration-clients | `clients/collaboration/` | `collaboration-clients-vX.Y.Z` | 0.2.0 (unpublished preview; first release `0.3.0`) |
 
 Backend and plugin release on independent cadences. Plugin fixes no longer
 require a backend release; backend changes don't force a plugin version
@@ -45,6 +46,59 @@ bump unless the plugin source itself changes.
   emits. Locally the file is still generated only by that script
   (build/test hooks); the extra-files entry exists so release PRs
   don't carry a stale version and trip CI's `check:version` gate.
+
+**Collaboration clients (`clients/collaboration/`):**
+- `{core,mcp,cli,adapter-sdk}/pyproject.toml` — `generic` updater on the
+  lines marked `x-release-please-version`: each package's own `version` and
+  the dependents' exact `caura-bus-core==X.Y.Z` pin.
+- `clients/collaboration/uv.lock` (`$.package[...].version` for each member).
+- `clients/collaboration/README.md` — the install snippet inside the
+  `x-release-please-start-version` block.
+
+## Collaboration client distributions
+
+`clients/collaboration/` releases four PyPI distributions in **lockstep**, one
+version for all of them:
+
+| Distribution | Console entrypoint | Depends on |
+| ------------ | ------------------ | ---------- |
+| `caura-bus-core` | none (library) | — |
+| `caura-bus-mcp` | `caura-bus-mcp` | `caura-bus-core==<same version>` |
+| `caura-bus-cli` | `caura-bus` | `caura-bus-core==<same version>` |
+| `caura-bus-adapter-sdk` | `caura-bus-adapter-echo` | `caura-bus-core==<same version>` |
+
+The exact pin is deliberate: the wire models live in `caura-bus-core`, and a
+`caura-bus-mcp` resolved against a different core could silently drop or
+misread fields. Upgrade the four together.
+
+Release flow:
+
+1. Conventional commits under `clients/collaboration/**` route to this
+   component and accumulate in the release-please PR.
+2. Merging that PR (review required) creates the GitHub release
+   `collaboration-clients-vX.Y.Z`.
+3. The release triggers `publish-python-collaboration-clients.yml`. Its build
+   job re-runs the client tests, builds wheels and sdists, and runs
+   `clients/collaboration/scripts/verify_dist.py`, which installs the four
+   wheels into a fresh virtualenv with no source tree in reach and runs every
+   entrypoint. Its publish job waits for approval on the
+   `pypi-collaboration` environment, then uploads with PyPI trusted
+   publishing and PEP 740 attestations (core first, then its dependents).
+
+`release-as: "0.3.0"` in `release-please-config.json` fixes the first published
+version. `0.2.0` was only ever the version string of unpublished sibling-path
+preview builds, so publishing starts at `0.3.0` to keep a preview install and a
+published artifact distinguishable. **Remove `release-as` in the first commit
+after `collaboration-clients-v0.3.0` is released**, or every later release
+PR will keep proposing `0.3.0`.
+
+Check the build locally before cutting a release:
+
+```sh
+cd clients/collaboration
+uv build --all-packages
+python3 -I scripts/verify_dist.py dist
+```
 
 ## Commit scope conventions
 
@@ -102,4 +156,6 @@ release branches.
 
 If release-please is unavailable, bump the affected package's version
 files manually, update `CHANGELOG.md`, and tag with the component-
-namespaced format (`backend-vX.Y.Z` or `plugin-vX.Y.Z`).
+namespaced format (`backend-vX.Y.Z`, `plugin-vX.Y.Z` or
+`collaboration-clients-vX.Y.Z`), then publish the release so the
+corresponding publish workflow runs.
