@@ -529,7 +529,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.2,<1.0" },
     { name = "sentry-sdk", extras = ["fastapi"], specifier = ">=2.66.0,<3" },
     { name = "slowapi", specifier = ">=0.1.9,<1.0" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<2.1" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<2.2" },
     { name = "structlog", specifier = ">=25.4,<27" },
     { name = "tiktoken", specifier = ">=0.10,<1" },
     { name = "types-croniter", marker = "extra == 'dev'", specifier = ">=6.2.4.20260711" },
