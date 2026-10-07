@@ -14,9 +14,11 @@ In OSS-standalone the tenant_id IS the org_id (single implicit org per
 tenant); in enterprise callers should pass the actual org_id (parameter
 rename to ``org_id`` is a follow-up that will touch ~20 call sites).
 
-Reads go through a per-process ``TTLCache`` (5-min TTL). Writes invalidate
-the local cache entry immediately; other workers catch up on TTL expiry.
-Cross-worker invalidation is tracked as a follow-up (see CAURA-571).
+Reads go through a per-process ``TTLCache`` (5-min TTL). A write invalidates
+the local entry immediately and broadcasts, and every other process drops its
+copy when the broadcast reaches it (CAURA-571); one the broadcast misses catches
+up on TTL expiry. The hold decision (g2.8) does not rely on either: storage
+checks the settings a live write was decided under (``common.settings_version``).
 """
 
 from __future__ import annotations
@@ -601,16 +603,26 @@ def _remap_vertex(provider: str) -> str:
     return provider
 
 
-# ── TTL cache: org_id → settings dict ──
+# ── TTL cache: org_id → settings and their version ──
 #
-# Per-process cache; each uvicorn worker has its own. Staleness across workers
-# is bounded by the TTL (5 min). Writes on the current worker invalidate
-# locally; others catch up on expiry. See CAURA-571 for cross-worker NOTIFY.
+# Per-process cache; each uvicorn worker has its own. A write invalidates it
+# locally and broadcasts ``Org.SETTINGS_CHANGED``, which every other process
+# answers by invalidating its own (CAURA-571). Until the broadcast arrives, or
+# for the TTL (5 min) if it never does, a process answers from the settings it
+# had. See ``common.settings_version`` for how the write hold copes with that.
 #
 # No locking: cache misses may issue duplicate DB reads under concurrency, but
 # the query is an indexed PK lookup and the result is identical, so racing
 # populations are harmless.
-_settings_cache: TTLCache[str, dict] = TTLCache(maxsize=10_000, ttl=300)
+@dataclass(frozen=True)
+class _CachedSettings:
+    overrides: dict
+    # Storage's version of ``overrides`` (``common.settings_version``), or
+    # ``None`` from a storage that predates it, which leaves writes unchecked.
+    version: str | None
+
+
+_settings_cache: TTLCache[str, _CachedSettings] = TTLCache(maxsize=10_000, ttl=300)
 
 
 def _validate_cron(expr: str) -> None:
@@ -1016,6 +1028,8 @@ class ResolvedConfig:
         self,
         org_settings: dict | None = None,
         tenant_settings: dict | None = None,
+        *,
+        settings_version: str | None = None,
     ):
         # ``tenant_settings`` is a back-compat alias for callers that
         # still pass the pre-CAURA-654 keyword. Silently absorbs them
@@ -1023,6 +1037,11 @@ class ResolvedConfig:
         # docstring's promise to keep call-site signatures stable until
         # the parameter rename follow-up lands.
         self._ts = org_settings or tenant_settings or {}
+        # The version of these settings, which a live write hands storage to say
+        # what it was decided under (``common.settings_version``). ``None`` for a
+        # config not loaded from storage, and a write decided under one is not
+        # checked.
+        self.settings_version = settings_version
 
     # Governance (eToro content policy)
     @property
@@ -1572,7 +1591,7 @@ def validate_search_profile(profile: dict) -> dict:
 
 
 def invalidate_cache(tenant_id: str) -> None:
-    """Evict a tenant's cached settings. Exposed for tests + future NOTIFY hook."""
+    """Evict a tenant's cached settings: on a write, on its broadcast, and on a stale write."""
     _settings_cache.pop(tenant_id, None)
     logger.info("organization_settings cache invalidated for %s", tenant_id)
 
@@ -1582,8 +1601,18 @@ async def resolve_config(tenant_id: str) -> ResolvedConfig:
 
     Settings load through core-storage-api (Fix 2 Phase 0).
     """
-    raw = await get_raw_settings(tenant_id)
-    return ResolvedConfig(raw)
+    cached = await _cached_settings(tenant_id)
+    return ResolvedConfig(cached.overrides, settings_version=cached.version)
+
+
+async def reload_config(tenant_id: str) -> ResolvedConfig:
+    """``resolve_config`` from storage rather than this process's cache.
+
+    For a write storage refused because the settings it was decided under have
+    changed (``common.settings_version``): the cache still holds them.
+    """
+    invalidate_cache(tenant_id)
+    return await resolve_config(tenant_id)
 
 
 async def get_raw_settings(tenant_id: str) -> dict:
@@ -1592,6 +1621,10 @@ async def get_raw_settings(tenant_id: str) -> dict:
     Cache-first (5-min TTL); on a miss, fetched via core-storage-api (Fix 2
     Phase 0 routed this through the storage client — no direct DB read).
     """
+    return (await _cached_settings(tenant_id)).overrides
+
+
+async def _cached_settings(tenant_id: str) -> _CachedSettings:
     cached = _settings_cache.get(tenant_id)
     if cached is not None:
         logger.debug("organization_settings cache hit for %s", tenant_id)
@@ -1599,7 +1632,7 @@ async def get_raw_settings(tenant_id: str) -> dict:
     return await _load_and_cache(tenant_id)
 
 
-async def _load_and_cache(tenant_id: str) -> dict:
+async def _load_and_cache(tenant_id: str) -> _CachedSettings:
     # The WRITER, on every miss — and this is the whole fix, not half of it.
     #
     # A miss here is rarely cold. ``update_settings`` invalidates, then
@@ -1619,8 +1652,12 @@ async def _load_and_cache(tenant_id: str) -> dict:
     # The cost is bounded by the thing the cache already guarantees: at most one
     # read per tenant per TTL per process. That is what makes taking it from the
     # primary affordable here and not elsewhere.
-    stored = await get_storage_client().get_org_settings(tenant_id)
-    resolved = await _encrypt_legacy_api_keys(tenant_id, stored)
+    #
+    # The version is the one read with the settings, even when the legacy-key
+    # swap below then writes the row: the first live write after a swap is
+    # refused as decided under old settings, and decided again. Once per tenant.
+    stored, version = await get_storage_client().get_org_settings_versioned(tenant_id)
+    resolved = _CachedSettings(await _encrypt_legacy_api_keys(tenant_id, stored), version)
     _settings_cache[tenant_id] = resolved
     logger.info("organization_settings cache miss for %s; loaded via storage-api and cached", tenant_id)
     return resolved

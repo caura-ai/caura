@@ -4,7 +4,8 @@ Moves the per-org settings read/write off core-api's direct DB pool and
 behind core-storage-api, per the "no DB outside core-storage-api" rule. The
 DB-touching half of ``core_api.services.organization_settings`` calls these:
 
-* ``GET``  returns the raw override JSONB (``{}`` when unset).
+* ``GET``  returns the raw override JSONB (``{}`` when unset) and its version,
+  read from the primary.
 * ``POST`` performs the transactional upsert — ``FOR UPDATE`` read → flat
   diff → JSONB ``||`` merge → append an audit row — all in one transaction so
   the lost-update guard holds. core-api keeps the TTL cache, the
@@ -30,9 +31,13 @@ _svc = PostgresService()
 
 @router.get("/{org_id}")
 async def get_organization_settings(org_id: str) -> dict:
-    """Return ``{"settings": <raw overrides>}`` — ``{}`` when the org has none."""
-    settings = await _svc.organization_settings_get(org_id)
-    return {"settings": settings}
+    """Return ``{"settings": <raw overrides>, "version": <str>}`` — ``{}`` when the org has none.
+
+    ``version`` is what a live memory write hands back to say which settings it
+    was decided under (``common.settings_version``).
+    """
+    settings, version = await _svc.organization_settings_read(org_id)
+    return {"settings": settings, "version": version}
 
 
 @router.post("/{org_id}")

@@ -98,6 +98,22 @@ jobs:
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
 
+      - name: Every service's uv.lock matches its pyproject.toml
+        # M-01: each image installs its service's uv.lock as it stands (``uv
+        # export --frozen``), while the install below resolves the pyproject
+        # ranges afresh. A pyproject edit made without a re-lock was therefore
+        # tested here and missing from the image, with nothing to fail it.
+        # ``uv lock --check`` fails when re-locking would change the lock.
+        run: |
+          stale=""
+          for service in core-api core-storage-api core-operations core-worker; do
+            uv lock --check --directory "${service}" || stale="${stale} ${service}/uv.lock"
+          done
+          if [ -n "${stale}" ]; then
+            echo "::error::Out of date:${stale}. Run uv lock in each one's directory and commit the result."
+            exit 1
+          fi
+
       - name: Install dependencies
         # core-operations is installed for its own ruff/mypy/pytest steps
         # below. Before it was listed here those steps passed only because
@@ -773,6 +789,17 @@ jobs:
             exit 1
           }
 
+      # M-01: core-worker's image, the write path in deferred mode, was built by
+      # no workflow. Its tests run in the CI job's shared venv, where another
+      # service's dependency can stand in for one core-worker never declared,
+      # so import the app its CMD serves from what the image itself installed.
+      - name: Build core-worker image and import its app
+        run: |
+          docker build --platform linux/amd64 --target runtime \
+            -t core-worker-imagetest \
+            -f core-worker/Dockerfile .
+          docker run --rm core-worker-imagetest python -c "import uvicorn, core_worker.app"
+
       - name: Build core-storage-api image for README quickstart
         run: |
           docker build --platform linux/amd64 --target runtime \
@@ -904,3 +931,31 @@ jobs:
 
       - name: Load-bearing strings survive
         run: python3 scripts/do_not_touch_sentinel.py
+
+  pypi-packages-build:
+    # L-235: the PyPI publish workflows build in a job without ``id-token: write``,
+    # from tools hash-pinned in .github/pypi-build/requirements.txt, with
+    # --no-isolation so no newer setuptools is fetched. They run only on a release
+    # tag, so a bad pin, or a Dependabot bump of one, would otherwise first fail
+    # mid-release. This builds every package they publish the same way.
+    name: PyPI packages build from the pinned tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the pinned build tools
+        run: pip install --require-hashes -r .github/pypi-build/requirements.txt
+
+      - name: Build every package the PyPI workflows publish
+        run: |
+          for pyproject in clients/*/pyproject.toml; do
+            python -m build --no-isolation --outdir "${RUNNER_TEMP}/dist" "$(dirname "${pyproject}")"
+          done

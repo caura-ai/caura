@@ -793,7 +793,7 @@ async def test_a_settings_miss_reads_the_primary(monkeypatch):
     monkeypatch.setattr(os_mod, "get_storage_client", lambda: _Client())
     os_mod._settings_cache.pop("t1", None)
 
-    assert await os_mod._load_and_cache("t1") == {"k": "v"}
+    assert (await os_mod._load_and_cache("t1")).overrides == {"k": "v"}
     assert reads == [False], f"the settings miss went to the replica: {reads!r}"
 
 

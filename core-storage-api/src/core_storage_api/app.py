@@ -12,12 +12,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from common import permanent_failure
+from common.settings_version import SETTINGS_CHANGED
 from common.structlog_config import configure_logging
 from core_storage_api.config import settings
 from core_storage_api.services.postgres_service import (
     BulkRowShapeError,
     DuplicateContentHashError,
     PointerNotInTenantError,
+    SettingsChangedError,
 )
 
 # Must run before any other module-level import emits a log record —
@@ -203,6 +205,17 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=409,
             content={"detail": str(exc), **exc.fields},
+        )
+
+    @app.exception_handler(SettingsChangedError)
+    async def _settings_changed_handler(request: Request, exc: SettingsChangedError) -> JSONResponse:
+        # App-wide, like the handlers around it, because both memory-insert
+        # routes raise it. 409 like a duplicate, but ``detail`` is an object
+        # naming ``SETTINGS_CHANGED`` where a duplicate's is a string: core-api
+        # decides the write again on this one and hands the caller the other.
+        return JSONResponse(
+            status_code=409,
+            content={"detail": {"error": SETTINGS_CHANGED, "message": str(exc)}},
         )
 
     @app.exception_handler(BulkRowShapeError)
