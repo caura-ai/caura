@@ -2,16 +2,25 @@
 
 Protocol (inherited from Phase 1, crash-safe by construction):
 - the cursor is the SERVER's forward-only watermark doc — no local state;
-- the watermark advances only after the server commits, and the attempt id
-  is deterministic per (node, window), so any retry dedups;
+- the watermark advances only after the server has stored the window (or, on
+  a synchronous server, committed its memories), and the attempt id is
+  deterministic per (node, window), so any retry dedups;
 - this adapter never modifies the transcript (Claude Code owns the trail).
 
-Failure matrix (per the approved plan):
+Outcomes. A server answers in one of two modes. The default
+(``interview_async_submit``) stores the window, advances the watermark and
+answers 200 ``accepted`` with ``memories_written=0``: the memories are written
+in the background, after the response. With that flag off, it interviews the
+window in-line and answers 200 ``committed`` or 207 ``partial`` with the count.
+  200  → accepted (async) or committed (sync): keep draining
+  207  → partial success (sync): watermark advanced, keep draining
   403  → abort the whole run (tenant off / bad key)         exit 2
+  409  → this window or stream is refused (another agent's stream, or a job
+         parked as permanently failed, the server's message says which):
+         skip file; a retry would get the same answer
   422  → our windowing bug: log + skip file, no retry
   504  → retry the SAME window once (dedup-safe), then skip file
   500  → window not consumed: skip file, next run resumes
-  207  → partial success: watermark advanced, keep draining
   transport error → one retry, then skip file
 """
 
@@ -71,6 +80,9 @@ class RunConfig:
 class FileResult:
     path: Path
     windows_submitted: int = 0
+    # Windows an async server stored for synthesis in the background, with
+    # their memories still to come (L-93).
+    windows_accepted: int = 0
     events_submitted: int = 0
     memories_written: int = 0
     skipped_reason: str | None = None
@@ -204,12 +216,16 @@ def run_file(
             break
         result.windows_submitted += 1
         result.events_submitted += len(window.events)
-        result.memories_written += int(response.get("memories_written") or 0)
+        if response.get("status") == "accepted":
+            result.windows_accepted += 1
+            outcome = "(memories are written in the background)"
+        else:
+            result.memories_written += int(response.get("memories_written") or 0)
+            outcome = f"memories={response.get('memories_written')}"
         _log(
             cfg,
             f"{transcript.path.name}: [{window.cursor_from}..{window.cursor_to}] "
-            f"{response.get('status')} watermark={response.get('watermark')} "
-            f"memories={response.get('memories_written')}",
+            f"{response.get('status')} watermark={response.get('watermark')} {outcome}",
         )
     return result
 

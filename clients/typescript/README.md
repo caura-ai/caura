@@ -51,7 +51,7 @@ network. Requests refuse redirects, so the key is never re-sent elsewhere: point
 | Method | Endpoint | Returns |
 |---|---|---|
 | `write(content, opts?)` | `POST /api/v1/memories` | `Memory` |
-| `search(query, opts?)` | `POST /api/v1/search` | `Memory[]` |
+| `search(query, opts?)` | `POST /api/v1/search` | `SearchResult` (a `Memory[]`) |
 | `recall(query, opts?)` | `POST /api/v1/recall` | `RecallResult` |
 | `getDocument(docId, opts)` | `GET /api/v1/documents/{docId}` | `object` |
 | `health()` | `GET /api/v1/health` | `object` |
@@ -62,7 +62,31 @@ response headers or consuming the response body throw `TransportError`, with
 the original rejection in `cause`. All extend `CauraError`, so one catch can
 handle both HTTP and transport failures. Transport errors have no HTTP status
 code; requests are not retried. Every result also exposes the full API payload
-on `.raw`.
+on `.raw`. `search()` resolves to a `SearchResult`: an array of `Memory` that
+also carries the response's `recallTracked`, `diagnostic` (set by
+`diagnostic: true`) and `warnings` (for example a parameter the server
+ignored), and the whole body on `.raw`.
+
+`recall()` reads the brief's `memories` and asks the server not to repeat them
+under `items` (`items_alias: false`), which halves the response. Pass
+`items_alias: true` if you read `raw.items`.
+
+### Reading as an agent with a tenant key
+
+With a tenant-scoped key, `search()` and `recall()` read as the tenant, so they
+do not return any agent's `scope_agent` memories, including ones this client
+wrote with `agentId`. Pass `callerAgentId` to read as that agent:
+
+```ts
+const mc = new Caura("mc_tenant_key", { tenantId: "my-team", agentId: "my-agent" });
+const mine = await mc.search("deploy checklist", { callerAgentId: mc.agentId });
+```
+
+The server then treats the read as that agent's: it registers the agent if it
+is new, and holds the read to the agent's fleet and trust level, so a trust-1
+agent reads its own fleet and is refused another. It is opt-in, never sent from
+`agentId` alone. An agent-scoped key already reads as its agent, and may only
+name itself here.
 
 ### Fetching a document
 

@@ -59,7 +59,7 @@ To reach the same memory from an MCP client with no SDK, see the
 | Method | Endpoint | Returns |
 |---|---|---|
 | `write(content, ...)` | `POST /api/v1/memories` | `Memory` |
-| `search(query, top_k=5, ...)` | `POST /api/v1/search` | `list[Memory]` |
+| `search(query, top_k=5, ...)` | `POST /api/v1/search` | `SearchResult` (a `list[Memory]`) |
 | `recall(query, top_k=5, ...)` | `POST /api/v1/recall` | `RecallResult` |
 | `health()` | `GET /api/v1/health` | `dict` |
 | `get_document(doc_id, *, collection, ...)` | `GET /api/v1/documents/{doc_id}` | `dict` |
@@ -71,7 +71,31 @@ The client is a context manager (`with Caura(...) as mc:`) and raises
 Network failures and timeouts raise `TransportError`, with the original `httpx`
 exception in `__cause__`. Catch `CauraError` to handle both HTTP and transport
 failures. Transport errors have no HTTP status code; requests are not retried.
-Every result also exposes the full API payload on `.raw`.
+Every result also exposes the full API payload on `.raw`. `search()` returns a
+`SearchResult`: a list of `Memory` that also carries the response's
+`recall_tracked`, `diagnostic` (set by `diagnostic=True`) and `warnings` (for
+example a parameter the server ignored), and the whole body on `.raw`.
+
+`recall()` reads the brief's `memories` and asks the server not to repeat them
+under `items` (`items_alias=False`), which halves the response. Pass
+`items_alias=True` if you read `raw["items"]`.
+
+### Reading as an agent with a tenant key
+
+With a tenant-scoped key, `search()` and `recall()` read as the tenant, so they
+do not return any agent's `scope_agent` memories, including ones this client
+wrote with `agent_id`. Pass `caller_agent_id` to read as that agent:
+
+```python
+with Caura("mc_tenant_key", tenant_id="my-team", agent_id="my-agent") as mc:
+    mine = mc.search("deploy checklist", caller_agent_id=mc.agent_id)
+```
+
+The server then treats the read as that agent's: it registers the agent if it
+is new, and holds the read to the agent's fleet and trust level, so a trust-1
+agent reads its own fleet and is refused another. It is opt-in, never sent from
+`agent_id` alone. An agent-scoped key already reads as its agent, and may only
+name itself here.
 
 ### Fetching a document
 
@@ -113,11 +137,14 @@ host other than the `base_url` you configure.
 
 `submit_interview()` is used by the `caura-interviewer` adapter below to
 submit parsed session windows to the server. It is not intended as a
-general-purpose SDK method: it calls the server synchronously (the server
-interviews the window in-line, up to a 90s budget), so its `timeout`
-defaults to 120s rather than the client-wide 30s, and the returned body
-carries an extra `"http_status"` key so callers can tell a `207` partial
-from a `200` committed. New SDK users should not need it.
+general-purpose SDK method. By default the server stores the window, advances
+its watermark and answers `200` with `"status": "accepted"` and
+`memories_written` 0: the memories are written in the background, after the
+response. A server with `interview_async_submit` turned off interviews the
+window in-line, up to a 90s budget, and answers `200` committed or `207`
+partial with the count; that is why `timeout` defaults to 120s rather than the
+client-wide 30s. The returned body carries an extra `"http_status"` key. New
+SDK users should not need it.
 
 For credentials, scopes, and the full API surface, see the
 [Caura docs](https://caura.ai/docs). Production fleets should use
@@ -208,10 +235,17 @@ It refuses to schedule a job that would no-op (missing credentials or no
 project allowlist). On Windows (no `crontab`), use Task Scheduler to run
 `caura-interviewer run` on a timer instead.
 
+A run ends with a one-line summary. On a default server it reports windows
+"accepted for synthesis in the background", since the memories are written
+after the response; "memories written" counts what a synchronous server wrote
+in-line.
+
 Crash-safety is inherited from the Interviewer protocol: the watermark
-advances only after the server commits a window, and retries of the same
-window dedup server-side via a deterministic attempt id — never a gap,
-never a duplicate.
+advances only after the server has stored a window, and retries of the same
+window dedup server-side via a deterministic attempt id, so each window is
+stored once. Its memories come from the server's background synthesis. A
+window whose synthesis keeps failing is parked server-side for an operator;
+its watermark has already moved, so this adapter does not send it again.
 
 ## License
 

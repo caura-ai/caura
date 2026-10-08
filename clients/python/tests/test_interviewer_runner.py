@@ -55,6 +55,21 @@ class FakeServer:
                 raise httpx.ConnectError("connection reset by peer", request=request)
             if outcome == "malformed":
                 return httpx.Response(200, json={"status": "committed", "memories_written": "n/a"})
+            if outcome == "accepted":
+                # The default async server (``interview_async_submit``): the
+                # window is stored and the watermark moves, and the memories are
+                # written in the background, after the response.
+                doc_id = watermark_doc_id(body["node_id"])
+                self.watermarks[doc_id] = max(self.watermarks.get(doc_id, -1), body["cursor_to"])
+                return httpx.Response(
+                    200,
+                    json={
+                        "status": "accepted",
+                        "watermark": self.watermarks[doc_id],
+                        "memories_written": 0,
+                        "errors": 0,
+                    },
+                )
             if outcome == "ok" or outcome == 207:
                 doc_id = watermark_doc_id(body["node_id"])
                 self.watermarks[doc_id] = max(self.watermarks.get(doc_id, -1), body["cursor_to"])
@@ -203,6 +218,36 @@ def test_207_partial_counts_as_progress(server, mc, tmp_path):
     assert summary.files[0].windows_submitted == 1
     node_id = node_id_for("abcdef123456", transcript.path)
     assert server.watermarks[watermark_doc_id(node_id)] == 11
+
+
+def test_l93_an_accepted_window_is_counted_as_accepted_not_as_no_memories(server, mc, tmp_path):
+    """The default async server answers ``accepted`` with ``memories_written=0``,
+    and writes the memories after the response (L-93)."""
+    server.script = ["accepted"]
+    summary = run_all(mc, [_transcript(tmp_path)], _cfg())
+    assert summary.files[0].windows_submitted == 1
+    assert summary.files[0].windows_accepted == 1
+    assert summary.files[0].memories_written == 0
+
+
+def test_l93_the_run_summary_says_what_the_server_did(server, mc, tmp_path):
+    """The CLI's headline was "N memories written", which an async server always
+    made 0. Windows it accepted are reported as such."""
+    from caura_client.interviewer.cli import _run_summary_line
+
+    server.script = ["accepted"]
+    accepted = run_all(mc, [_transcript(tmp_path, name="a.jsonl")], _cfg())
+    server.script = ["accepted", "ok"]
+    files = [_transcript(tmp_path, name="b.jsonl"), _transcript(tmp_path, name="c.jsonl")]
+    mixed = run_all(mc, files, _cfg())
+
+    assert _run_summary_line(accepted, dry_run=False) == (
+        "[interviewer] 1 file(s): 1 window(s) submitted, 1 accepted for synthesis in the background"
+    )
+    assert _run_summary_line(mixed, dry_run=False) == (
+        "[interviewer] 2 file(s): 2 window(s) submitted, 1 accepted for synthesis in the background, "
+        "12 memories written"
+    )
 
 
 def test_per_file_isolation(server, mc, tmp_path):
