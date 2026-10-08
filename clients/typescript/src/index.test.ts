@@ -397,9 +397,29 @@ test("transport mapping does not wrap serialization errors", async () => {
   await assert.rejects(client.write("hello", { metadata: circular }), TypeError);
 });
 
-test("transport mapping does not wrap invalid JSON", async () => {
-  const client = makeClient(() => new Response("not json"));
-  await assert.rejects(client.health(), SyntaxError);
+test("a 2xx response that is not JSON is a CauraApiError, not a bare SyntaxError", async () => {
+  const client = makeClient(() => new Response("<html>login</html>", { status: 200 }));
+  for (const call of [() => client.health(), () => client.write("x")]) {
+    await assert.rejects(call(), (error: unknown) => {
+      assert.ok(error instanceof CauraApiError);
+      assert.ok(error instanceof CauraError);
+      assert.ok(!(error instanceof TransportError));
+      assert.equal(error.statusCode, 200);
+      assert.equal(error.message, "[200] response was not valid JSON");
+      assert.ok(error.cause instanceof SyntaxError);
+      return true;
+    });
+  }
+});
+
+test("a non-JSON error body still maps by status", async () => {
+  const client = makeClient(() => new Response("<html>bad gateway</html>", { status: 502 }));
+  await assert.rejects(client.health(), (error: unknown) => {
+    assert.ok(error instanceof CauraApiError);
+    assert.equal(error.statusCode, 502);
+    assert.equal(error.message, "[502] request failed");
+    return true;
+  });
 });
 
 // L-66: the key never crosses the network in cleartext unless the caller opts in.
