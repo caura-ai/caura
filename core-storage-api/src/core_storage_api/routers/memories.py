@@ -98,7 +98,9 @@ async def create_memory(request: Request) -> dict:
     # this call opens a session, and a broad catch would relabel a server fault
     # as a client error.
     memory = await _svc.memory_add(body)
-    return orm_to_dict(memory, MEMORY_FIELDS)
+    # No vectors (L-187): the embedding is the one core-api just sent, and no
+    # caller reads the row's vectors back from here.
+    return orm_to_dict(memory, MEMORY_LIST_FIELDS)
 
 
 @router.post("/bulk")
@@ -352,7 +354,9 @@ async def load_by_ids(request: Request) -> list[dict]:
                 readable_tenant_ids=body.get("readable_tenant_ids") or None,
                 strict_fleet_scoping=body.get("strict_fleet_scoping", False),
             )
-        out = [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+        # No vectors (L-188): ClassifyQuery builds result rows from these, and
+        # a result carries no vector.
+        out = [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
     except Exception:
         success = False
         raise
@@ -433,7 +437,8 @@ async def find_entity_overlap_candidates(request: Request) -> list[dict]:
         # A54 — owner identity, applied only for the scope_agent tier.
         agent_id=body.get("agent_id"),
     )
-    return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+    # No vectors (L-189): contradiction detection never reads a candidate's.
+    return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 
 
 @router.get("/by-supersedes-id")
@@ -517,7 +522,10 @@ async def find_successors(request: Request) -> list[dict]:
     )
     # ``successor_of`` names the row each one replaced: its ``supersedes_id``,
     # or for a contradiction's further loser the one its record names (M-34).
-    return [{**orm_to_dict(m, MEMORY_FIELDS), "successor_of": str(replaced)} for m, replaced in successors]
+    # No vectors (L-188): a successor joins search results, which carry none.
+    return [
+        {**orm_to_dict(m, MEMORY_LIST_FIELDS), "successor_of": str(replaced)} for m, replaced in successors
+    ]
 
 
 @router.post("/similar-candidates")
@@ -542,7 +550,8 @@ async def find_similar_candidates(request: Request) -> list[dict]:
         # A54 — owner identity, applied only for the scope_agent tier.
         agent_id=body.get("agent_id"),
     )
-    return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+    # No vectors (L-189): up to 20 per write, and the detector reads none.
+    return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 
 
 @router.get("/by-content-hash")
@@ -609,7 +618,8 @@ async def find_duplicate_hash(
 async def bulk_get_memories(request: Request) -> list[dict | None]:
     """Fetch many memories by id in a single round-trip.
 
-    Body: ``{"ids": ["uuid", ...], "tenant_id": "..."}``.
+    Body: ``{"ids": ["uuid", ...], "tenant_id": "...", "with_embedding": false}``.
+    The rows carry no vectors unless ``with_embedding`` asks for the embedding.
 
     Returns a list of memory dicts in the **same order** as the input ids,
     with ``null`` for ids that don't exist, are soft-deleted, or belong to a
@@ -643,7 +653,11 @@ async def bulk_get_memories(request: Request) -> list[dict | None]:
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=422, detail=f"invalid UUID in ids: {e}")
 
-    by_id = await _svc.memory_get_memories_by_ids(uids, tenant_id=tenant_id)
+    # No vectors unless asked (L-189): the crystallizer and the graph's evidence
+    # filter read none, and the bulk re-embed asks for the embedding.
+    with_embedding = bool(body.get("with_embedding", False))
+    fields = [*MEMORY_LIST_FIELDS, "embedding"] if with_embedding else MEMORY_LIST_FIELDS
+    by_id = await _svc.memory_get_memories_by_ids(uids, tenant_id=tenant_id, with_embedding=with_embedding)
 
     # No tenant comparison here any more: the query is scoped, so a row from
     # another tenant is never fetched rather than being fetched and discarded.
@@ -653,7 +667,7 @@ async def bulk_get_memories(request: Request) -> list[dict | None]:
     out: list[dict | None] = []
     for uid in uids:
         mem = by_id.get(uid)
-        out.append(orm_to_dict(mem, MEMORY_FIELDS) if mem is not None else None)
+        out.append(orm_to_dict(mem, fields) if mem is not None else None)
     return out
 
 
@@ -767,7 +781,8 @@ async def find_rdf_conflicts(
         visibility=visibility,
         agent_id=agent_id,
     )
-    return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+    # No vectors (L-189), as for the other contradiction candidates.
+    return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 
 
 @router.post("/near-duplicates")

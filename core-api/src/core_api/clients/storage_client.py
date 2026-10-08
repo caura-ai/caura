@@ -1600,6 +1600,7 @@ class CoreStorageClient:
         tenant_id: str,
         *,
         read: bool = True,
+        with_embedding: bool = False,
     ) -> list[dict | None]:
         """Fetch many memories; order matches input ``ids``.
 
@@ -1616,10 +1617,17 @@ class CoreStorageClient:
 
         ``read=False`` routes to the WRITER, for a read-back of rows written
         moments ago, as on ``get_memory``.
+
+        The rows carry no vectors (L-189) unless ``with_embedding`` asks for the
+        embedding.
         """
         rows: list[dict | None] = []
         for start in range(0, len(ids), _BULK_GET_MAX_IDS):
-            payload: dict[str, Any] = {"ids": ids[start : start + _BULK_GET_MAX_IDS], "tenant_id": tenant_id}
+            payload: dict[str, Any] = {
+                "ids": ids[start : start + _BULK_GET_MAX_IDS],
+                "tenant_id": tenant_id,
+                "with_embedding": with_embedding,
+            }
             chunk: list[dict | None] = await self._post(  # type: ignore[assignment]
                 "/memories/bulk-get", payload, read=read
             )

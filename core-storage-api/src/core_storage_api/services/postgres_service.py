@@ -1639,6 +1639,21 @@ def _attach_agent_display_names(rows: Any) -> list[Memory]:
     return out
 
 
+def _without_vectors(*, keep_embedding: bool = False) -> tuple[Any, ...]:
+    """Loader options that leave a memory's two large columns out of a select.
+
+    ``embedding`` is 1024 floats that Postgres renders as text and pgvector parses
+    back into a list, and ``search_vector`` is the row's tsvector. A read whose rows
+    are serialised with ``MEMORY_LIST_FIELDS``, or dictified without them, never
+    touches either (L-188, L-189, L-194). Reading a deferred column later raises
+    rather than loading it, as these rows are read after their session closes.
+    ``keep_embedding`` keeps the vector for a caller that reads it.
+    """
+    if keep_embedding:
+        return (defer(Memory.search_vector),)
+    return (defer(Memory.embedding), defer(Memory.search_vector))
+
+
 def _recorded_winners(
     loser_ids: Sequence[UUID],
     tenant_id: str,
@@ -4676,7 +4691,7 @@ class PostgresService:
             .join(scored_cte, Memory.id == scored_cte.c.mem_id)
             .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
             .order_by(scored_cte.c.score.desc(), Memory.created_at.desc())
-            .options(defer(Memory.embedding), defer(Memory.search_vector))
+            .options(*_without_vectors())
         )
         if use_ann_pool:
             stmt = stmt.outerjoin(pool_cte, Memory.id == pool_cte.c.id)
@@ -4816,6 +4831,7 @@ class PostgresService:
             stmt = (
                 select(Memory, Agent.display_name.label("agent_display_name"))
                 .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+                .options(*_without_vectors())
                 .where(
                     Memory.id.in_(memory_ids),
                     Memory.tenant_id.in_(readable_tenant_ids)
@@ -4965,6 +4981,7 @@ class PostgresService:
             edges = await session.execute(
                 select(Memory, display)
                 .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+                .options(*_without_vectors())
                 .where(Memory.supersedes_id.in_(supersedes_ids), *scope)
             )
             found: list[tuple[Memory, UUID]] = [
@@ -4974,7 +4991,11 @@ class PostgresService:
                 supersedes_ids, tenant_id, *scope, readable_tenant_ids=readable_tenant_ids
             )
             for stmt in winners:
-                named = stmt.add_columns(display).outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+                named = (
+                    stmt.add_columns(display)
+                    .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+                    .options(*_without_vectors())
+                )
                 rows = (await session.execute(named)).all()
                 memories = _attach_agent_display_names((row[0], row[2]) for row in rows)
                 found.extend(zip(memories, (row[1] for row in rows), strict=True))
@@ -5099,6 +5120,7 @@ class PostgresService:
                 .group_by(Memory.id)
                 .order_by(func.count(func.distinct(other_ent.c.canonical_name)).desc())
                 .limit(limit)
+                .options(*_without_vectors())
             )
 
             result = await session.execute(stmt)
@@ -5116,29 +5138,34 @@ class PostgresService:
         agent_id: str | None = None,
     ) -> list[Memory]:
         async with get_session() as session:
-            stmt = select(Memory).where(
-                Memory.tenant_id == tenant_id,
-                Memory.deleted_at.is_(None),
-                Memory.status.in_(("active", "confirmed", "pending")),
-                Memory.subject_entity_id == subject_entity_id,
-                # A36 — match every spelling of the SAME attribute, not just
-                # the one this write happened to use. ``status`` and
-                # ``current_status`` are two members of
-                # ``SINGLE_VALUE_PREDICATES`` naming one attribute, and exact
-                # equality meant a subject holding one of each was never
-                # compared: no conflict raised, both rows live, both
-                # unpenalised. Expanded here rather than at write time so
-                # ALREADY-STORED rows are covered and the predicate a caller
-                # reads back is still the one its writer chose. A predicate in
-                # no cluster yields a single-member IN — the same query as the
-                # equality it replaces.
-                func.lower(Memory.predicate).in_(sorted(predicate_cluster(predicate))),
-                # A35 — compare NORMALISED forms. Raw inequality made
-                # "7,500 rpm" and "7500 RPM" look like competing values for the
-                # same attribute and flagged a contradiction that was only a
-                # formatting difference.
-                _normalized_object_sql(Memory.object_value) != _normalized_object_sql(literal(object_value)),
-                Memory.id != memory_id,
+            stmt = (
+                select(Memory)
+                .options(*_without_vectors())
+                .where(
+                    Memory.tenant_id == tenant_id,
+                    Memory.deleted_at.is_(None),
+                    Memory.status.in_(("active", "confirmed", "pending")),
+                    Memory.subject_entity_id == subject_entity_id,
+                    # A36 — match every spelling of the SAME attribute, not just
+                    # the one this write happened to use. ``status`` and
+                    # ``current_status`` are two members of
+                    # ``SINGLE_VALUE_PREDICATES`` naming one attribute, and exact
+                    # equality meant a subject holding one of each was never
+                    # compared: no conflict raised, both rows live, both
+                    # unpenalised. Expanded here rather than at write time so
+                    # ALREADY-STORED rows are covered and the predicate a caller
+                    # reads back is still the one its writer chose. A predicate in
+                    # no cluster yields a single-member IN — the same query as the
+                    # equality it replaces.
+                    func.lower(Memory.predicate).in_(sorted(predicate_cluster(predicate))),
+                    # A35 — compare NORMALISED forms. Raw inequality made
+                    # "7,500 rpm" and "7500 RPM" look like competing values for the
+                    # same attribute and flagged a contradiction that was only a
+                    # formatting difference.
+                    _normalized_object_sql(Memory.object_value)
+                    != _normalized_object_sql(literal(object_value)),
+                    Memory.id != memory_id,
+                )
             )
             # ``COALESCE`` grouping, as in the dedup gates: NULL and ``''`` are
             # one fleet scope, so a row stored with ``''`` is a candidate for
@@ -5208,6 +5235,7 @@ class PostgresService:
                 .join(found, Memory.id == found.c.id)
                 .where((1.0 - found.c.distance) >= threshold)
                 .order_by(found.c.distance)
+                .options(*_without_vectors())
             )
             await _scan_past_other_tenants(session)
             result = await session.execute(stmt)
@@ -6516,7 +6544,7 @@ class PostgresService:
         async with get_session() as session:
             stmt = (
                 select(Memory)
-                .options(defer(Memory.embedding), defer(Memory.search_vector))
+                .options(*_without_vectors())
                 .where(*prior_ingest_where(tenant_id, doc_hash, fleet_id=fleet_id, agent_id=agent_id))
                 .order_by(Memory.created_at.desc())
             )
@@ -6803,6 +6831,7 @@ class PostgresService:
         memory_ids: list[UUID],
         *,
         tenant_id: str,
+        with_embedding: bool = False,
     ) -> dict[UUID, Memory]:
         """Fetch multiple memories by ID within one tenant, as {id: Memory}.
 
@@ -6816,15 +6845,22 @@ class PostgresService:
         Python comparison the next refactor could drop with no test failing.
 
         Filtering here means another tenant's row is never selected at all.
+
+        The rows leave out their vectors unless ``with_embedding`` (L-189): only
+        the bulk re-embed reads one.
         """
         if not memory_ids:
             return {}
         async with get_session() as session:
-            stmt = select(Memory).where(
-                Memory.id.in_(memory_ids),
-                Memory.tenant_id == tenant_id,
-                Memory.deleted_at.is_(None),
-                Memory.status != QUARANTINED_MEMORY_STATUS,
+            stmt = (
+                select(Memory)
+                .options(*_without_vectors(keep_embedding=with_embedding))
+                .where(
+                    Memory.id.in_(memory_ids),
+                    Memory.tenant_id == tenant_id,
+                    Memory.deleted_at.is_(None),
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
+                )
             )
             result = await session.execute(stmt)
             return {m.id: m for m in result.scalars().all()}
@@ -7234,9 +7270,10 @@ class PostgresService:
         Returns up to ``limit`` rows (the route passes ``limit`` already
         widened to ``limit+1`` so it can detect ``has_more`` and build the
         next cursor). Mirrors the prior inline admin query's filter, cursor,
-        and tiebreaker exactly. Read-only (reader replica).
+        and tiebreaker exactly. Read-only (reader replica). The route serialises
+        ``MEMORY_LIST_FIELDS``, so the vectors are not loaded (L-194).
         """
-        stmt = select(Memory)
+        stmt = select(Memory).options(*_without_vectors())
         if tenant_id:
             stmt = stmt.where(Memory.tenant_id == tenant_id)
         if fleet_id:
@@ -7391,8 +7428,12 @@ class PostgresService:
         a non-empty ``readable_tenant_ids`` expands ``tenant_id = $1`` to
         ``tenant_id = ANY($1)``; ``tenant_id`` stays the binding/home tenant.
         """
-        base = select(Memory, Agent.display_name.label("agent_display_name")).outerjoin(
-            Agent, _AGENT_DISPLAY_JOIN
+        # The route serialises ``MEMORY_LIST_FIELDS``, so the vectors are not
+        # loaded: a 500-row page parsed ~6 MB of vector text it then dropped (L-194).
+        base = (
+            select(Memory, Agent.display_name.label("agent_display_name"))
+            .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+            .options(*_without_vectors())
         )
         if readable_tenant_ids:
             stmt = base.where(Memory.tenant_id.in_(readable_tenant_ids))
@@ -12276,7 +12317,7 @@ class PostgresService:
         return out
 
     @staticmethod
-    def _insights_dedup_stmt(filters: list, order_by, limit: int):
+    def _insights_dedup_stmt(filters: list, order_by, limit: int, *, keep_embedding: bool = False):
         """Build a one-exemplar-per-exact-title select for the theme-finding
         insight reads (patterns / stale / failures / discover-sample).
 
@@ -12307,6 +12348,8 @@ class PostgresService:
           needs the window annotations themselves (failures sorts by
           ``inner.c.dup_count`` so high-frequency patterns aren't cut by
           LIMIT below one-off rows).
+        - The rows leave out their vectors (L-194); ``keep_embedding`` keeps
+          the embedding for discover-sample, the one read that returns it.
         """
         dedup_key = func.coalesce(func.nullif(Memory.title, ""), cast(Memory.id, String))
         inner = (
@@ -12328,6 +12371,7 @@ class PostgresService:
             .where(inner.c.rn == 1)
             .order_by(*order_cols)
             .limit(limit)
+            .options(*_without_vectors(keep_embedding=keep_embedding))
         )
 
     def _insights_annotated_rows_to_dicts(self, rows, *, include_embedding: bool = False) -> list[dict]:
@@ -12353,6 +12397,7 @@ class PostgresService:
         async with get_read_session() as session:
             stmt = (
                 select(Memory)
+                .options(*_without_vectors())
                 .where(
                     *base,
                     Memory.status != "deleted",
@@ -12374,6 +12419,7 @@ class PostgresService:
             if superseded_ids and len(rows) < max_memories:
                 sup_stmt = (
                     select(Memory)
+                    .options(*_without_vectors())
                     .where(
                         *base,
                         Memory.memory_type != "insight",
@@ -12408,6 +12454,7 @@ class PostgresService:
                 if entity_ids:
                     extra_stmt = (
                         select(Memory)
+                        .options(*_without_vectors())
                         .where(
                             *base,
                             Memory.status != "deleted",
@@ -12464,6 +12511,7 @@ class PostgresService:
             if window_start is None:
                 stmt = (
                     select(Memory)
+                    .options(*_without_vectors())
                     .where(*filters)
                     .order_by(Memory.recall_count.desc(), Memory.weight.asc())
                     .limit(max_memories)
@@ -12524,7 +12572,13 @@ class PostgresService:
         ]
         async with get_read_session() as session:
             if window_start is None:
-                stmt = select(Memory).where(*filters).order_by(Memory.created_at.asc()).limit(max_memories)
+                stmt = (
+                    select(Memory)
+                    .options(*_without_vectors())
+                    .where(*filters)
+                    .order_by(Memory.created_at.asc())
+                    .limit(max_memories)
+                )
                 result = await session.execute(stmt)
                 return self._insights_rows_to_dicts(result.scalars().all())
             filters.append(Memory.created_at > window_start)
@@ -12564,6 +12618,7 @@ class PostgresService:
 
             mem_stmt = (
                 select(Memory)
+                .options(*_without_vectors())
                 .where(
                     *base,
                     Memory.status != "deleted",
@@ -12606,7 +12661,13 @@ class PostgresService:
         ]
         async with get_read_session() as session:
             if window_start is None:
-                stmt = select(Memory).where(*filters).order_by(Memory.created_at.desc()).limit(max_memories)
+                stmt = (
+                    select(Memory)
+                    .options(*_without_vectors())
+                    .where(*filters)
+                    .order_by(Memory.created_at.desc())
+                    .limit(max_memories)
+                )
                 result = await session.execute(stmt)
                 return self._insights_rows_to_dicts(result.scalars().all())
             filters.append(Memory.created_at > window_start)
@@ -12658,11 +12719,17 @@ class PostgresService:
         ]
         async with get_read_session() as session:
             if window_start is None:
-                stmt = select(Memory).where(*filters).order_by(Memory.created_at.desc()).limit(sample_size)
+                stmt = (
+                    select(Memory)
+                    .options(*_without_vectors(keep_embedding=True))
+                    .where(*filters)
+                    .order_by(Memory.created_at.desc())
+                    .limit(sample_size)
+                )
                 result = await session.execute(stmt)
                 return self._insights_rows_to_dicts(result.scalars().all(), include_embedding=True)
             filters.append(Memory.created_at > window_start)
-            stmt = self._insights_dedup_stmt(filters, (func.random(),), sample_size)
+            stmt = self._insights_dedup_stmt(filters, (func.random(),), sample_size, keep_embedding=True)
             result = await session.execute(stmt)
             return self._insights_annotated_rows_to_dicts(result.all(), include_embedding=True)
 
