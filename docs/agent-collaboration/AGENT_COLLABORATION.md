@@ -1,0 +1,500 @@
+# Caura agent collaboration capability
+
+## Product objective
+
+Agent collaboration lets an agent running in a human's existing host ask other
+agents directly. The requesting agent discovers peers by their expertise
+descriptions, sends addressed requests through Caura, and collects correlated
+answers from one or several peers. Caura transports and records the exchange
+and involves a human when policy requires it. The Docker environment is a test
+fixture for the completed capability, not the product deliverable.
+
+This replaces the earlier store-only coordination pattern, in which agents
+handed work to each other only by writing shared memories and hoping a peer
+recalled them later. Shared memory stays the place for durable knowledge the
+whole fleet should find. Collaboration is for asking a specific peer a question
+now and getting an attributable answer back. The capability is a **beta
+preview**; see [Capability status](#capability-status) for what is available,
+what is still in review, and what is deliberately not promised.
+
+The capability covers:
+
+1. Credential-bound agent sessions advertising capabilities and availability,
+   with expiring presence so disconnected agents do not appear online, plus a
+   registered expertise description that stays discoverable while the agent
+   is offline (in review, see the status table).
+2. Durable agent conversations plus resumable live events through Caura.
+   Messages are delivered at least once; live delivery into a host depends on
+   the host state (see the [host-state matrix](#host-state-matrix)).
+3. Agent checkpoints evaluated by Caura policy. Missing information, conflicting
+   results, low confidence, consequential actions and exhausted delivery retries
+   create a human intervention with a clear reason and relevant context.
+4. Human-initiated interruption of an active or queued delivery. Caura blocks
+   new claims and late results for that delivery immediately. Pull clients observe the
+   interruption at their next Caura call or supported turn boundary; only a
+   runtime with control of execution can attest that processing stopped.
+5. An in-app notification and intervention queue in the authenticated Caura
+   dashboard. Authorized humans approve, reject or redirect; version checks
+   prevent conflicting decisions, and the full lifecycle is auditable.
+6. Explicit runtime semantics: a paused delivery is distinct from a runtime
+   confirming it stopped. An external side effect cannot be undone by fencing.
+
+## CLI-first product scope (S1–S4)
+
+Humans keep using their existing CLI or desktop agent host (Claude Code,
+Codex). Caura registers and discovers peers and transports agent messages; it
+does not become a place where the human chats with agents. The requesting
+agent reads peer descriptions and chooses one or several peers itself.
+
+Out of scope for this release: a new human chat UI, task board, room composer,
+server-side model router or hosted-agent service. Caura never selects a
+recipient on the agent's behalf with a model. The existing oversight dashboard
+and intervention queue described above remain as they are; removing them is a
+separate scope change, and the scenarios below do not depend on them.
+
+Human interaction stays in the host. The human asks agent A in A's own host
+conversation and reads the answer there. Nobody tells a peer to poll, and no
+human relays text between hosts.
+
+| ID | Scenario | Pass condition |
+|---|---|---|
+| S1 | The human asks A for a fact only B knows, without naming B. | A discovers B by its expertise description, asks through Caura, and answers in the original host conversation. |
+| S2 | B knows one fact and C another; the question needs both. | A selects both from descriptions, sends correlated requests, and combines both replies. |
+| S3 | B is offline (presence expired) when A selects it. | Starting B later completes the already accepted request; A does not resend. |
+| S4 | Restart, lease expiry and reply recovery. | The existing restart/lease/reply recovery fixtures pass against the same build. |
+
+Rules that apply to every scenario:
+
+- **No hardcoded peer IDs.** Setup prompts, host instructions and test scripts
+  for the requesting agent never name the recipient's ID or contain the
+  answer. Selection comes from `discover`/`agents` results at run time. A local
+  `peers` allow-list is a host permission, not a routing rule; use `["*"]` (or
+  a list that includes every eligible peer) when selection is discovery-based.
+- **Fresh private facts.** Each run uses newly generated random facts held in
+  separate agent sessions and workspaces. A must not be able to read the answer
+  from shared files, memory, environment variables or setup prompts.
+- **Descriptions and replies are untrusted data.** They inform selection and
+  answers but grant no authority and are never followed as instructions.
+- **Honest host states.** Each run records the host executable versions and
+  the host state from the matrix below. Only a state marked supported counts as
+  passing evidence for that host.
+- **Real-model selection is separate from transport tests.** Scripted CI
+  agents prove transport, correlation and recovery; they do not prove that a
+  model chooses the right peer. Report the two separately.
+
+## Connect your agent
+
+A teammate connects their own Claude Code or Codex in about a minute with an
+agent key from the dashboard's API Credentials page:
+
+```sh
+uv tool install "git+https://github.com/caura-ai/caura@main#subdirectory=clients/collaboration/cli"
+caura-bus setup --runtime claude --url https://your-caura.example --key "$CAURA_API_KEY" --dir ~/my-project
+caura-bus setup --runtime codex  --url https://your-caura.example --key "$CAURA_API_KEY" --dir ~/my-project
+```
+
+`setup` verifies the key and reads the agent and tenant from the server, writes
+a private (mode 600) agent config, registers the `caura-bus` MCP server with the
+runtime (`claude mcp add --scope local` in the project, or the
+`[mcp_servers.caura-bus]` table of `~/.codex/config.toml`), and adds the
+[peer instructions](PEER_AGENT_CLAUDE_template.md) to the project's `CLAUDE.md`
+or `AGENTS.md` in a marked block. `--description` registers the agent's
+expertise, `--dry-run` prints the plan, and re-running updates in place. Details:
+[Connect your agent](../../clients/collaboration/README.md#connect-your-agent-one-minute).
+
+## Capability status
+
+Status as of 2026-10-06. **Available** means merged into the collaboration
+branches (`feat/collaboration-benchmark` here, `feat/tenant-send-quota` in
+Caura Enterprise); those branches are themselves still in review against the
+default branches, and nothing below is generally available. **In review** means
+an open pull request; do not rely on it until it merges. Everything is beta.
+
+| Capability | Status | Source |
+|---|---|---|
+| Durable direct messages, private delivery leases, atomic reply plus ACK, idempotent sends | Available | Collaboration foundation |
+| Request lifecycle: reply due times, overdue/undelivered/unclaimed/stuck/silent notices, `status`, `requests` | Available | Collaboration foundation |
+| Description-based consultation guidance in the `peer` tool and agent template | Available | caura#1914 |
+| Bounded multi-peer `collect` with partial results, late answers and duplicate-presentation suppression | Available | caura#1917 |
+| Consultation count and deadline bounds; direct A→B→A back-edge refused | Available | caura#1922 |
+| Hostile peer descriptions and replies kept as data; tokens never rendered | Available | caura#1918 |
+| Host busy/approval/re-entry boundaries; Claude Stop listener advertises `busy` while holding a lease | Available | caura#1916 |
+| Stale paused MCP claim refreshed from Caura after a human decision | Available | caura#1920 |
+| Failed native Codex wake retried with capped backoff instead of stranded | Available | caura#1928 |
+| Credential rotation and revocation bounds across live leases, long polls and streams | Available (tests and bounds) | caura-enterprise#2147 |
+| Configurable payload and fan-out budgets | Available | caura-enterprise#2135 |
+| Registered expertise descriptions, discoverable while offline | In review | caura-enterprise#2139, #2140 |
+| `describe` opcode and `Bus.describe()` in the SDK and MCP | In review | caura#1923 |
+| Broker `caura agent connect --description` and `caura agent describe` | In review (draft until #2139 merges) | caura-daemon#251 |
+| Directory pagination (`cursor`, `limit`, `next_cursor`) | In review | caura-enterprise#2151, caura#1931 |
+| Acknowledge with `progress`, deliver with one `reply` | In review | caura#1919 |
+| Reclaim before reply after a lost lease | In review | caura#1921 |
+| Wake for resumed work after approve or redirect | In review | caura-enterprise#2141 |
+| Outstanding-backlog quotas; recipient-weighted send admission; degraded quota bounds | In review | caura-enterprise#2149, #2142, #2138 |
+| Opt-in retention with `stream.resync_required` replay handling | In review | caura-enterprise#2137, #2148, caura#1932 |
+| Collaboration data removed with org tenant deletion | In review | caura-enterprise#2146 |
+| Deterministic S1–S3 acceptance and its CI gate | In review | caura-enterprise#2145, #2150 |
+| Published `caura-bus-*` packages on PyPI | In review; not yet published | caura#1927 |
+| Real-model peer selection inside a host; second host and cross-runtime direction | Not yet qualified | Release plan PR-35, PR-36 |
+
+Until directory pagination merges, `discover` and `agents` return at most the
+first 1000 visible agents. Until registered descriptions merge, a peer is
+described only by its live session presence, so an offline peer cannot be
+found by expertise and S3 cannot be run end to end on a released build.
+
+What this capability does **not** promise:
+
+- **No federation.** Agent messages, discovery and history are tenant-scoped.
+  There is no cross-tenant or cross-deployment messaging.
+- **No universal wake-up.** Only the host states marked supported in the
+  [host-state matrix](#host-state-matrix) receive work without a human turn.
+  Everything else receives queued work the next time the agent calls `wait`.
+- **No exactly-once effects.** Delivery is at least once. Idempotency keys
+  deduplicate sends and replies inside Caura; duplicate-presentation tracking
+  in the MCP session is bookkeeping that resets on restart. Runtimes must
+  deduplicate their own external effects.
+- **No server-side routing.** Caura never chooses a recipient with a model.
+  The requesting agent selects peers from descriptions.
+
+Onboarding steps for hosts are in the
+[client README](../../clients/collaboration/README.md#cli-first-onboarding-with-the-broker).
+
+## Running the S1–S3 acceptance
+
+Two kinds of evidence are kept apart.
+
+**Deterministic transport acceptance** (caura-enterprise#2145, in review) runs
+S1–S3 as pytest against the real collaboration platform: routes, the PostgreSQL
+store and Redis-backed send admission, driven by scripted `caura_bus_core.Bus`
+clients. No model and no real host is involved. Each test records
+`evidence = "transport-only: scripted description keyword selection, not model-driven"`
+in its JUnit properties. From a Caura Enterprise checkout paired with this
+repository:
+
+```sh
+docker run -d --name acc-pg -p 55432:5432 -e POSTGRES_PASSWORD=x postgres:16
+docker run -d --name acc-redis -p 56379:6379 redis:7
+cd platform-collaboration-api
+CAURA_BUS_TEST_DATABASE_URL=postgresql+asyncpg://postgres:x@127.0.0.1:55432/postgres \
+COLLABORATION_QUOTA_REDIS_URL=redis://127.0.0.1:56379/0 \
+PYTHONPATH=.:..:../platform-storage-api \
+pytest tests/test_private_expertise_acceptance.py -v
+```
+
+Without both URLs the tests skip. Set `CAURA_BUS_REQUIRE_SERVICES=1` to turn
+any skip into a failure. The CI gate (caura-enterprise#2150, in review) runs the
+same suite on every collaboration pull request with disposable PostgreSQL 16
+and Redis 7, fails on any skipped test or on fewer than seven passing acceptance
+cases, and uses no model credentials.
+
+What the deterministic suite checks:
+
+- **Setup.** Agents A, B, C and an irrelevant peer each get their own
+  workspace and key. Each peer registers its own expertise description through
+  the self-service description API. B and C get fresh random private facts that
+  exist only in their own workspaces. A receives only its own config and the
+  human's question. Before any peer answers, no fact appears anywhere in the
+  platform schema or the environment.
+- **S1.** A finds B by description with `discover(available_only=false)`, sends
+  one request and returns B's correlated answer. C and the irrelevant peer
+  receive nothing.
+- **S2.** A asks B and C, in either completion order, and combines both
+  attributed answers. A partial variant lets C's request go overdue: A reports
+  B's fact and says C has not answered, and C's delivery is still pending.
+- **S3.** B's presence has expired. A still finds B by description, sends once,
+  and B's later start completes the original request with no resend.
+
+A clean setup needs **no dashboard, no direct database edits, no hidden
+recipient IDs and no shared answer files**: descriptions are self-registered
+through the API (or `caura agent connect --description` on a real host), and
+selection uses run-time discovery. To keep the suite fast, the harness shortens
+the 45-second presence expiry and the request due time by moving those
+timestamps in its disposable test database. That is a test-clock shortcut, not
+a setup step.
+
+**Real-host qualification** connects separate host sessions with the Broker
+(see the client README), registers each peer's description, and asks A an
+ordinary question in A's own host. Record the host executable versions and the
+host state from the matrix. Model-driven selection in a real host and the second
+host (release plan PR-35 and PR-36) are not yet qualified; do not report the deterministic
+suite as evidence for them.
+
+## Authorization and boundaries
+
+Reuse Caura agent credentials and verified human sessions. Agent-supplied
+descriptions/capabilities aid discovery but grant no authority. Human decisions
+require the personal agent's owner or an organization administrator. Agents
+cannot approve their own interventions. Agent messages remain tenant-scoped.
+The human inbox is scoped by current agent ownership and tenant, with admin oversight.
+Conversation governance is tenant-scoped: organization owners/admins can read
+every thread; members can read threads they participate in and threads involving
+agents they currently own. Read access grants no additional decision rights.
+
+Automatic escalation is a server policy decision over structured checkpoint
+signals and observed delivery state. Explanations identify each trigger.
+It does not claim to infer arbitrary risk from all natural-language messages.
+No model or agent can turn a required human decision into an automatic approval.
+
+## Runtime contract: MCP pull, hooks and supervised execution
+
+Accepted design, 2026-09-21. This replaces the tmux/keystroke-injection approach
+in the product plan. Users connect their ordinary agent sessions to Caura;
+special terminals and screen-idle heuristics are not part of the supported path.
+The MCP pull baseline implements `wait`, `reply`, `ack`, `progress` and
+model-facing `checkpoint` alongside discovery, messaging and human escalation.
+The tmux package and executable have been removed. Restart MCP connections to
+refresh the tool schema after upgrading the platform and MCP package.
+
+### Wake mechanism and rollout
+
+1. **MCP baseline:** extend the single `peer(op, args)` tool. The agent calls
+   `wait` after finishing work and repeats it after an empty timeout. An MCP
+   tool runs inside an existing model turn; it cannot start a new turn itself.
+2. **Interactive hooks:** supported host hooks check the inbox at turn
+   boundaries and present incoming work to the model. Qualify each host and
+   version; do not assume all clients expose equivalent hooks. This milestone
+   addresses agents that never call `wait`.
+3. **Unattended runners:** a supervisor claims work and owns a headless agent
+   process for the delivery. It manages cancellation, cleanup and stop
+   confirmation. Qualify descendant processes and external-effect handling
+   before claiming that stopping the runner stops all effects of its work.
+
+Native wake commands and host setup are documented in
+[Connecting a runtime](../../clients/collaboration/README.md). Codex uses its native
+session queue with a persisted outstanding marker until authenticated `wait`.
+The body/token-free `/inbox/state` reports a runnable/interrupt hint and durable
+wait generation. Each HTTP wait advances it once, not once per internal poll.
+Neither that read nor `recv` consumes work. Events trigger state checks;
+periodic reconciliation catches lease expiry and reconnect gaps. Coalescing is
+local to one host per agent. Claude Code hooks (`hooks install`, or `setup
+--hooks`) start a background `asyncRewake` listener on `SessionStart` and on
+every `Stop`. It runs the same event-driven check as the Codex waker without
+holding the turn. When a new burst is runnable, it exits 2 and Claude Code
+starts a turn with the fixed wake text, also from idle. One listener runs per
+agent and host (a lock), and it exits when its Claude Code process exits.
+Each arming lasts up to `--listen-seconds` (12 hours by default). The legacy
+blocking `recv --hook Stop` listener remains for existing installs; reinstalling
+replaces it. Missing config or key makes recv a silent no-op. Hooks read the
+key from `CAURA_API_KEY` or from a 0600 `--key-file`. Project installs use ignored local settings;
+shared project hooks require explicit `--shared`. Cursor automatic wake is not
+qualified in this release.
+
+### Host-state matrix
+
+What a recipient host can do when a message arrives depends on its state, not
+just its product name. Advertise and test only the rows marked supported.
+Presence descriptions published by the waker and the Stop listener describe
+the receive mode; they must not claim more than this table. Every supported
+row is **beta**: it is qualified on the collaboration branches, not in a
+generally available release.
+
+| Host | State | Receive behavior | Status |
+|---|---|---|---|
+| Codex | Session open, `caura-bus wake --runtime codex --thread ID` (or `--thread latest --dir PROJECT`) running | Native `codex queue` delivers one wake prompt to that session; the model calls `peer wait` at its next turn boundary. | **Supported (beta)** active-session receive. Used for the initial S1–S3 demonstration. |
+| Codex | Waker not running, or the session thread is gone | Nothing queues a prompt. Messages stay durable in Caura until a session calls `wait`. | Not wakeable. Work is delivered when the agent next calls `wait`. |
+| Claude Code | Session open and inside a turn that calls `peer wait` | The MCP tool returns the delivery inside that turn. | Supported (beta, pull). |
+| Claude Code | Session open (idle or between turns), hooks installed, Claude Code with `asyncRewake` hooks | The background listener armed by `SessionStart`/`Stop` exits 2 when work arrives, and Claude Code starts a turn with the wake text; the model calls `peer wait`. | **Supported (beta)** active-session receive. Qualified on Claude Code 2.1.294 against the local stack: wake 0.4 s after send, reply 5–8 s. |
+| Claude Code | Session open, idle longer than `--listen-seconds` (12 h) since its last turn, or another session of the same agent holds the listener | No listener for this session. A human turn (UserPromptSubmit hook) surfaces pending work. | Not wakeable. |
+| Claude Code | Process stopped or exited | Nothing runs. Messages stay durable; starting the agent and calling `wait` (S3) receives them. | **Never advertised as wakeable.** |
+| Cursor | Any | No automatic wake. | Unsupported in this release. |
+
+A stopped host is a durability case, not a wake case: S3 passes because the
+accepted request survives until the recipient starts, not because Caura
+restarted the recipient. The operator-only direct `codex queue` fallback is not
+an acceptance path for S1–S3. Re-verify installed host executable versions
+before each qualification run and record exactly which version and state
+passed.
+
+### Waiting, leases and restart recovery
+
+- `wait` defaults to **50 seconds**, configurable below the host client's tool
+  timeout. MCP composes HTTP polls of at most 20 seconds to fit the gateway’s
+  25-second upstream timeout and revalidate authentication between polls. An empty timeout returns an explicit no-delivery result. It does not
+  acknowledge work or increment a delivery attempt. Compatibility requires
+  measured client timeouts; a 600-second tool call is not the default.
+- Allow **one outstanding delivery per recipient**. Repeated `wait` from the
+  owning MCP session returns the same outstanding delivery with its current
+  state, without another claim or attempt increment. Concurrent calls must not
+  claim separate items. A paused item is returned as paused, not runnable.
+  Resolve the outstanding item before advancing; any operator-authorized skip
+  or quarantine must make the ordering gap visible.
+- The **MCP process owns the lease token** and renews the **30-second lease** in
+  the background while authorized work is active. The platform validates every
+  renewal. Lease tokens never appear in tool results, model context, the human
+  interface or logs. `human` takes a delivery ID and reason, never a token.
+- A different session cannot take a live lease. After the owning process dies
+  and its lease expires, a new session of the same authenticated agent can claim
+  that outstanding delivery with a **fresh token and attempt plus one**, before
+  later queued work. Stale tokens cannot renew, acknowledge or publish a result
+  for the new attempt. Expiry is not proof that the old model stopped executing.
+- Delivery remains **at least once**. After **five failed or abandoned attempts**,
+  park it for human review and stop automatic redelivery. No infinite crash loop
+  and no silent discard. A human-approved retry starts the documented retry
+  budget only after the applicable pause/recovery requirements are satisfied.
+- If a wait is cancelled or its response is lost after claiming, retain the
+  claim as that session's outstanding work. A later wait recovers it. Neither a
+  cancelled call nor loss of the connection counts as an acknowledgement.
+
+A successful wait returns the original message envelope plus `delivery_id`,
+`lease_expires_at`, `attempt`, `state` and `resume_context` (null when absent).
+Also return `processing_deadline` and `extension_count` so processing limits
+are visible. Human resume context must accompany the resumed claim; the model
+does not need another call to obtain its instructions. The MCP process retains
+the token privately and resolves subsequent delivery-ID operations against it.
+
+### Processing deadlines and progress
+
+The processing deadline is a tenant-configurable **inactivity deadline**, separate
+from the short renewable lease. Tenant policy defaults to `processing_timeout_seconds=600`
+and `max_extensions=6`. The seventh distinct extension request pauses and escalates;
+replaying an accepted report does not consume another extension. Thus uninterrupted
+work has at most seven ten-minute windows before human review, depending on when
+progress is reported. Change these values through the authenticated human policy API. Normal long work can extend it through an
+accepted `progress` call or a checkpoint whose policy verdict permits continued
+work. Caura records the progress summary, last-progress time, extension count
+and updated deadline using server time. These records survive MCP restarts.
+
+Each logical progress/checkpoint report has an idempotency key: retrying it
+does not extend the deadline or increment the count again. An extension does
+not reset delivery attempts. Automatic lease renewal and repeated `wait` calls
+do not count as progress. A report cannot resume a paused delivery or override
+a human decision. If the deadline passes without accepted progress, pause the
+delivery and notify the authorized human, including its progress history.
+
+Progress is agent-reported liveness, not proof of useful advancement. A client
+must be able to report within its configured window; a model turn that makes
+no Caura calls cannot silently extend it. Do not promise perfect detection of
+stuck agents or absence of false escalations. The UI exposes extension counts
+and elapsed time so humans can assess repeatedly extended work.
+
+### Completion and strict reply binding
+
+- `ack(delivery_id)` explicitly confirms processing completion. A repeated
+  acknowledgement of an already acknowledged delivery by its authenticated
+  recipient returns **200 with the existing result**, including after a lost
+  response or MCP restart. An unfinished delivery still requires the current
+  lease; idempotency must not let a stale attempt acknowledge replacement work.
+- `reply` defaults to **`ack=true`** for the claimed delivery. Derive the original
+  sender, message and thread from Caura's delivery record. Any supplied
+  `reply_to` must equal that delivery's message ID; reject a mismatch before
+  writing either the reply or the acknowledgement.
+- Commit the reply and acknowledgement in **one platform transaction**, with
+  an idempotency key. Retrying the same logical reply returns the same receipt
+  without another message or completion event. Conflicting reuse is rejected.
+- A correlated reply is the deliverable. The first reply from the recipient,
+  with or without ack, moves the sender's request to **`replied`**. Agents
+  acknowledge receipt and report working status with **`progress`**, which keeps
+  the request `awaiting`, and send exactly one reply. `reply(..., ack=false)`
+  only keeps the lease for follow-up work after that reply, ending with an
+  explicit ack. Generic `send`, history reads, turn endings, tool timeouts and
+  disconnections never imply acknowledgement. A paused or cancelled delivery
+  cannot complete through a late reply/ack or a progress extension.
+- **Reclaim before reply.** When a lease is lost mid-task (expiry, platform
+  rebuild), the stale token fails every lease operation. Before the stdio MCP
+  sends a reply, ack, progress or checkpoint for that work it re-reads Caura
+  through its authenticated session wait. It proceeds only on a fresh claim of
+  the same delivery, with no unseen human instructions, using the new private
+  token and the caller's unchanged idempotency key. Changed instructions return
+  `resumed`; a cancelled, completed or reassigned delivery returns
+  `unavailable`, and its in-hand answer is never replayed. A retry of a reply
+  this session already sent keeps its key, so Caura can return the stored receipt.
+
+### What interruption promises
+
+**Pull-based interruption reaches the agent at its next Caura call or supported
+turn boundary. It cannot stop a model turn already running.** A background MCP
+renewal can observe a pause, but cannot inject a new model turn or cancel work
+the host has not exposed control over. All subsequent delivery operations must
+surface the pause and prevent continuation through Caura.
+
+The case exposes `pause_requested`, `pause_observed`, `caura_stop_confirmed`,
+`runtime_stop_confirmed` or `stopped_unconfirmed`. The MCP session discards its
+private token after observing a pause and confirms the Caura fence; the platform
+invalidates that token. This permits human approval/redirection through Caura,
+while the dashboard explicitly says that the model may still act locally.
+Only `runtime_stop_confirmed` attests runtime stoppage. The compatibility
+`pause_confirmed` field is generated from either Caura or runtime confirmation;
+`stop_status` is the authoritative source and the dashboard uses it directly.
+
+An expired paused lease becomes `stopped_unconfirmed`, never runtime-confirmed.
+Approval/redirection then requires the human's explicit `allow_unconfirmed=true`
+acknowledgement; the dashboard presents the recovery choice and records it with
+the decision. Reject is permitted at every level. Every subsequent ack, reply,
+progress or checkpoint on paused work returns 409 carrying the pause context.
+A resumed `wait` returns fresh ownership and the human's instructions.
+None of these mechanisms can undo an external effect already executed.
+
+## Delivery sequence
+
+Build the domain state machine and API, then the SDK/MCP lifecycle, then the
+native Caura dashboard and notification surface. Validate unit/concurrency
+properties during development; run complete authenticated end-to-end acceptance
+tests once the workflow is wired together. Do not present a transport-only
+round trip as completion of this capability.
+
+External notification channels are an extension of the durable in-app inbox.
+They must not become the source of truth for approval or resume work merely
+because a notification was sent.
+
+
+## Conversation governance
+
+The Conversations section has Mine and, for organization owners/admins, All
+conversations. Mine includes personal participation and currently owned agents.
+The tenant view is read-only and audited; existing message composition and
+intervention decision permissions are unchanged. There are no edit/delete/redact
+operations. Agent credentials cannot access the human governance routes.
+
+- `GET /api/v1/bus/human/threads?scope=mine|tenant` accepts agent_id, kind, state,
+  since (ISO time), cursor and limit (1–100). Filters apply before pagination.
+  Threads are ordered by most recent message; last_activity is that message’s
+  server timestamp. Participants, message count, open interventions and delivery
+  counts accompany each row. Parked denotes exhausted retries (or legacy dead
+  deliveries); other human pauses remain paused.
+- `GET /threads/{id}/messages` returns messages chronologically, cursor/limit
+  pagination, correlation IDs, recipient states/attempts and linked interventions.
+  Review links appear only when the viewer also has decision authority.
+- `GET /threads/{id}/export` returns the complete thread as JSON, including
+  deliveries and interventions. Private lease tokens are excluded.
+- Each list records one row with scope, filters and returned thread count; open
+  and export record the selected thread in bus_governance_reads. Records contain
+  verified tenant/user/role, action, server time and reason=governance_view. If
+  auditing cannot commit, no governance result is returned.
+- Human event streams accept scope=mine|tenant. Stream starts are audited, and
+  thread message/delivery/intervention events are filtered by the same current
+  authorization. Reads and ownership checks use authenticated Caura APIs; no
+  parallel registry or direct client database access is introduced.
+
+Gateway-generated errors use Caura’s detail/error envelope, including 502/504
+during replacement. MCP wait retries transient 5xx/transport failures with
+bounded backoff using the same session ID, preserving ambiguous claims. Retry
+time is bounded by the wait budget with at most one second for the last HTTP
+response; persistent unavailability returns 503. Revoked credentials fail closed.
+
+
+## Native packaging and transports
+
+Apache client packages live in Caura `clients/collaboration/`. Enterprise owns
+`platform-collaboration-api`, gateway, dashboard and `local-dev/collaboration/`.
+The stdio MCP server owns pull leases privately. The optional native remote MCP
+entrypoint registers `peer` for discover, agents, send, recent, threads, status,
+human and memory_context. Lease operations explicitly require stdio.
+
+The preview uses paired `caura` and `caura-enterprise` checkouts. Enterprise's
+`platform-collaboration-api/sources.json` is the single OSS revision pin. Public
+source checkout needs no private repository secret. Docker accepts the OSS tree
+as a named build context. There are no patch overlays or synchronization jobs.
+
+## Consolidated messaging boundary
+
+Keep the durable PostgreSQL ledger, private stdio lease tokens and one outstanding
+delivery. Same-fleet messaging is the default; admins may explicitly enable
+tenant-wide messaging through `messaging_scope=tenant`. Existing accepted work
+and history survive policy changes. See SPEC.md for correlated response reads
+that permit a nested consultation without releasing the original lease.
+
+A waker retries after an OS error proves the runtime process never started.
+Once a process has started, timeout, cancellation or a nonzero exit can be
+ambiguous: retain the wake marker and inspect the runtime before clearing it.
+These guarantees prevent a missing executable from permanently suppressing work
+without claiming exactly-once runtime execution.

@@ -96,10 +96,15 @@ class Lifecycle(enum.StrEnum):
     FORGE_DISTILL_REQUESTED = "caura.lifecycle.forge-distill-requested"
 
 
+class Collaboration(enum.StrEnum):
+    WAKE = "caura.collaboration.wake"
+
+
 class Topics:
     """Namespaced facade so call sites keep the ergonomic form
     `Topics.Memory.EMBEDDED` instead of importing each inner enum."""
 
+    Collaboration = Collaboration
     Memory = Memory
     Audit = Audit
     Lifecycle = Lifecycle
@@ -287,9 +292,7 @@ def family(topic: str) -> str:
 # declared here and consumed downstream. Listing the family keeps the two
 # copies' flip state aligned, and means a publisher added here later inherits
 # the current name rather than the outgoing one.
-FLIPPED_FAMILIES: frozenset[str] = frozenset(
-    {"audit", "lifecycle", "memory", "org"}
-)
+FLIPPED_FAMILIES: frozenset[str] = frozenset({"audit", "lifecycle", "memory", "org"})
 
 
 def all_topics() -> tuple[str, ...]:

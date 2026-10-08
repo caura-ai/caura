@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev, feat/agent-collaboration, feat/collaboration-benchmark]
 
 env:
   PYTHON_VERSION: "3.13"
@@ -138,7 +138,7 @@ jobs:
         run: |
           uv venv .venv
           source .venv/bin/activate
-          uv pip install -e core-storage-api/[dev] -e core-api/[dev] -e core-operations/[dev] -e core-worker/[dev]
+          uv pip install -e core-storage-api/[dev] -e core-api/[dev] -e core-operations/[dev] -e core-worker/[dev] -e clients/collaboration/core -e clients/collaboration/mcp
           echo "$VIRTUAL_ENV/bin" >> $GITHUB_PATH
 
       # --- Broker↔cloud API-versioning gate (Gate C / Phase 1, deliverables A+B) ---
@@ -889,9 +889,8 @@ jobs:
     # it reports in seconds instead of waiting behind the suite, and its status
     # check reads on its own terms rather than as one more way for "CI" to be red.
     #
-    # ``depth=1`` is enough. On a ``pull_request`` the checkout is already the
-    # merge commit, so main's tree is the exact base for this PR's contribution
-    # and no merge-base walk is needed. Same anonymous fetch the broker gate uses.
+    # Compare with the event's immutable target SHA so stacked feature PRs
+    # are checked against their own base rather than unrelated main changes.
     name: Legacy-name ratchet
     runs-on: ubuntu-latest
     # Seconds of work; the only thing that can hang is the fetch.
@@ -904,9 +903,11 @@ jobs:
           persist-credentials: false
 
       - name: No new old-brand names
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          git fetch --no-tags --depth=1 origin main
-          python3 scripts/legacy_name_ratchet.py --base origin/main
+          git fetch --no-tags --depth=1 origin "$PR_BASE_SHA"
+          python3 scripts/legacy_name_ratchet.py --base "$PR_BASE_SHA"
 
   do-not-touch-sentinel:
     # The other half of hard rule 4. The ratchet above is directional — it fails a
@@ -958,6 +959,9 @@ jobs:
 
       - name: Build every package the PyPI workflows publish
         run: |
-          for pyproject in clients/*/pyproject.toml; do
+          # clients/collaboration is a uv workspace root (no [project]); its
+          # published packages are the members one level down.
+          for pyproject in clients/*/pyproject.toml clients/*/*/pyproject.toml; do
+            grep -q '^\[project\]' "${pyproject}" || continue
             python -m build --no-isolation --outdir "${RUNNER_TEMP}/dist" "$(dirname "${pyproject}")"
           done
