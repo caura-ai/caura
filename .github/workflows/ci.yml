@@ -58,6 +58,9 @@ jobs:
           node-version: "22"
 
       - name: Install reviewer sandbox and smoke-test pinned CLI (no API calls)
+        # A backstop for the script's own bound on each download: this job has no
+        # timeout of its own, so a hang here would hold it for GitHub's six hours.
+        timeout-minutes: 10
         run: bash .github/scripts/install_review_sandbox.sh
 
       - name: Check plugin version-sync (gen-version.sh → src/version.ts)

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any, Literal, NotRequired, TypedDict
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
@@ -209,6 +210,17 @@ def _storage_permanent(response: httpx.Response) -> tuple[str, dict] | None:
     # it as data, not as a substring of the message.
     fields = {k: v for k, v in detail.items() if k != "message"}
     return (message if isinstance(message, str) and message else _PERMANENT_FALLBACK_DETAIL), fields
+
+
+def _agent_path(agent_id: str) -> str:
+    """``/agents/<agent_id>``, with the id escaped as one path segment (M-13).
+
+    Interpolated raw, ``?`` and ``#`` end the path: httpx reads ``bot?v2`` as
+    agent ``bot`` with a query, so a lookup returned another agent's row. An
+    escaped ``/`` does not survive routing, since the server decodes it first;
+    ``get_or_create_agent`` refuses such an id before it gets here.
+    """
+    return f"/agents/{quote(agent_id, safe='')}"
 
 
 def _reject_reserved_write_id(agent_id: str | None) -> None:
@@ -878,6 +890,18 @@ class CoreStorageClient:
         if content is not None:
             body["content"] = content
         result = await self._post(f"/memories/{memory_id}/predicate", body, read=False)
+        return bool((result or {}).get("updated"))
+
+    async def set_supersedes_if_null(self, memory_id: str, tenant_id: str, *, supersedes_id: str) -> bool:
+        """Point a live row at the memory it supersedes, if it points nowhere yet.
+
+        The near-duplicate merge's link (L-19): a compare-and-set against NULL
+        that writes ``supersedes_id`` and nothing else, where
+        ``update_memory_status`` also writes a status. Returns whether the link
+        landed; ``False`` covers a row that is gone, held, foreign, or already
+        supersedes another, and a target outside ``tenant_id``."""
+        body = {"tenant_id": tenant_id, "supersedes_id": supersedes_id}
+        result = await self._post(f"/memories/{memory_id}/supersedes", body, read=False)
         return bool((result or {}).get("updated"))
 
     async def update_memory_status(
@@ -1574,6 +1598,8 @@ class CoreStorageClient:
         self,
         ids: list[str],
         tenant_id: str,
+        *,
+        read: bool = True,
     ) -> list[dict | None]:
         """Fetch many memories; order matches input ``ids``.
 
@@ -1587,12 +1613,15 @@ class CoreStorageClient:
         ``tenant_id`` is required. As an optional argument it was the client
         half of GHSA-wgvw-28pq-jc36, and one of the two call sites did in fact
         omit it.
+
+        ``read=False`` routes to the WRITER, for a read-back of rows written
+        moments ago, as on ``get_memory``.
         """
         rows: list[dict | None] = []
         for start in range(0, len(ids), _BULK_GET_MAX_IDS):
             payload: dict[str, Any] = {"ids": ids[start : start + _BULK_GET_MAX_IDS], "tenant_id": tenant_id}
             chunk: list[dict | None] = await self._post(  # type: ignore[assignment]
-                "/memories/bulk-get", payload, read=True
+                "/memories/bulk-get", payload, read=read
             )
             rows.extend(chunk)
         return rows
@@ -2036,9 +2065,15 @@ class CoreStorageClient:
         # The returned memory ids get fetched next, so an unscoped call handed
         # this caller other tenants' rows to look up. Storage restricts each
         # link to rows with both ends in ``tenant_id``.
+        #
+        # ``read=True``, as the entity FTS and graph expansion beside it on
+        # the search path: it reads links earlier requests wrote, never its
+        # own, and sent to the writer it put a primary transaction on every
+        # entity-shaped search (L-190).
         result = await self._post(
             "/entities/memory-ids-by-entity-ids",
             {"entity_ids": entity_ids, "tenant_id": tenant_id},
+            read=True,
         )
         return result  # type: ignore[return-value]
 
@@ -2190,8 +2225,14 @@ class CoreStorageClient:
         The default stays ``True``. Most callers here are plain lookups — trust
         gates, fleet resolution, 404 checks — and sending those to the primary
         would give up the read split entirely to fix four call sites.
+
+        An id with a ``/`` cannot be addressed (see ``_agent_path``), so it
+        finds nothing here rather than routing to a sub-resource such as
+        ``/fleet`` and failing there.
         """
-        return await self._get(f"/agents/{agent_id}", read=read, tenant_id=tenant_id)
+        if "/" in agent_id:
+            return None
+        return await self._get(_agent_path(agent_id), read=read, tenant_id=tenant_id)
 
     async def list_agents(
         self,
@@ -2204,16 +2245,16 @@ class CoreStorageClient:
         return await self._get_list("/agents", **params)
 
     async def update_trust_level(self, agent_id: str, data: dict) -> dict | None:
-        return await self._patch(f"/agents/{agent_id}/trust-level", data)
+        return await self._patch(f"{_agent_path(agent_id)}/trust-level", data)
 
     async def update_search_profile(
         self,
-        agent_id_pk: str,
+        agent_id: str,
         tenant_id: str,
         search_profile: dict,
     ) -> dict | None:
         return await self._patch(
-            f"/agents/{agent_id_pk}/search-profile",
+            f"{_agent_path(agent_id)}/search-profile",
             {"tenant_id": tenant_id, "search_profile": search_profile},
         )
 
@@ -2223,7 +2264,7 @@ class CoreStorageClient:
         tenant_id: str,
     ) -> dict | None:
         return await self._post_optional(
-            f"/agents/{agent_id}/search-profile/reset",
+            f"{_agent_path(agent_id)}/search-profile/reset",
             {"tenant_id": tenant_id},
         )
 
@@ -2233,7 +2274,7 @@ class CoreStorageClient:
         tenant_id: str,
     ) -> dict | None:
         return await self._get(
-            f"/agents/{agent_id}/search-profile",
+            f"{_agent_path(agent_id)}/search-profile",
             tenant_id=tenant_id,
         )
 
@@ -2244,10 +2285,10 @@ class CoreStorageClient:
         )
 
     async def update_agent_fleet(self, agent_id: str, data: dict) -> dict | None:
-        return await self._patch(f"/agents/{agent_id}/fleet", data)
+        return await self._patch(f"{_agent_path(agent_id)}/fleet", data)
 
     async def delete_agent(self, agent_id: str, tenant_id: str) -> bool:
-        return await self._delete(f"/agents/{agent_id}", tenant_id=tenant_id)
+        return await self._delete(_agent_path(agent_id), tenant_id=tenant_id)
 
     # =====================================================================
     # Documents
@@ -3691,6 +3732,36 @@ class CoreStorageClient:
 
     async def add_task_failure(self, data: dict) -> dict:
         return await self._post("/tasks/failures", data)  # type: ignore[return-value]
+
+    async def list_open_task_failures(
+        self,
+        tenant_id: str,
+        task_names: Sequence[str],
+        *,
+        since: datetime,
+        limit: int,
+        memory_id: str | None = None,
+        max_reruns_per_memory: int | None = None,
+    ) -> list[dict]:
+        """A tenant's task rows still ``failed`` or ``cancelled``, oldest first."""
+        params: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "task_name": list(task_names),
+            "since": since.isoformat(),
+            "limit": limit,
+        }
+        if memory_id is not None:
+            params["memory_id"] = memory_id
+        if max_reruns_per_memory is not None:
+            params["max_reruns_per_memory"] = max_reruns_per_memory
+        return await self._get_list("/tasks/failures", **params)
+
+    async def mark_task_failures_handled(self, tenant_id: str, ids: Sequence[str], status: str) -> int:
+        """Move open task rows to a handled status (``rerun`` / ``skipped``); returns how many moved."""
+        result = await self._post(
+            "/tasks/failures/handled", {"tenant_id": tenant_id, "ids": list(ids), "status": status}
+        )
+        return int(result.get("updated", 0)) if isinstance(result, dict) else 0
 
     # =====================================================================
     # Tenant suppression (CAURA-694)

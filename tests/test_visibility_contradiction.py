@@ -1,10 +1,12 @@
 """Visibility + Contradiction edge-case test coverage.
 
 Tests:
-1. Auto-chunk child visibility inheritance
-2. Bulk write visibility assignment
-3. Contradiction detector visibility scoping
-4. Supersession first-match-only behavior
+1. Contradiction detector visibility scoping
+2. Supersession first-match-only behavior
+
+The auto-chunk and bulk-write visibility classes that were here built
+``Memory()`` themselves and asserted on what they built, so they could not
+fail whatever the write paths did (L-172).
 """
 
 from unittest.mock import AsyncMock, patch
@@ -16,145 +18,7 @@ from core_api.constants import VECTOR_DIM
 from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 # ---------------------------------------------------------------------------
-# 1. Auto-chunk child visibility inheritance
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestAutoChunkVisibilityInheritance:
-    """Child memories created via auto-chunking should inherit the parent's visibility."""
-
-    def test_child_memory_missing_visibility_in_auto_chunk(self):
-        """Demonstrate that the auto-chunk code path does NOT pass visibility
-        to child Memory constructors — children get None (Python-level) instead
-        of inheriting the parent's visibility. The DB server_default fills in
-        'scope_team' on INSERT, but this means a parent with 'scope_org' or
-        'scope_agent' produces children with a different visibility.
-
-        This test documents the current (buggy) behavior so that when the
-        fix lands, it will start failing and can be updated.
-        """
-        from common.models.memory import Memory
-
-        # Simulate what auto-chunk does: parent with scope_org
-        parent = Memory(
-            tenant_id="t1",
-            fleet_id="f1",
-            agent_id="a1",
-            memory_type="fact",
-            content="Parent memory with org visibility",
-            weight=0.5,
-            status="active",
-            visibility="scope_org",
-            content_hash="parent-hash",
-        )
-        assert parent.visibility == "scope_org"
-
-        # Simulate child creation as done in memory_service.py (no visibility kwarg)
-        child = Memory(
-            tenant_id="t1",
-            fleet_id="f1",
-            agent_id="a1",
-            memory_type="fact",
-            content="Child chunk fact",
-            weight=0.5,
-            status="active",
-            content_hash="child-hash",
-            # NOTE: visibility is NOT passed — this is the bug
-        )
-
-        # Child gets None at Python level (server_default applies only on INSERT),
-        # which means it won't match the parent's 'scope_org'.
-        # When this bug is fixed, child should explicitly get parent's visibility.
-        assert child.visibility is None or child.visibility != parent.visibility, (
-            "If this fails, the bug is fixed! Update this test to assert inheritance."
-        )
-
-    def test_child_inherits_when_visibility_explicitly_set(self):
-        """When visibility IS explicitly passed to child, it matches parent."""
-        from common.models.memory import Memory
-
-        for vis in ("scope_agent", "scope_team", "scope_org"):
-            parent = Memory(
-                tenant_id="t1",
-                fleet_id="f1",
-                agent_id="a1",
-                memory_type="fact",
-                content="parent",
-                weight=0.5,
-                status="active",
-                visibility=vis,
-                content_hash=f"p-{vis}",
-            )
-            child = Memory(
-                tenant_id="t1",
-                fleet_id="f1",
-                agent_id="a1",
-                memory_type="fact",
-                content="child",
-                weight=0.5,
-                status="active",
-                visibility=vis,  # Explicitly inherited
-                content_hash=f"c-{vis}",
-            )
-            assert child.visibility == parent.visibility
-
-
-# ---------------------------------------------------------------------------
-# 2. Bulk write visibility assignment
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestBulkWriteVisibility:
-    """Memories created via bulk write should get the specified visibility."""
-
-    def test_bulk_memory_constructor_no_visibility(self):
-        """Bulk write currently does NOT pass visibility to Memory constructor.
-
-        This test documents the bug: bulk-created memories get None at the
-        Python level (server_default 'scope_team' only applies on DB INSERT),
-        regardless of what the caller intended.
-        """
-        from common.models.memory import Memory
-
-        # Simulating what create_memories_bulk does (no visibility kwarg)
-        mem = Memory(
-            tenant_id="t1",
-            fleet_id="f1",
-            agent_id="a1",
-            memory_type="fact",
-            content="Bulk item",
-            weight=0.5,
-            status="active",
-            content_hash="bulk-hash",
-            # NOTE: no visibility — gets None at Python level, scope_team from DB
-        )
-        # Python-level default is None; DB server_default fills 'scope_team' on INSERT.
-        # The bug is that bulk write never passes the caller's desired visibility.
-        assert mem.visibility is None
-
-    def test_bulk_memory_constructor_with_explicit_visibility(self):
-        """When visibility IS explicitly passed, it takes effect."""
-        from common.models.memory import Memory
-
-        for vis in ("scope_agent", "scope_team", "scope_org"):
-            mem = Memory(
-                tenant_id="t1",
-                fleet_id="f1",
-                agent_id="a1",
-                memory_type="fact",
-                content="Bulk item",
-                weight=0.5,
-                status="active",
-                content_hash=f"bulk-{vis}",
-                visibility=vis,
-            )
-            assert mem.visibility == vis
-
-
-# ---------------------------------------------------------------------------
-# 3. Contradiction detector visibility scoping
+# 1. Contradiction detector visibility scoping
 # ---------------------------------------------------------------------------
 
 
@@ -206,7 +70,7 @@ class TestContradictionVisibilityScoping:
 
 
 # ---------------------------------------------------------------------------
-# 4. Supersession first-match-only
+# 2. Supersession first-match-only
 # ---------------------------------------------------------------------------
 
 

@@ -108,6 +108,7 @@ _SPEC = ToolSpec(
         "INVALID_ARGUMENTS",
         "MISSING_AGENT_ID",
         "NOT_FOUND",
+        "PLAN_LIMIT_READ_ONLY",
         "UNAUTHORIZED",
         "UPSTREAM_ERROR",
     ),

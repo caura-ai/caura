@@ -114,8 +114,12 @@ def process_uptime_seconds() -> float:
     return time.monotonic() - _PROCESS_STARTED_MONOTONIC
 
 
+# ``docs/telemetry-schema-v1.json`` caps ``version`` at this length.
+_VERSION_MAX_LENGTH = 64
+
+
 def normalise_version(version: str | None) -> str:
-    """``"v3.17.0"`` -> ``"3.17.0"``; empty -> ``"dev"``.
+    """``"v3.17.0"`` -> ``"3.17.0"``; empty, or longer than the schema allows, -> ``"dev"``.
 
     ``docs/self-hosting.md`` tells operators to pin with ``CAURA_VERSION=v3.17.0``
     in ``.env``, which core-api also reads, so the tag form must not reach the
@@ -124,6 +128,10 @@ def normalise_version(version: str | None) -> str:
     v = (version or "").strip()
     if len(v) > 1 and v[0] in "vV" and v[1].isdigit():
         v = v[1:]
+    if len(v) > _VERSION_MAX_LENGTH:
+        # CAURA_VERSION is sent as the operator typed it; past the schema's cap
+        # the payload would be rejected, so it reports as ``dev`` (L-100).
+        return "dev"
     return v or "dev"
 
 

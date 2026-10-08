@@ -29,6 +29,7 @@ from core_api import openapi_responses as _oar
 from core_api.agent_ids import DEFAULT_AGENT_ID, canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.config import settings
 from core_api.constants import CONTRADICTED_STATUSES
 from core_api.errors import (
     AUTH_AGENT_NOT_REGISTERED,
@@ -196,6 +197,45 @@ async def _revert_unlinked_loser(sc, conflict: dict, new: dict, old: dict) -> st
     return "undone" if reverted else "not_applied"
 
 
+async def _reviewer(auth: AuthContext, tenant_id: str) -> str:
+    """Who a review decision is filed as, or 403 for a caller who may not review.
+
+    An agent reviews as itself, at trust >= 2. The people the surface is for
+    carry no agent (M-28): a person signed in through the gateway is filed by
+    their user id, the admin key as ``admin``, and the standalone operator as
+    the standalone default, as ``resolve_caller_and_gate`` admits them. A
+    machine key naming no agent is refused rather than filed as
+    ``DEFAULT_AGENT_ID``, a name every such key would share.
+    """
+    if auth.agent_id:
+        reviewer = canonical_service_agent_id(auth.agent_id)
+        _trust, not_found, terr = await _require_trust(tenant_id, reviewer, min_level=2)
+        if not_found or terr:
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    AUTH_AGENT_NOT_REGISTERED,
+                    f"Agent '{reviewer}' cannot review conflicts. Reviewing records ground "
+                    "truth about detector accuracy, so an agent needs trust >= 2.",
+                ),
+            )
+        return reviewer
+    if auth.is_admin:
+        return "admin"
+    if auth.is_person:
+        return auth.user_id or "person"
+    if settings.is_standalone:
+        return DEFAULT_AGENT_ID
+    raise HTTPException(
+        status_code=403,
+        detail=coded_detail(
+            AUTH_AGENT_NOT_REGISTERED,
+            "This credential names no reviewer. Review as a signed-in person, or name "
+            "a registered agent at trust >= 2 with X-Agent-ID.",
+        ),
+    )
+
+
 @router.patch("/conflicts/{conflict_id}/resolve", responses={200: {"model": _oar.ConflictOut}})
 async def resolve_conflict(
     conflict_id: str,
@@ -231,18 +271,7 @@ async def resolve_conflict(
     # system's only record of the detector being wrong, so a self-serving one
     # corrupts the exact ground truth this surface exists to collect. Trust >= 2
     # matches the keystone-author bar: a privileged action inside a tenant.
-    reviewer = canonical_service_agent_id(auth.agent_id or DEFAULT_AGENT_ID)
-    _trust, not_found, terr = await _require_trust(body.tenant_id, reviewer, min_level=2)
-    if not_found or terr:
-        raise HTTPException(
-            status_code=403,
-            detail=coded_detail(
-                AUTH_AGENT_NOT_REGISTERED,
-                f"Agent '{reviewer}' cannot review conflicts. Reviewing records ground "
-                "truth about detector accuracy, so it requires a registered agent at "
-                "trust >= 2 — call with X-Agent-ID or an agent-scoped credential.",
-            ),
-        )
+    reviewer = await _reviewer(auth, body.tenant_id)
     payload = {
         "tenant_id": body.tenant_id,
         "review_status": body.review_status,

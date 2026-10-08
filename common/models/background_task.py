@@ -28,6 +28,9 @@ class BackgroundTaskLog(Base):
         DateTime(timezone=True), server_default=text("now()"),
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When a row was marked ``rerun`` or ``skipped``; the same for every row one
+    # mark moved, so distinct values count re-runs (migration 064).
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         Index("ix_bg_task_log_tenant_status", "tenant_id", "status"),

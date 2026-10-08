@@ -233,7 +233,8 @@ MEMORY_ENTITY_LINK_FIELDS: list[str] = [
 AUDIT_LOG_FIELDS: list[str] = [
     "id",
     "tenant_id",
-    "fleet_id",
+    # No ``fleet_id``: the table has never had one, and a listed name the model
+    # lacks ships as an always-null field (L-143).
     "agent_id",
     "action",
     "resource_type",
@@ -261,14 +262,6 @@ REPORT_FIELDS: list[str] = [
     "usage_data",
     "issues",
     "crystallization",
-]
-
-BACKGROUND_TASK_FIELDS: list[str] = [
-    "id",
-    "tenant_id",
-    "task_type",
-    "error_message",
-    "created_at",
 ]
 
 AGENT_DIGEST_FIELDS: list[str] = [

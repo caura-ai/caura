@@ -13,8 +13,10 @@ the session's rules receipt, and the review queue shows both.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -151,6 +153,57 @@ async def test_a_released_held_write_goes_live(client, as_auth, sc):
 
     assert resp.status_code == 200, resp.text
     assert (await _row(sc, tenant, result["id"]))["status"] == "active"
+
+
+async def test_the_weeks_counts_see_held_writes_a_person_has_decided(
+    client, as_auth, sc
+):
+    """The pilot report's numbers (g4.3): a release and a reject leave the hold
+    on the write, so the week still counts both as held, and each decision is
+    counted from the audit row it left."""
+    tenant = new_tenant_id()
+    since = datetime.now(UTC) - timedelta(hours=1)
+    _as_broker(as_auth, tenant)
+    released, rejected = await _bulk(
+        client,
+        tenant,
+        _refused_write(write_gate=ACCOUNT),
+        _refused_write(write_gate=ACCOUNT),
+    )
+
+    as_auth(tenant, is_person=True, user_id="user-7", org_role="admin")
+    for result, status in ((released, "active"), (rejected, "cancelled")):
+        resp = await client.patch(
+            f"/api/v1/memories/{result['id']}/status?tenant_id={tenant}",
+            json={"status": status},
+        )
+        assert resp.status_code == 200, resp.text
+    # The release replays what the held write skipped. Its enrichment then
+    # writes into ``_system`` (no model runs here, so the test writes as it does).
+    from core_api.tasks import _background_tasks
+
+    pending = [task for task in _background_tasks if not task.done()]
+    if pending:
+        await asyncio.wait(pending, timeout=30)
+    await sc.update_memory(
+        released["id"],
+        tenant,
+        {"metadata_patch": {"_system": {"enrichment_pending": False}}},
+    )
+    counts = await sc._get(
+        "/memories/held/counts",
+        tenant_id=tenant,
+        since=since.isoformat(),
+        until=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    )
+
+    assert _system(await _row(sc, tenant, released["id"]))["hold"] == HOLD
+    assert counts == {
+        "held": {"write_gate": 2},
+        "released": 1,
+        "rejected": 1,
+        "rolled_back": 0,
+    }
 
 
 async def test_only_the_broker_may_ask_for_a_hold(client, as_auth, sc):

@@ -23,7 +23,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from common import permanent_failure
-from common.constants import QUARANTINE_EXITS, QUARANTINED_MEMORY_STATUS
+from common.constants import (
+    QUARANTINE_EXITS,
+    QUARANTINE_REJECT_ACTION,
+    QUARANTINE_RELEASE_ACTION,
+    QUARANTINED_MEMORY_STATUS,
+    SESSION_ROLLBACK_ACTION,
+)
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api import openapi_responses as _oar
 from core_api import request_phase
@@ -563,6 +569,11 @@ async def list_memories(
         if not auth.tenant_id:
             raise HTTPException(status_code=400, detail="tenant_id is required")
         tenant_id = auth.tenant_id
+    if not tenant_id:
+        # An admin naming no tenant. Storage reads one tenant here, and
+        # forwarding none came back as a 500 (audit 10/01 L-23);
+        # ``/memories/count`` below already answers this 400.
+        raise HTTPException(status_code=400, detail="tenant_id is required")
     # Visibility/fleet identity: prefer the gateway-authenticated agent over the
     # caller-supplied query param so an agent credential can't widen its view by
     # passing a peer's agent_id (which would expose that peer's scope_agent rows)
@@ -752,6 +763,11 @@ async def memory_stats(
         if not auth.tenant_id:
             raise HTTPException(status_code=400, detail="tenant_id is required")
         tenant_id = auth.tenant_id
+    if not tenant_id:
+        # An admin naming no tenant. Storage reads one tenant here, and
+        # forwarding none came back as a 500 (audit 10/01 L-23);
+        # ``/memories/count`` below already answers this 400.
+        raise HTTPException(status_code=400, detail="tenant_id is required")
 
     # ``agent_id`` is the author filter. It used to be the visibility identity
     # too, so an agent credential naming a PEER would have learned that peer's
@@ -846,12 +862,10 @@ async def memory_count(
     literal ``count`` segment resolves here instead of being parsed as a UUID
     (which previously returned a confusing 422).
     """
-    # Tenant resolution mirrors memory_stats, with one deliberate difference:
-    # count is single-tenant (count_active has no cross-tenant aggregate the way
-    # compute_memory_stats does), so a tenant_id must ALWAYS be resolvable. An
-    # admin omitting tenant_id therefore gets 400 — count_active(tenant_id=None)
-    # is meaningless to storage (the /count-active endpoint requires tenant_id) —
-    # rather than aggregating the way memory_stats does for admins.
+    # Tenant resolution mirrors memory_stats: a tenant_id must ALWAYS be
+    # resolvable, so an admin omitting it gets 400 — count_active(tenant_id=None)
+    # is meaningless to storage (the /count-active endpoint requires tenant_id).
+    # memory_stats and list_memories answer the same 400 (audit 10/01 L-23).
     if tenant_id:
         auth.enforce_readable_tenant(tenant_id)
     elif not auth.is_admin:
@@ -966,7 +980,7 @@ async def rollback_session(
             try:
                 await log_action(
                     tenant_id=tenant_id,
-                    action="session.rollback",
+                    action=SESSION_ROLLBACK_ACTION,
                     resource_type="memory",
                     resource_id=memory_id,
                     detail={"session_id": body.session_id, "new_status": new_status, **auth.audit_actor()},
@@ -2226,13 +2240,21 @@ async def update_memory_status(
     # A release or reject names the person who decided it.
     await log_action(
         tenant_id=tenant_id,
-        agent_id=memory.get("agent_id"),
-        action=("quarantine.release" if status == "active" else "quarantine.reject")
+        # Whoever acted, not the row's owner, which goes in ``detail`` (L-09). A
+        # tenant credential carries no agent, so it logs none rather than the
+        # owner's; the actor fields name the person on a release or reject.
+        agent_id=auth.agent_id,
+        action=(QUARANTINE_RELEASE_ACTION if status == "active" else QUARANTINE_REJECT_ACTION)
         if held
         else "status_update",
         resource_type="memory",
         resource_id=memory_id,
-        detail={"old_status": old_status, "new_status": status, **(auth.audit_actor() if held else {})},
+        detail={
+            "old_status": old_status,
+            "new_status": status,
+            "owner_agent_id": memory.get("agent_id"),
+            **(auth.audit_actor() if held else {}),
+        },
     )
     if held and status == "active":
         # g2.8 — the work the held write skipped (enrichment, governance, its

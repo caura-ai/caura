@@ -73,10 +73,16 @@ PLATFORM_ONLY_KEYS: frozenset[str] = frozenset(
         "near_dup_skipped_reason",
         "near_duplicate_of",
         "near_duplicate_similarity",
-        # ``DetectNearDuplicate``'s decision to merge into ``near_duplicate_of``.
-        # A release replays it (g2.8), so a forged one would retire a memory the
-        # write never meant to replace.
+        # ``DetectNearDuplicate``'s decision to merge into ``near_duplicate_of``,
+        # held until the merge runs (L-17). A release replays it (g2.8), so a
+        # forged one would retire a memory the write never meant to replace.
+        "near_duplicate_merge_pending",
+        # Set once that merge has linked the row and retired its predecessor.
+        # Rows held before L-17 carry it as the decision, and a release still
+        # replays it, so it is reserved for the same reason.
         "near_duplicate_merged",
+        # Why that merge did not land, in its place.
+        "near_dup_merge_skipped",
         # Write mode and the pending flags consumers poll on.
         "write_mode",
         "enrichment_pending",

@@ -22,7 +22,10 @@ from unittest.mock import DEFAULT
 _TEST_DEFAULTS = {
     "TESTING": "1",
     "EMBEDDING_PROVIDER": "fake",
-    "ENTITY_EXTRACTION_PROVIDER": "fake",
+    # ``none``, what ci.yml runs the suite with: a test that does not pin a
+    # provider now runs the same write path here as in CI. Enrichment and
+    # entity extraction are on only where a test turns them on (L-84).
+    "ENTITY_EXTRACTION_PROVIDER": "none",
     "USE_LLM_FOR_MEMORY_CREATION": "false",
     "ADMIN_API_KEY": "test-admin-key",
     "IS_STANDALONE": "true",

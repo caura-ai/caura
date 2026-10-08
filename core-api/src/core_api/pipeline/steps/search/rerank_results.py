@@ -79,5 +79,11 @@ class RerankResults:
             return None
 
         order = sorted(range(len(head)), key=lambda i: scores[i], reverse=True)
+        # L-115 — the score that ordered the row, serialized as
+        # ``score_parts.rerank``. ``score`` stays the first-stage composite, so
+        # a reranked page reads non-monotonic there and this says why; the tail
+        # past the cap was not reranked and carries none.
+        for row, score in zip(head, scores, strict=True):
+            row.rerank = float(score)
         ctx.data["raw_rows"] = [head[i] for i in order] + tail
         return None

@@ -123,7 +123,17 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # is unchanged. About +11 counted by hand; not measured, because tiktoken was
 # not available where this was written, so the next entry should measure the
 # fixture rather than trust this one. Ceiling NOT raised.
-CEILING_TOKENS = 5390
+#
+# 2026-10-07 (L-104, L-107, L-111, L-10, L-110, L-137): 5485 cl100k, measured
+# by CI on caura-ai/caura#1994. Three tools gained a parameter their REST twins
+# already take, and an MCP caller cannot pass one the schema does not list:
+# ``caura_tune.reset``, ``caura_doc.force`` and
+# ``caura_keystones_set.caller_agent_id``. The rest is descriptions that now
+# say what the handler does: caura_doc's query bounds, caura_keystones'
+# home-fleet default, and caura_manage no longer calling bulk_delete MCP-only.
+# The +117 over 5368 includes the M-19 change above, which was never measured,
+# so the split between the two is not known. Ceiling 5390 -> 5510, leaving 25.
+CEILING_TOKENS = 5510
 
 
 def _count(path: Path) -> int:

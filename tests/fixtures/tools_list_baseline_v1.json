@@ -85,13 +85,13 @@
         },
         "limit": {
           "default": 20,
-          "description": "op=query.",
+          "description": "op=query: 1-100.",
           "title": "Limit",
           "type": "integer"
         },
         "offset": {
           "default": 0,
-          "description": "op=query.",
+          "description": "op=query: 0 or more.",
           "title": "Offset",
           "type": "integer"
         },
@@ -132,6 +132,12 @@
           "description": "op=search: max results (1-50).",
           "title": "Top K",
           "type": "integer"
+        },
+        "force": {
+          "default": false,
+          "description": "op=write: overwrite past the shrink guard; an agent needs trust 3.",
+          "title": "Force",
+          "type": "boolean"
         }
       },
       "required": [
@@ -313,7 +319,7 @@
             }
           ],
           "default": null,
-          "description": "Scope filter; supply to include fleet- and agent-scoped rules.",
+          "description": "Defaults to your home fleet; fleet- and agent-scoped rules need one.",
           "title": "Fleet Id"
         }
       },
@@ -432,6 +438,19 @@
           "default": null,
           "description": "op=set: optional author identity for audit.",
           "title": "Author User Id"
+        },
+        "caller_agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Your agent id when the credential carries none; held to trust >= 2.",
+          "title": "Caller Agent Id"
         }
       },
       "required": [
@@ -619,7 +638,7 @@
   {
     "name": "caura_manage",
     "title": null,
-    "description": "Per-memory lifecycle. bulk_delete and lineage are MCP-only; lineage returns the supersession chain. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete and bulk_delete are soft (prefer transition to outdated/archived).",
+    "description": "Per-memory lifecycle. bulk_delete and lineage are not in the plugin; lineage returns the supersession chain. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete and bulk_delete are soft (prefer transition to outdated/archived).",
     "inputSchema": {
       "properties": {
         "op": {
@@ -1097,6 +1116,12 @@
           "default": null,
           "description": "0-1.",
           "title": "Similarity Blend"
+        },
+        "reset": {
+          "default": false,
+          "description": "Clear every tuned knob.",
+          "title": "Reset",
+          "type": "boolean"
         }
       },
       "title": "caura_tuneArguments",

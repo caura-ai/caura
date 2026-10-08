@@ -23,6 +23,8 @@ The PostgresService methods these call port the source ORM/SQL VERBATIM.
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import APIRouter, HTTPException, Request
 
 from core_storage_api.routers._validation import _require, _require_number
@@ -93,6 +95,13 @@ async def evolve_apply_weights(request: Request) -> dict:
     ids = body.get("ids")
     if not isinstance(ids, list):
         raise HTTPException(status_code=422, detail="ids (list) is required")
+    # Each id is a UUID, checked here as filter-by-scope's are: one malformed
+    # id was an asyncpg DataError, so a 500 (L-141).
+    try:
+        for memory_id in ids:
+            UUID(str(memory_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"invalid ids: {exc}") from exc
     delta = _require_number(body, "delta")
     floor = _require_number(body, "floor")
     cap = _require_number(body, "cap")

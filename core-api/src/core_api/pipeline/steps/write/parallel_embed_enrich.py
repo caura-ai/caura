@@ -115,7 +115,11 @@ class ParallelEmbedEnrich:
             # downstream log readers. Distinct from "deferred to
             # core-worker" where the key is absent entirely.
             embedding_task = _timed(_return_cached(), timings, "embedding_ms")
-        elif not defer_embedding:
+        elif not defer_embedding and data.persist:
+            # ``persist`` (L-182): an extract-only preview stores nothing and
+            # answers no vector, so an embedding would be a paid call nothing
+            # reads, and a slow provider would 504 the preview.
+            #
             # Not deferred means a caller is blocked on the HTTP response
             # (deployment_mode="inline", or write_mode="strong" which is always
             # inline), so this must NOT sit on the reduced background budget —

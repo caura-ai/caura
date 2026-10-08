@@ -4,13 +4,12 @@ name: Security Scan
 # CVE audit (pip-audit). Complements the per-PR lint/type/test gate in ci.yml —
 # that catches style/type/behaviour; this catches security smells and known-
 # vulnerable dependencies. Runs per-PR (fast feedback) + weekly (catches newly
-# disclosed CVEs in unchanged deps).
+# disclosed CVEs in unchanged deps). CodeQL, a richer SAST, runs from codeql.yml.
 #
-# Both steps are REPORT-ONLY for now (continue-on-error) so the existing
-# backlog doesn't block merges on day one — the findings show in the job log.
-# Ratchet to a hard fail (drop continue-on-error) once the initial backlog is
-# triaged. A richer SAST (GitHub CodeQL) is free on this public repo and can be
-# added later via .github/workflows/codeql.yml.
+# A finding fails the job (L-65). Both steps ran report-only (continue-on-error)
+# until their backlog was triaged; what it left is fixed, or accepted below with
+# the reason it does not apply. A red weekly run means a new advisory against a
+# version a lock pins: bump it, or accept it here with the reason.
 
 on:
   pull_request:
@@ -44,20 +43,54 @@ jobs:
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
 
-      - name: Install project + scanners
+      - name: Install the scanners
+        # Pinned in .github/security-scan/requirements.txt, so a new release
+        # cannot fail every PR at once; Dependabot's pip updates propose bumps.
         run: |
           uv venv .venv
           source .venv/bin/activate
-          uv pip install -e core-api/[dev] -e core-storage-api/[dev] bandit pip-audit
+          uv pip install -r .github/security-scan/requirements.txt
           echo "$VIRTUAL_ENV/bin" >> "$GITHUB_PATH"
 
       - name: Bandit SAST (medium+ severity / medium+ confidence)
-        # Report-only for now — see header comment. -r scans src only (not tests).
-        continue-on-error: true
-        run: bandit -r core-api/src core-storage-api/src --severity-level medium --confidence-level medium
+        # Source only, not tests: common/ and every service's src. B104 (binding
+        # to all interfaces) is skipped: every service runs in a container, where
+        # it must listen on all of them. common/serve.py's --host default is such
+        # a bind, and that file cannot carry a "# nosec": it is vendored, kept
+        # byte-identical with caura-enterprise's copy.
+        run: >-
+          bandit -r common core-api/src core-storage-api/src core-operations/src core-worker/src
+          --skip B104 --severity-level medium --confidence-level medium
 
-      - name: pip-audit (known-vulnerable dependencies)
-        # Audits the resolved venv (core-api + core-storage-api deps). Report-only
-        # for now; editable project packages with no release are skipped.
-        continue-on-error: true
-        run: pip-audit --desc
+      - name: pip-audit (known-vulnerable dependencies in each service's uv.lock)
+        # Each service's lock, exported as its Dockerfile exports it (uv export
+        # --frozen --no-dev) with every --extra that Dockerfile can pass: the
+        # pins its images install, and not extras no image installs, such as
+        # core-worker's opt-in local embedder or the dev and test tools.
+        # --no-deps and --disable-pip read those pins as written, without
+        # resolving or installing anything.
+        #
+        # Accepted advisories, each with the reason it does not apply here. Drop
+        # one once a fixed release is locked.
+        # - CVE-2026-85394, python-jose <= 3.5.0: HMAC verification can take an
+        #   asymmetric public key as its secret. Our one use, core-api's
+        #   standalone tenant middleware, verifies HS256 with the shared
+        #   jwt_secret, never with an asymmetric key.
+        # - PYSEC-2026-1325, ecdsa, which python-jose depends on: a timing attack
+        #   on signing with P-256. Nothing here signs with ecdsa.
+        run: |
+          vulnerable=""
+          for service in core-api core-storage-api core-operations core-worker; do
+            mapfile -t extras < <(grep -o -- '--extra [a-z-]*' "${service}/Dockerfile" | sort -u | sed 's/ /=/')
+            uv export --frozen --no-dev "${extras[@]}" --no-emit-project --quiet \
+              --directory "${service}" -o "${RUNNER_TEMP}/${service}.txt"
+            echo "::group::${service} ${extras[*]}"
+            pip-audit --desc --no-deps --disable-pip -r "${RUNNER_TEMP}/${service}.txt" \
+              --ignore-vuln CVE-2026-85394 --ignore-vuln PYSEC-2026-1325 \
+              || vulnerable="${vulnerable} ${service}"
+            echo "::endgroup::"
+          done
+          if [ -n "${vulnerable}" ]; then
+            echo "::error::Known-vulnerable dependencies in:${vulnerable}. Bump them, or accept the advisory above with the reason it does not apply."
+            exit 1
+          fi

@@ -39,6 +39,7 @@ from core_api.pipeline.steps.search.retrieval_types import (
     RetrievalStrategy,
 )
 from core_api.schemas import EntityLinkOut
+from core_api.search_trim import is_derived_fanout_row
 from core_api.services.entity_tokens import extract_entity_tokens
 
 _GRAPH_HOP_BOOST_FALLBACK = GRAPH_HOP_BOOST[max(GRAPH_HOP_BOOST)]
@@ -148,6 +149,14 @@ class ClassifyQuery:
                 # Exposure stays gated at the route.
                 ctx.data["entity_matches"] = len(matched_ids)
 
+                # L-175 — a match of nothing is an answer too. Stashed as an
+                # empty hop set, which ParallelEmbedAndEntityBoost takes as
+                # authoritative, so it does not send the same tokens to the same
+                # index again. Only here: an over-broad match (below) empties
+                # ``matched_ids`` but says so with ``entity_match_declined``.
+                if not matched_ids:
+                    ctx.data["_classified_entity_hops"] = {}
+
                 # CAURA-698: over-broad match → not a "name a specific entity"
                 # query. The precision argument for entity_lookup breaks down
                 # at high match counts: graph expansion + memory linking
@@ -211,6 +220,29 @@ class ClassifyQuery:
                     )
                     matched_ids = []
 
+                # L-112 — a floor someone named (the request, the agent profile
+                # or the tenant default) declines the same way. The route builds
+                # its rows with no cosine and skips PostFilterResults, so it
+                # cannot apply ``min_similarity``, and the field promises the
+                # caller it is applied. Only the untuned global floor keeps the
+                # route, as only it may be relaxed for a lexical hit.
+                if matched_ids and ctx.data.get("min_similarity_tuned"):
+                    entity_hops = await self._hops_for_seeds(
+                        sc,
+                        matched_ids,
+                        tenant_id,
+                        fleet_ids,
+                        graph_max_hops,
+                        graph_expand=graph_expand,
+                    )
+                    ctx.data["_classified_entity_hops"] = entity_hops
+                    logger.info(
+                        "classify_query: entity_lookup declined — min_similarity %s is tuned, "
+                        "falling through with hop boost",
+                        search_params.get("min_similarity"),
+                    )
+                    matched_ids = []
+
                 if matched_ids:
                     entity_hops = await self._hops_for_seeds(
                         sc,
@@ -236,6 +268,7 @@ class ClassifyQuery:
                         valid_at=valid_at,
                         readable_tenant_ids=readable_tenant_ids,
                         strict_fleet_scoping=strict_fleet_scoping,
+                        include_derived=ctx.data.get("include_derived", True),
                         pool_report=ctx.data,
                     )
 
@@ -267,7 +300,8 @@ class ClassifyQuery:
                         # min_similarity is not applied to entity_lookup results:
                         # these rows are retrieved by graph traversal (hop boost)
                         # rather than vector similarity, so vec_sim is None and the
-                        # cosine threshold is not meaningful here.
+                        # cosine threshold is not meaningful here. Only the untuned
+                        # global floor gets this far; a tuned one declined above.
                         # PostFilterResults will SKIP via its guard.
                         ctx.data["filtered_rows"] = filtered_rows
                         ctx.data["retrieval_plan"] = plan
@@ -551,6 +585,7 @@ class ClassifyQuery:
         readable_tenant_ids: list[str] | None = None,
         pool_report: dict | None = None,
         strict_fleet_scoping: bool = False,
+        include_derived: bool = True,
     ) -> list[types.SimpleNamespace]:
         """Load memories linked to graph-expanded entities, scored by hop distance."""
         all_entity_ids = list(entity_hops.keys())
@@ -568,6 +603,12 @@ class ClassifyQuery:
             [str(eid) for eid in all_entity_ids],
             tenant_id,
         )
+        # L-175 — the boost step needs these same links when the search falls
+        # through: same hops, same cap, same order. It reads them only beside
+        # the hops the caller stashes on a decline, so links from a load that
+        # raised afterwards are never taken for a set the boost re-derived.
+        if pool_report is not None:
+            pool_report["_classified_entity_links"] = raw_links
 
         # Sort by hop distance so closest entities are processed first.
         all_links = sorted(
@@ -709,6 +750,12 @@ class ClassifyQuery:
             for mid, boost in memory_boost.items()
             if mid in memories_by_id
         ]
+        # L-16 — ``include_derived=false`` holds on this route too. Only
+        # PostFilterResults applied it, and this route skips that step. Dropped
+        # before the top_k trim, so a pool the children leave short falls
+        # through on the caller's re-check rather than answering short.
+        if not include_derived:
+            rows = [row for row in rows if not is_derived_fanout_row(getattr(row.Memory, "metadata_", None))]
         # Re-rank the candidate pool by lexical overlap with the query before
         # trimming to top_k. entity_lookup matches greedily and hop-boost is
         # near-uniform, so the exact-entity memory can be diluted below

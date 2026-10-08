@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 from fastapi import HTTPException
 
+from common.constants import HOLD_KEY
 from common.settings_version import SETTINGS_VERSION_KEY
 from core_api.clients.storage_client import StorageSettingsChangedError, get_storage_client
 from core_api.services.system_metadata import SYSTEM_NAMESPACE
@@ -31,11 +32,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
-
-# Under ``metadata["_system"]``, where the platform's own keys live: caller
-# input is stripped of that namespace, so a write can't claim to be held, or
-# released, by setting it.
-HOLD_KEY = "hold"
 
 
 async def hold_for(

@@ -32,6 +32,66 @@ class ExtractionShapeError(ValueError):
     """
 
 
+class ProvidersUnavailableError(Exception):
+    """Every provider was reached and failed, and the regex heuristic was not used.
+
+    Raised in place of the heuristic only for a caller that asked for it
+    (``raise_on_provider_failure``) because it will ask again later:
+    ``entity_extraction_worker`` waits and retries before it settles for the
+    heuristic. On staging (2026-10-07) a Vertex 429 during a release left a
+    memory with no entities, and nothing retried it.
+
+    Only for failures that asking again may fix (``_may_pass_if_asked_again``):
+    a timeout, a lost connection, an HTTP 408, 425, 429 or 5xx. Everything else
+    still degrades at once: a bad key, an unknown model or a rejected request
+    fails the same way later, output that does not parse repeats because the
+    seed is pinned, and with no usable provider there is no one to ask.
+
+    ``__cause__`` is the last provider error.
+    """
+
+
+# HTTP statuses that say "not now" rather than "not this": a timeout, too early,
+# too many requests. 5xx is added below.
+_TRANSIENT_STATUSES = frozenset({408, 425, 429})
+
+# The transport errors of the provider SDKs, matched by class name so that no SDK
+# is imported here: the OpenAI and Anthropic SDKs' ``APIConnectionError`` (and
+# its ``APITimeoutError``), and httpx's ``TransportError`` family.
+_TRANSIENT_ERROR_NAMES = frozenset({"APIConnectionError", "APITimeoutError", "TransportError"})
+
+
+def _http_status(exc: BaseException) -> int | None:
+    """The HTTP status a provider error carries, if any.
+
+    Duck-typed, like ``common.llm.retry.retry_after_seconds``:
+    ``.status_code`` (OpenAI, Anthropic), ``.response.status_code`` (httpx),
+    and ``.code`` (google-genai, which Vertex and Gemini raise).
+    """
+    for status in (
+        getattr(exc, "status_code", None),
+        getattr(getattr(exc, "response", None), "status_code", None),
+        getattr(exc, "code", None),
+    ):
+        if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+            return status
+    return None
+
+
+def _may_pass_if_asked_again(exc: BaseException) -> bool:
+    """Is this a failure that asking the provider again later may not repeat?
+
+    An allowlist: an error this does not recognise is treated as permanent, so
+    it degrades at once, as it did before ``ProvidersUnavailableError``.
+    """
+    status = _http_status(exc)
+    if status is not None:
+        return status in _TRANSIENT_STATUSES or status >= 500
+    if isinstance(exc, TimeoutError | ConnectionError):
+        return True
+    return any(cls.__name__ in _TRANSIENT_ERROR_NAMES for cls in type(exc).__mro__)
+
+
 EXTRACTION_PROMPT = """\
 Extract named entities, their relations, and surface-form mentions from the following memory content.
 
@@ -286,10 +346,47 @@ def _reattach_subject_discriminators(graph: ExtractedGraph, content: str) -> Ext
     return graph
 
 
+def _extraction_provider(tenant_config) -> str:
+    if tenant_config:
+        return tenant_config.entity_extraction_provider
+    return settings.entity_extraction_provider
+
+
+def degraded_graph(content: str, tenant_config=None) -> ExtractedGraph:
+    """``_fake_extract`` plus the one log line that says it happened.
+
+    The chain's own "All LLM providers failed" warning names the service in
+    an interpolated message, so it cannot be filtered or counted per service
+    in log search, and NOTHING downstream can tell a heuristic graph from a
+    model one: the rows are persisted, the names embedded, and the only
+    tell is that every type is ``unknown`` and no entity claims a subject.
+    A silent degrade to regex is therefore invisible in exactly the two
+    places it matters — the dashboard, and anyone measuring extraction.
+    Structured and greppable so it is neither.
+
+    Public for ``entity_extraction_worker``, which settles for this itself
+    after its own retries (``ProvidersUnavailableError``).
+    """
+    provider_name = _extraction_provider(tenant_config)
+    logger.error(
+        "entity_extraction_degraded_to_heuristic provider=%s content_len=%d",
+        provider_name,
+        len(content),
+        extra={
+            "event": "entity_extraction_degraded",
+            "provider": str(provider_name),
+            "content_len": len(content),
+        },
+    )
+    return _fake_extract(content)
+
+
 async def extract_entities_from_content(
     content: str,
     memory_type: str,
     tenant_config=None,
+    *,
+    raise_on_provider_failure: bool = False,
 ) -> ExtractedGraph:
     """Extract entities from content with retry + fallback chain.
 
@@ -298,12 +395,13 @@ async def extract_entities_from_content(
       2. Alternative LLM provider (with retry) — if API key available
       3. Regex heuristic (_fake_extract) — always succeeds
 
-    Never raises; always returns an ExtractedGraph.
+    With ``raise_on_provider_failure``, step 3 raises
+    ``ProvidersUnavailableError`` instead when a provider was reached and
+    failed on something asking again may fix; the caller retries later.
+
+    Otherwise never raises; always returns an ExtractedGraph.
     """
-    if tenant_config:
-        provider_name = tenant_config.entity_extraction_provider
-    else:
-        provider_name = settings.entity_extraction_provider
+    provider_name = _extraction_provider(tenant_config)
 
     if provider_name == "fake":
         return _fake_extract(content)
@@ -379,34 +477,29 @@ async def extract_entities_from_content(
         or None
     )
 
-    def _degraded_extract() -> ExtractedGraph:
-        """``_fake_extract`` plus the one log line that says it happened.
+    # The provider errors that asking again may fix, for the last resort below.
+    provider_errors: list[Exception] = []
 
-        The chain's own "All LLM providers failed" warning names the service in
-        an interpolated message, so it cannot be filtered or counted per service
-        in log search, and NOTHING downstream can tell a heuristic graph from a
-        model one: the rows are persisted, the names embedded, and the only
-        tell is that every type is ``unknown`` and no entity claims a subject.
-        A silent degrade to regex is therefore invisible in exactly the two
-        places it matters — the dashboard, and anyone measuring extraction.
-        Structured and greppable so it is neither.
-        """
-        logger.error(
-            "entity_extraction_degraded_to_heuristic provider=%s content_len=%d",
-            provider_name,
-            len(content),
-            extra={
-                "event": "entity_extraction_degraded",
-                "provider": str(provider_name),
-                "content_len": len(content),
-            },
-        )
-        return _fake_extract(content)
+    async def _attempt(llm: LLMProvider) -> ExtractedGraph:
+        try:
+            return await _do_extract(llm)
+        except Exception as exc:
+            if _may_pass_if_asked_again(exc):
+                provider_errors.append(exc)
+            raise
+
+    def _last_resort() -> ExtractedGraph:
+        if raise_on_provider_failure and provider_errors:
+            last = provider_errors[-1]
+            raise ProvidersUnavailableError(
+                f"every entity-extraction provider failed; the last with {type(last).__name__}"
+            ) from last
+        return degraded_graph(content, tenant_config)
 
     graph = await call_with_fallback(
         primary_provider_name=provider_name,
-        call_fn=_do_extract,
-        fake_fn=_degraded_extract,
+        call_fn=_attempt,
+        fake_fn=_last_resort,
         tenant_config=tenant_config,
         service_label="entity-extraction",
         model_override=extraction_model,

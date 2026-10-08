@@ -1567,7 +1567,7 @@
         "type": "object"
       },
       "ScoreParts": {
-        "description": "D12 — per-factor breakdown of the ranking composite ``MemoryOut.score``.\n\nEvery factor mirrors a column the scored-search SQL already computes and\nreturns per row; this model only surfaces them. All fields are nullable:\nFTS-only rows have no ``vec_sim``, entity-lookup short-circuit rows have no\nFTS rank, and successor-injected rows were never scored at all.",
+        "description": "D12 — per-factor breakdown of the ranking composite ``MemoryOut.score``.\n\nEvery factor mirrors a column the scored-search SQL already computes and\nreturns per row; this model only surfaces them. All fields are nullable:\nFTS-only rows have no ``vec_sim``, entity-lookup short-circuit rows have no\nFTS rank, and successor-injected rows were never scored at all.\n\n``rerank`` is the second-stage reranker's score, set only on rows it\nreordered. ``MemoryOut.score`` stays the first-stage composite.",
         "properties": {
           "entity_boost": {
             "anyOf": [
@@ -1612,6 +1612,17 @@
               }
             ],
             "title": "Recall Boost"
+          },
+          "rerank": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rerank"
           },
           "status_penalty": {
             "anyOf": [

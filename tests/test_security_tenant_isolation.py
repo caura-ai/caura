@@ -50,15 +50,6 @@ async def _write_memory(
 
 
 @pytest.mark.integration
-async def test_no_auth_list_memories_scoped(client):
-    """Without auth, listing memories returns only what RLS allows (standalone auto-auth)."""
-    resp = await client.get("/api/v1/memories")
-    # In standalone mode: 200 (auto-auth). In multi-tenant: 401/403/422.
-    # The key assertion: no cross-tenant data leakage.
-    assert resp.status_code in (200, 401, 403, 422)
-
-
-@pytest.mark.integration
 async def test_no_auth_cannot_list_fleets(client):
     """Without auth, listing fleets should fail (or require tenant_id)."""
     resp = await client.get("/api/v1/fleets")
@@ -96,13 +87,19 @@ async def test_health_no_tenant_stats(client):
 
 
 @pytest.mark.integration
-async def test_list_tenants_requires_auth(client):
-    """GET /api/tenants requires some form of authentication."""
-    # In standalone mode, auto-auth means 200 is acceptable
-    # In multi-tenant without auth, should be 401/403
-    # The admin-only version lives at /api/admin/tenants
+async def test_list_tenants_requires_auth(client, monkeypatch):
+    """GET /api/tenants refuses a request with no credential.
+
+    The suite runs standalone, where every request is authenticated, so this
+    accepted 200 and could not fail; it now runs outside standalone mode
+    (L-172). Listing memories without a credential is refused the same way in
+    tests/test_standalone.py::test_non_standalone_requires_auth.
+    """
+    from core_api.config import settings
+
+    monkeypatch.setattr(settings, "is_standalone", False)
     resp = await client.get("/api/v1/tenants")
-    assert resp.status_code in (200, 401, 403)
+    assert resp.status_code in (401, 403)
 
 
 @pytest.mark.integration

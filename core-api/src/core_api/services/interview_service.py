@@ -124,7 +124,7 @@ def interview_attempt_id(node_id: str, cursor_from: int, cursor_to: int) -> str:
     re-run) resolves to ``duplicate_attempt`` instead of duplicate rows.
     Matches ``_BULK_ATTEMPT_ID_PATTERN`` (``^[A-Za-z0-9._:\\-]{1,128}$``).
     """
-    digest = hashlib.sha1(f"{node_id}:{cursor_from}:{cursor_to}".encode()).hexdigest()
+    digest = hashlib.sha1(f"{node_id}:{cursor_from}:{cursor_to}".encode(), usedforsecurity=False).hexdigest()
     return f"interview:{digest[:40]}"
 
 
@@ -144,7 +144,7 @@ def watermark_doc_id(node_id: str) -> str:
     mint synthetic per-instance ids), so per-session cursors would
     fragment. Session ids still travel per-event for report grouping.
     """
-    return f"wm_{hashlib.sha1(node_id.encode()).hexdigest()[:40]}"
+    return f"wm_{hashlib.sha1(node_id.encode(), usedforsecurity=False).hexdigest()[:40]}"
 
 
 # ── Masking ──

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -263,6 +264,40 @@ async def idempotency_for(
     """
     if not idempotency_key:
         return None
+    body_bytes = await request.body()
+    return await idempotency_for_hash(
+        tenant_id, idempotency_key, hashlib.sha256(body_bytes).hexdigest(), source=source
+    )
+
+
+def arguments_hash(**args: Any) -> str:
+    """Stable hash of a tool call's arguments, for :func:`idempotency_for_hash`.
+
+    Key order and serialisation are fixed, so the same arguments always hash
+    the same and different ones never do: the IETF draft's "same key, different
+    body is a client error" holds as it does for REST's raw request bytes.
+    """
+    canonical = json.dumps(args, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+async def idempotency_for_hash(
+    tenant_id: str,
+    idempotency_key: str | None,
+    request_hash: str,
+    *,
+    source: Literal["header", "body", "mcp"],
+) -> IdempotencyGuard | None:
+    """:func:`idempotency_for` for a caller that hashes its own request.
+
+    An MCP tool call has no request body of its own to hash, so
+    ``caura_write`` hashes its arguments with :func:`arguments_hash` and
+    claims under the ``mcp:`` prefix, which keeps its keys out of the REST
+    buckets (L-103). Validation, the claim, the poll and the replay are the
+    same code either way.
+    """
+    if not idempotency_key:
+        return None
     if not idempotency_key.strip():
         raise HTTPException(status_code=400, detail="Idempotency-Key must not be blank")
     if len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LEN:
@@ -272,9 +307,6 @@ async def idempotency_for(
         )
 
     namespaced_key = f"{source}:{idempotency_key}"
-
-    body_bytes = await request.body()
-    request_hash = hashlib.sha256(body_bytes).hexdigest()
 
     sc = get_storage_client()
 

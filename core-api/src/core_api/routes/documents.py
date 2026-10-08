@@ -1,7 +1,6 @@
 """Document Store — structured JSONB records for agents."""
 
 import logging
-import re
 from datetime import datetime
 
 import httpx
@@ -14,7 +13,7 @@ from core_api import openapi_responses as _oar
 from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
-from core_api.constants import DEFAULT_DOC_SEARCH_TOP_K, MAX_DOC_SEARCH_TOP_K
+from core_api.constants import DEFAULT_DOC_SEARCH_TOP_K, MAX_DOC_SEARCH_TOP_K, SKILL_SLUG_RE
 from core_api.errors import AUTH_AGENT_TRUST_TOO_LOW, coded_detail
 from core_api.middleware.idempotency import (
     IDEMPOTENCY_HEADER,
@@ -61,13 +60,10 @@ router = APIRouter(tags=["Document Store"])
 # data["description"] for the skills collection only — see
 # core_api.services.doc_indexing).
 SKILLS_COLLECTION = "skills"
-# Optional ``forge/`` or ``agent/`` prefix supports the Skill Factory's
-# doc_id namespacing (plan §3): Forge candidates land as ``forge/<slug>``
-# and synchronous agent-direct writes via ``caura_doc`` land as
-# ``agent/<slug>``. Without this, Forge's own writes 422 themselves at
-# the route boundary. ``manual``/``imported`` rows keep the plain
-# ``<slug>`` shape — the prefix is opt-in, not required.
-_SKILL_SLUG_RE = re.compile(r"^(?:forge/|agent/)?[a-z0-9][a-z0-9._-]{0,99}$")
+# Shared with MCP ``caura_doc``; see ``core_api.constants.SKILL_SLUG_RE`` for
+# the ``forge/`` / ``agent/`` namespacing. Without the prefix, Forge's own
+# writes would 422 themselves at the route boundary.
+_SKILL_SLUG_RE = SKILL_SLUG_RE
 
 # Skill Factory SF-005 — Rollback metadata for applied skills.
 #
@@ -767,9 +763,9 @@ async def _upsert_document_claimed(
     return out
 
 
-# NOTE: /documents/collections must be registered BEFORE /documents/{doc_id}
+# NOTE: /documents/collections must be registered BEFORE /documents/{doc_id:path}
 # because FastAPI matches in declaration order — without this ordering,
-# `GET /documents/collections` would match `/documents/{doc_id}` with
+# `GET /documents/collections` would match `/documents/{doc_id:path}` with
 # doc_id="collections" and require the `collection=` query param, returning 422.
 @router.get(
     "/documents/collections",
@@ -804,14 +800,20 @@ async def list_collections(
     )
 
 
-@router.get("/documents/{doc_id}", responses={200: {"model": DocOut}})
+# ``{doc_id:path}`` on the two by-id routes because a doc_id may contain "/":
+# ``forge/<slug>`` and ``agent/<slug>`` skills, and hierarchical ids such as
+# ``runbooks/db/failover``, which the write path accepts and storage serves.
+# The single-segment form could write those rows but never read or delete them
+# here (M-30). A guess of ``/documents/{collection}/{doc_id}`` now lands on this
+# route and is told the query parameter it is missing, instead of a 404.
+@router.get("/documents/{doc_id:path}", responses={200: {"model": DocOut}})
 async def get_document(
     doc_id: str,
     tenant_id: str = Query(...),
     collection: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Get a single document by collection + doc_id.
+    """Get a single document by collection + doc_id. ``doc_id`` may contain "/".
 
     Cross-tenant credentials may pass any ``tenant_id`` in their readable
     set; the gate widens via ``enforce_readable_tenant``. Single-tenant
@@ -941,14 +943,14 @@ async def list_documents(
     return [_dict_to_out(d) for d in docs]
 
 
-@router.delete("/documents/{doc_id}", status_code=204)
+@router.delete("/documents/{doc_id:path}", status_code=204)
 async def delete_document(
     doc_id: str,
     tenant_id: str = Query(...),
     collection: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Delete a document by collection + doc_id.
+    """Delete a document by collection + doc_id. ``doc_id`` may contain "/".
 
     Also un-mints the memory the write minted — see ``POST /documents``.
     """

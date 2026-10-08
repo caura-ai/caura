@@ -91,14 +91,6 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
-# Canonical source enum — kept in lockstep with
-# ``core_api.services.skill_lifecycle.ALLOWED_SOURCES``. A divergence
-# between the two would let Branch 4 normalize a value the validator
-# still considers acceptable (or vice-versa). The string literals
-# below are inlined into the SQL for Postgres' ``= ANY`` operator.
-_CANONICAL_SOURCES_SQL = "'forge', 'agent', 'manual', 'imported'"
-
-
 # Why the ``::jsonb`` / ``::json`` round-trip on every UPDATE:
 #
 # Older eToro deployments declared ``documents.data`` as plain ``json``
@@ -168,9 +160,13 @@ def upgrade() -> None:
     # Branch 4: normalize legacy non-canonical source values. Stash the
     # original under ``legacy_source`` so audit + future migrations can
     # see where the doc came from. Idempotent via the canonical-set
-    # NOT IN guard.
+    # NOT IN guard. That set is the canonical source enum, kept in
+    # lockstep with ``core_api.services.skill_lifecycle.ALLOWED_SOURCES``:
+    # a divergence would let this branch normalize a value the validator
+    # still considers acceptable (or vice-versa). It is written into the
+    # statement rather than interpolated, so the SQL is static (L-65).
     op.execute(
-        f"""
+        """
         UPDATE documents
         SET data = ((data::jsonb) || jsonb_build_object(
                        'source',        'imported',
@@ -178,7 +174,7 @@ def upgrade() -> None:
                    ))::json
         WHERE collection = 'skills'
           AND ((data::jsonb) ->> 'source') IS NOT NULL
-          AND ((data::jsonb) ->> 'source') NOT IN ({_CANONICAL_SOURCES_SQL})
+          AND ((data::jsonb) ->> 'source') NOT IN ('forge', 'agent', 'manual', 'imported')
         """
     )
 

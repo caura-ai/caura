@@ -165,5 +165,5 @@ incident). Those are a standing compatibility promise, not an oversight.
 If you send a field the API does not document, you will now get a 422 where
 you used to get a 2xx. That is the point — the field was never being stored —
 but it is a behaviour change. Check write payloads against the OpenAPI schema
-(`/openapi.json`); anything not in a request model's `properties` was already
+(`/api/openapi.json`); anything not in a request model's `properties` was already
 being thrown away.

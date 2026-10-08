@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
-from core_api.schemas import AgentOut, AgentTrustUpdate, SearchProfileUpdate
+from core_api.schemas import AgentFleetUpdate, AgentOut, AgentTrustUpdate, SearchProfileUpdate
 from core_api.services.agent_service import enforce_broker_agent_ownership, lookup_agent, update_trust_level
 from core_api.services.audit_service import log_action
 from core_api.services.organization_settings import validate_search_profile
@@ -96,7 +96,7 @@ async def patch_agent_trust(
 )
 async def update_agent_fleet(
     agent_id: str,
-    body: dict,
+    body: AgentFleetUpdate,
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
@@ -108,9 +108,7 @@ async def update_agent_fleet(
     # must not be able to relocate itself/a peer to reach another fleet's data.
     auth.enforce_not_agent_credential("reassign agent fleets")
     auth.enforce_not_org_member("reassign agent fleets")
-    fleet_id = body.get("fleet_id")
-    if not fleet_id:
-        raise HTTPException(status_code=400, detail="fleet_id is required")
+    fleet_id = body.fleet_id
 
     sc = get_storage_client()
     agent = await lookup_agent(tenant_id, agent_id, read=False)
@@ -233,7 +231,7 @@ async def patch_agent_tune(
     if updates:
         current.update(updates)
         current = validate_search_profile(current)
-        await sc.update_search_profile(agent["id"], tenant_id, current)
+        await sc.update_search_profile(agent["agent_id"], tenant_id, current)
         await log_action(
             tenant_id=tenant_id,
             agent_id=auth.agent_id,
@@ -270,10 +268,13 @@ async def delete_agent(
     agent = await lookup_agent(tenant_id, agent_id, read=False)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    # Audited once the delete has happened, never before: a delete that failed
+    # or matched nothing left an entry saying the agent was gone (L-21).
+    if not await sc.delete_agent(agent["agent_id"], tenant_id):
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
     await log_action(
         tenant_id=tenant_id,
         action="delete",
         resource_type="agent",
         detail={"agent_id": agent["agent_id"], "fleet_id": agent.get("fleet_id")},
     )
-    await sc.delete_agent(agent["agent_id"], tenant_id)

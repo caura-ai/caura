@@ -220,6 +220,12 @@ async def set_keystone(
             data=data,
             fleet_id=fleet_id,
             system=True,
+            # The shrink guard is for client-synced documents, where a failed
+            # read can upsert an empty file. A keystone is a short rule its
+            # author rewrites whole, and no surface could pass the override,
+            # so a long rule could never be cut down (L-39). Every version is
+            # kept besides, so a shrink is recoverable.
+            force=True,
             session=session,
         )
         version = await _record_version(

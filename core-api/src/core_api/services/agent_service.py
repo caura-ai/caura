@@ -70,6 +70,15 @@ async def get_or_create_agent(
     """
     sc = get_storage_client()
     agent_id = canonical_service_agent_id(agent_id)
+    if "/" in agent_id:
+        # Storage addresses an agent by one path segment, and the server
+        # decodes an escaped "/" before routing, so this id could never be
+        # looked up: every call would take the create path below, resetting
+        # trust and auditing a fresh registration each time (M-13).
+        raise HTTPException(
+            status_code=422,
+            detail=f"agent_id '{agent_id}' must not contain '/'; use '-' or '.' to group agents.",
+        )
     agent = await sc.get_agent(agent_id, tenant_id)
     if agent is None:
         # Confirm a MISS against the primary before creating. A miss is the

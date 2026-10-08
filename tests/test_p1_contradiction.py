@@ -355,56 +355,6 @@ class TestSupersessionSemantics:
 
 
 @pytest.mark.unit
-class TestStaleStateClearing:
-    """Verify that content update clears stale supersession/contradiction state."""
-
-    def test_outdated_memory_content_change_resets_status(self):
-        """Simulating the update_memory logic: status resets to active."""
-        # This tests the logic we added, not the full service (which needs DB)
-        status = "outdated"
-        supersedes_id = uuid4()
-
-        # Simulate the P1-2 logic from update_memory
-        content_changed = True
-        if content_changed:
-            if supersedes_id is not None:
-                supersedes_id = None
-            if status in ("outdated", "conflicted"):
-                status = "active"
-
-        assert status == "active"
-        assert supersedes_id is None
-
-    def test_conflicted_memory_content_change_resets_status(self):
-        status = "conflicted"
-        supersedes_id = uuid4()
-
-        content_changed = True
-        if content_changed:
-            if supersedes_id is not None:
-                supersedes_id = None
-            if status in ("outdated", "conflicted"):
-                status = "active"
-
-        assert status == "active"
-        assert supersedes_id is None
-
-    def test_active_memory_content_change_stays_active(self):
-        status = "active"
-        supersedes_id = None
-
-        content_changed = True
-        if content_changed:
-            if supersedes_id is not None:
-                supersedes_id = None
-            if status in ("outdated", "conflicted"):
-                status = "active"
-
-        assert status == "active"
-        assert supersedes_id is None
-
-
-@pytest.mark.unit
 class TestAsyncEntryPoint:
     """Verify the async entry point handles edge cases."""
 
