@@ -10,6 +10,24 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.29.1](https://github.com/caura-ai/caura/compare/backend-v3.29.0...backend-v3.29.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **write:** the write path records what it did, and does less ([#2004](https://github.com/caura-ai/caura/issues/2004)) ([472a3c3](https://github.com/caura-ai/caura/commit/472a3c34d01c37de56f97c90e6651fe6f15a7908))
+
+
+### Performance
+
+* **agents:** read each request's agent row once ([#2008](https://github.com/caura-ai/caura/issues/2008)) ([85b6d6f](https://github.com/caura-ai/caura/commit/85b6d6fc1bf76640a32a040934dfa55769440c45))
+* **storage:** reads load and send no vector their caller drops ([#2006](https://github.com/caura-ai/caura/issues/2006)) ([ef42a3c](https://github.com/caura-ai/caura/commit/ef42a3c1bc2aa358df031e562ebde9318f80a777))
+
+
+### Dependencies
+
+* **plugin:** bump @types/node from 26.6.1 to 26.6.4 in /plugin in the npm-minor-patch group across 1 directory ([#1748](https://github.com/caura-ai/caura/issues/1748)) ([38305bb](https://github.com/caura-ai/caura/commit/38305bb85b095cd42d2cc2d0d3bcaa75dfbb437d))
+
 ## [3.29.0](https://github.com/caura-ai/caura/compare/backend-v3.28.0...backend-v3.29.0) (2026-10-07)
 
 
