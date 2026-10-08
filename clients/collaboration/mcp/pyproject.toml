@@ -1,12 +1,12 @@
 [project]
 name = "caura-bus-mcp"
-version = "0.2.0"  # x-release-please-version
+version = "0.3.0"  # x-release-please-version
 description = "MCP server exposing one opcode-based Caura peer tool over stdio"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Caura, Inc." }]
 dependencies = [
-    "caura-bus-core==0.2.0",  # x-release-please-version
+    "caura-bus-core==0.3.0",  # x-release-please-version
     "mcp>=2.1.1,<3",
 ]
 

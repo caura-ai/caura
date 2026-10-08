@@ -1,12 +1,12 @@
 [project]
 name = "caura-bus-adapter-sdk"
-version = "0.2.0"  # x-release-please-version
+version = "0.3.0"  # x-release-please-version
 description = "SDK for building caura-bus adapters: connect, subscribe, gate on idle, consume"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Caura, Inc." }]
 dependencies = [
-    "caura-bus-core==0.2.0",  # x-release-please-version
+    "caura-bus-core==0.3.0",  # x-release-please-version
 ]
 
 [project.scripts]

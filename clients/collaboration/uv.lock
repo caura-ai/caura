@@ -64,7 +64,7 @@ wheels = [
 
 [[package]]
 name = "caura-bus-adapter-sdk"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "adapter-sdk" }
 dependencies = [
     { name = "caura-bus-core" },
@@ -75,7 +75,7 @@ requires-dist = [{ name = "caura-bus-core", editable = "core" }]
 
 [[package]]
 name = "caura-bus-cli"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "cli" }
 dependencies = [
     { name = "caura-bus-core" },
@@ -92,7 +92,7 @@ requires-dist = [
 
 [[package]]
 name = "caura-bus-core"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "core" }
 dependencies = [
     { name = "httpx" },
@@ -109,7 +109,7 @@ requires-dist = [
 
 [[package]]
 name = "caura-bus-mcp"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "mcp" }
 dependencies = [
     { name = "caura-bus-core" },

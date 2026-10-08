@@ -72,7 +72,6 @@
       "package-name": "caura-bus",
       "component": "collaboration-clients",
       "changelog-path": "CHANGELOG.md",
-      "release-as": "0.3.0",
       "extra-files": [
         { "type": "generic", "path": "core/pyproject.toml" },
         { "type": "generic", "path": "mcp/pyproject.toml" },

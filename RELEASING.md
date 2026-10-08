@@ -10,7 +10,7 @@ The repo ships **three independently-versioned release-please components**:
 | ------- | -------- | ---------------- | -------- |
 | backend | `.`      | `backend-vX.Y.Z` | 2.5.0    |
 | plugin  | `plugin/`| `plugin-vX.Y.Z`  | 2.5.0    |
-| collaboration-clients | `clients/collaboration/` | `collaboration-clients-vX.Y.Z` | 0.2.0 (unpublished preview; first release `0.3.0`) |
+| collaboration-clients | `clients/collaboration/` | `collaboration-clients-vX.Y.Z` | 0.3.0 (first published release) |
 
 Backend and plugin release on independent cadences. Plugin fixes no longer
 require a backend release; backend changes don't force a plugin version
@@ -93,12 +93,13 @@ Release flow:
    `pypi-collaboration` environment, then uploads with PyPI trusted
    publishing and PEP 740 attestations (core first, then its dependents).
 
-`release-as: "0.3.0"` in `release-please-config.json` fixes the first published
-version. `0.2.0` was only ever the version string of unpublished sibling-path
-preview builds, so publishing starts at `0.3.0` to keep a preview install and a
-published artifact distinguishable. **Remove `release-as` in the first commit
-after `collaboration-clients-v0.3.0` is released**, or every later release
-PR will keep proposing `0.3.0`.
+The first published version, `0.3.0`, was cut by hand from the release
+candidate before it reached `main`: one release commit set the four package versions,
+`clients/collaboration/uv.lock` and the manifest to `0.3.0`, and a maintainer
+created the GitHub release `collaboration-clients-v0.3.0` on it, which ran the
+publish workflow above. `0.2.0` was only ever the version string of unpublished
+sibling-path preview builds. The one-off `release-as: "0.3.0"` pin is gone, so
+release-please proposes the next version from conventional commits as usual.
 
 Check the build locally before cutting a release:
 
