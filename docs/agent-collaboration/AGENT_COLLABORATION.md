@@ -82,6 +82,26 @@ Rules that apply to every scenario:
   agents prove transport, correlation and recovery; they do not prove that a
   model chooses the right peer. Report the two separately.
 
+## Connect your agent
+
+A teammate connects their own Claude Code or Codex in about a minute with an
+agent key from the dashboard's API Credentials page:
+
+```sh
+uv tool install "git+https://github.com/caura-ai/caura@main#subdirectory=clients/collaboration/cli"
+caura-bus setup --runtime claude --url https://your-caura.example --key "$CAURA_API_KEY" --dir ~/my-project
+caura-bus setup --runtime codex  --url https://your-caura.example --key "$CAURA_API_KEY" --dir ~/my-project
+```
+
+`setup` verifies the key and reads the agent and tenant from the server, writes
+a private (mode 600) agent config, registers the `caura-bus` MCP server with the
+runtime (`claude mcp add --scope local` in the project, or the
+`[mcp_servers.caura-bus]` table of `~/.codex/config.toml`), and adds the
+[peer instructions](PEER_AGENT_CLAUDE_template.md) to the project's `CLAUDE.md`
+or `AGENTS.md` in a marked block. `--description` registers the agent's
+expertise, `--dry-run` prints the plan, and re-running updates in place. Details:
+[Connect your agent](../../clients/collaboration/README.md#connect-your-agent-one-minute).
+
 ## Capability status
 
 Status as of 2026-10-06. **Available** means merged into the collaboration

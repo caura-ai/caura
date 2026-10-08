@@ -14,6 +14,7 @@ from caura_bus_core.config import CONFIG_ENV_VAR, DEFAULT_CONFIG_PATH
 
 from .hooks import install_hooks
 from .runtime import CodexQueue, WakeState, receive, state_path, supervise
+from .setup import Options, SetupError, run_setup
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help="Caura agent messaging.")
 agents_app = typer.Typer(no_args_is_help=True)
@@ -134,6 +135,40 @@ def hooks_install(
     except (ValueError, RuntimeError, OSError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
+
+
+@app.command()
+def setup(
+    runtime: str = typer.Option(..., help="claude or codex"),
+    url: str = typer.Option(..., help="Caura gateway origin, e.g. https://caura.example"),
+    key: str | None = typer.Option(
+        None, help="Agent key (or set CAURA_API_KEY; prompted when absent)", envvar="CAURA_API_KEY"
+    ),
+    directory: Path = typer.Option(Path("."), "--dir", help="Project directory the runtime starts in"),
+    agent_id: str | None = typer.Option(None, help="Expected agent id; setup fails if the key differs"),
+    description: str | None = typer.Option(None, help="Register this agent's expertise for discovery"),
+    config: Path | None = typer.Option(None, help="Agent config path (default: per-user config dir)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Verify the key and print the plan only"),
+):
+    """Connect Claude Code or Codex to Caura: verify the key, write config, wire MCP and instructions."""
+    if not key:
+        key = typer.prompt("Caura agent key", hide_input=True)
+    options = Options(
+        runtime=runtime,
+        url=url,
+        key=key or "",
+        directory=directory,
+        agent_id=agent_id,
+        description=description,
+        config=config,
+        dry_run=dry_run,
+    )
+    try:
+        code = run_setup(options, typer.echo, asyncio.run)
+    except (SetupError, ValueError, OSError) as exc:
+        typer.echo(f"caura-bus setup: {exc}", err=True)
+        raise typer.Exit(1) from None
+    raise typer.Exit(code)
 
 
 def execute(config, operation):

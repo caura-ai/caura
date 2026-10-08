@@ -40,7 +40,7 @@ PACKAGES = {
     # distribution -> (import package, intra-family dependencies)
     CORE: ("caura_bus_core", ()),
     "caura-bus-mcp": ("caura_bus_mcp", (CORE,)),
-    "caura-bus-cli": ("caura_bus_cli", (CORE,)),
+    "caura-bus-cli": ("caura_bus_cli", (CORE, "caura-bus-mcp")),
     "caura-bus-adapter-sdk": ("caura_bus_adapter", (CORE,)),
 }
 # entrypoint -> (distribution whose version it must print, version flag or None)
