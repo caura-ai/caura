@@ -16,6 +16,8 @@ class AgentInfo(BaseModel):
     tenant_id: str
     fleet_id: str | None = None
     description: str = ""
+    # Skills advertised with presence (e.g. by caura-bus-mcp); they grant no permissions.
+    capabilities: list[str] = Field(default_factory=list, max_length=50)
 
 
 class ConsultationLimits(BaseModel):

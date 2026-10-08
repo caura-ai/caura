@@ -1,6 +1,7 @@
 """One opcode-based peer tool; every operation uses the authenticated Caura API."""
 
 import argparse
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -25,6 +26,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import ConfigDict, Field
 
 from .delivery import DeliverySession
+from .presence import PRESENCE_ENV_VAR, PresenceHeartbeat, presence_enabled, presence_profile
 
 
 @dataclass
@@ -61,10 +63,17 @@ async def lifespan(_server: MCPServer) -> AsyncIterator[AppContext]:
     config = load_config()
     async with Bus(config) as bus:
         app = AppContext(config, bus)
+        presence = PresenceHeartbeat(bus, presence_profile(config)) if presence_enabled() else None
+        if presence:
+            presence.start()
         try:
             yield app
         finally:
-            await app.delivery.close()
+            try:
+                if presence:
+                    await presence.stop()
+            finally:
+                await app.delivery.close()
 
 
 mcp = MCPServer("caura-bus", lifespan=lifespan)
@@ -246,7 +255,8 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
     send: to* (ID list), body*, idempotency_key*, kind=info (info/request/response/ack),
       thread_id, reply_to, expect_reply_within_seconds=60..604800, capability (request only).
       Returns message_id/thread_id; accepted does not mean completed.
-      Retry the same payload with the same key. Reply: kind=response, reply_to=request ID,
+      Retry the same payload with the same key; a new message needs a new key
+      (COLLABORATION_IDEMPOTENCY_KEY_REUSED). Reply: kind=response, reply_to=request ID,
       to=[original sender]; Caura preserves the thread. to=["*"] expands allowed peers.
     recent: thread_id, agent_id, limit=20 (1-100), before=next_cursor. Returns visible messages.
       reply_to=request ID reads responses to your request while keeping current work leased.
@@ -267,6 +277,9 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
     wait: timeout=50 (0-50 seconds, below host timeout). Returns delivery (possibly null) and durable notices. Read notices even when delivery is null.
       On a wake hint, handle deliveries and repeat wait until delivery is null; drain notices too.
       One delivery at a time; stop if paused. Honor resume_context on human resumption.
+      A kind=response delivery carries correlation.reply_to and matches_sent_request: it answers
+      your question only if reply_to is your request's message_id. Get answers with collect
+      message_id=<request ID>; never report an unmatched or old response as the answer.
       After a pause or lost lease, other ops re-check Caura and reclaim the same work when
       still permitted: state=resumed shows new instructions, so revise and retry;
       state=unavailable means the work was withdrawn or completed, so do not replay it.
@@ -418,6 +431,8 @@ async def dispatch(
                     request_key=params.idempotency_key,
                 )
             receipt = await app.bus.send(message, idempotency_key=params.idempotency_key)
+            if message.kind == "request":
+                app.delivery.sent_requests.add(receipt.message_id)
             return receipt.model_dump()
         case Recent():
             result = await app.bus.recent(
@@ -495,12 +510,21 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="caura-bus-mcp",
         description="Serve the Caura peer tool to one MCP host over stdio. "
-        "Configuration comes from CAURA_BUS_AGENT_CONFIG and CAURA_API_KEY.",
+        "Configuration comes from CAURA_BUS_AGENT_CONFIG and CAURA_API_KEY. "
+        "While running, it advertises the agent as ready (presence heartbeat).",
     )
     parser.add_argument(
         "--version", action="version", version="caura-bus-mcp " + package_version("caura-bus-mcp")
     )
-    parser.parse_args(argv)
+    parser.add_argument(
+        "--no-presence",
+        action="store_true",
+        help="Do not advertise this agent as connected while the server runs "
+        f"(same as {PRESENCE_ENV_VAR}=0). Presence is on by default.",
+    )
+    args = parser.parse_args(argv)
+    if args.no_presence:
+        os.environ[PRESENCE_ENV_VAR] = "0"
     mcp.run()
 
 

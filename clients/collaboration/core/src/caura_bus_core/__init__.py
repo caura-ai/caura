@@ -1,7 +1,7 @@
 """Caura Bus: all messaging crosses the authenticated Caura platform API."""
 
 from .agent import AgentConfig, AgentInfo
-from .bus import RESYNC_EVENT, Bus, DirectoryIncomplete, PlatformError
+from .bus import IDEMPOTENCY_KEY_REUSED, RESYNC_EVENT, Bus, DirectoryIncomplete, PlatformError
 from .config import CONFIG_ENV_VAR, load_config, require_api_key
 from .consult import (
     Answer,
@@ -18,6 +18,7 @@ from .protocol import Claim, Receipt, SendMessage
 
 __all__ = [
     "CONFIG_ENV_VAR",
+    "IDEMPOTENCY_KEY_REUSED",
     "RESYNC_EVENT",
     "AgentConfig",
     "AgentInfo",

@@ -369,3 +369,79 @@ async def test_cold_suppression_and_presence_use_reserved_pool_under_real_tcp_sa
             release.set()
             await held
             await entry.suppression_cache.close()
+
+
+@pytest.mark.parametrize("operation", ["send", "reply", "human_send"])
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(409, "COLLABORATION_IDEMPOTENCY_KEY_REUSED"), (422, "REPLY_TO_OWN_MESSAGE")],
+)
+async def test_send_errors_keep_their_code_and_fixed_message(
+    entry, monkeypatch, operation, status, code
+):
+    async def fail(*_args, **_kwargs):
+        response = httpx.Response(
+            status,
+            json={
+                "detail": {"code": code, "message": "private diagnostic", "key": "k"}
+            },
+            request=httpx.Request("POST", "http://storage"),
+        )
+        raise httpx.HTTPStatusError(
+            "private", request=response.request, response=response
+        )
+
+    monkeypatch.setattr(
+        entry, "get_storage_client", lambda: SimpleNamespace(_post=fail)
+    )
+    with pytest.raises(HTTPException) as caught:
+        await entry._storage_call(
+            SimpleNamespace(operation=operation, model_dump=lambda: {})
+        )
+    assert caught.value.status_code == status
+    assert caught.value.detail == {
+        "code": code,
+        "message": entry.SEND_ERRORS[status, code],
+    }
+    assert "private" not in str(caught.value.detail)
+
+
+def test_reused_idempotency_key_message_is_recoverable(entry):
+    message = entry.SEND_ERRORS[409, "COLLABORATION_IDEMPOTENCY_KEY_REUSED"]
+    assert "different message" in message and "use a new key" in message
+
+
+@pytest.mark.parametrize(
+    ("operation", "status", "code"),
+    [
+        ("ack", 409, "COLLABORATION_IDEMPOTENCY_KEY_REUSED"),
+        ("send", 409, "REPLY_TO_OWN_MESSAGE"),
+        ("send", 422, "COLLABORATION_IDEMPOTENCY_KEY_REUSED"),
+        ("send", 409, "UNKNOWN_PRIVATE_CODE"),
+    ],
+)
+async def test_send_error_allowlist_is_exact(
+    entry, monkeypatch, operation, status, code
+):
+    async def fail(*_args, **_kwargs):
+        response = httpx.Response(
+            status,
+            json={"detail": {"code": code, "message": "private diagnostic"}},
+            request=httpx.Request("POST", "http://storage"),
+        )
+        raise httpx.HTTPStatusError(
+            "private", request=response.request, response=response
+        )
+
+    monkeypatch.setattr(
+        entry, "get_storage_client", lambda: SimpleNamespace(_post=fail)
+    )
+    with pytest.raises(HTTPException) as caught:
+        await entry._storage_call(
+            SimpleNamespace(operation=operation, model_dump=lambda: {})
+        )
+    assert caught.value.status_code == status
+    assert caught.value.detail in {
+        "Caura operation conflicts with the current state",
+        "Caura request is invalid",
+    }

@@ -96,6 +96,18 @@ DECISION_CONFLICTS = {
 }
 
 
+# Agent-recoverable send/reply errors: the public API rebuilds this fixed
+# vocabulary (status unchanged) so a model can act on it; any other storage
+# text stays private.
+SEND_ERRORS = {
+    (409, "COLLABORATION_IDEMPOTENCY_KEY_REUSED"): "idempotency key already used for a different message; "
+    "use a new key (retry with the same key only when resending the identical message)",
+    (422, "REPLY_TO_OWN_MESSAGE"): "reply_to names a message you sent. Reply to a message you received, "
+    "or follow up on your own message by sending a new message with its thread_id and without reply_to.",
+}
+SEND_OPERATIONS = frozenset({"send", "reply", "human_send"})
+
+
 async def storage_call(operation):
     if operation.operation in {"send", "human_send", "reply"}:
         operation = operation.model_copy(update={"deadline_at": send_deadline.get()})
@@ -143,16 +155,27 @@ async def _storage_call(operation):
                 "Collaboration send deadline exceeded",
                 headers={"Retry-After": "1", "X-Caura-Send-Result": "deadline"},
             ) from exc
-        if status == 409:
+        if status in {409, 422}:
             try:
                 payload = exc.response.json()
             except ValueError:
                 payload = None  # A malformed error body still maps to a fixed conflict.
             detail = payload.get("detail") if isinstance(payload, dict) else None
             code = detail.get("code") if isinstance(detail, dict) else None
-            if operation.operation == "human_decide" and isinstance(code, str) and code in DECISION_CONFLICTS:
+            if (
+                operation.operation in SEND_OPERATIONS
+                and isinstance(code, str)
+                and (status, code) in SEND_ERRORS
+            ):
+                raise HTTPException(status, {"code": code, "message": SEND_ERRORS[status, code]}) from exc
+            if (
+                status == 409
+                and operation.operation == "human_decide"
+                and isinstance(code, str)
+                and code in DECISION_CONFLICTS
+            ):
                 raise HTTPException(409, {"code": code, "message": DECISION_CONFLICTS[code]}) from exc
-            if isinstance(detail, dict) and detail.get("state") == "paused":
+            if status == 409 and isinstance(detail, dict) and detail.get("state") == "paused":
                 raise HTTPException(
                     409, {"state": "paused", "detail": "Delivery paused; call wait for current context"}
                 ) from exc
