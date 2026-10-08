@@ -1589,7 +1589,7 @@ async def _write_memory_inner(
         body.fleet_id = agent["fleet_id"]
     usage = None
     if auth.tenant_id:  # skip enforcement + metering for admin
-        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
+        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id, agent=agent)
     _observe_rest_reserved_write(auth, body.agent_id or chosen_agent_id)
     result = await create_memory(body)
     # Metered only after the write succeeded, like the bulk route: a write that
@@ -1857,7 +1857,7 @@ async def _write_memories_bulk_inner(
     if not body.fleet_id and agent.get("fleet_id"):
         body.fleet_id = agent["fleet_id"]
     if auth.tenant_id:  # skip enforcement for admin
-        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
+        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id, agent=agent)
 
     # Metering deliberately does NOT happen here — see after the write. This
     # used to be ``usage = await bulk_check_and_increment(...)`` on this line,
@@ -2712,7 +2712,7 @@ async def _search_inner(
             # (length != 1), so the list reached storage unchecked and came back
             # with full ``scope_team`` content.
             if body.fleet_ids:
-                await enforce_fleet_read_many(body.tenant_id, eff_agent_id, body.fleet_ids)
+                await enforce_fleet_read_many(body.tenant_id, eff_agent_id, body.fleet_ids, agent=_agent)
         usage = await check_and_increment(body.tenant_id, "search")
     set_usage_headers(response, usage)
     from core_api.services.organization_settings import resolve_config
@@ -2957,7 +2957,7 @@ async def ingest_commit_endpoint(
     if not body.fleet_id and agent.get("fleet_id"):
         body.fleet_id = agent["fleet_id"]
     if auth.tenant_id:  # skip enforcement for admin
-        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
+        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id, agent=agent)
     result = await ingest_commit(body)
     if auth.tenant_id:  # skip for admin
         # One unit PER FACT, not one per request. A commit writes
@@ -3165,7 +3165,7 @@ async def recall_endpoint(
             # peer's trust level; gating the right principal on only the
             # single-fleet case would still let it widen by naming two.
             if body.fleet_ids:
-                await enforce_fleet_read_many(body.tenant_id, eff_agent_id, body.fleet_ids)
+                await enforce_fleet_read_many(body.tenant_id, eff_agent_id, body.fleet_ids, agent=_agent)
         # D13 — a recall is a recall, not a search: plans meter them separately
         # and the recalls counter never moved because this site (and the MCP
         # twin) billed "search". Flag-gated; see ``recall_operation``.

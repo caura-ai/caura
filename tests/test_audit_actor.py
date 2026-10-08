@@ -395,7 +395,8 @@ async def test_trust(monkeypatch, log):
 
 
 async def test_keystone_set(monkeypatch, log):
-    monkeypatch.setattr(keystones, "_enforce_author_trust", AsyncMock())
+    # The caller's trust, which the route holds to the rule's floor.
+    monkeypatch.setattr(keystones, "_enforce_author_trust", AsyncMock(return_value=3))
     sc = _storage(
         monkeypatch, keystones, get_document=None, upsert_keystone={"id": str(uuid4())}
     )

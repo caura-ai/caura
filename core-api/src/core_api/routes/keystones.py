@@ -130,42 +130,36 @@ async def _enforce_author_trust(
     tenant_id: str,
     agent_id: str,
     *,
-    min_level: int,
     standalone_admin: bool = False,
-    hint: str = "",
-) -> None:
-    """Block keystone writes / deletes from principals below ``min_level``.
+) -> int:
+    """Block keystone writes / deletes from unregistered or unapproved
+    principals, and return the caller's trust level.
 
-    Callers compute ``min_level`` via
-    :func:`core_api.trust_utils.keystone_min_trust` (or
-    :func:`~core_api.trust_utils.effective_keystone_min_trust` for upserts
-    against an existing rule). The check itself
-    is the standard write-path pattern (mirrors ``routes/evolve.py``):
+    The check is the standard write-path pattern (mirrors ``routes/evolve.py``):
     ``require_trust`` soft-passes when no agent row exists AND
     ``min_level <= DEFAULT_TRUST_LEVEL``, so the ``not_found`` branch
     is rejected explicitly — keystone writes must be traceable to a
     registered identity, and the soft-pass would let a fabricated
     ``agent_id`` through.
 
+    It runs at trust 1, before the stored rule is read, so an unregistered
+    caller cannot probe whether a ``doc_id`` exists. The rule's own floor is
+    then held against the returned trust by :func:`_enforce_rule_floor`, so a
+    request looks its caller up once (L-177), as ``caura_keystones_set`` does.
+    The standalone admin is not checked, gets ``0`` and is held to no floor.
+
     **Cross-fleet authoring at trust ≥ 2 is intentionally allowed.**
     A trust-2 agent in tenant T can still write ``scope=fleet`` rules
     for any fleet within T — finer-grained scope authority (admin/org
     role, fleet pinning) is tracked separately (#119).
-
-    ``hint`` is appended to the insufficient-trust 403 only (see
-    :func:`core_api.trust_utils.keystone_trust_hint`). It is not added
-    to the unregistered-agent 403 above: that refusal is about identity,
-    and "pass agent_id" is not its remedy — registering is. Callers that
-    pass no ``hint`` (the anti-probing pre-check, the delete path) are
-    unchanged.
     """
     # Standalone single-tenant operator: the API-key holder IS the admin and
     # there is no other agent to impersonate, so the anti-spoof trust gate is
     # pure friction. Skip it (the caller still passes storage-side shape
     # validation). See ``_is_standalone_admin``.
     if standalone_admin:
-        return
-    _trust, not_found, terr = await _require_trust(tenant_id, agent_id, min_level=min_level)
+        return 0
+    trust, not_found, terr = await _require_trust(tenant_id, agent_id, min_level=1)
     if not_found:
         raise HTTPException(
             status_code=403,
@@ -180,8 +174,41 @@ async def _enforce_author_trust(
     if terr:
         raise HTTPException(
             status_code=403,
-            detail=coded_detail(AUTH_AGENT_TRUST_TOO_LOW, parse_trust_error(terr) + hint),
+            detail=coded_detail(AUTH_AGENT_TRUST_TOO_LOW, parse_trust_error(terr)),
         )
+    return trust
+
+
+def _enforce_rule_floor(
+    agent_id: str,
+    trust: int,
+    min_level: int,
+    *,
+    standalone_admin: bool = False,
+    hint: str = "",
+) -> None:
+    """Block a caller whose trust, as :func:`_enforce_author_trust` returned
+    it, is below the floor the rule sets.
+
+    Callers compute ``min_level`` via
+    :func:`core_api.trust_utils.keystone_min_trust` (or
+    :func:`~core_api.trust_utils.effective_keystone_min_trust` for upserts
+    against an existing rule), raised by :func:`_effective_min_for_caller`.
+
+    ``hint`` is appended to the 403 (see
+    :func:`core_api.trust_utils.keystone_trust_hint`). The unregistered-agent
+    403 never carries it: that refusal is about identity, and "pass agent_id"
+    is not its remedy — registering is.
+    """
+    if standalone_admin or trust >= min_level:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=coded_detail(
+            AUTH_AGENT_TRUST_TOO_LOW,
+            f"Agent '{agent_id}' (trust_level={trust}) < required {min_level}.{hint}",
+        ),
+    )
 
 
 def _resolve_caller_identity(auth: AuthContext, x_agent_id: str | None) -> tuple[str, bool]:
@@ -428,12 +455,10 @@ async def upsert_keystone(
     # Early registration check — anti-probing parity with delete. Without
     # this, an unregistered caller could probe ``doc_id`` existence
     # because ``sc.get_document`` below runs before any trust check
-    # fires. Use the minimum floor (1) here so a trust-1 caller passes;
-    # the full floor (which may be 2 once the stored shape is known) is
-    # re-enforced after the storage read.
-    await _enforce_author_trust(
-        body.tenant_id, caller_agent_id, min_level=1, standalone_admin=standalone_admin
-    )
+    # fires. It holds the caller to the minimum floor (1) so a trust-1
+    # caller passes; the trust it returns is held to the full floor (which
+    # may be 2 once the stored shape is known) after the storage read.
+    trust = await _enforce_author_trust(body.tenant_id, caller_agent_id, standalone_admin=standalone_admin)
 
     sc = get_storage_client()
     # Look up the existing rule (if any) so the trust floor combines
@@ -460,10 +485,10 @@ async def upsert_keystone(
     # ``scope=agent``+``agent_id=<victim>`` and forge a rule in the
     # victim's name at trust 1.
     min_level = _effective_min_for_caller(scope_floor, caller_verified)
-    await _enforce_author_trust(
-        body.tenant_id,
+    _enforce_rule_floor(
         caller_agent_id,
-        min_level=min_level,
+        trust,
+        min_level,
         standalone_admin=standalone_admin,
         # Distinguish "you're not trusted enough for this scope" from
         # "you meant to self-author but left agent_id out" — the latter
@@ -564,36 +589,14 @@ async def delete_keystone(
     auth.enforce_read_only()
     caller_agent_id, caller_verified = _resolve_caller_identity(auth, x_agent_id)
     standalone_admin = _is_standalone_admin(auth, x_agent_id)
-    trust: int = 0  # assigned in the trust-gate block below; default unused (read is in the same not-standalone_admin guard)
 
     # ONE trust round-trip for both the pre-lookup registration check
-    # (≥ 1, anti-probing) and the post-lookup floor check. We ask
-    # ``_require_trust`` for the minimum the caller could possibly
-    # need (1), then compare the returned trust level against the
-    # floor computed from the stored rule. This collapses two DB
-    # queries into one without losing either guarantee. Skipped for the
-    # standalone single-tenant operator (see ``_is_standalone_admin``).
-    if not standalone_admin:
-        trust, not_found, terr = await _require_trust(tenant_id, caller_agent_id, min_level=1)
-        # Anti-probing: an unregistered caller must NOT learn whether a
-        # ``doc_id`` exists (404 would leak presence; trust check below
-        # would 403). 403 unconditionally on missing identity.
-        if not_found:
-            raise HTTPException(
-                status_code=403,
-                detail=coded_detail(
-                    AUTH_AGENT_NOT_REGISTERED,
-                    f"Agent '{caller_agent_id}' has no registered agent row, so its "
-                    "keystone-author trust can't be verified. Register it (write one memory "
-                    "as that agent, then promote its trust), or call with X-Agent-ID / an "
-                    "agent-scoped credential for an agent at trust ≥ 2.",
-                ),
-            )
-        if terr:
-            raise HTTPException(
-                status_code=403,
-                detail=coded_detail(AUTH_AGENT_TRUST_TOO_LOW, parse_trust_error(terr)),
-            )
+    # (≥ 1, anti-probing: an unregistered caller must NOT learn whether a
+    # ``doc_id`` exists, as a 404 would tell it) and the post-lookup floor
+    # check, which holds the returned trust to the floor the stored rule
+    # sets. Skipped for the standalone single-tenant operator (see
+    # ``_is_standalone_admin``).
+    trust = await _enforce_author_trust(tenant_id, caller_agent_id, standalone_admin=standalone_admin)
 
     sc = get_storage_client()
     # Look up the rule before computing the scope-derived floor — the
@@ -603,24 +606,16 @@ async def delete_keystone(
     if not existing:
         raise HTTPException(status_code=404, detail="Keystone not found")
     data = existing.get("data") or {}
-    if not standalone_admin:
-        scope_floor = keystone_min_trust(
-            data.get("scope", ""),
-            data.get("agent_id"),
-            caller_agent_id,
-        )
-        # Bump to ≥ 2 if the caller's identity is unverified (admin key
-        # with ``X-Agent-ID`` claim only) — same anti-spoof rationale as
-        # the upsert path.
-        min_level = _effective_min_for_caller(scope_floor, caller_verified)
-        if trust < min_level:
-            raise HTTPException(
-                status_code=403,
-                detail=coded_detail(
-                    AUTH_AGENT_TRUST_TOO_LOW,
-                    f"Agent '{caller_agent_id}' (trust_level={trust}) < required {min_level}.",
-                ),
-            )
+    scope_floor = keystone_min_trust(
+        data.get("scope", ""),
+        data.get("agent_id"),
+        caller_agent_id,
+    )
+    # Bump to ≥ 2 if the caller's identity is unverified (admin key
+    # with ``X-Agent-ID`` claim only) — same anti-spoof rationale as
+    # the upsert path.
+    min_level = _effective_min_for_caller(scope_floor, caller_verified)
+    _enforce_rule_floor(caller_agent_id, trust, min_level, standalone_admin=standalone_admin)
 
     # TOCTOU narrowing: re-fetch the stored row immediately before the
     # delete and abort with 409 if the shape changed. Without this, a

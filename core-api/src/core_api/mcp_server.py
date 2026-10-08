@@ -1560,7 +1560,7 @@ async def caura_recall(
         # trust-1 agent widen its read by naming a second fleet (parity with
         # REST /search and /recall).
         if fleet_ids:
-            await enforce_fleet_read_many(tenant_id, agent_id, fleet_ids)
+            await enforce_fleet_read_many(tenant_id, agent_id, fleet_ids, agent=_ag)
         # D13 — same fix as REST /recall: bill the recall counter (flag-gated).
         # AFTER the fleet gate, as REST gates first: a recall refused with
         # FORBIDDEN read nothing and must not be charged (L-102).
@@ -1852,12 +1852,10 @@ async def caura_write(
                     ),
                     t0,
                 )
-            # Register the calling agent (auto-create row on first write) and
-            # enforce trust gating for cross-fleet writes — same surface the
-            # REST write path uses. Without this, MCP writes succeed without
-            # ever creating an Agent row, so a follow-up
-            # PATCH /agents/{id}/trust 404s.
-            agent = await enforce_fleet_write(tenant_id, agent_id, fleet_id)
+            # Trust gating for cross-fleet writes — same surface the REST write
+            # path uses — on the row ``resolve_write_agent`` registered and
+            # returned above, which is not read a second time (L-178).
+            agent = await enforce_fleet_write(tenant_id, agent_id, fleet_id, agent=agent)
             # Mirror the REST write paths (routes/memories.py:937, :1125): an
             # omitted fleet_id resolves to the caller's home fleet, so an MCP
             # write scopes like a REST write instead of persisting
@@ -2936,14 +2934,14 @@ async def caura_doc(
                 # install credential's ``agent_id`` is a claim, so a doc — and
                 # the memory minted from it below — must not land under an
                 # agent another install owns.
-                _, agent_id = await resolve_write_agent(
+                write_agent, agent_id = await resolve_write_agent(
                     agent_id,
                     tenant_id,
                     fleet_id,
                     is_install_credential=_is_install_credential(),
                     install_uuid=_get_install_uuid(),
                 )
-                write_agent = await enforce_fleet_write(tenant_id, agent_id, fleet_id)
+                write_agent = await enforce_fleet_write(tenant_id, agent_id, fleet_id, agent=write_agent)
                 # M-89: an agent awaiting approval writes nothing, as in
                 # caura_write; the write would also mint a memory as it.
                 if write_agent.get("trust_level", 0) == 0:

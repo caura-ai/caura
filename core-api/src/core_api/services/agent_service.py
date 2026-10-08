@@ -32,6 +32,7 @@ async def get_or_create_agent(
     install_id: str | None = None,
     owner_install_uuid: str | None = None,
     registration_ctx: dict | None = None,
+    known: dict | None = None,
 ) -> dict:
     """Return the agent dict, creating it on first encounter.
 
@@ -67,6 +68,11 @@ async def get_or_create_agent(
     it did a moment ago, so asking afterwards would report every typo as a
     registered agent. An out-dict rather than a changed return type so the
     other seven callers stay untouched.
+
+    ``known`` is this agent's row as the caller read it from the replica
+    moments ago in the same request, used in place of the lookup below (L-178):
+    ``resolve_write_agent`` passes the one the broker ownership gate read. Only
+    a found row is passed, as a miss must still be confirmed on the primary.
     """
     sc = get_storage_client()
     agent_id = canonical_service_agent_id(agent_id)
@@ -79,7 +85,7 @@ async def get_or_create_agent(
             status_code=422,
             detail=f"agent_id '{agent_id}' must not contain '/'; use '-' or '.' to group agents.",
         )
-    agent = await sc.get_agent(agent_id, tenant_id)
+    agent = known if known is not None else await sc.get_agent(agent_id, tenant_id)
     if agent is None:
         # Confirm a MISS against the primary before creating. A miss is the
         # only dangerous answer here: it sends this call down the create path,
@@ -231,7 +237,13 @@ def _owned_by_other_install(owner_install_uuid: str | None, install_uuid: str | 
     return owner_install_uuid is not None and owner_install_uuid != install_uuid
 
 
-async def broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id: str) -> AgentIdentity:
+async def broker_owned_agent_id(
+    chosen: str,
+    install_uuid: str | None,
+    tenant_id: str,
+    *,
+    row_ctx: dict | None = None,
+) -> AgentIdentity:
     """Lenient ownership gate over a broker write's chosen agent id.
 
     A broker write may be attributed to an agent named by the caller (REST item
@@ -249,6 +261,11 @@ async def broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id
       - ``owner_install_uuid`` is NULL  -> keep (unclaimed; this write claims it)
       - owned by THIS install           -> keep
       - owned by a DIFFERENT install    -> degrade to ``broker:<install>``
+
+    ``row_ctx`` is an out-dict, as ``registration_ctx`` is for
+    ``get_or_create_agent``. When the gate keeps an existing agent it receives
+    ``{"row": <that agent's row>}``, so the write registering it need not read
+    it again (L-178).
     """
     # No install identity means there is nothing to enforce ownership against:
     # the gateway couples ``x-caura-credential-kind`` with ``x-install-uuid`` behind
@@ -284,6 +301,8 @@ async def broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id
         return AgentIdentity(chosen)
     if _owned_by_other_install(owner.get("owner_install_uuid"), install_uuid):
         return AgentIdentity(fallback)
+    if row_ctx is not None:
+        row_ctx["row"] = owner
     return AgentIdentity(chosen)
 
 
@@ -342,10 +361,17 @@ async def resolve_write_agent(
     ``get_or_create_agent`` unchanged — the stamp and gate are broker-only, keyed
     on ``is_install_credential`` (a stray ``install_uuid`` without the credential
     kind is ignored).
+
+    The returned row is what a write's ``enforce_fleet_write`` should be handed,
+    so the request reads the agent once (L-178). A broker write's gate already
+    read the row it keeps, and registration reuses that read.
     """
     chosen_agent_id = canonical_service_agent_id(chosen_agent_id)
+    gate_ctx: dict = {}
     if is_install_credential:
-        chosen_agent_id = await broker_owned_agent_id(chosen_agent_id, install_uuid, tenant_id)
+        chosen_agent_id = await broker_owned_agent_id(
+            chosen_agent_id, install_uuid, tenant_id, row_ctx=gate_ctx
+        )
     agent = await get_or_create_agent(
         tenant_id,
         chosen_agent_id,
@@ -354,6 +380,7 @@ async def resolve_write_agent(
         # Stamp ownership only for broker writes — never rely on the gateway
         # happening to omit x-install-uuid for non-broker callers.
         owner_install_uuid=install_uuid if is_install_credential else None,
+        known=gate_ctx.get("row"),
     )
     if (
         is_install_credential
@@ -375,9 +402,17 @@ async def enforce_fleet_write(
     tenant_id: str,
     agent_id: str,
     fleet_id: str | None,
+    *,
+    agent: dict | None = None,
 ) -> dict:
-    """Enforce write permissions. Returns the agent (auto-created if new)."""
-    agent = await get_or_create_agent(tenant_id, agent_id, fleet_id)
+    """Enforce write permissions. Returns the agent (auto-created if new).
+
+    ``agent`` is the row ``resolve_write_agent`` returned for ``agent_id`` in
+    the same request. The gate reads only its ``fleet_id`` and ``trust_level``,
+    so it is used rather than looked up a second time (L-178).
+    """
+    if agent is None:
+        agent = await get_or_create_agent(tenant_id, agent_id, fleet_id)
 
     # Agents can always write to their home fleet (or tenant-wide if no fleet specified)
     if fleet_id is None or fleet_id == agent.get("fleet_id"):
@@ -496,6 +531,8 @@ async def enforce_fleet_read_many(
     tenant_id: str,
     agent_id: AgentIdentity,
     fleet_ids: Sequence[str | None],
+    *,
+    agent: dict | None = None,
 ) -> None:
     """Enforce read permissions for EVERY requested fleet.
 
@@ -516,8 +553,13 @@ async def enforce_fleet_read_many(
     ``enforce_fleet_read`` delegates here so the single- and multi-fleet ladders
     cannot drift apart, the same reason ``resolve_read_fleet_gate`` is shared
     across its four surfaces. Semantics for a one-element list are unchanged.
+
+    ``agent`` is the caller's row as the route already read it in this request,
+    used in place of a second lookup (L-178). ``None`` means it was not read,
+    or found nothing, and the gate looks it up.
     """
-    agent = await lookup_agent(tenant_id, agent_id)
+    if agent is None:
+        agent = await lookup_agent(tenant_id, agent_id)
 
     # Unknown agent — allow the read (agent registration happens on writes)
     if not agent:
