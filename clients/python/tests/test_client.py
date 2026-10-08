@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 import sys
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from pathlib import Path
 
 import httpx
@@ -258,6 +260,28 @@ def test_rate_limit_error_without_retry_after():
     with pytest.raises(RateLimitError) as exc:
         make_client(handler).search("q")
     assert exc.value.retry_after is None
+
+
+@pytest.mark.parametrize("date_format", ["imf", "rfc850", "asctime"])
+def test_rate_limit_error_parses_retry_after_http_date(date_format):
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=120)
+    value = {
+        "imf": format_datetime(deadline, usegmt=True),
+        "rfc850": deadline.strftime("%A, %d-%b-%y %H:%M:%S GMT"),
+        "asctime": deadline.strftime("%a %b %d %H:%M:%S %Y"),
+    }[date_format]
+    client = make_client(lambda request: httpx.Response(429, headers={"Retry-After": value}))
+    with client, pytest.raises(RateLimitError) as exc:
+        client.health()
+    assert 115 <= exc.value.retry_after <= 120
+
+
+@pytest.mark.parametrize("value, expected", [("Sun, 06 Nov 1994 08:49:37 GMT", 0), ("not a date", None)])
+def test_rate_limit_error_with_past_or_invalid_retry_after(value, expected):
+    client = make_client(lambda request: httpx.Response(429, headers={"Retry-After": value}))
+    with client, pytest.raises(RateLimitError) as exc:
+        client.health()
+    assert exc.value.retry_after == expected
 
 
 def test_generic_api_error():

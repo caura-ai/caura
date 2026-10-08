@@ -315,6 +315,42 @@ test("429 without retry-after has null retryAfter", async () => {
   );
 });
 
+for (const dateFormat of ["imf", "rfc850", "asctime"]) {
+  test(`429 parses an HTTP-date retry-after (${dateFormat})`, async () => {
+    const deadline = new Date(Date.now() + 120000);
+    const imf = deadline.toUTCString();
+    const weekday = deadline.toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
+    const value =
+      dateFormat === "rfc850"
+        ? imf.replace(/^(\w+), (\d+) (\w+) (\d{2})(\d{2})/, `${weekday}, $2-$3-$5`)
+        : dateFormat === "asctime"
+          ? imf.replace(/^(\w+), (\d+) (\w+) (\d+) (\S+) GMT$/, "$1 $3 $2 $5 $4")
+          : imf;
+    const client = makeClient(() => new Response("{}", { status: 429, headers: { "retry-after": value } }));
+    await assert.rejects(
+      client.health(),
+      (err: unknown) =>
+        err instanceof RateLimitError &&
+        err.retryAfter !== null &&
+        err.retryAfter >= 115 &&
+        err.retryAfter <= 120,
+    );
+  });
+}
+
+for (const [value, expected] of [
+  ["Sun, 06 Nov 1994 08:49:37 GMT", 0],
+  ["not a date", null],
+] as const) {
+  test(`429 handles a past or invalid retry-after (${value})`, async () => {
+    const client = makeClient(() => new Response("{}", { status: 429, headers: { "retry-after": value } }));
+    await assert.rejects(
+      client.health(),
+      (err: unknown) => err instanceof RateLimitError && err.retryAfter === expected,
+    );
+  });
+}
+
 test("500 maps to CauraApiError", async () => {
   const client = makeClient(() => jsonResponse(500, { message: "boom" }));
   await assert.rejects(client.recall("q"), CauraApiError);

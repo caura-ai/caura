@@ -343,7 +343,12 @@ async function raiseForStatus(res: Response): Promise<void> {
   }
   if (res.status === 429) {
     const retryAfter = res.headers.get("retry-after");
-    const parsed = retryAfter === null ? Number.NaN : Number(retryAfter);
+    let parsed = retryAfter === null ? Number.NaN : Number(retryAfter);
+    if (!Number.isFinite(parsed) && retryAfter !== null) {
+      // All HTTP-date forms use GMT, including asctime without an explicit zone.
+      const deadline = Date.parse(retryAfter.endsWith("GMT") ? retryAfter : `${retryAfter} GMT`);
+      parsed = Math.max(0, (deadline - Date.now()) / 1000);
+    }
     throw new RateLimitError(
       res.status,
       message || "rate limit exceeded",

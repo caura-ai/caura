@@ -10,6 +10,8 @@ import os
 import re
 import sys
 import urllib.parse
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -20,9 +22,7 @@ from .models import Memory, RecallResult
 
 DEFAULT_BASE_URL = "https://caura.ai"
 
-USER_AGENT = (
-    f"caura-client-python/{__version__} (python/{sys.version_info.major}.{sys.version_info.minor})"
-)
+USER_AGENT = f"caura-client-python/{__version__} (python/{sys.version_info.major}.{sys.version_info.minor})"
 """Sent on every request so a server can tell SDK families apart.
 
 It names the package, its version and the Python major.minor, nothing more;
@@ -274,8 +274,16 @@ class Caura:
         if response.status_code == 429:
             try:
                 retry_after = float(response.headers["Retry-After"])
-            except (KeyError, ValueError):
+            except KeyError:
                 retry_after = None
+            except ValueError:
+                try:
+                    deadline = parsedate_to_datetime(response.headers["Retry-After"])
+                    # The obsolete asctime HTTP-date form has no explicit zone; it is still GMT.
+                    deadline = deadline.replace(tzinfo=timezone.utc) if deadline.tzinfo is None else deadline
+                    retry_after = max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
+                except (TypeError, ValueError, OverflowError):
+                    retry_after = None
             raise RateLimitError(
                 response.status_code,
                 message or "rate limit exceeded",
