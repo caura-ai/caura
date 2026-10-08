@@ -372,6 +372,63 @@ def write_instructions(path: Path) -> str:
     return action
 
 
+# --- 5. wake-ups (opt-in) -----------------------------------------------
+
+
+def key_file_path(config: Path) -> Path:
+    return config.with_suffix(".key")
+
+
+def codex_waker_command(directory: Path, config: Path, key_file: Path) -> str:
+    return shlex.join(
+        [
+            "caura-bus",
+            "wake",
+            "--runtime",
+            "codex",
+            "--thread",
+            "latest",
+            "--dir",
+            str(directory),
+            "--config",
+            str(config),
+            "--key-file",
+            str(key_file),
+        ]
+    )
+
+
+def install_wake(options, runtime, directory, config_path, key, echo) -> str | None:
+    """Store the key for hooks/wakers (0600) and install Claude hooks or print the Codex waker.
+
+    Hooks and wakers are started by the runtime, not by the shell that holds
+    CAURA_API_KEY, so they read the key from a private file next to the config.
+    """
+    from .hooks import install_hooks
+
+    key_file = key_file_path(config_path)
+    prefix = "[dry-run] would " if options.dry_run else ""
+    if options.dry_run:
+        echo(f"  {prefix}write the agent key to {show(key_file)} (mode 600) for wake-ups")
+    else:
+        write_private(key_file, key + "\n")
+        echo(f"  [ok] agent key for wake-ups {show(key_file)} (mode 600)")
+    if runtime == "codex":
+        command = codex_waker_command(directory, config_path, key_file)
+        echo(f"  {prefix if options.dry_run else '[ok] '}Codex wake-ups: run `{command}` while Codex is open")
+        return command
+    if options.dry_run:
+        echo(f"  {prefix}install Claude Code wake hooks in {show(directory / '.claude/settings.local.json')}")
+        return None
+    try:
+        result = install_hooks(project=directory, config=config_path, key_file=key_file)
+    except (RuntimeError, ValueError, OSError) as exc:
+        echo(f"  [!!] wake hooks not installed: {exc}")
+        return None
+    echo(f"  [ok] wake hooks {show(result['path'])} (SessionStart/Stop listener, UserPromptSubmit check)")
+    return None
+
+
 # --- orchestration --------------------------------------------------------
 
 
@@ -385,6 +442,7 @@ class Options:
     description: str | None = None
     config: Path | None = None
     dry_run: bool = False
+    hooks: bool = False
     codex_config: Path | None = None
     transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False)
 
@@ -489,6 +547,10 @@ def finish(options, runtime, directory, config_path, echo, run_async, key, *, fa
             except ValueError as exc:
                 echo(f"  [!!] description not registered: {exc}")
 
+    waker = None
+    if options.hooks:
+        waker = install_wake(options, runtime, directory, config_path, key, echo)
+
     if options.dry_run:
         echo("Dry run: nothing was written.")
         return 0
@@ -499,6 +561,8 @@ def finish(options, runtime, directory, config_path, echo, run_async, key, *, fa
         echo(f"  1. Start Claude Code in the project:  {start}")
     else:
         echo(f"  1. Start (or restart) Codex in the project:  {start}")
+    if waker:
+        echo(f"     In another terminal, keep the wake listener running:  {waker}")
     echo('  2. Try: "Use the caura-bus peer tool: discover available peers and tell me who they are."')
     echo(
         "  3. Check the connection any time:  CAURA_API_KEY=<your key> caura-bus doctor "

@@ -352,3 +352,46 @@ def test_packaged_peer_instructions_match_docs_template():
 def test_mask_never_reveals_short_keys():
     assert setup_mod.mask("short") == "****"
     assert setup_mod.mask(KEY) == "mc_tes…CRET"
+
+
+def test_setup_without_hooks_installs_no_hooks_and_stores_no_key(env):
+    assert invoke("--runtime", "claude", "--dir", str(env.project)).exit_code == 0
+    assert not (env.project / ".claude" / "settings.local.json").exists()
+    assert not env.config.with_suffix(".key").exists()
+
+
+def test_claude_setup_hooks_stores_private_key_file_and_installs_wake_hooks(env):
+    result = invoke("--runtime", "claude", "--dir", str(env.project), "--hooks")
+    assert result.exit_code == 0, result.output
+    assert KEY not in result.output
+    key_file = env.config.with_suffix(".key")
+    assert mode(key_file) == 0o600 and key_file.read_text().strip() == KEY
+    settings = env.project / ".claude" / "settings.local.json"
+    text = settings.read_text()
+    assert KEY not in text  # hooks reference the key file, never the key
+    hooks = json.loads(text)["hooks"]
+    assert set(hooks) == {"SessionStart", "Stop", "UserPromptSubmit"}
+    for event in ("SessionStart", "Stop"):
+        (hook,) = hooks[event][0]["hooks"]
+        assert hook["asyncRewake"] is True
+        assert f"--key-file {key_file}" in hook["command"] and f"--config {env.config}" in hook["command"]
+    assert invoke("--runtime", "claude", "--dir", str(env.project), "--hooks").exit_code == 0
+    assert json.loads(settings.read_text())["hooks"] == hooks  # idempotent
+
+
+def test_codex_setup_hooks_prints_the_waker_command(env):
+    result = invoke("--runtime", "codex", "--dir", str(env.project), "--hooks")
+    assert result.exit_code == 0, result.output
+    key_file = env.config.with_suffix(".key")
+    assert mode(key_file) == 0o600
+    assert "caura-bus wake --runtime codex --thread latest" in result.output
+    assert f"--key-file {key_file}" in result.output and KEY not in result.output
+    assert not (env.project / ".claude").exists()
+
+
+def test_dry_run_hooks_writes_nothing(env):
+    result = invoke("--runtime", "claude", "--dir", str(env.project), "--hooks", "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert "wake hooks" in result.output
+    assert not env.config.with_suffix(".key").exists()
+    assert not (env.project / ".claude").exists()

@@ -150,19 +150,66 @@ class WakeState:
             return True
 
 
+LATEST_THREAD = "latest"
+
+
+def codex_home():
+    base = os.environ.get("CODEX_HOME", "").strip()
+    return Path(base) if base else Path.home() / ".codex"
+
+
+def latest_codex_thread(directory, home=None):
+    """The newest Codex session started in ``directory``, from its rollout metadata.
+
+    Codex writes a session's rollout once its first turn starts, so a session
+    that has not yet received a message has no thread to queue into.
+    """
+    directory = Path(directory).resolve()
+    sessions = (Path(home) if home else codex_home()) / "sessions"
+    rollouts = sorted(sessions.rglob("rollout-*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for rollout in rollouts:
+        try:
+            with rollout.open() as stream:
+                meta = json.loads(stream.readline())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(meta, dict) or meta.get("type") != "session_meta":
+            continue
+        payload = meta.get("payload") or {}
+        if not payload.get("id") or not payload.get("cwd"):
+            continue
+        if Path(payload["cwd"]).resolve() == directory:
+            return payload["id"]
+    return None
+
+
 class CodexQueue:
-    def __init__(self, thread, executable="codex"):
+    def __init__(self, thread, executable="codex", directory=None):
+        # ``latest`` follows the newest session in ``directory`` and is resolved
+        # at every wake, so the waker can start before (or outlive) a session.
         self.thread = thread
         self.executable = executable
+        self.directory = Path(directory or Path.cwd())
+
+    def resolve(self):
+        if self.thread != LATEST_THREAD:
+            return self.thread
+        thread = latest_codex_thread(self.directory)
+        if thread is None:
+            raise WakeNotStarted(
+                f"no Codex session found for {self.directory}; start Codex there and send it a first message"
+            )
+        return thread
 
     async def __call__(self, message=WAKE_TEXT):
         env = {k: v for k, v in os.environ.items() if k not in {"CAURA_API_KEY", "CAURA_BUS_AGENT_CONFIG"}}
+        thread = self.resolve()
         try:
             process = await asyncio.create_subprocess_exec(
                 self.executable,
                 "queue",
                 "--thread",
-                self.thread,
+                thread,
                 "--message",
                 message,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -181,7 +228,7 @@ class CodexQueue:
             raise
         if process.returncode:
             raise RuntimeError("Codex queue failed; inspect the runtime before clearing wake state")
-        print("Caura: native Codex wake queued.", file=sys.stderr, flush=True)
+        print(f"Caura: native Codex wake queued for thread {thread}.", file=sys.stderr, flush=True)
 
 
 def transient(exc):
@@ -211,7 +258,7 @@ async def run_waker(config, runtime, state, emit=None):
         description=(
             "Native Codex queue; delivery at a turn boundary"
             if runtime == "codex"
-            else "Claude Code Stop/UserPromptSubmit hooks; boundary checks only"
+            else "Claude Code background hook; wakes the open session between turns"
         ),
         capabilities=["pull-delivery"],
         supports_interrupt=False,
@@ -302,6 +349,65 @@ async def supervise(config, runtime, state, emit=None):
             loop.remove_signal_handler(signal.SIGTERM)
 
 
+def process_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def listen(config, state, wait, watch_pid=None, poll=5.0):
+    """Background Claude Code listener (an ``asyncRewake`` hook).
+
+    Runs the event-driven waker until the inbox has a new burst to announce,
+    then returns the wake text; the hook exits 2 and Claude Code starts a turn
+    with it, even when the session is idle. Returns ``None`` without waking when
+    another listener already covers this agent on this host, when ``wait``
+    expires, or when the watched Claude Code process has exited.
+    """
+    message = None
+    woke = asyncio.Event()
+
+    async def emit(text=WAKE_TEXT):
+        nonlocal message
+        message = text
+        woke.set()
+
+    guard = contextlib.ExitStack()
+    try:
+        guard.enter_context(lock(state.path.with_suffix(".process.lock")))
+    except RuntimeError:
+        return None  # one listener per agent and host; the armed one wakes us
+    loop = asyncio.get_running_loop()
+    parent = os.getppid()
+    waker = asyncio.create_task(run_waker(config, "claude-code", state, emit))
+    try:
+        deadline = loop.time() + wait
+        while not woke.is_set() and not waker.done():
+            if watch_pid is not None and not process_alive(watch_pid):
+                break
+            if watch_pid is None and os.getppid() != parent:
+                break  # reparented: the session that armed us is gone
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(min(poll, remaining)):
+                    await woke.wait()
+        if waker.done() and not woke.is_set():
+            waker.result()  # surface revocation or a stopped event stream
+    finally:
+        if not waker.done():
+            waker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await waker
+        guard.close()
+    return message
+
+
 async def receive(config, state, hook=None, wait=0, idle_listen_seconds=5):
     output = []
 
@@ -383,3 +489,24 @@ async def receive(config, state, hook=None, wait=0, idle_listen_seconds=5):
                     await bus.advertise(profile.model_copy(update={"status": "offline"}))
         await bus.close()
     return output[0] if output else ""
+
+
+def load_key(key_file=None):
+    """Make the agent key available: the environment wins, then a private key file.
+
+    Hooks and wakers are started by the runtime, not by the shell that holds the
+    key, so `setup --hooks` stores it in a 0600 file next to the agent config.
+    Returns False when no key is available (the caller treats that as opt-out).
+    """
+    if os.environ.get("CAURA_API_KEY", "").strip():
+        return True
+    if key_file is None or not Path(key_file).is_file():
+        return False
+    path = Path(key_file)
+    if path.stat().st_mode & 0o077:
+        raise ValueError(f"{path} must be private to you (chmod 600 {path})")
+    key = path.read_text().strip()
+    if not key:
+        return False
+    os.environ["CAURA_API_KEY"] = key
+    return True

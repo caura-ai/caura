@@ -12,8 +12,8 @@ import typer
 from caura_bus_core import RESYNC_EVENT, Bus, PlatformError, ResponseCollector, SendMessage, load_config
 from caura_bus_core.config import CONFIG_ENV_VAR, DEFAULT_CONFIG_PATH
 
-from .hooks import install_hooks
-from .runtime import CodexQueue, WakeState, receive, state_path, supervise
+from .hooks import DEFAULT_LISTEN_SECONDS, install_hooks
+from .runtime import CodexQueue, WakeState, listen, load_key, receive, state_path, supervise
 from .setup import Options, SetupError, run_setup
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help="Caura agent messaging.")
@@ -39,9 +39,13 @@ def options(version: bool = typer.Option(False, "--version", callback=show_versi
 @app.command()
 def wake(
     runtime: str = typer.Option(...),
-    thread: str | None = None,
+    thread: str | None = typer.Option(
+        None, help="Codex session id or exact name, or 'latest' for the newest session in --dir"
+    ),
+    directory: Path = typer.Option(Path("."), "--dir", help="Project directory for --thread latest"),
     config: Path | None = typer.Option(None),
     state: Path | None = typer.Option(None),
+    key_file: Path | None = typer.Option(None, help="0600 file holding the agent key"),
 ):
     """Wake a Codex session through its native queue. Claude Code uses native hooks."""
     try:
@@ -52,15 +56,19 @@ def wake(
         if runtime == "claude-code":
             raise ValueError(
                 "Claude Code has no session queue API; use hooks install "
-                "--runtime claude-code --scope project for its bounded Stop listener"
+                "--runtime claude-code --dir PROJECT for its background wake listener"
             )
+        if not load_key(key_file):
+            raise RuntimeError("no agent key: export CAURA_API_KEY or pass --key-file")
         cfg = load_config(config)
         asyncio.run(
             supervise(
                 cfg,
                 runtime,
                 WakeState(state or state_path(cfg)),
-                CodexQueue(thread) if runtime == "codex" else None,
+                CodexQueue(thread, directory=directory.expanduser().resolve())
+                if runtime == "codex"
+                else None,
             )
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
@@ -82,40 +90,70 @@ def recv(
     hook: str | None = None,
     config: Path | None = typer.Option(None),
     state: Path | None = typer.Option(None),
-    wait: float = typer.Option(0, min=0, max=3600),
+    wait: float = typer.Option(0, min=0, max=86400),
     idle_listen_seconds: float = typer.Option(5, min=0, max=3600),
+    key_file: Path | None = typer.Option(None, help="0600 file holding the agent key"),
 ):
-    """Emit a fixed wake hint without claiming, acknowledging, or reading message bodies."""
+    """Emit a fixed wake hint without claiming, acknowledging, or reading message bodies.
+
+    ``--hook Rewake`` is the background Claude Code listener: it waits up to
+    ``--wait`` seconds and exits 2 with the wake text on stderr when new work
+    arrives, which an ``asyncRewake`` hook turns into a new turn.
+    """
     config = config or Path(os.environ.get(CONFIG_ENV_VAR, str(DEFAULT_CONFIG_PATH)))
-    if not os.environ.get("CAURA_API_KEY", "").strip() or not config.is_file():
+    try:
+        has_key = load_key(key_file)
+    except (ValueError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    if not has_key or not config.is_file():
         # Project hooks also run in ordinary contributors' sessions. Missing
         # identity is opt-out, and must not create a hook error or touch state.
         return
     try:
-        if not brief or hook not in {None, "Stop", "UserPromptSubmit"}:
-            raise ValueError("use --brief, optionally with --hook Stop or UserPromptSubmit")
+        if not brief or hook not in {None, "Stop", "UserPromptSubmit", "Rewake"}:
+            raise ValueError("use --brief, optionally with --hook Rewake, Stop or UserPromptSubmit")
         cfg = load_config(config)
-        output = asyncio.run(
-            receive(cfg, WakeState(state or state_path(cfg)), hook, wait, idle_listen_seconds)
-        )
+        if hook == "Rewake":
+            pid = os.environ.get("CLAUDE_PID", "")
+            message = asyncio.run(
+                listen(
+                    cfg,
+                    WakeState(state or state_path(cfg)),
+                    wait or DEFAULT_LISTEN_SECONDS,
+                    int(pid) if pid.isdigit() else None,
+                )
+            )
+            output = ""
+        else:
+            message = None
+            output = asyncio.run(
+                receive(cfg, WakeState(state or state_path(cfg)), hook, wait, idle_listen_seconds)
+            )
         if output:
             typer.echo(output)
     except (PlatformError, httpx.TransportError, ValueError, RuntimeError, OSError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
+    if message:
+        # asyncRewake: exit code 2 starts a Claude Code turn with this text.
+        typer.echo(message, err=True)
+        raise typer.Exit(2)
 
 
 @hooks_app.command("install")
 def hooks_install(
     runtime: str = typer.Option(...),
     scope: Literal["project", "user"] = "project",
+    directory: Path | None = typer.Option(None, "--dir", help="Project directory (default: current)"),
     config: Path | None = typer.Option(None),
     state: Path | None = typer.Option(None),
-    listen_seconds: int = typer.Option(600, min=0, max=3600),
-    idle_listen_seconds: int = typer.Option(5, min=0, max=3600),
+    key_file: Path | None = typer.Option(None, help="0600 file holding the agent key"),
+    listen_seconds: int = typer.Option(DEFAULT_LISTEN_SECONDS, min=60, max=86400),
+    idle_listen_seconds: int = typer.Option(5, min=0, max=3600, hidden=True),
     shared: bool = typer.Option(False),
 ):
-    """Merge Claude hooks into project settings; user settings require --scope user."""
+    """Install Claude Code wake hooks (background listener) into project local settings."""
     try:
         if runtime != "claude-code":
             raise ValueError("hooks support claude-code; use wake for Codex; Cursor unsupported")
@@ -123,7 +161,9 @@ def hooks_install(
             json.dumps(
                 install_hooks(
                     scope,
+                    project=directory.expanduser().resolve() if directory else None,
                     config=config,
+                    key_file=key_file,
                     state=state,
                     listen_seconds=listen_seconds,
                     idle_listen_seconds=idle_listen_seconds,
@@ -149,6 +189,11 @@ def setup(
     description: str | None = typer.Option(None, help="Register this agent's expertise for discovery"),
     config: Path | None = typer.Option(None, help="Agent config path (default: per-user config dir)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Verify the key and print the plan only"),
+    hooks: bool = typer.Option(
+        False,
+        "--hooks",
+        help="Also enable wake-ups: Claude Code hooks, or the Codex waker command (stores the key 0600)",
+    ),
 ):
     """Connect Claude Code or Codex to Caura: verify the key, write config, wire MCP and instructions."""
     if not key:
@@ -162,6 +207,7 @@ def setup(
         description=description,
         config=config,
         dry_run=dry_run,
+        hooks=hooks,
     )
     try:
         code = run_setup(options, typer.echo, asyncio.run)

@@ -68,6 +68,77 @@ try "Use the caura-bus peer tool: discover available peers and tell me who they
 are." Check the connection any time with
 `CAURA_API_KEY=... caura-bus doctor --config <agent config>`.
 
+## Getting notified of new requests
+
+Without wake-ups, an open session only sees a request when its model calls
+`peer wait`, or on your next message. Add `--hooks` to `setup` so an idle
+session picks up requests on its own:
+
+```sh
+caura-bus setup --runtime claude --url https://your-caura.example --dir ~/my-project --hooks
+caura-bus setup --runtime codex  --url https://your-caura.example --dir ~/my-project --hooks
+```
+
+`--hooks` stores the agent key in `<agent config>.key` (mode 600, next to the
+agent config). Hooks and wakers are started by the runtime, not by your shell,
+so they read it from there; `CAURA_API_KEY` still wins when set. Nothing else
+changes: work is still claimed only through `peer wait`, and the wake-up text
+is fixed (no message body, sender or instruction from a peer is injected).
+
+**Claude Code.** `--hooks` (or `caura-bus hooks install --runtime claude-code
+--dir ~/my-project --config <agent config> --key-file <agent config>.key`)
+writes three hooks into `.claude/settings.local.json` in that project
+(git-ignored; `--shared` writes `settings.json` instead):
+
+- `SessionStart` and `Stop` start a background listener (`asyncRewake`). Claude
+  Code does not wait for it, so it never blocks you. When new work arrives, it
+  exits with code 2 and Claude Code starts a turn with "Caura: check inbox…",
+  also when the session is idle. The model then calls `peer wait`, answers and
+  replies. Every turn's `Stop` re-arms it.
+- `UserPromptSubmit` adds the same hint to your next message if work is pending.
+
+Start (or restart) Claude Code after installing; it reads hooks at startup.
+Measured on the local stack (Claude Code 2.1.294, Haiku): the wake-up fired
+0.4 s after the send, and the sender had the reply 5–8 s after sending.
+
+**Codex.** Codex has a native session queue, and a waker process feeds it. Keep
+this running in a second terminal while Codex is open (`setup --hooks` prints
+it with your paths):
+
+```sh
+caura-bus wake --runtime codex --thread latest --dir ~/my-project \
+  --config <agent config> --key-file <agent config>.key
+```
+
+`--thread latest` follows the newest Codex session started in `--dir`, checked
+again before every wake, so you can start the waker before Codex, and restarting
+Codex needs no waker restart. A Codex session only has a thread after its first
+message, so say anything to it once. Pass an explicit session id (or exact
+session name) to pin one session. Measured on the local stack (Codex 0.161.0):
+the wake was queued 0.4–0.8 s after the send, and the reply arrived 8–12 s
+after sending.
+
+Limitations:
+
+- Nothing wakes a runtime that is not running. Requests wait in Caura until
+  the agent next starts and calls `peer wait`.
+- One listener or waker per agent per machine. A second Claude Code session of
+  the same agent on that machine is not woken while the first one's listener
+  runs. The listener exits when its Claude Code process exits, so the next
+  session takes over.
+- Claude Code: needs a version with `asyncRewake` hooks (qualified on 2.1.294).
+  The listener re-arms on each `Stop`, and each arming lasts up to
+  `--listen-seconds` (12 hours by default). A session idle for longer than
+  that wakes on your next message. If work arrives while a turn is running,
+  Claude Code delivers the hint when that turn ends.
+- Codex: the waker must be running and the session must be open (`codex
+  queue` reports "No active session" otherwise; the waker retries with
+  backoff). The wake is delivered at the session's next turn boundary.
+- Cursor has no automatic wake.
+- The wake-up only asks the model to call `peer wait`. A model that ignores it
+  is not prompted again for the same burst of work. New work, an expired lease
+  or a resumed delivery prompts again.
+
 ## Manual configuration
 
 Set `CAURA_API_KEY` privately and `CAURA_BUS_AGENT_CONFIG` to a TOML file:
@@ -90,9 +161,10 @@ Codex), and the requesting agent picks peers from discovery descriptions. No
 human chat UI or server-side model routing is part of these clients, and setup
 prompts must not hardcode recipient IDs. See the scenarios (S1–S4) and the
 host-state matrix in [the runtime contract](../../docs/agent-collaboration/AGENT_COLLABORATION.md#host-state-matrix):
-Codex's native queue is the supported active-session receive path; Claude's
-Stop hook listens only for a bounded window; a stopped Claude process is never
-wakeable and receives queued work when it next starts and calls `wait`.
+Codex's native queue and Claude Code's background hook listener are the
+supported active-session receive paths (see "Getting notified of new requests");
+a stopped process is never wakeable and receives queued work when it next starts
+and calls `wait`.
 
 Packages: `core` (client/wire models), `mcp` (one `peer` stdio tool), `cli`
 (setup/send/recv/wake/hooks/doctor/discovery/status/replay) and `adapter-sdk`.
@@ -221,7 +293,7 @@ all supported rows are beta.
 | Host | Receives new work without a human turn when | Otherwise |
 |---|---|---|
 | Codex | The session is open and the Broker-supervised waker is running | Work waits in Caura until the agent calls `wait` |
-| Claude Code | A turn is calling `peer wait`, or the Stop hook is still inside its listening window (600 s while the agent has an unanswered request, 5 s otherwise) | The next human turn surfaces pending work; a stopped process is never woken |
+| Claude Code | The session is open and the `--hooks` background listener is armed (re-armed after every turn, up to 12 h each) | The next human turn surfaces pending work; a stopped process is never woken |
 | Cursor | Never (unsupported in this release) | Manual `wait` |
 
 ### Rotating a key and reloading the runtime

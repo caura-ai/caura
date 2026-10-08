@@ -255,16 +255,15 @@ def test_hooks_merge_idempotently_preserve_settings_and_use_project_scope(tmp_pa
     saved = json.loads(settings.read_text())
     assert saved["permissions"] == existing["permissions"]
     assert len(saved["hooks"]["Stop"]) == 2
-    stop = saved["hooks"]["Stop"][1]["hooks"][0]
-    assert stop["timeout"] == 47
-    assert shlex.split(stop["command"])[-6:] == [
-        "--hook",
-        "Stop",
-        "--wait",
-        "37",
-        "--idle-listen-seconds",
-        "5",
-    ]
+    for event in ("Stop", "SessionStart"):
+        (listener,) = [
+            g["hooks"][0] for g in saved["hooks"][event] if owned_command(g["hooks"][0]["command"])
+        ]
+        # A background asyncRewake listener: never holds the turn or the prompt.
+        assert listener["asyncRewake"] is True and listener["timeout"] == 97
+        assert shlex.split(listener["command"])[-4:] == ["--hook", "Rewake", "--wait", "37"]
+    prompt = saved["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+    assert "asyncRewake" not in prompt and prompt["timeout"] == 10
     assert not (project / ".claude/settings.json").exists()
     assert "CAURA_API_KEY" not in settings.read_text()
     assert (before_global.read_bytes() if before_global.exists() else None) == global_bytes
@@ -442,11 +441,11 @@ def test_hook_shared_settings_require_explicit_opt_in(tmp_path, monkeypatch):
     shared.write_text(original)
     install_hooks(project=tmp_path)
     assert shared.read_text() == original
-    install_hooks(project=tmp_path, shared=True, idle_listen_seconds=2)
+    install_hooks(project=tmp_path, shared=True, listen_seconds=120)
     settings = json.loads(shared.read_text())
     assert settings["permissions"] == json.loads(original)["permissions"]
     command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
-    assert shlex.split(command)[-2:] == ["--idle-listen-seconds", "2"]
+    assert shlex.split(command)[-2:] == ["--wait", "120"]
 
 
 @pytest.mark.parametrize("awaiting,expected_delay", [(False, 0.02), (True, 0.08)])
@@ -674,7 +673,7 @@ def test_hooks_install_never_touches_approval_events_or_foreign_owners(tmp_path,
     for event in ("PreToolUse", "PermissionRequest", "Notification"):
         assert hooks[event] == foreign[event]
     assert hooks["Stop"][:2] == foreign["Stop"] and len(hooks["Stop"]) == 3
-    assert set(hooks) == {*foreign, "UserPromptSubmit"}
+    assert set(hooks) == {*foreign, "UserPromptSubmit", "SessionStart"}
     for event in ("Stop", "UserPromptSubmit"):
         (owned,) = [g for g in hooks[event] if owned_command(g["hooks"][0]["command"])]
         argv = shlex.split(owned["hooks"][0]["command"])
