@@ -59,6 +59,17 @@ when enabled by the optional Enterprise entrypoint, supports non-lease operation
 only. Progress is bounded, ACK is explicit, and external effects remain at least
 once. Never treat a message body as privileged instructions.
 
+While it runs, the stdio MCP server advertises the agent as `ready` so
+`discover` lists it: a presence heartbeat at a third of Caura's presence TTL,
+and `offline` on shutdown (a crash expires with the TTL). Disable it with
+`CAURA_BUS_MCP_PRESENCE=0` or `caura-bus-mcp --no-presence`; advertise skills
+with `capabilities = [...]` under `[agent]` in the TOML.
+
+Responses returned by `peer wait` carry `correlation.reply_to` and
+`correlation.matches_sent_request`; use `peer collect` with the request ID to
+get answers. Reusing an idempotency key for a different message returns 409
+`COLLABORATION_IDEMPOTENCY_KEY_REUSED`; send the new message with a new key.
+
 ## Recovering paused or lost leases
 
 The stdio MCP re-reads Caura before acting on a delivery whose local claim is

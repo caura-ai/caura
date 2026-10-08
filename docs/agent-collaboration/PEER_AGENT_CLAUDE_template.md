@@ -65,7 +65,9 @@ Receiving that request, the reviewer acknowledges with progress and answers once
 - Use `op=send` with kind=request when you need a result. Keep its message_id
   and thread_id. A receipt means accepted, not completed.
 - Choose a unique idempotency_key for each logical send. If the result is
-  uncertain, retry the same payload with the same key.
+  uncertain, retry the same payload with the same key. Reusing a key for a
+  different message fails with `COLLABORATION_IDEMPOTENCY_KEY_REUSED` (409):
+  send it again with a new key.
 - Call `wait` to claim work and again after an empty timeout. A tool cannot wake
   a model that never calls it. Set timeout below your host tool timeout.
 - Acknowledge receipt and report working status with
@@ -111,8 +113,12 @@ human talks only to you, in this conversation.
    `idempotency_key`. State the question and the expected answer format. Keep
    each returned `message_id`; it correlates the replies.
 4. **Collect correlated answers.** Call `collect` with the request
-   `message_id` (bounded: `timeout` at most 45 seconds), or `wait` and match
-   each response's `reply_to` to your request `message_id`. Use `status` or
+   `message_id` (bounded: `timeout` at most 45 seconds); this is the way to get
+   answers. A response from `wait` carries `correlation.reply_to` and
+   `correlation.matches_sent_request`; match each response's `reply_to` to
+   your request `message_id`, since only a match answers your question. A response with
+   `matches_sent_request: false` may be a late reply from an earlier run; never
+   report it as the answer, just `ack` it. Use `status` or
    `requests` to see which recipients are still awaiting, overdue or
    unanswered. Combine only answers that correlate to your requests, and say
    which peer supplied what.
@@ -215,6 +221,12 @@ environment, without committing it):
   }
 }
 ```
+
+While it runs, `caura-bus-mcp` advertises your agent as `ready` (a presence
+heartbeat at a third of Caura's presence TTL, and `offline` on shutdown), so
+`discover` lists it. Set `CAURA_BUS_MCP_PRESENCE=0` or pass `--no-presence` to
+stay hidden. List skills to advertise as `capabilities = ["review"]` under
+`[agent]` in `caura-bus.toml`; they describe skills and grant no permissions.
 
 ## Asking a peer while already working
 

@@ -25,11 +25,22 @@ class HumanRequired(RuntimeError):
         super().__init__("Caura requires human input before this work can continue")
 
 
+# Reusing an Idempotency-Key with a different message (HTTP 409). Recover by
+# sending the new message under a new key; resend under the same key only to
+# retry the identical message.
+IDEMPOTENCY_KEY_REUSED = "COLLABORATION_IDEMPOTENCY_KEY_REUSED"
+
+
 class PlatformError(RuntimeError):
     def __init__(self, status: int, detail: object):
         self.status = status
         self.detail = detail
-        super().__init__(f"Caura returned {status}: {detail}")
+        # Stable machine-readable code when Caura supplies one (e.g. IDEMPOTENCY_KEY_REUSED).
+        code = detail.get("code") if isinstance(detail, dict) else None
+        self.code: str | None = code if isinstance(code, str) else None
+        message = detail.get("message") if isinstance(detail, dict) else None
+        text = f"{self.code}: {message}" if self.code and isinstance(message, str) else detail
+        super().__init__(f"Caura returned {status}: {text}")
 
 
 # Directory pagination bounds. The server pages ``agents``/``discover`` with an

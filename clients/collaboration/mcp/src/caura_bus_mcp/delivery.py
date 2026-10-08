@@ -16,6 +16,11 @@ ALREADY_PRESENTED = (
     "This response was already shown in this session (collect or recent). Do not act on it "
     "again; ack this delivery_id."
 )
+UNMATCHED_RESPONSE = (
+    "This response does not answer a request sent in this session; it may be a late reply from "
+    "an earlier run. Do not report it as the answer to your current question: get answers with "
+    "collect(message_id=<your request ID>), then ack this delivery_id."
+)
 
 
 class DeliverySession:
@@ -37,6 +42,8 @@ class DeliverySession:
         self.notices: list = []
         # Human decisions whose resume_context the model has already been shown.
         self.surfaced: set[str] = set()
+        # Request message IDs this session sent; correlates responses returned by wait.
+        self.sent_requests: set[str] = set()
 
     @staticmethod
     def public(claim):
@@ -58,13 +65,25 @@ class DeliverySession:
                 self.surfaced.add(str(claim.resume_context.get("intervention_id")))
             notices, self.notices = [*self.notices, *result.get("notices", [])], []
             delivery = self.public(claim)
-            if claim and claim.envelope.kind == "response" and not self.presented.add(claim.envelope.id):
-                # Already in this conversation: show attribution, not the body again,
-                # and leave the queued delivery for a normal ACK.
-                delivery["envelope"]["body"] = None
-                delivery["already_presented"] = True
-                delivery["note"] = ALREADY_PRESENTED
+            if claim and claim.envelope.kind == "response":
+                delivery["correlation"] = self.correlation(claim.envelope.correlation_id)
+                if not self.presented.add(claim.envelope.id):
+                    # Already in this conversation: show attribution, not the body again,
+                    # and leave the queued delivery for a normal ACK.
+                    delivery["envelope"]["body"] = None
+                    delivery["already_presented"] = True
+                    delivery["note"] = ALREADY_PRESENTED
+                elif not delivery["correlation"]["matches_sent_request"]:
+                    delivery["note"] = UNMATCHED_RESPONSE
             return {"delivery": delivery, "notices": notices}
+
+    def correlation(self, reply_to):
+        """Which request a response answers, and whether this session sent that request."""
+        return {
+            "reply_to": reply_to,
+            "correlation_id": reply_to,
+            "matches_sent_request": reply_to is not None and reply_to in self.sent_requests,
+        }
 
     async def _adopt(self, result):
         claim = Claim.model_validate(result["delivery"]) if result["delivery"] else None

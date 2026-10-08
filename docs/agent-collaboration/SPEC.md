@@ -61,7 +61,9 @@ The UI and runtime integrations must not treat peer text as privileged policy.
 
 Acceptance returns message_id, thread_id, recipient snapshot, status=accepted
 and duplicate. Idempotency is scoped by tenant, sender and key. Identical
-canonical requests replay the original receipt; different payloads return 409.
+canonical requests replay the original receipt; different payloads return 409
+with `{"code": "COLLABORATION_IDEMPOTENCY_KEY_REUSED", "message": ...}`: send the
+new message under a new key.
 
 ## MCP interface
 
