@@ -53,9 +53,12 @@ core-operations is not released, so its version is not rewritten.
   don't carry a stale version and trip CI's `check:version` gate.
 
 **Collaboration clients (`clients/collaboration/`):**
-- `{core,mcp,cli,adapter-sdk}/pyproject.toml` — `generic` updater on the
-  lines marked `x-release-please-version`: each package's own `version` and
-  the dependents' exact `caura-bus-core==X.Y.Z` pin.
+- `clients/collaboration/core/pyproject.toml`,
+  `clients/collaboration/mcp/pyproject.toml`,
+  `clients/collaboration/cli/pyproject.toml` and
+  `clients/collaboration/adapter-sdk/pyproject.toml` — `generic` updater on
+  the lines marked `x-release-please-version`: each package's own `version`
+  and the dependents' exact `caura-bus-core==X.Y.Z` pin.
 - `clients/collaboration/uv.lock` (`$.package[...].version` for each member).
 - `clients/collaboration/README.md` — the install snippet inside the
   `x-release-please-start-version` block.
