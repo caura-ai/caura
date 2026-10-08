@@ -266,12 +266,16 @@ The body/token-free `/inbox/state` reports a runnable/interrupt hint and durable
 wait generation. Each HTTP wait advances it once, not once per internal poll.
 Neither that read nor `recv` consumes work. Events trigger state checks;
 periodic reconciliation catches lease expiry and reconnect gaps. Coalescing is
-local to one host per agent. Claude Stop hooks listen up to a configurable cap
-(600 seconds by default) only while a sent request has an unanswered recipient;
-otherwise the idle window defaults to five seconds. The server's `awaiting_reply`
-hint uses durable, tenant-scoped request/response correlations. Hooks then go
-offline. A session idle beyond that window needs a human turn. Missing config
-or key makes recv a silent no-op. Project installs use ignored local settings;
+local to one host per agent. Claude Code hooks (`hooks install`, or `setup
+--hooks`) start a background `asyncRewake` listener on `SessionStart` and on
+every `Stop`. It runs the same event-driven check as the Codex waker without
+holding the turn. When a new burst is runnable, it exits 2 and Claude Code
+starts a turn with the fixed wake text, also from idle. One listener runs per
+agent and host (a lock), and it exits when its Claude Code process exits.
+Each arming lasts up to `--listen-seconds` (12 hours by default). The legacy
+blocking `recv --hook Stop` listener remains for existing installs; reinstalling
+replaces it. Missing config or key makes recv a silent no-op. Hooks read the
+key from `CAURA_API_KEY` or from a 0600 `--key-file`. Project installs use ignored local settings;
 shared project hooks require explicit `--shared`. Cursor automatic wake is not
 qualified in this release.
 
@@ -286,11 +290,11 @@ generally available release.
 
 | Host | State | Receive behavior | Status |
 |---|---|---|---|
-| Codex | Session open, `caura-bus wake --runtime codex --thread ID` running | Native `codex queue` delivers one wake prompt to that session; the model calls `peer wait` at its next turn boundary. | **Supported (beta)** active-session receive. Used for the initial S1–S3 demonstration. |
+| Codex | Session open, `caura-bus wake --runtime codex --thread ID` (or `--thread latest --dir PROJECT`) running | Native `codex queue` delivers one wake prompt to that session; the model calls `peer wait` at its next turn boundary. | **Supported (beta)** active-session receive. Used for the initial S1–S3 demonstration. |
 | Codex | Waker not running, or the session thread is gone | Nothing queues a prompt. Messages stay durable in Caura until a session calls `wait`. | Not wakeable. Work is delivered when the agent next calls `wait`. |
 | Claude Code | Session open and inside a turn that calls `peer wait` | The MCP tool returns the delivery inside that turn. | Supported (beta, pull). |
-| Claude Code | Session open, turn just ended, hooks installed | The Stop hook listens for a bounded window: up to `listen_seconds` (600 by default) while a sent request is unanswered, otherwise `idle_listen_seconds` (5 by default). Work arriving inside the window continues the session. | Supported (beta) **only within that window**. Qualified separately from the Codex demonstration. |
-| Claude Code | Session open, idle beyond the listening window | No hook runs; there is no session queue API. A human turn (UserPromptSubmit hook) surfaces pending work. | Not wakeable. |
+| Claude Code | Session open (idle or between turns), hooks installed, Claude Code with `asyncRewake` hooks | The background listener armed by `SessionStart`/`Stop` exits 2 when work arrives, and Claude Code starts a turn with the wake text; the model calls `peer wait`. | **Supported (beta)** active-session receive. Qualified on Claude Code 2.1.294 against the local stack: wake 0.4 s after send, reply 5–8 s. |
+| Claude Code | Session open, idle longer than `--listen-seconds` (12 h) since its last turn, or another session of the same agent holds the listener | No listener for this session. A human turn (UserPromptSubmit hook) surfaces pending work. | Not wakeable. |
 | Claude Code | Process stopped or exited | Nothing runs. Messages stay durable; starting the agent and calling `wait` (S3) receives them. | **Never advertised as wakeable.** |
 | Cursor | Any | No automatic wake. | Unsupported in this release. |
 
