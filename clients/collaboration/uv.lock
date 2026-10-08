@@ -79,12 +79,14 @@ version = "0.2.0"
 source = { editable = "cli" }
 dependencies = [
     { name = "caura-bus-core" },
+    { name = "caura-bus-mcp" },
     { name = "typer" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "caura-bus-core", editable = "core" },
+    { name = "caura-bus-mcp", editable = "mcp" },
     { name = "typer", specifier = ">=0.12" },
 ]
 
