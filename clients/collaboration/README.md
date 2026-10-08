@@ -25,6 +25,51 @@ uv run --no-sync caura-bus --help
 uv run --no-sync pytest
 ```
 
+## Connect your agent (one minute)
+
+Get an agent key from your Caura admin (the dashboard's API Credentials page),
+then connect Claude Code or Codex from the project directory it will work in:
+
+```sh
+uv tool install "git+https://github.com/caura-ai/caura@main#subdirectory=clients/collaboration/cli"
+export CAURA_API_KEY=...   # or pass --key; setup prompts when neither is given
+
+caura-bus setup --runtime claude --url https://your-caura.example --dir ~/my-project \
+  --description "What this agent knows, written for the peers that will pick it"
+caura-bus setup --runtime codex  --url https://your-caura.example --dir ~/my-project
+```
+
+`setup` verifies the key against the server and reads the agent and tenant
+from it (`--agent-id` only asserts the expected value). It then:
+
+1. writes the agent config to
+   `~/.config/caura-bus/agents/<host>/<tenant>/<agent>.toml` (mode 600, no key
+   inside; `$XDG_CONFIG_HOME` is honoured, `--config` overrides). Plain `http`
+   is accepted only for `localhost`/`127.0.0.1`.
+2. wires the `caura-bus-mcp` server installed next to the CLI:
+   - **claude:** `claude mcp add --scope local caura-bus …` run in `--dir`
+     (default: the current directory). Without `claude` on `PATH` it prints the
+     exact command to run, taking the key from `$CAURA_API_KEY`.
+   - **codex:** adds or updates only `[mcp_servers.caura-bus]` in
+     `~/.codex/config.toml` (`$CODEX_HOME` honoured). Unrelated settings and
+     subtables such as `[mcp_servers.caura-bus.tools.peer]` are kept, a backup
+     is saved as `config.toml.caura-bus-setup.bak`, and the result is validated
+     before writing. The file holds the key afterwards, so it is set to mode 600.
+     Codex MCP servers are per user, so one Codex user connects one agent.
+3. adds the [peer instructions](../../docs/agent-collaboration/PEER_AGENT_CLAUDE_template.md)
+   to `CLAUDE.md` (claude) or `AGENTS.md` (codex) in `--dir`, inside a marked
+   block. Existing content is never rewritten; re-running replaces only that block.
+4. registers `--description`, when given, as the agent's directory description.
+
+Re-running `setup` updates everything in place, for example after a key rotation.
+`--dry-run` verifies the key and prints the plan without writing anything. The
+key is only ever printed masked. Then start the runtime in that directory and
+try "Use the caura-bus peer tool: discover available peers and tell me who they
+are." Check the connection any time with
+`CAURA_API_KEY=... caura-bus doctor --config <agent config>`.
+
+## Manual configuration
+
 Set `CAURA_API_KEY` privately and `CAURA_BUS_AGENT_CONFIG` to a TOML file:
 
 ```toml
@@ -50,7 +95,7 @@ Stop hook listens only for a bounded window; a stopped Claude process is never
 wakeable and receives queued work when it next starts and calls `wait`.
 
 Packages: `core` (client/wire models), `mcp` (one `peer` stdio tool), `cli`
-(send/recv/wake/hooks/doctor/discovery/status/replay) and `adapter-sdk`.
+(setup/send/recv/wake/hooks/doctor/discovery/status/replay) and `adapter-sdk`.
 See [the runtime contract](../../docs/agent-collaboration/AGENT_COLLABORATION.md)
 and [agent instructions](../../docs/agent-collaboration/PEER_AGENT_CLAUDE_template.md).
 
