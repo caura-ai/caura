@@ -329,3 +329,41 @@ Index(
     Memory.id,
     postgresql_where=text("deleted_at IS NULL AND status = 'quarantined'"),
 )
+
+
+# Backs the contradiction-signal window (L-185). The reader windows on
+# ``COALESCE(status_changed_at, created_at)``, since 045 left the column
+# unbackfilled, so the key is that expression; 045's index on the bare column
+# could not serve it. Contradicted rows only. Created CONCURRENTLY in migration
+# 065, which drops 045's, with the same key and predicate.
+Index(
+    "ix_memories_contradicted_window",
+    Memory.tenant_id,
+    func.coalesce(Memory.status_changed_at, Memory.created_at),
+    postgresql_where=text("status IN ('outdated', 'conflicted')"),
+)
+
+
+# Back the two arms of the expiry sweep (L-191): live rows with an
+# ``expires_at`` or a ``ts_valid_end``, so the sweep reads by index only the rows
+# that can expire, and the planner ORs the two. The statuses are
+# ``LIVE_MEMORY_STATUSES``, which the sweep binds. Created CONCURRENTLY in
+# migration 065 with the same keys and predicates.
+Index(
+    "ix_memories_expires_at",
+    Memory.tenant_id,
+    Memory.expires_at,
+    postgresql_where=text(
+        "deleted_at IS NULL AND status IN ('active', 'confirmed', 'pending') "
+        "AND expires_at IS NOT NULL"
+    ),
+)
+Index(
+    "ix_memories_valid_end",
+    Memory.tenant_id,
+    Memory.ts_valid_end,
+    postgresql_where=text(
+        "deleted_at IS NULL AND status IN ('active', 'confirmed', 'pending') "
+        "AND ts_valid_end IS NOT NULL"
+    ),
+)

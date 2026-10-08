@@ -53,10 +53,11 @@ _TABLES_WITHOUT_MODELS = {
 
 # Indexes the migrations create that the models do not express. Left undeclared
 # rather than back-filled: these are partial, GIN and HNSW indexes whose exact
-# predicates and operator classes are load-bearing, and transcribing seventeen
+# predicates and operator classes are load-bearing, and transcribing sixteen
 # of them into the models is a change with its own risk profile. Listed so that
-# an EIGHTEENTH — a genuinely new drift — fails this test instead of joining a
-# crowd nobody is counting.
+# a SEVENTEENTH — a genuinely new drift — fails this test instead of joining a
+# crowd nobody is counting. 045's ``ix_memories_status_changed_at`` left the list
+# when 065 dropped it (L-185).
 _INDEXES_ONLY_IN_MIGRATIONS = {
     "ix_audit_log_tenant_event_hash",
     "ix_audit_log_tenant_id",
@@ -72,7 +73,6 @@ _INDEXES_ONLY_IN_MIGRATIONS = {
     "ix_memories_search_vector",
     "ix_memories_stale_embedding",
     "ix_memories_status",
-    "ix_memories_status_changed_at",
     "ix_memories_tenant_id_active",
     "ix_memories_visibility",
 }
@@ -123,7 +123,7 @@ async def test_no_model_declares_an_index_the_schema_does_not_have() -> None:
 async def test_the_indexes_only_the_migrations_know_about_are_the_known_ones() -> None:
     """Guard on the residual, not a claim that the residual is fine.
 
-    These seventeen WOULD be dropped by an autogenerate-generated migration —
+    These sixteen WOULD be dropped by an autogenerate-generated migration —
     including three HNSW vector indexes and two GIN full-text indexes, whose
     loss would not fail a single test and would quietly change search from an
     index scan to a sequential one. Pinning the set means the next reader finds
