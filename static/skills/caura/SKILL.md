@@ -276,13 +276,16 @@ an unnamed target, and you'll get a 403 about trust rather than the shape.
 ```text
 # For yourself (trust >= 1; agent_id=<you> is REQUIRED — omitting it
 # drops the call to the trust >= 2 tier):
-caura_keystones_set op=set scope=agent agent_id=<you> fleet_id=<fleet> \
-  title="…" content="…" weight=low|med|high
+caura_keystones_set op=set doc_id=<stable-slug> scope=agent agent_id=<you> \
+  fleet_id=<fleet> title="…" content="…" weight=low|med|high
 
 # For the fleet or tenant (trust >= 2; OMIT agent_id for tenant/fleet):
-caura_keystones_set op=set scope=fleet|tenant \
+caura_keystones_set op=set doc_id=<stable-slug> scope=fleet|tenant \
   title="…" content="…" weight=low|med|high [fleet_id=<fleet>]
 ```
+
+`doc_id` is required: it is the upsert key. Setting the same `doc_id` again
+updates that rule, and `op=delete` takes it to remove the rule.
 
 ## A full loop, end to end
 

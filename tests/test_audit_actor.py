@@ -284,7 +284,7 @@ async def test_conflict_resolve(monkeypatch, log):
     await conflicts.resolve_conflict(
         "c1",
         ConflictResolveRequest(tenant_id="t1", review_status="resolved"),
-        auth=_ctx(),
+        auth=_ctx(is_person=True),
     )
     _assert_actor(_detail(log, "conflict.review"))
 

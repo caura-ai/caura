@@ -3,30 +3,18 @@
 Each test names the commit SHA it guards against regression. Every fix is
 black-box tested through the HTTP API so the envelope change, hook wiring,
 and endpoint shape are locked in end-to-end.
+
+The guards for 49334e7 (the on_recall hook bumps ``recall_count``) and
+81fa94e (re-running insights supersedes prior rows) skipped themselves under
+the fake embedding provider the suite always runs with, so they never ran.
+They are gone; tests/test_search_recall_tracked_flag.py and
+tests/test_insights_service.py cover both paths (L-84).
 """
 
 from __future__ import annotations
 
-import os
-
-import pytest
-
 from tests.conftest import get_test_auth
 from tests.conftest import uid as _uid
-
-
-def _needs_real_provider() -> bool:
-    """True when the test env uses the `fake` embedding/LLM provider.
-
-    The on_recall hook and the insight-supersede path both require real
-    semantic matching to exercise — fake providers return null/constant
-    vectors and deterministic canned LLM output, so they can't reliably
-    trigger a recall hit or produce re-runnable insight findings.
-    """
-    return (
-        os.environ.get("EMBEDDING_PROVIDER", "").lower() == "fake"
-        or os.environ.get("ENTITY_EXTRACTION_PROVIDER", "").lower() == "fake"
-    )
 
 
 async def _write(
@@ -76,64 +64,6 @@ async def test_search_response_uses_items_envelope(client):
     assert isinstance(data, dict), f"search must return dict, got {type(data).__name__}"
     assert "items" in data, f"search response missing 'items' key: {list(data)}"
     assert isinstance(data["items"], list)
-
-
-# ---------------------------------------------------------------------------
-# 49334e7 — on_recall hook wires recall_count + last_recalled_at
-# ---------------------------------------------------------------------------
-
-
-async def test_recall_increments_recall_count(client):
-    if _needs_real_provider():
-        pytest.skip("fake embedding provider can't reliably trigger on_recall hook")
-    tenant_id, headers = get_test_auth()
-    tag = _uid()
-    agent_id = f"recall-agent-{tag}"
-    fleet_id = f"recall-fleet-{tag}"
-
-    mem = await _write(
-        client,
-        tenant_id,
-        headers,
-        "The capital of France is Paris.",
-        agent_id=agent_id,
-        fleet_id=fleet_id,
-    )
-    memory_id = mem["id"]
-    assert mem["recall_count"] == 0
-    assert mem["last_recalled_at"] is None
-
-    resp = await client.post(
-        "/api/v1/recall",
-        json={
-            "tenant_id": tenant_id,
-            "query": "capital of France",
-            "fleet_ids": [fleet_id],
-            "top_k": 5,
-        },
-        headers=headers,
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    if body.get("memory_count", 0) == 0:
-        # The fake embedding provider in CI can't guarantee a vector hit for
-        # a short semantic query, so the hook has nothing to fire on. That's
-        # fine — the hook's contract is "increment on hits" and there's no
-        # regression to guard against without a hit. Skip in that case.
-        pytest.skip(
-            "recall returned zero memories — fake embedding can't match; hook untestable"
-        )
-
-    after = await client.get(
-        f"/api/v1/memories/{memory_id}?tenant_id={tenant_id}",
-        headers=headers,
-    )
-    assert after.status_code == 200
-    after_data = after.json()
-    assert after_data["recall_count"] >= 1, (
-        "on_recall hook not wired — recall_count did not increment"
-    )
-    assert after_data["last_recalled_at"] is not None
 
 
 # ---------------------------------------------------------------------------
@@ -207,63 +137,6 @@ async def test_agents_get_tune_symmetric_with_patch(client):
     get_body = get_resp.json()
     assert "trust_level" in get_body
     assert get_body["agent_id"] == agent_id
-
-
-# ---------------------------------------------------------------------------
-# 81fa94e — Re-running insights supersedes prior active rows to 'outdated'
-# ---------------------------------------------------------------------------
-
-
-async def test_insights_rerun_supersedes_prior(client):
-    if _needs_real_provider():
-        pytest.skip("fake LLM provider can't reliably produce insight findings")
-    tenant_id, headers = get_test_auth()
-    tag = _uid()
-    fleet_id = f"ins-fleet-{tag}"
-    agent_id = f"ins-agent-{tag}"
-
-    for i in range(3):
-        await _write(
-            client,
-            tenant_id,
-            headers,
-            f"The {['red', 'green', 'blue'][i]} team ships on Fridays.",
-            agent_id=agent_id,
-            fleet_id=fleet_id,
-        )
-
-    body = {
-        "tenant_id": tenant_id,
-        "fleet_id": fleet_id,
-        "agent_id": agent_id,
-        "scope": "fleet",
-        "focus": "patterns",
-    }
-    first = await client.post("/api/v1/insights/generate", json=body, headers=headers)
-    if first.status_code == 404:
-        pytest.skip("insights/generate endpoint not available in this build")
-    assert first.status_code in (200, 201), first.text
-    first_body = first.json()
-    if not first_body.get("findings"):
-        pytest.skip("first insight run yielded no findings — nothing to supersede")
-
-    second = await client.post("/api/v1/insights/generate", json=body, headers=headers)
-    assert second.status_code in (200, 201), second.text
-
-    # After the second run, prior 'insight' memories for this focus should be
-    # moved from active → outdated. Check via the memories list.
-    listing = await client.get(
-        f"/api/v1/memories?tenant_id={tenant_id}&agent_id={agent_id}"
-        f"&memory_type=insight&include_deleted=true&limit=50",
-        headers=headers,
-    )
-    assert listing.status_code == 200, listing.text
-    items = listing.json()["items"]
-    statuses = [m["status"] for m in items]
-    assert "outdated" in statuses, (
-        f"Re-running insights did not transition prior rows to 'outdated'. "
-        f"Got statuses: {statuses}"
-    )
 
 
 # ---------------------------------------------------------------------------

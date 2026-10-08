@@ -198,6 +198,24 @@ async def test_the_merge_it_meant_to_make_is_made_now(calls):
     assert calls["merge"].await_args.args == (row["id"], candidate, "t")
 
 
+async def test_the_pending_merge_decision_is_made_now(calls):
+    """L-17: a write records its merge decision as pending, and sets
+    ``near_duplicate_merged`` only once the merge lands. The row above carries
+    the flag as a write held before that change recorded it."""
+    candidate = str(uuid.uuid4())
+    row = _row(
+        system={
+            "write_mode": "fast",
+            "near_duplicate_of": candidate,
+            "near_duplicate_merge_pending": True,
+        }
+    )
+
+    await _replay(calls, row)
+
+    calls["merge"].assert_awaited_once_with(row["id"], candidate, "t")
+
+
 async def test_a_near_duplicate_it_did_not_mean_to_merge_stays(calls):
     """Fast mode records the nearest row whether or not it decided to merge."""
     await _replay(

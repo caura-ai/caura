@@ -1,0 +1,5 @@
+# The scanners security-scan.yml runs (L-65), pinned so a new release cannot fail
+# every PR at once. Dependabot's pip updates propose bumps, and a bump's own PR
+# runs the scan with the new version.
+bandit==1.9.4
+pip-audit==2.10.1

@@ -10,13 +10,14 @@ from core_api.config import settings
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
 from core_api.services.entity_extraction_worker import process_entity_extraction
+from core_api.services.system_metadata import set_system_value
 from core_api.services.task_tracker import tracked_task
 from core_api.tasks import track_task
 
 logger = logging.getLogger(__name__)
 
 
-async def _merge_near_duplicate(new_id: str, candidate_id: str, tenant_id: str) -> None:
+async def _merge_near_duplicate(new_id: str, candidate_id: str, tenant_id: str) -> dict:
     """Retire the near-duplicate this write supersedes (A71).
 
     Two writes, and the ORDER is the safety property:
@@ -31,20 +32,23 @@ async def _merge_near_duplicate(new_id: str, candidate_id: str, tenant_id: str) 
     linked, which is exactly what an in-flight contradiction chain looks like
     and which the existing lineage already tolerates.
 
-    ``update_memory_status`` guards the link with a CAS against NULL, so if a
-    contradiction verdict claimed this row between the write and here, that
-    verdict wins and this becomes a no-op rather than a second opinion.
+    The link is a compare-and-set against NULL that writes nothing else (L-19:
+    it used to set the new row's status to ``active`` too, over the status its
+    writer chose). Storage answers whether it landed, so a contradiction
+    verdict that claimed this row first, or a row deleted or held since, keeps
+    the candidate current instead of retiring it with nothing pointing at it.
 
     Never raises: the memory is already committed and the caller returned 201.
     A merge that fails leaves an ordinary near-duplicate pair — the state every
     tenant without this flag is in — so degrading is strictly better than
     failing a write that succeeded.
+
+    Returns the metadata patch that records the outcome on the new row (L-17),
+    for the caller to show in its response.
     """
     sc = get_storage_client()
     try:
-        linked = await sc.update_memory_status(
-            new_id, "active", supersedes_id=candidate_id, tenant_id=tenant_id
-        )
+        linked = await sc.set_supersedes_if_null(new_id, tenant_id, supersedes_id=candidate_id)
     except Exception:
         logger.warning(
             "near-duplicate merge: could not link %s -> %s; leaving both rows live",
@@ -52,20 +56,19 @@ async def _merge_near_duplicate(new_id: str, candidate_id: str, tenant_id: str) 
             candidate_id,
             exc_info=True,
         )
-        return
-    if linked is None:
-        # Storage matched no row: the new one was deleted since, or it is held
-        # for review, which nothing but a person's release moves (and a release
-        # makes this merge then). Either way nothing stands in the candidate's
-        # place now, so it stays current.
+        return await _record_merge(sc, new_id, tenant_id, skipped="link_failed")
+    if not linked:
+        # The new row is gone, held for review (a release replays this merge),
+        # or already supersedes another row. Nothing stands in the candidate's
+        # place, so it stays current.
         logger.info(
-            "near-duplicate merge: %s is gone or held; leaving %s current",
+            "near-duplicate merge: %s was not linked; leaving %s current",
             new_id,
             candidate_id,
         )
-        return
+        return await _record_merge(sc, new_id, tenant_id, skipped="not_linked")
     try:
-        await sc.update_memory_status(candidate_id, "outdated", tenant_id=tenant_id)
+        retired = await sc.update_memory_status(candidate_id, "outdated", tenant_id=tenant_id)
     except Exception:
         # The link landed, so the pair is discoverable and a later contradiction
         # pass can finish the job. Logged at WARNING rather than swallowed
@@ -77,8 +80,34 @@ async def _merge_near_duplicate(new_id: str, candidate_id: str, tenant_id: str) 
             candidate_id,
             exc_info=True,
         )
-        return
+        return await _record_merge(sc, new_id, tenant_id, skipped="candidate_not_retired")
+    if retired is None:
+        # Storage matched no candidate row: deleted, or held, since the search.
+        logger.info("near-duplicate merge: linked %s -> %s; the candidate is gone", new_id, candidate_id)
+        return await _record_merge(sc, new_id, tenant_id, skipped="candidate_not_retired")
     logger.info("near_duplicate_merged new=%s superseded=%s tenant_id=%s", new_id, candidate_id, tenant_id)
+    return await _record_merge(sc, new_id, tenant_id, skipped=None)
+
+
+async def _record_merge(sc, new_id: str, tenant_id: str, *, skipped: str | None) -> dict:
+    """Record a merge's outcome on the new row (L-17).
+
+    ``near_duplicate_merged`` once the merge has landed, ``near_dup_merge_skipped``
+    with the reason when it did not, and the pending decision cleared either
+    way. Best effort, like the merge: a row this fails on keeps the pending
+    decision, which still says no merge is known to have happened.
+    """
+    patch: dict = {}
+    set_system_value(patch, "near_duplicate_merge_pending", None)
+    if skipped is None:
+        set_system_value(patch, "near_duplicate_merged", True)
+    else:
+        set_system_value(patch, "near_dup_merge_skipped", skipped)
+    try:
+        await sc.update_memory(new_id, tenant_id, {"metadata_patch": patch})
+    except Exception:
+        logger.warning("near-duplicate merge: could not record the outcome on %s", new_id, exc_info=True)
+    return patch
 
 
 class ScheduleBackgroundTasks:
@@ -99,8 +128,17 @@ class ScheduleBackgroundTasks:
         # before the row exists, so it can only record the intent; this is the
         # first point at which there is an id to link.
         merge_target = ctx.data.get("merge_supersedes_id")
-        if merge_target:
-            await _merge_near_duplicate(str(memory_id), str(merge_target), data.tenant_id)
+        if merge_target and memory.get("status") != QUARANTINED_MEMORY_STATUS:
+            # A held write merges when a person releases it: the release replays
+            # the pending decision (``release_replay``).
+            from core_api.services.memory_service import _merged_metadata
+
+            outcome = await _merge_near_duplicate(str(memory_id), str(merge_target), data.tenant_id)
+            # L-17: the 201 shows what the row now records about the merge.
+            stored = memory.get("metadata_")
+            memory["metadata_"] = _merged_metadata(
+                stored if stored is not None else memory.get("metadata") or {}, outcome
+            )
 
         # Fast mode fan-out. The fast branch returns BEFORE the strong-mode
         # entity-extraction + Path A blocks below, so historically each had

@@ -42,6 +42,7 @@ from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
 from core_api.services.dedup_identifier_filter import _content_is_identifier_bearing
 from core_api.services.memory_service import _find_semantic_duplicate
+from core_api.services.system_metadata import set_system_value
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +196,10 @@ class DetectNearDuplicate:
             return None
 
         ctx.data["merge_supersedes_id"] = str(candidate_id)
-        metadata["near_duplicate_merged"] = True
+        # L-17: the decision, not the outcome. ``_merge_near_duplicate`` sets
+        # ``near_duplicate_merged`` once the merge has landed and clears this;
+        # a held write keeps it until a release replays the merge.
+        set_system_value(metadata, "near_duplicate_merge_pending", True)
         logger.info(
             "near_duplicate_merge subject=%s predicate=%s candidate=%s similarity=%.4f tenant_id=%s",
             getattr(data, "subject_entity_id", None),

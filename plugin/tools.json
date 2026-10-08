@@ -8,6 +8,7 @@
       "INVALID_ARGUMENTS",
       "MISSING_AGENT_ID",
       "NOT_FOUND",
+      "PLAN_LIMIT_READ_ONLY",
       "UNAUTHORIZED",
       "UPSTREAM_ERROR"
     ],
@@ -116,14 +117,14 @@
       },
       {
         "default": 20,
-        "description": "op=query.",
+        "description": "op=query: 1-100.",
         "name": "limit",
         "required": false,
         "type": "int"
       },
       {
         "default": 0,
-        "description": "op=query.",
+        "description": "op=query: 0 or more.",
         "name": "offset",
         "required": false,
         "type": "int"
@@ -155,6 +156,13 @@
         "name": "top_k",
         "required": false,
         "type": "int"
+      },
+      {
+        "default": false,
+        "description": "op=write: overwrite past the shrink guard; an agent needs trust 3.",
+        "name": "force",
+        "required": false,
+        "type": "bool"
       }
     ],
     "plugin_exposed": true,
@@ -190,6 +198,7 @@
       "INTERNAL_ERROR",
       "INVALID_ARGUMENTS",
       "MISSING_AGENT_ID",
+      "PLAN_LIMIT_READ_ONLY",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",
@@ -247,6 +256,7 @@
       "INTERNAL_ERROR",
       "INVALID_ARGUMENTS",
       "MISSING_AGENT_ID",
+      "PLAN_LIMIT_READ_ONLY",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",
@@ -305,7 +315,7 @@
       },
       {
         "default": null,
-        "description": "Scope filter; supply to include fleet- and agent-scoped rules.",
+        "description": "Defaults to your home fleet; fleet- and agent-scoped rules need one.",
         "name": "fleet_id",
         "required": false,
         "type": "str | None"
@@ -323,6 +333,7 @@
       "INVALID_ARGUMENTS",
       "MISSING_AGENT_ID",
       "NOT_FOUND",
+      "PLAN_LIMIT_READ_ONLY",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",
@@ -408,6 +419,13 @@
         "default": null,
         "description": "op=set: optional author identity for audit.",
         "name": "author_user_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Your agent id when the credential carries none; held to trust >= 2.",
+        "name": "caller_agent_id",
         "required": false,
         "type": "str | None"
       }
@@ -538,7 +556,7 @@
     "trust_required": 1
   },
   {
-    "description": "Per-memory lifecycle. bulk_delete and lineage are MCP-only; lineage returns the supersession chain. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete and bulk_delete are soft (prefer transition to outdated/archived).",
+    "description": "Per-memory lifecycle. bulk_delete and lineage are not in the plugin; lineage returns the supersession chain. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete and bulk_delete are soft (prefer transition to outdated/archived).",
     "error_codes": [
       "FORBIDDEN",
       "INVALID_ARGUMENTS",
@@ -838,6 +856,7 @@
       "FORBIDDEN",
       "INVALID_ARGUMENTS",
       "MISSING_AGENT_ID",
+      "NOT_FOUND",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",
@@ -913,6 +932,13 @@
         "name": "similarity_blend",
         "required": false,
         "type": "float | None"
+      },
+      {
+        "default": false,
+        "description": "Clear every tuned knob.",
+        "name": "reset",
+        "required": false,
+        "type": "bool"
       }
     ],
     "plugin_exposed": true,
@@ -927,6 +953,7 @@
       "INVALID_ARGUMENTS",
       "INVALID_BATCH_ITEM",
       "MISSING_AGENT_ID",
+      "PLAN_LIMIT_READ_ONLY",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",

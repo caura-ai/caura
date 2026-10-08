@@ -1,7 +1,8 @@
 """P0-3: Time-decayed recall boost — breaks the feedback loop.
 
-Unit tests validate the decay math.
-Integration tests verify recall_count + last_recalled_at update correctly.
+Unit tests validate the decay math. The recall_count bump itself is tested
+through ``/search`` in tests/test_search_recall_tracked_flag.py; the
+persistence test that was here ran its own UPDATE and asserted it (L-172).
 """
 
 from datetime import UTC, datetime, timedelta
@@ -188,57 +189,3 @@ class TestRecallBoostDecay:
             "a 12%-more-relevant fresh memory must out-rank a saturated popular "
             "one — recall_boost must not be able to hijack the ranking"
         )
-
-
-# ---------------------------------------------------------------------------
-# Integration tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-class TestRecallBoostPersistence:
-    """Verify recall_count and last_recalled_at are updated on search."""
-
-    async def _create_memory(self, db, tenant_id, content, agent_id="test-agent"):
-        """Insert a memory with fake embedding for search."""
-        import hashlib
-
-        from common.embedding import fake_embedding
-        from common.models.memory import Memory
-
-        ch = hashlib.sha256(f"{tenant_id}:None:{content}".encode()).hexdigest()
-        emb = fake_embedding(content)
-        mem = Memory(
-            tenant_id=tenant_id,
-            agent_id=agent_id,
-            memory_type="fact",
-            content=content,
-            weight=0.7,
-            embedding=emb,
-            content_hash=ch,
-            status="active",
-        )
-        db.add(mem)
-        await db.flush()
-        return mem
-
-    async def test_recall_count_increments_on_search(self, db, tenant_id):
-        mem = await self._create_memory(db, tenant_id, "The sky is blue on clear days")
-        assert mem.recall_count == 0
-        assert mem.last_recalled_at is None
-
-        # Simulate what search_memories does after returning results
-        from sqlalchemy import func, update
-
-        from common.models.memory import Memory
-
-        await db.execute(
-            update(Memory)
-            .where(Memory.id == mem.id)
-            .values(recall_count=Memory.recall_count + 1, last_recalled_at=func.now())
-        )
-        await db.flush()
-        await db.refresh(mem)
-
-        assert mem.recall_count == 1
-        assert mem.last_recalled_at is not None

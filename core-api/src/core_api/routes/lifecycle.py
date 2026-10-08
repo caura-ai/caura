@@ -23,6 +23,7 @@ import logging
 import weakref
 from collections.abc import Awaitable, Callable, MutableMapping
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -589,6 +590,51 @@ async def reconcile_stranded_lifecycle_actions(
         "unknown_action": unknown_action,
         "ineffective": ineffective,
     }
+
+
+@router.post("/admin/entity-extraction/rerun-lost")
+async def rerun_lost_entity_extractions(
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict:
+    """Re-run entity extraction for memories that lost it (``services.extraction_rerun``).
+
+    core-operations' hourly ``entity-extraction-rerun`` job calls this. It reads
+    the extraction rows of ``background_task_log`` still open, oldest first,
+    marks them and schedules the re-runs in the background, and returns counts
+    without waiting for them.
+    """
+    auth.enforce_admin()
+    from core_api.services.extraction_rerun import rerun_lost_extractions
+
+    counts = await rerun_lost_extractions()
+    if counts["memories"] or counts["unreadable_tenants"]:
+        logger.info("entity extraction re-run sweep", extra=counts)
+    return counts
+
+
+@router.post("/admin/memories/{memory_id}/re-extract", status_code=202)
+async def re_extract_memory(
+    memory_id: UUID,
+    tenant_id: str = Query(...),
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict:
+    """Re-run one memory's entity extraction, replacing the graph it has.
+
+    For an operator: the memory's extraction is reset and run again in the
+    background, and its open ``background_task_log`` extraction rows are marked
+    ``rerun``. 404 when the memory is gone or held (a release replays its
+    extraction); 409 when its organization has entity extraction off.
+    """
+    auth.enforce_admin()
+    from core_api.services.extraction_rerun import live_memory, schedule_rerun
+
+    memory = await live_memory(str(memory_id), tenant_id)
+    if memory is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    if not (await resolve_config(tenant_id)).entity_extraction_enabled:
+        raise HTTPException(status_code=409, detail="Entity extraction is off for this organization")
+    marked = await schedule_rerun(memory, tenant_id)
+    return {"memory_id": str(memory_id), "scheduled": True, "rows_marked": marked}
 
 
 @router.get("/admin/lifecycle/audits/summary")

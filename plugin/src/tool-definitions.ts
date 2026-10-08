@@ -661,6 +661,11 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
       if (v === undefined || v === null) continue;
       query[k] = String(v);
     }
+    // The schema says 1-50 and MCP caps there, but REST accepts up to 500, so
+    // cap here too or a plugin page could be ten times an MCP one (L-109).
+    if (query.limit !== undefined) {
+      query.limit = String(Math.min(50, Math.max(1, Number(query.limit) || 1)));
+    }
     return apiCall("GET", "/memories", undefined, query, signal);
   },
 

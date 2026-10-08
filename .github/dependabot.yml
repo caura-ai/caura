@@ -168,6 +168,26 @@ updates:
       pypi-build-majors:
         update-types: ["major"]
 
+  # --- Python: the scanners security-scan.yml runs (L-65) ---
+  # .github/security-scan/requirements.txt. A bump's own PR runs the scan with the
+  # new version, so a check it adds fires there first.
+  - package-ecosystem: "pip"
+    directory: "/.github/security-scan"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+      - "kind/chore"
+      - "area/infra"
+    commit-message:
+      prefix: "deps(ci)"
+    groups:
+      security-scan-minor-patch:
+        update-types: ["minor", "patch"]
+      security-scan-majors:
+        update-types: ["major"]
+
   # --- npm: published client packages ---
   - package-ecosystem: "npm"
     directories:

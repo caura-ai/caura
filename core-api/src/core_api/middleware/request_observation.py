@@ -165,11 +165,11 @@ _REST_CAPABILITY: dict[tuple[str, str], tuple[str, str | None]] = {
     # documents
     ("POST", "/documents"): ("doc", "write"),
     ("GET", "/documents"): ("doc", "read"),
-    ("GET", "/documents/{doc_id}"): ("doc", "read"),
+    ("GET", "/documents/{doc_id:path}"): ("doc", "read"),
     ("GET", "/documents/collections"): ("doc", "list_collections"),
     ("POST", "/documents/query"): ("doc", "query"),
     ("POST", "/documents/search"): ("doc", "search"),
-    ("DELETE", "/documents/{doc_id}"): ("doc", "delete"),
+    ("DELETE", "/documents/{doc_id:path}"): ("doc", "delete"),
     # keystones — one entry per verb covers BOTH the canonical mount
     # (brand-neutral, 2026-08-14) and the permanent legacy brand-prefixed
     # alias, since the label drops the prefix that distinguished them. See

@@ -107,8 +107,19 @@ class CheckSemanticDuplicate:
         fields = ctx.data["memory_fields"]
         metadata = fields["metadata"]
 
-        if not tenant_config.semantic_dedup_enabled or embedding is None:
+        if not tenant_config.semantic_dedup_enabled:
             return StepResult(outcome=StepOutcome.SKIPPED)
+        if embedding is None:
+            # L-116: the 409 contract needs a vector to compare, and there is
+            # none: the provider failed, no embedding credential is set, or the
+            # auto-chunk branch of a deferred deployment left the embedding to
+            # the worker. The write still lands, and the row says the gate did
+            # not run, as the identifier skip below does.
+            set_system_value(metadata, "dedup_skipped_reason", "embedding_unavailable")
+            return StepResult(
+                outcome=StepOutcome.SKIPPED,
+                detail={"reason": "embedding_unavailable"},
+            )
 
         # A1 identifier pre-filter — when content carries an
         # identifier-shaped token (UUID, PR ref, build number, semver,

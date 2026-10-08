@@ -85,7 +85,8 @@ PYTHONPATH=.:core-api/src uvicorn core_api.app:app \
 
 # 8. Verify (in another terminal)
 curl http://localhost:8000/api/v1/health
-# Expected: {"status":"ok","storage":"connected","redis":"connected","event_bus":"ok"}
+# Expected: {"status":"ok","storage":"connected","redis":"not configured","event_bus":"ok"}
+# (this .env sets no REDIS_URL; redis is optional and "not configured" counts as healthy)
 ```
 
 Caura is running at `http://localhost:8000`.
@@ -160,10 +161,6 @@ If you're an OpenClaw agent running on a gateway, install the plugin instead:
 CAURA_URL=http://localhost:8000
 CAURA_KEY=YOUR_KEY_HERE      # admin key (Path 2) or shared gate key (Path 3)
 CAURA_FLEET=my-fleet
-CAURA_AGENT_ID=my-agent        # optional but recommended: a stable, human-readable
-                              # identity for THIS install (e.g. webclaw, vm-01). If
-                              # unset, the plugin uses a stable per-install id
-                              # (main-<install_id>) so installs don't collide.
 
 # Run the install script (API key in header, not query param)
 curl -sf -H "X-API-Key: $CAURA_KEY" "$CAURA_URL/api/v1/install-plugin?fleet_id=$CAURA_FLEET&api_url=$CAURA_URL" | bash
@@ -173,6 +170,8 @@ openclaw gateway restart    # or: systemctl --user restart openclaw-gateway
 ```
 
 This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims the exclusive memory slot (disabling `memory-core`), and configures `openclaw.json` to allowlist the agent-facing tools. The plugin calls the local Caura API over HTTP — same tools as MCP. <!-- legacy-name-floor: the installer still writes the frozen plugin directory -->
+
+Optional but recommended: give this install a stable, readable identity (for example `webclaw` or `vm-01`) by adding `CAURA_AGENT_ID=my-agent` to the `.env` in that plugin directory, then restarting the gateway. The installer does not take an agent id, and re-running it rewrites that `.env`, so add the line again afterwards. Without it, the plugin uses a stable per-install id (`main-<install_id>`) so installs don't collide.
 
 **MCP vs Plugin — which to use:**
 
@@ -259,7 +258,7 @@ Once connected via MCP or the OpenClaw plugin, you have these tools:
 | `caura_write` | Store a memory — send `content` (single) or `items` (batch ≤100). Everything else is auto-inferred |
 | `caura_recall` | Hybrid semantic + keyword search. Set `include_brief=true` to get the LLM's answer to the query alongside the matching memories |
 | `caura_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete` |
-| `caura_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2 |
+| `caura_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet` on your own fleet trust ≥ 1, another fleet or `scope=all` trust ≥ 2 |
 | `caura_doc` | Document CRUD, op-dispatched: `write`, `read`, `query`, `delete`, `list_collections`, `search` (semantic) on named JSON collections |
 | `caura_entity_get` | Look up an entity with linked memories and relations |
 | `caura_tune` | Adjust per-agent search parameters (top_k, min_similarity, graph hops, blend weights) |

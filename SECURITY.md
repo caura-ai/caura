@@ -38,7 +38,7 @@ provided for:
 
 | Version | Supported |
 |---------|-----------|
-| Latest minor release (2.x) | Yes |
+| Latest minor release of each component's current major (the backend and the plugin are versioned separately; see `.release-please-manifest.json`) | Yes |
 | Previous minor release | Best-effort, critical fixes only |
 | Older releases | No |
 

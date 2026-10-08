@@ -176,6 +176,10 @@ def _row(**over: Any) -> dict:
 def _storage(**raises: BaseException) -> MagicMock:
     sc = MagicMock(name="storage_client")
     sc.get_memory = AsyncMock(return_value=_row())
+    # The bulk re-embed reads its batch in one call (L-184).
+    sc.bulk_get_memories = AsyncMock(
+        side_effect=lambda ids, _t, **_kw: [_row() for _ in ids]
+    )
     for method in ("update_embedding", "update_memory", "update_memory_status"):
         setattr(sc, method, AsyncMock(side_effect=raises.get(method)))
     return sc
@@ -334,6 +338,44 @@ def _extraction(stack: ExitStack):
     return w.process_entity_extraction(
         uuid.uuid4(), TENANT, "f1", "a", "c", "fact"
     ), fault
+
+
+def _rerun_of(stack: ExitStack, storage: MagicMock):
+    from core_api.services import extraction_rerun
+
+    stack.enter_context(
+        patch.object(extraction_rerun, "get_storage_client", lambda: storage)
+    )
+    return extraction_rerun._rerun(_row()["id"], TENANT)
+
+
+def _rerun_read(stack: ExitStack):
+    sc = _storage()
+    sc.get_memory = AsyncMock(side_effect=_boom())
+    return _rerun_of(stack, sc), sc.get_memory
+
+
+def _rerun_reset(stack: ExitStack):
+    sc = _storage()
+    sc.reset_entity_artifacts = AsyncMock(side_effect=_boom())
+    return _rerun_of(stack, sc), sc.reset_entity_artifacts
+
+
+def _rerun_extraction(stack: ExitStack):
+    from core_api.services import entity_extraction_worker as w
+
+    stack.enter_context(
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=_config()),
+        )
+    )
+    fault = _fault(
+        stack, w, "extract_entities_from_content", AsyncMock(side_effect=_boom())
+    )
+    sc = _storage()
+    sc.reset_entity_artifacts = AsyncMock()
+    return _rerun_of(stack, sc), fault
 
 
 def _bulk(stack: ExitStack, storage: MagicMock, batch: AsyncMock):
@@ -604,6 +646,15 @@ ROSTER: dict[str, dict[str, Any]] = {
     "process_entity_extraction": {
         "wraps": {"process_entity_extraction"},
         "scenarios": [Scenario("extraction", "entity_extraction", _extraction)],
+    },
+    "_rerun": {
+        # The re-run sweep's read, reset, then extraction (services.extraction_rerun).
+        "wraps": {"_rerun"},
+        "scenarios": [
+            Scenario("rerun-read", "entity_extraction", _rerun_read),
+            Scenario("rerun-reset", "entity_extraction", _rerun_reset),
+            Scenario("rerun-extraction", "entity_extraction", _rerun_extraction),
+        ],
     },
     "_reembed_memories_bulk": {
         "wraps": {"_reembed_memories_bulk"},

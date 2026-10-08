@@ -42,8 +42,9 @@ pip install pre-commit   # or: uv pip install pre-commit
 pre-commit install
 ```
 
-The hook is configured in `.pre-commit-config.yaml` and only runs against
-`core-api/src/` and `core-storage-api/src/`. `mypy` is intentionally not in
+The hook is configured in `.pre-commit-config.yaml` and runs the ruff
+version the services pin over the trees CI checks: `common/`, `scripts/`,
+`tests/` and each service's `src/` and `tests/`. `mypy` is intentionally not in
 the hook (it needs the real project venv to resolve workspace imports
 correctly) — CI runs it authoritatively, and you can run it locally via
 the command under "Run local checks" below.
@@ -215,10 +216,12 @@ release-please opens or updates a release PR. Merging the release PR:
 1. Tags `vX.Y.Z` and creates a GitHub Release.
 2. Updates `CHANGELOG.md` with everything since the last tag,
    grouped by Conventional Commit type.
-3. Bumps the version in every pinned file: `VERSION`, every
-   `pyproject.toml`, `plugin/package.json`, `plugin/openclaw.plugin.json`.
+3. Bumps the backend and plugin versions in the files RELEASING.md lists
+   under "Version files release-please rewrites".
 
-You don't bump versions by hand; just write good commit messages.
+You don't bump those by hand; just write good commit messages. The client
+packages under `clients/` are versioned on their own: bump one by hand as its
+publish workflow describes.
 
 ## Code Style
 

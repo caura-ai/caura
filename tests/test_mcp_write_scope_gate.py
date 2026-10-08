@@ -5,7 +5,10 @@ The audit found ``_is_write_allowed()`` defined but never invoked, so a
 credential whose ``X-Capabilities`` set excluded ``write`` could still
 mutate state through every MCP write surface. These tests assert that
 every write tool now refuses such credentials with a FORBIDDEN envelope
-(``isError=True``).
+(``isError=True``). The update and transition tests aim at a memory that
+exists, with the write itself a spy: aimed at a missing row, as they were, a
+gate moved after the write still produced an error, the 404, and passed
+(L-171).
 
 It also covers the middleware: prior to the fix, ``_readable_tenant_ids_var``
 and ``_scopes_var`` were only set when their respective request headers
@@ -19,7 +22,11 @@ from __future__ import annotations
 import pytest
 
 from core_api import mcp_server
-from tests._mcp_test_helpers import is_error_envelope, parse_envelope
+from tests._mcp_test_helpers import (
+    is_error_envelope,
+    parse_envelope,
+    stub_storage_client,
+)
 
 pytestmark = [pytest.mark.unit]
 
@@ -69,6 +76,31 @@ def _force_read_only(monkeypatch):
     monkeypatch.setattr(mcp_server, "_get_scopes", lambda: {"read"})
 
 
+def _assert_read_only_refusal(out) -> None:
+    """The refusal the scope gate gives, not just any error.
+
+    ``_require_trust`` also answers FORBIDDEN, so the code alone does not
+    show the gate ran; ``scope-limited to read`` occurs only in
+    ``_READ_ONLY_ERROR``.
+    """
+    assert is_error_envelope(out)
+    error = parse_envelope(out)["error"]
+    assert error["code"] == "FORBIDDEN"
+    assert "scope-limited to read" in error["message"]
+
+
+# A memory the stubbed storage client returns, so a refusal cannot come from
+# a missing row.
+_EXISTING = {
+    "id": "22222222-2222-2222-2222-222222222222",
+    "tenant_id": "test-tenant",
+    "agent_id": "mcp-agent",
+    "fleet_id": None,
+    "visibility": "scope_team",
+    "status": "active",
+}
+
+
 async def test_caura_write_blocked_for_read_only(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
     out = await mcp_server.caura_write(content="should never persist")
@@ -82,7 +114,7 @@ async def test_caura_write_blocked_for_read_only(mcp_env, monkeypatch):
 async def test_caura_write_batch_blocked_for_read_only(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
     out = await mcp_server.caura_write(items=[{"content": "x"}, {"content": "y"}])
-    assert is_error_envelope(out)
+    _assert_read_only_refusal(out)
     assert "create_memories_bulk" not in mcp_env["service_mocks"]
 
 
@@ -148,27 +180,33 @@ async def test_caura_manage_bulk_delete_blocked_for_read_only(mcp_env, monkeypat
         op="bulk_delete",
         memory_ids=["11111111-1111-1111-1111-111111111111"],
     )
-    assert is_error_envelope(out)
+    _assert_read_only_refusal(out)
 
 
 async def test_caura_manage_update_blocked_for_read_only(mcp_env, monkeypatch):
+    """The write is a spy that would succeed, so only a gate that runs before
+    it can refuse, and the spy must never be awaited."""
     _force_read_only(monkeypatch)
+    update = mcp_env["service"]("update_memory")
     out = await mcp_server.caura_manage(
-        op="update",
-        memory_id="11111111-1111-1111-1111-111111111111",
-        content="new content",
+        op="update", memory_id=_EXISTING["id"], content="new content"
     )
-    assert is_error_envelope(out)
+    _assert_read_only_refusal(out)
+    update.assert_not_awaited()
 
 
 async def test_caura_manage_transition_blocked_for_read_only(mcp_env, monkeypatch):
+    """The memory exists, so only the gate can refuse, before the status
+    write is awaited."""
     _force_read_only(monkeypatch)
-    out = await mcp_server.caura_manage(
-        op="transition",
-        memory_id="11111111-1111-1111-1111-111111111111",
-        status="archived",
+    storage = stub_storage_client(
+        monkeypatch, get_memory=_EXISTING, update_memory_status=None
     )
-    assert is_error_envelope(out)
+    out = await mcp_server.caura_manage(
+        op="transition", memory_id=_EXISTING["id"], status="archived"
+    )
+    _assert_read_only_refusal(out)
+    storage.update_memory_status.assert_not_awaited()
 
 
 async def test_caura_doc_write_blocked_for_read_only(mcp_env, monkeypatch):
@@ -176,13 +214,13 @@ async def test_caura_doc_write_blocked_for_read_only(mcp_env, monkeypatch):
     out = await mcp_server.caura_doc(
         op="write", collection="things", doc_id="d1", data={"k": "v"}
     )
-    assert is_error_envelope(out)
+    _assert_read_only_refusal(out)
 
 
 async def test_caura_doc_delete_blocked_for_read_only(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
     out = await mcp_server.caura_doc(op="delete", collection="things", doc_id="d1")
-    assert is_error_envelope(out)
+    _assert_read_only_refusal(out)
 
 
 # ---------------------------------------------------------------------------

@@ -36,7 +36,7 @@ except ImportError:
         pass  # type: ignore[misc]
 
 
-from common.constants import QUARANTINED_MEMORY_STATUS, VECTOR_DIM
+from common.constants import HOLD_KEY, QUARANTINED_MEMORY_STATUS, VECTOR_DIM
 from common.embedding import (
     embedding_configured,
     get_embedding,
@@ -52,6 +52,7 @@ from core_api.constants import (
     BULK_EMBEDDING_TIMEOUT_SECONDS,
     BULK_ENRICHMENT_CONCURRENCY,
     BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS,
+    BULK_REEMBED_PATCH_CONCURRENCY,
     BULK_STRONG_EMBED_TIMEOUT_SECONDS,
     CANDIDATE_POOL_SIZE,
     CHUNKING_THRESHOLD_CHARS,
@@ -134,7 +135,7 @@ from core_api.services.system_metadata import (
 )
 from core_api.services.task_tracker import record_task_failure, tracked_task
 from core_api.services.write_gate_hold import write_gate_hold_from
-from core_api.services.write_hold import HOLD_KEY, claim_settings, hold_for, insert_deciding_again
+from core_api.services.write_hold import claim_settings, hold_for, insert_deciding_again
 
 logger = logging.getLogger(__name__)
 
@@ -3255,32 +3256,33 @@ async def _reembed_memories_bulk(
 
     sc = get_storage_client()
 
-    # Fan out the get_memory reads concurrently — O(N) serial awaits
-    # was a real cliff for large bulks (a 100-item batch with 50ms
-    # storage p99 = 5s wall-clock before the first PATCH). gather with
-    # return_exceptions=True so one failed read doesn't nuke the rest.
-    mems = await asyncio.gather(
-        *[sc.get_memory(str(memory_id), tenant_id) for (memory_id, _), _ in pairs],
-        return_exceptions=True,
-    )
+    # L-184: one read for the batch, on the writer. Per-id GETs cost N round
+    # trips where bulk-get answers 1000 ids at once, and they went to the
+    # reader moments after the insert, where lag read a row back as missing
+    # and it was skipped with no retry.
+    try:
+        mems = await sc.bulk_get_memories(
+            [str(memory_id) for (memory_id, _), _ in pairs], tenant_id, read=False
+        )
+    except Exception:
+        # Broad for the same reason as the batch call above: a transient read
+        # failure would otherwise strand every item unembedded.
+        logger.exception("Bulk re-embed: bulk read failed; scheduling per-item retries")
+        for memory_id, content in items:
+            _fallback(memory_id, content)
+        return
 
-    for ((memory_id, content), embedding), mem in zip(pairs, mems):
+    # The PATCHes run side by side under a cap (L-184): one at a time, a
+    # 100-item batch was 100 serial round trips, each carrying a vector.
+    patch_slots = asyncio.Semaphore(BULK_REEMBED_PATCH_CONCURRENCY)
+
+    async def _store(memory_id: UUID, content: str, embedding: list[float] | None, mem: dict | None) -> None:
         if embedding is None:
             _fallback(memory_id, content)
-            continue
-        if isinstance(mem, BaseException):
-            # A transient get_memory failure here would otherwise strand
-            # this item permanently unembedded — the batch helper is the
-            # only scheduled writer. Reschedule as a per-item retry.
-            logger.error(
-                "Bulk re-embed: get_memory failed for %s; scheduling per-item retry",
-                memory_id,
-                exc_info=mem,
-            )
-            _fallback(memory_id, content)
-            continue
-        if mem is None or mem.get("deleted_at") is not None:
-            continue
+            return
+        if mem is None:
+            # Deleted or held since the insert: nothing to embed.
+            return
         # Mirror the single-item race guard in _reembed_memory: if
         # _enrich_memory_background has already written a hint-enhanced
         # embedding, respect it (higher retrieval quality) and fire
@@ -3301,21 +3303,22 @@ async def _reembed_memories_bulk(
                     tenant_id,
                 )
             )
-            continue
+            return
         try:
-            # Same provenance stamp as the single-row path above: hash the
-            # text we embedded, not whatever the row says now.
-            await sc.update_embedding(
-                str(memory_id),
-                tenant_id,
-                embedding,
-                embedded_content_hash=_content_hash(tenant_id, mem.get("fleet_id"), content),
-            )
+            async with patch_slots:
+                # Same provenance stamp as the single-row path above: hash the
+                # text we embedded, not whatever the row says now.
+                await sc.update_embedding(
+                    str(memory_id),
+                    tenant_id,
+                    embedding,
+                    embedded_content_hash=_content_hash(tenant_id, mem.get("fleet_id"), content),
+                )
         except Exception:
             # Broad match for the same reason as the outer batch-call
             # except: httpx-layer errors, pool exhaustion, auth, etc.
             # aren't in the narrow tuple and would otherwise propagate
-            # out of the for-loop, aborting the rest of the batch.
+            # out of the gather, abandoning the rest of the batch.
             # CancelledError (BaseException subclass) still propagates.
             # Reschedule the item so a transient PATCH blip doesn't
             # leave it permanently unembedded.
@@ -3324,7 +3327,7 @@ async def _reembed_memories_bulk(
                 memory_id,
             )
             _fallback(memory_id, content)
-            continue
+            return
         track_task(
             tracked_task(
                 run_contradiction_detection(
@@ -3340,6 +3343,13 @@ async def _reembed_memories_bulk(
                 tenant_id,
             )
         )
+
+    await asyncio.gather(
+        *[
+            _store(memory_id, content, embedding, mem)
+            for ((memory_id, content), embedding), mem in zip(pairs, mems, strict=True)
+        ]
+    )
 
 
 _STRONG_TYPES = frozenset({"decision", "commitment", "cancellation"})
@@ -5512,13 +5522,19 @@ async def _entity_boost_pipeline(
             if not matched_entity_ids:
                 return boosted_memory_ids, memory_boost_factor
 
-            # Graph expansion
+            # Graph expansion, per requested fleet as the pipeline expands
+            # (L-114); a multi-fleet request sent ``fleet_id`` None, so the walk
+            # crossed every fleet's relations. Imported here because the search
+            # steps import this module.
             if graph_expand and graph_max_hops > 0:
-                entity_hops = await expand_graph(
+                from core_api.pipeline.steps.search.classify_query import ClassifyQuery
+
+                entity_hops = await ClassifyQuery._expand_per_fleet(
+                    sc,
                     matched_entity_ids,
                     tenant_id,
-                    fleet_ids[0] if fleet_ids and len(fleet_ids) == 1 else None,
-                    max_hops=graph_max_hops,
+                    fleet_ids,
+                    graph_max_hops,
                     use_union=use_union,
                 )
             else:
@@ -6226,7 +6242,13 @@ async def _search_memories_legacy(
                 # composite, which exceeds 1.0 and is useless for threshold
                 # gating). Mirrors LoadAndSerialize in the pipeline path so both
                 # surfaces agree (test_search_pipeline_equivalence) — see F-14.
-                similarity=round(float(row["vec_sim"]), 4) if row.get("vec_sim") is not None else None,
+                # None for a row with no embedding, whose 0.0 is storage's
+                # sentinel, not a cosine (L-113).
+                similarity=(
+                    round(float(row["vec_sim"]), 4)
+                    if row.get("vec_sim") is not None and row.get("has_embedding", True) is not False
+                    else None
+                ),
             )
         )
 

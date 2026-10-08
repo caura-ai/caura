@@ -99,7 +99,12 @@ async def test_keystones_set_missing_doc_id(mcp_env):
 
 async def test_keystones_set_trust_denied(mcp_env, monkeypatch):
     """Low-trust agent must be rejected — keystones override user instructions,
-    so a compromised agent cannot be allowed to plant one."""
+    so a compromised agent cannot be allowed to plant one.
+
+    The caller is an agent credential: the standalone operator naming no agent
+    is exempt from this gate, as REST's ``_is_standalone_admin`` is (L-111).
+    """
+    monkeypatch.setattr(mcp_server, "_get_agent_id", lambda: "agent-low")
 
     async def _deny(tenant_id, agent_id, min_level):
         return 0, False, "INSUFFICIENT_TRUST level 1 required"

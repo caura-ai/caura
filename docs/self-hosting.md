@@ -64,9 +64,10 @@ semantic recall.
 | **OpenAI** (default) | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=openai` | `OPENAI_API_KEY` |
 | **Google Gemini** | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=gemini` | `GEMINI_API_KEY` + `OPENAI_API_KEY` |
 | **OpenRouter** | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=openrouter` | `OPENROUTER_API_KEY` + `OPENAI_API_KEY` |
+| **Atlas Cloud** | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=atlascloud` | `ATLASCLOUD_API_KEY` + `OPENAI_API_KEY` |
 | **Self-hosted (TEI / bge-m3)** | `--profile embed-local` + `OPENAI_EMBEDDING_BASE_URL=http://tei:80/v1`<br>+ `OPENAI_EMBEDDING_MODEL=BAAI/bge-m3`<br>+ `OPENAI_EMBEDDING_SEND_DIMENSIONS=false` | none — runs locally |
 
-Gemini and OpenRouter do not provide embedding APIs here, so pair them with
+Gemini, OpenRouter and Atlas Cloud do not provide embedding APIs here, so pair them with
 OpenAI or TEI for embeddings. `ENTITY_EXTRACTION_PROVIDER=anthropic` is not
 supported: enrichment, entity extraction and contradiction detection need
 structured JSON output, which Anthropic's OpenAI-compatible endpoint rejects,
@@ -114,7 +115,8 @@ wins.
 ### Offline and air-gapped operation
 
 - If the image is cached, `docker compose up -d --pull never` starts without a registry request.
-- If no image is cached, `docker compose up --build --pull never` builds from source.
+- If no image is cached, `docker compose up --build --pull never` builds from source. The build itself still downloads apt and PyPI packages, so it needs network the first time (a warm build cache can make later rebuilds offline).
+- On a host with no network at all, pull or build the images on a connected machine, `docker save` them to a file, and `docker load` it on the air-gapped host.
 - For a strict no-network guarantee, add a `docker-compose.override.yml` that sets `pull_policy: never` for the three application services. Compose then fails fast when an image is absent.
 
 ### Service URLs

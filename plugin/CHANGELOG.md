@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.24.2](https://github.com/caura-ai/caura/compare/plugin-v2.24.1...plugin-v2.24.2) (2026-10-07)
+
+
+### Bug Fixes
+
+* **mcp:** MCP tools answer as their REST twins do ([#1994](https://github.com/caura-ai/caura/issues/1994)) ([f7a7f88](https://github.com/caura-ai/caura/commit/f7a7f88e5c33eae993a71bf2c51f4d4ba38f3970))
+
 ## [2.24.1](https://github.com/caura-ai/caura/compare/plugin-v2.24.0...plugin-v2.24.1) (2026-10-07)
 
 

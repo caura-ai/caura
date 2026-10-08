@@ -36,6 +36,9 @@ _EXPECTED_JOBS = {
     # Registered unconditionally, unlike ``embed-backfill``: the count matters
     # most when the sweep is OFF, since nothing is draining the backlog then.
     "embedding-coverage",
+    # Re-runs entity extraction for memories that lost it. Hourly at quarter to,
+    # clear of the top-of-hour jobs and of the reconcile at half past.
+    "entity-extraction-rerun",
 }
 
 
@@ -154,3 +157,15 @@ def test_embed_backfill_registered_aligned_off_the_congested_hour(monkeypatch):
     assert 0 < task.delay_provider() <= 24 * 3600
     assert app.settings.embed_backfill_run_at_hour == 4
     assert app.settings.embed_backfill_run_at_hour != app.settings.lifecycle_pipeline_run_at_hour
+
+
+def test_the_extraction_rerun_runs_hourly_at_quarter_to(monkeypatch):
+    from core_operations.scheduler import seconds_until_next_utc_minute_past
+
+    fresh = Scheduler()
+    monkeypatch.setattr(app, "scheduler", fresh)
+
+    app._register_scheduled_tasks()
+
+    task = next(t for t in fresh._tasks if t.name == "entity-extraction-rerun")
+    assert abs(task.delay_provider() - seconds_until_next_utc_minute_past(45)) < 5

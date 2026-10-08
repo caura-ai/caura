@@ -142,13 +142,29 @@ WRITE_QUOTA_OPS: frozenset[str] = frozenset({"create", "bulk_create", "update", 
 # listed, and while the flag is off the old asymmetry is still the shipped
 # behaviour for everything that is.
 #
-# ``redistribute`` is not exposed as an MCP tool, so this list's MCP-reachable
-# members are ``create`` and ``bulk_create``; both are wired.
+# ``redistribute`` is not exposed as an MCP tool. The MCP-reachable members are
+# ``create`` and ``bulk_create`` (``caura_write``) and the four writes whose REST
+# twins call ``enforce_usage_limits()``: ``doc_write`` (``caura_doc op=write``),
+# ``keystone_set``, ``evolve`` and ``insights`` (L-106). All six are wired.
+#
+# Those four are deliberately absent from ``WRITE_QUOTA_OPS``: they charge (or
+# not) at their own call sites, as their REST twins do, and this pair of tables
+# records where the plan-limit refusal applies, which is all they share.
 #
 # IF YOU EDIT THIS SET, the MCP side follows automatically — the call sites
 # consult ``plan_limit_gated`` rather than naming ops, so this stays the single
 # policy record.
-PLAN_LIMIT_GATED_OPS: frozenset[str] = frozenset({"create", "bulk_create", "redistribute"})
+PLAN_LIMIT_GATED_OPS: frozenset[str] = frozenset(
+    {
+        "create",
+        "bulk_create",
+        "redistribute",
+        "doc_write",
+        "keystone_set",
+        "evolve",
+        "insights",
+    }
+)
 
 # Typed so a mistyped verb is a mypy error at the call site rather than a
 # ``ValueError`` at request time — i.e. a 500 for the caller.
@@ -163,7 +179,19 @@ PLAN_LIMIT_GATED_OPS: frozenset[str] = frozenset({"create", "bulk_create", "redi
 # The annotation still earns its place: it is correct for callers outside the
 # exempted modules, and it starts working for these the day either module comes
 # off that list, which the config itself calls a to-do rather than a policy.
-MutatingOp = Literal["create", "bulk_create", "update", "redistribute", "transition", "delete", "bulk_delete"]
+MutatingOp = Literal[
+    "create",
+    "bulk_create",
+    "update",
+    "redistribute",
+    "transition",
+    "delete",
+    "bulk_delete",
+    "doc_write",
+    "keystone_set",
+    "evolve",
+    "insights",
+]
 
 _KNOWN_OPS: frozenset[str] = frozenset(get_args(MutatingOp))
 

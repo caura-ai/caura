@@ -261,14 +261,19 @@ async def upsert_keystone(request: Request) -> dict:
 
     doc_id, data, fleet_id = _validate_payload(body)
 
-    doc, version = await set_keystone(
-        tenant_id=tenant_id,
-        doc_id=doc_id,
-        data=data,
-        fleet_id=fleet_id,
-        actor_agent_id=body.get("actor_agent_id"),
-        actor_user_id=body.get("actor_user_id"),
-    )
+    try:
+        doc, version = await set_keystone(
+            tenant_id=tenant_id,
+            doc_id=doc_id,
+            data=data,
+            fleet_id=fleet_id,
+            actor_agent_id=body.get("actor_agent_id"),
+            actor_user_id=body.get("actor_user_id"),
+        )
+    except ValueError as exc:
+        # The document upsert's refusals, a 400 as on ``POST /documents``,
+        # not a 500 (L-39).
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _audit(
         tenant_id=tenant_id,
         action="keystone.set",
