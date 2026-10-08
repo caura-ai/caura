@@ -77,8 +77,8 @@ export class TransportError extends CauraError {
 export class CauraApiError extends CauraError {
   readonly statusCode: number;
   readonly details: unknown;
-  constructor(statusCode: number, message: string, details?: unknown) {
-    super(`[${statusCode}] ${message}`);
+  constructor(statusCode: number, message: string, details?: unknown, options?: ErrorOptions) {
+    super(`[${statusCode}] ${message}`, options);
     this.name = "CauraApiError";
     this.statusCode = statusCode;
     this.details = details;
@@ -300,7 +300,16 @@ export class Caura {
         throw new TransportError(cause);
       }
       await raiseForStatus(res);
-      return await readResponseJson(res);
+      try {
+        return await readResponseJson(res);
+      } catch (cause) {
+        // readResponseJson rethrows SyntaxError for raiseForStatus; on a 2xx
+        // (a captive portal or proxy page) it must still be a Caura error.
+        if (cause instanceof SyntaxError) {
+          throw new CauraApiError(res.status, "response was not valid JSON", undefined, { cause });
+        }
+        throw cause;
+      }
     } finally {
       clearTimeout(timer);
     }
