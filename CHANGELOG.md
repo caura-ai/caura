@@ -10,6 +10,21 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.30.1](https://github.com/caura-ai/caura/compare/backend-v3.30.0...backend-v3.30.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* B41 recheck defects (L-229, L-224, L-223) ([#2017](https://github.com/caura-ai/caura/issues/2017)) ([0779ad3](https://github.com/caura-ai/caura/commit/0779ad30a2f58beed1af7fe8b013646bb936176e))
+* **plugin:** plugin batch (B36, L-163, L-199) ([#2018](https://github.com/caura-ai/caura/issues/2018)) ([07e8b0d](https://github.com/caura-ai/caura/commit/07e8b0deabcbaf4ac943993c36a02133e1f40750))
+
+
+### Dependencies
+
+* update google-genai requirement from &gt;=2.23.0 to &gt;=2.28.0 ([#1981](https://github.com/caura-ai/caura/issues/1981)) ([24bd278](https://github.com/caura-ai/caura/commit/24bd278990471bbad788ef31a22e5d2a6ff1d35c))
+* update httpx2 requirement from &lt;3,&gt;=2 to &gt;=2.13.1,&lt;3 ([#1750](https://github.com/caura-ai/caura/issues/1750)) ([018a3e5](https://github.com/caura-ai/caura/commit/018a3e52f653b855a94253162000716d16059b8c))
+* update openai requirement from &lt;4,&gt;=3 to &gt;=3.24.0,&lt;4 ([#1982](https://github.com/caura-ai/caura/issues/1982)) ([c7e688f](https://github.com/caura-ai/caura/commit/c7e688f35f220873af3b41db9ff598c0467a0700))
+
 ## [3.30.0](https://github.com/caura-ai/caura/compare/backend-v3.29.1...backend-v3.30.0) (2026-10-09)
 
 

@@ -4,6 +4,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.24.4](https://github.com/caura-ai/caura/compare/plugin-v2.24.3...plugin-v2.24.4) (2026-10-09)
+
+
+### Bug Fixes
+
+* B41 recheck defects (L-229, L-224, L-223) ([#2017](https://github.com/caura-ai/caura/issues/2017)) ([0779ad3](https://github.com/caura-ai/caura/commit/0779ad30a2f58beed1af7fe8b013646bb936176e))
+* **plugin:** plugin batch (B36, L-163, L-199) ([#2018](https://github.com/caura-ai/caura/issues/2018)) ([07e8b0d](https://github.com/caura-ai/caura/commit/07e8b0deabcbaf4ac943993c36a02133e1f40750))
+
 ## [2.24.3](https://github.com/caura-ai/caura/compare/plugin-v2.24.2...plugin-v2.24.3) (2026-10-08)
 
 
