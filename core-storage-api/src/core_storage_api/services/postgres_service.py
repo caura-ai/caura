@@ -8346,19 +8346,21 @@ class PostgresService:
         if not items:
             return []
 
-        # Partition by action; updates and creates each use a per-item
-        # session (for FK-error isolation — a constraint error on item
-        # N must not roll back items 0..N-1). Per-row sessions for both
-        # paths cost connection pool checkouts but stay within one HTTP
-        # — same big win.
+        # One transaction per item, deliberately, unlike
+        # ``entity_bulk_upsert_links`` (L-196; Eldad, 2026-10-09). Each costs a
+        # commit, which waits for a WAL flush. But an update, or a create that
+        # merges into a row already there, locks that row (``entity_merge``),
+        # and one transaction for the batch would hold every such lock until the
+        # batch commits: concurrent extractions naming the same entity would
+        # queue behind one another, and two batches locking overlapping
+        # entities in different orders could deadlock. Per item, a lock lasts
+        # only that item's short transaction, and a constraint error on item N
+        # leaves items 0..N-1 written.
         results: list[dict | None] = [None] * len(items)
 
         updates = [it for it in items if it["action"] == "update"]
         creates = [it for it in items if it["action"] == "create"]
 
-        # Per-item sessions so a constraint error on item N doesn't roll
-        # back items 0..N-1. The HTTP-roundtrip win is what matters; per-
-        # item session checkout cost is negligible.
         for item in updates:
             eid = item["entity_id"]
             if not isinstance(eid, UUID):
@@ -9796,36 +9798,15 @@ class PostgresService:
         reported exactly like one whose endpoint does not exist — see
         ``error="fk_violation"`` below.
 
+        One transaction (L-196): the ownership read, then every link in one
+        INSERT, and one commit. Each link used to open its own session and
+        commit, so a 500-link batch waited on 500 WAL flushes in turn.
+
         Cap enforced at the router level.
         """
         if not items:
             return []
 
-        # Composite PK is (memory_id, entity_id); ``role`` is not part of
-        # the unique key. INSERT ... ON CONFLICT DO UPDATE with the
-        # no-op SET (``role = memory_entity_links.role``) is the standard
-        # trick that lets RETURNING fire on both branches so we can
-        # detect insert-vs-existed via the ``xmax`` system column.
-        #
-        # Per-item sessions: an FK violation (memory_id or entity_id
-        # pointing at a deleted/nonexistent row) on item N would
-        # otherwise roll back items 0..N-1 in a shared transaction.
-        # Keyed by ``input_idx`` rather than (mid, eid) so a caller
-        # accidentally sending the same pair twice doesn't lose the
-        # second slot's result to map overwrite.
-        idx_to_result: dict[int, dict[str, Any]] = {}
-
-        # Ownership resolved once for the whole batch, in its own session, then
-        # tested per item below. Two queries rather than two per item — and the
-        # sets are what the per-item test needs anyway, since a batch may name
-        # one memory many times.
-        #
-        # A separate session from the inserts is deliberate and safe: neither
-        # parent's ``tenant_id`` is caller-writable (``_MEMORY_IMMUTABLE_FIELDS``
-        # names it on memories, ``_ENTITY_UPDATABLE_FIELDS`` omits it on
-        # entities), so a row cannot change hands between this read and the
-        # write. Sharing one session instead would undo the per-item isolation
-        # the comment above describes.
         pair_ids = [
             (
                 mid if isinstance(mid, UUID) else UUID(mid),
@@ -9834,98 +9815,135 @@ class PostgresService:
             for mid, eid in ((it["memory_id"], it["entity_id"]) for it in items)
         ]
         async with get_session() as session:
+            # Ownership resolved once for the whole batch, then tested per item
+            # below. Two queries rather than two per item — and the sets are what
+            # the per-item test needs anyway, since a batch may name one memory
+            # many times.
             owned_memories, owned_entities = await self._owned_link_endpoints(
                 session,
                 tenant_id,
                 {mid for mid, _ in pair_ids},
                 {eid for _, eid in pair_ids},
             )
+            owned = [mid in owned_memories and eid in owned_entities for mid, eid in pair_ids]
+            # Each pair is written with its first item's role: a later item
+            # naming the same pair finds the row the first one wrote.
+            roles: dict[tuple[UUID, UUID], str] = {}
+            for it, pair, is_owned in zip(items, pair_ids, owned, strict=True):
+                if is_owned:
+                    roles.setdefault(pair, it["role"])
+            # One row per pair, in pair order, so two batches that share pairs
+            # lock those rows in the same order.
+            pairs = sorted(roles)
 
-        for it, (mid, eid) in zip(items, pair_ids, strict=True):
-            if mid not in owned_memories or eid not in owned_entities:
-                # Same ``error`` value as the FK branch below, because the two
-                # are one answer to the caller: a row outside your tenant is
-                # not distinguishable from a row that is not there, and making
-                # it distinguishable would turn a batch endpoint into a
-                # bulk existence oracle. The log line carries the real cause.
-                logger.warning(
-                    "Entity link bulk-upsert refused: memory_id=%s entity_id=%s not in tenant %s",
-                    mid,
-                    eid,
-                    tenant_id,
-                )
-                idx_to_result[it["input_idx"]] = {
-                    "input_idx": it["input_idx"],
-                    "memory_id": str(mid),
-                    "entity_id": str(eid),
-                    "role": it["role"],
-                    "created": False,
-                    "error": "fk_violation",
-                }
-                continue
-            # Annotated because ``literal_column("xmax")`` types as ``Any``, and
-            # mypy will not infer a variable whose type is partly ``Any``.
-            ins_stmt: ReturningInsert[tuple[UUID, UUID, str, Any]] = (
-                pg_insert(MemoryEntityLink)
-                .values(
-                    memory_id=mid,
-                    entity_id=eid,
-                    role=it["role"],
-                    source=LINK_SOURCE_EXTRACTION,
-                )
-                .on_conflict_do_update(
-                    index_elements=[
+            def upsert(batch: list[tuple[UUID, UUID]]) -> ReturningInsert[tuple[UUID, UUID, str, Any]]:
+                # Composite PK is (memory_id, entity_id); ``role`` is not part
+                # of the unique key. The no-op SET (``role =
+                # memory_entity_links.role``) is the standard trick that lets
+                # RETURNING fire on both branches, so an insert is told from an
+                # existing row by the ``xmax`` system column.
+                return (
+                    pg_insert(MemoryEntityLink)
+                    .values(
+                        [
+                            {
+                                "memory_id": mid,
+                                "entity_id": eid,
+                                "role": roles[(mid, eid)],
+                                "source": LINK_SOURCE_EXTRACTION,
+                            }
+                            for mid, eid in batch
+                        ]
+                    )
+                    .on_conflict_do_update(
+                        index_elements=[MemoryEntityLink.memory_id, MemoryEntityLink.entity_id],
+                        # ``source`` is deliberately NOT in the SET, so an
+                        # existing row keeps the provenance it has. Extraction
+                        # re-mining an entity a caller curated does not take the
+                        # row over: the caller asked for that link to be there,
+                        # and a later edit dropping the mention must not delete
+                        # it. The cost is that a row which predates the column
+                        # keeps its conservative ``caller`` default forever —
+                        # under-deleting, which is the recoverable direction.
+                        set_={"role": MemoryEntityLink.role},
+                    )
+                    .returning(
                         MemoryEntityLink.memory_id,
                         MemoryEntityLink.entity_id,
-                    ],
-                    # ``source`` is deliberately NOT in the SET, so an existing
-                    # row keeps the provenance it has. Extraction re-mining an
-                    # entity a caller curated does not take the row over: the
-                    # caller asked for that link to be there, and a later edit
-                    # dropping the mention must not delete it. The cost is that
-                    # a row which predates the column keeps its conservative
-                    # ``caller`` default forever — under-deleting, which is the
-                    # recoverable direction.
-                    set_={"role": MemoryEntityLink.role},
+                        MemoryEntityLink.role,
+                        literal_column("xmax"),
+                    )
                 )
-                .returning(
-                    MemoryEntityLink.memory_id,
-                    MemoryEntityLink.entity_id,
-                    MemoryEntityLink.role,
-                    literal_column("xmax"),
-                )
-            )
-            try:
-                async with get_session() as session:
-                    row = (await session.execute(ins_stmt)).one()
-                # xmax=0 ⇒ INSERT inserted; non-zero ⇒ existing row hit
-                # by the DO UPDATE no-op.
-                idx_to_result[it["input_idx"]] = {
-                    "input_idx": it["input_idx"],
-                    "memory_id": str(mid),
-                    "entity_id": str(eid),
-                    "role": row[2],
-                    "created": int(row[3]) == 0,
-                }
-            except IntegrityError:
-                # FK violation on memory_id or entity_id — report per-row
-                # so the caller can continue processing the other links
-                # rather than losing the whole batch.
-                logger.warning(
-                    "Entity link bulk-upsert FK violation: memory_id=%s entity_id=%s",
-                    mid,
-                    eid,
-                )
-                idx_to_result[it["input_idx"]] = {
-                    "input_idx": it["input_idx"],
-                    "memory_id": str(mid),
-                    "entity_id": str(eid),
-                    "role": it["role"],
-                    "created": False,
-                    "error": "fk_violation",
-                }
 
-        return [idx_to_result[it["input_idx"]] for it in items]
+            # ``(stored role, inserted)`` per pair that landed. xmax=0 ⇒ the
+            # INSERT inserted; non-zero ⇒ an existing row hit by the no-op.
+            landed: dict[tuple[UUID, UUID], tuple[str, bool]] = {}
+            if pairs:
+                try:
+                    async with session.begin_nested():
+                        result = await session.execute(upsert(pairs))
+                        for mid, eid, role, xmax in result:
+                            landed[(mid, eid)] = (role, int(xmax) == 0)
+                except IntegrityError:
+                    # An endpoint hard-deleted since the ownership read fails
+                    # the statement's FK check as a whole. Write each pair in
+                    # its own savepoint instead, so only a pair that fails is
+                    # lost, and reported below as ``fk_violation``.
+                    for pair in pairs:
+                        try:
+                            async with session.begin_nested():
+                                result = await session.execute(upsert([pair]))
+                                _mid, _eid, role, xmax = result.one()
+                            landed[pair] = (role, int(xmax) == 0)
+                        except IntegrityError:
+                            logger.warning(
+                                "Entity link bulk-upsert FK violation: memory_id=%s entity_id=%s",
+                                pair[0],
+                                pair[1],
+                            )
+
+        results: list[dict] = []
+        written: set[tuple[UUID, UUID]] = set()
+        for it, (mid, eid), is_owned in zip(items, pair_ids, owned, strict=True):
+            row = landed.get((mid, eid))
+            if row is None:
+                # Not in the tenant, or gone by the insert. The same ``error``
+                # value for both, because the two are one answer to the caller:
+                # a row outside your tenant is not distinguishable from a row
+                # that is not there, and making it distinguishable would turn a
+                # batch endpoint into a bulk existence oracle. The log line
+                # carries the real cause.
+                if not is_owned:
+                    logger.warning(
+                        "Entity link bulk-upsert refused: memory_id=%s entity_id=%s not in tenant %s",
+                        mid,
+                        eid,
+                        tenant_id,
+                    )
+                results.append(
+                    {
+                        "input_idx": it["input_idx"],
+                        "memory_id": str(mid),
+                        "entity_id": str(eid),
+                        "role": it["role"],
+                        "created": False,
+                        "error": "fk_violation",
+                    }
+                )
+                continue
+            role, inserted = row
+            results.append(
+                {
+                    "input_idx": it["input_idx"],
+                    "memory_id": str(mid),
+                    "entity_id": str(eid),
+                    "role": role,
+                    # Only the first item naming a pair can have created it.
+                    "created": inserted and (mid, eid) not in written,
+                }
+            )
+            written.add((mid, eid))
+        return results
 
     # ------------------------------------------------------------------
     # Crystallizer helpers (entity)
