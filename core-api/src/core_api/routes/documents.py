@@ -14,7 +14,12 @@ from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_DOC_SEARCH_TOP_K, MAX_DOC_SEARCH_TOP_K, SKILL_SLUG_RE
-from core_api.errors import AUTH_AGENT_TRUST_TOO_LOW, coded_detail
+from core_api.errors import (
+    AUTH_AGENT_TRUST_TOO_LOW,
+    EMBEDDING_NOT_CONFIGURED,
+    EMBEDDING_NOT_CONFIGURED_MESSAGE,
+    coded_detail,
+)
 from core_api.middleware.idempotency import (
     IDEMPOTENCY_HEADER,
     IdempotencyGuard,
@@ -1027,6 +1032,13 @@ async def search_documents(
     # so a bulk-ingest flood can't throttle it into the 503 below.
     query_embedding = await get_embedding(body.query, tenant_config, background=False)
     if query_embedding is None:
+        if not embedding_configured(tenant_config):
+            # No provider at all (L-224): permanent until an operator sets one,
+            # so not the 503 below, which invites a retry.
+            raise HTTPException(
+                status_code=501,
+                detail=coded_detail(EMBEDDING_NOT_CONFIGURED, EMBEDDING_NOT_CONFIGURED_MESSAGE),
+            )
         raise HTTPException(
             status_code=503,
             detail=("embedding provider returned no vector (check provider config / quota); search aborted"),

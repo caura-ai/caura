@@ -32,9 +32,10 @@ class Settings(BaseSettings):
     # ``db_pool_*`` settings + ``database_url`` were removed with the engine.
     api_key: str | None = None  # legacy, deprecated
     admin_api_key: str | None = None
-    # A file holding the admin key, read only when ``admin_api_key`` is unset or
-    # blank (M-109): the compose stack generates one so its bundled scheduler can
-    # reach the admin endpoints. An operator's ADMIN_API_KEY wins.
+    # A file holding the admin key, read only when ``admin_api_key`` and the
+    # legacy ``api_key`` are both unset or blank (M-109, L-229): the compose stack
+    # generates one so its bundled scheduler can reach the admin endpoints. An
+    # operator's ADMIN_API_KEY, or a legacy API_KEY, wins.
     admin_api_key_file: str = ""
     # Optional: when set, all non-admin requests must present this key. Both
     # spellings are accepted as INPUTS; ``_prefer_the_new_api_key_name`` below
@@ -512,8 +513,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def resolve_admin_api_key(self) -> Self:
-        # Blank as well as unset: .env.example ships ``ADMIN_API_KEY=``.
-        if not self.admin_api_key and self.admin_api_key_file:
+        # Blank as well as unset: .env.example ships ``ADMIN_API_KEY=``. Not
+        # over a legacy ``API_KEY`` either (L-229): ``get_admin_key`` prefers
+        # ``admin_api_key``, so the generated key would shadow it and an operator
+        # whose .env carries only the legacy key would lose admin access.
+        if not self.admin_api_key and not self.api_key and self.admin_api_key_file:
             self.admin_api_key = read_shared_secret_file(
                 self.admin_api_key_file, env_name="ADMIN_API_KEY_FILE"
             )

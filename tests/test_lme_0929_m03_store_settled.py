@@ -163,6 +163,8 @@ async def test_inline_deployment_bulk_ingest_is_settled_immediately(client):
     stats = await _stats(client, tenant)
     assert stats["pending"] == {"embedding": 0, "enrichment": 0, "fanout": 0}
     assert stats["settled"] is True
+    # L-224: an embedder is configured here, so ``settled`` waits for its rows.
+    assert stats["embedding_configured"] is True
 
 
 async def test_scoping_by_agent_id(client, monkeypatch):

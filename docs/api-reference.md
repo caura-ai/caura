@@ -24,7 +24,7 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/memories/rollback-session` | POST | Undo a broker session's writes (`{"session_id"}`): its live memories and the rows derived from them become `outdated`, what they had superseded or contradicted becomes `active` again (`restored`), and its held ones are rejected as a person rejects them (`cancelled` and soft-deleted), with their auto-chunks. A person only |
 | `/memories/{id}/contradictions` | GET | View contradiction chain |
 | `/memories` | DELETE | Bulk soft-delete. Skips held memories (`quarantined`), as every delete does, because a person decides on those. A fleet or tenant purge still removes them |
-| `/memories/stats` | GET | Counts by type, agent, and status, plus `pending: {embedding, enrichment, fanout}` (live rows still owed background work) and `settled` (all zero). Benchmarks and other measure-after-ingest callers should poll until `settled: true` before measuring — see [BENCHMARKS.md](../BENCHMARKS.md#reproduce-it-yourself) |
+| `/memories/stats` | GET | Counts by type, agent, and status, plus `pending: {embedding, enrichment, fanout}` (live rows still owed background work) and `settled` (all zero). Benchmarks and other measure-after-ingest callers should poll until `settled: true` before measuring — see [BENCHMARKS.md](../BENCHMARKS.md#reproduce-it-yourself). With no embedding provider configured, `embedding_configured` is `false`: rows are stored unembedded and searched by keyword, `pending.embedding` counts them, and `settled` ignores that count |
 | `/search` | POST | Hybrid semantic + keyword search with graph-enhanced retrieval |
 | `/recall` | POST | Search + LLM synthesis — `summary` is the answer to the query (the model reasons step by step internally; only its final answer is surfaced), alongside the source memories under `memories` (also mirrored to `items` for /search-shaped consumers — **`items` is deprecated and scheduled for removal in v4.0.0**; send `items_alias: false` to drop that copy now and halve the response, and read `memories`. The MCP recall brief already omits it by default). `top_k` is the result count — `limit` is accepted as an alias for it |
 | `/ingest/preview` | POST | Extract 5-20 atomic facts from a URL or text (no writes) |
@@ -84,6 +84,7 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/documents` | POST | Store or update a structured JSON document. Also mints a memory carrying the document's `data`, so the body is reachable by recall — the doc row embeds only `data["summary"]`. Independent of the summary: a doc without one is invisible to `/documents/search` and still mints. Not minted for `collection="skills"`, `_`-prefixed collections, an empty `data`, or a payload over the memory size limit |
 | `/documents/{id}` | GET | Retrieve document by ID |
 | `/documents/query` | POST | Query by field equality filters |
+| `/documents/search` | POST | Similarity search over documents written with a `data["summary"]`. With no embedding provider configured, documents are stored unindexed and this answers `501 EMBEDDING_NOT_CONFIGURED` (MCP `caura_doc op=search`: the same code) |
 | `/documents/{id}` | DELETE | Delete a document, and un-mint the memory its write minted |
 
 **Fleet**

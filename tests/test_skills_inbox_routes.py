@@ -793,6 +793,36 @@ async def test_approve_concurrent_status_flip_409(storage, settings, side_effect
     assert "concurrently transitioned" in r.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    "other", ["summarize-oncall-handoff", "agent/summarize-oncall-handoff"]
+)
+async def test_l223_approve_refuses_a_folder_an_active_skill_uses(
+    storage, settings, side_effects, other
+):
+    """L-223 (audit 2026-10-01, B41): ``forge/X``, ``agent/X`` and ``X`` all
+    install as folder ``X``. A node that sees two of them skips both and then
+    prunes the folder, so approving ``forge/X`` removed an active ``X`` from
+    the nodes that had it. Approval refuses while another active skill holds
+    the folder, in any fleet: a node with no fleet installs every skill."""
+    storage.seed(forge_doc())
+    storage.seed({"doc_id": other, "fleet_id": "fleet-b", "data": {"status": "active"}})
+
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/approve")
+
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "SKILL_FOLDER_TAKEN"
+    assert other in r.json()["detail"]
+    assert storage.upserts == []
+
+    # Only an active skill is installed, so one that left active no longer
+    # holds the folder.
+    storage.docs[other]["data"]["status"] = "rejected"
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/approve")
+    assert r.status_code == 200, r.text
+
+
 # ---------------------------------------------------------------------------
 # Quarantined skills: review and override (M-120)
 # ---------------------------------------------------------------------------

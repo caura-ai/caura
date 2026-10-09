@@ -266,6 +266,25 @@ describe("reconcileSkills", () => {
     assert.deepEqual(summary.skipped, ["agent/shared", "forge/shared", "shared"]);
   });
 
+  test("L-223: a slug two catalog skills share keeps the copy already installed", async () => {
+    // A fleet's own ``shared`` was installed; a tenant-wide ``forge/shared``
+    // now reaches this node too. Neither can be chosen, so neither is written,
+    // and the installed copy is not pruned for being absent from the catalog.
+    plantOnDisk(FROZEN_PLUGIN_ID);
+    plantOnDisk("shared", "# installed copy\n");
+    mockCatalog = [
+      { doc_id: "shared", data: { name: "Fleet", description: "fleet", content: "# fleet\n" } },
+      { doc_id: "forge/shared", data: { name: "Forged", description: "forged", content: "# forged\n" } },
+    ];
+
+    const summary = await reconcileSkills();
+
+    assert.deepEqual(listSkillDirs(), [FROZEN_PLUGIN_ID, "shared"].sort());
+    assert.equal(readSkill("shared"), "# installed copy\n");
+    assert.deepEqual(summary.removed, []);
+    assert.deepEqual(summary.skipped, ["forge/shared", "shared"]);
+  });
+
   test("duplicate catalog rows with identical materialized content remain idempotent", async () => {
     plantOnDisk(FROZEN_PLUGIN_ID);
     const duplicate = {
@@ -667,6 +686,22 @@ describe("reconcileSkills — configured targets", () => {
     assert.ok(!existsSync(ext("old-skill")), "owned orphan removed");
     assert.ok(summary.removed.includes("old-skill"));
     assert.ok(existsSync(ext("client-skill", "SKILL.md")), "foreign neighbour untouched");
+  });
+
+  test("additive: L-223 — an owned skill whose slug two catalog skills share is kept", async () => {
+    plantOnDisk(FROZEN_PLUGIN_ID);
+    plantOwned("shared", "# installed copy\n");
+    useAdditive();
+    mockCatalog = [
+      { doc_id: "shared", data: { name: "Fleet", description: "fleet", content: "# fleet\n" } },
+      { doc_id: "forge/shared", data: { name: "Forged", description: "forged", content: "# forged\n" } },
+    ];
+
+    const summary = await reconcileSkills();
+
+    assert.equal(readFileSync(ext("shared", "SKILL.md"), "utf-8"), "# installed copy\n");
+    assert.ok(existsSync(ext("shared", OWNED_MARKER)), "still ours");
+    assert.ok(!summary.removed.includes("shared"));
   });
 
   test("additive: an owned skill still in the catalog is updated in place", async () => {

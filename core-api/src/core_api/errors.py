@@ -159,6 +159,30 @@ AUTH_PERSON_REQUIRED = "PERSON_REQUIRED"
 REQUEST_BUDGET_EXCEEDED = "REQUEST_BUDGET_EXCEEDED"
 
 
+# ── Code for a deployment with no embedder (L-224) ────────────────────────
+#
+# With no embedding provider configured (no tenant key, no OPENAI_API_KEY, no
+# platform embedder), documents are stored without vectors, so document search
+# cannot run at all. It answered with the 503 meant for a provider that failed
+# once, which tells a caller to retry; no retry helps until an operator
+# configures a provider. Answered 501 with this code on REST, and the same code
+# on MCP ``caura_doc``. Memory search still works, by keyword.
+EMBEDDING_NOT_CONFIGURED = "EMBEDDING_NOT_CONFIGURED"
+EMBEDDING_NOT_CONFIGURED_MESSAGE = (
+    "Document search needs an embedding provider, and none is configured, so documents are "
+    "stored without embeddings. Set OPENAI_API_KEY or PLATFORM_EMBEDDING_* on the server "
+    "(or EMBEDDING_PROVIDER=fake for test vectors). Memory search still works by keyword."
+)
+
+# ── Code for a skill folder another skill holds (L-223) ───────────────────
+#
+# ``forge/X``, ``agent/X`` and ``X`` all install as the folder ``X`` on a plugin
+# node. A node that sees two of them cannot tell which to install: it keeps a
+# copy it already has, no longer updated, and a node without one gets neither.
+# Answered 409 by the skills-inbox approve.
+SKILL_FOLDER_TAKEN = "SKILL_FOLDER_TAKEN"
+
+
 def coded_detail(code: str, message: str, **details: object) -> dict:
     """An ``HTTPException`` detail that keeps its own error code.
 

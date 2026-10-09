@@ -30,6 +30,7 @@ from common.constants import (
     QUARANTINED_MEMORY_STATUS,
     SESSION_ROLLBACK_ACTION,
 )
+from common.embedding import embedding_configured
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api import openapi_responses as _oar
 from core_api import request_phase
@@ -813,7 +814,7 @@ async def memory_stats(
     # Type/agent/status breakdown (GROUPING SETS) via core-storage-api. Aggregates
     # across the readable set when the caller has cross-tenant read AND didn't pin
     # tenant_id; pinning to a specific tenant returns just that tenant's stats.
-    return await get_storage_client().memory_stats_breakdown(
+    stats = await get_storage_client().memory_stats_breakdown(
         {
             "tenant_id": tenant_id,
             "fleet_id": fleet_id,
@@ -840,6 +841,35 @@ async def memory_stats(
             "caller_tenant_id": auth.tenant_id,
         }
     )
+    return await _settle_without_an_embedder(stats, tenant_id)
+
+
+async def _settle_without_an_embedder(stats: dict, tenant_id: str) -> dict:
+    """Say whether an embedder is configured, and settle without one (L-224).
+
+    With no embedding provider, every row is stored ``embedding=NULL`` and stays
+    so, so ``pending.embedding`` can never reach zero and ``settled`` never
+    flipped, though docs/api-reference.md tells callers to poll for it. The
+    count stays (those rows are unembedded); ``settled`` then waits only for
+    enrichment and fan-out. Resolved for ``tenant_id``, the tenant a
+    cross-tenant aggregate is read as.
+    """
+    pending = stats.get("pending")
+    if not isinstance(pending, dict):
+        return stats
+    from core_api.services.organization_settings import resolve_config
+
+    try:
+        tenant_config = await resolve_config(tenant_id)
+    except Exception:
+        # The same degrade-to-process-provider idiom as the search paths.
+        logger.warning("stats: failed to resolve tenant config (tenant=%s)", tenant_id, exc_info=True)
+        tenant_config = None
+    configured = embedding_configured(tenant_config)
+    stats["embedding_configured"] = configured
+    if not configured:
+        stats["settled"] = not any(count for axis, count in pending.items() if axis != "embedding")
+    return stats
 
 
 @router.get("/memories/count", responses={200: {"model": _oar.MemoryCountResponse}})

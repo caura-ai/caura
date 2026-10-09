@@ -58,6 +58,8 @@ from core_api.constants import (
 from core_api.errors import (
     AUTH_ORG_SUSPENDED,
     AUTH_PLAN_LIMIT,
+    EMBEDDING_NOT_CONFIGURED,
+    EMBEDDING_NOT_CONFIGURED_MESSAGE,
     REQUEST_BUDGET_EXCEEDED,
     code_for_status,
 )
@@ -3382,7 +3384,7 @@ async def caura_doc(
                     return _with_latency(
                         _error_response("INVALID_ARGUMENTS", "op=search requires a non-empty 'query'."), t0
                     )
-                from common.embedding import get_embedding
+                from common.embedding import embedding_configured, get_embedding
 
                 # Same-provider query embedding — see routes/documents.py
                 # search: the query vector must come from the provider that
@@ -3401,6 +3403,13 @@ async def caura_doc(
                 # Interactive search — see documents.py: not background.
                 query_embedding = await get_embedding(query, tenant_config, background=False)
                 if query_embedding is None:
+                    # No provider at all is permanent, unlike a provider that
+                    # failed once — see routes/documents.py (L-224).
+                    if not embedding_configured(tenant_config):
+                        return _with_latency(
+                            _error_response(EMBEDDING_NOT_CONFIGURED, EMBEDDING_NOT_CONFIGURED_MESSAGE),
+                            t0,
+                        )
                     return _with_latency(
                         _error_response(
                             "UPSTREAM_ERROR",

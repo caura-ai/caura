@@ -34,7 +34,13 @@ from core_api.schemas import MemoryOut, SearchWarning
 
 
 class MemoryPendingWork(BaseModel):
-    embedding: int = Field(description="Live rows whose vector has not landed yet (`embedding IS NULL`).")
+    embedding: int = Field(
+        description=(
+            "Live rows whose vector has not landed yet (`embedding IS NULL`). With no embedding "
+            "provider configured (`embedding_configured` false) these rows stay unembedded, and "
+            "`settled` ignores them."
+        )
+    )
     enrichment: int = Field(
         description="Live rows still marked `enrichment_pending` — the deferred LLM enrichment has not written back."
     )
@@ -64,7 +70,18 @@ class MemoryStatsResponse(BaseModel):
     )
     settled: bool | None = Field(
         default=None,
-        description="True when every `pending` count is zero. Wait for this before measuring a freshly ingested store.",
+        description=(
+            "True when every `pending` count is zero, or every count but `embedding` when "
+            "`embedding_configured` is false. Wait for this before measuring a freshly ingested store."
+        ),
+    )
+    embedding_configured: bool | None = Field(
+        default=None,
+        description=(
+            "False when no embedding provider is configured for the tenant: rows are stored without "
+            "embeddings and searched by keyword only, so `pending.embedding` counts rows that will stay "
+            "unembedded until a provider is set and they are re-embedded."
+        ),
     )
 
 

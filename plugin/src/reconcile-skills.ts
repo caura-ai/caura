@@ -290,13 +290,14 @@ function readDirSlugs(root: string, caller: string): Set<string> | null {
 
 /**
  * Reconcile ONE ``owned`` target dir against the desired catalog set:
- * prune orphans (anything on disk not in ``desired``, except
+ * prune orphans (anything on disk not in ``desired`` or ``held``, except
  * {@link PROTECTED_SKILLS}), then write/update the desired skills.
  * Returns this dir's contribution to the summary; never throws.
  */
 function reconcileOwnedDir(
   skillsRoot: string,
   desired: Map<string, string>,
+  held: ReadonlySet<string>,
 ): DirReconcileResult {
   const result: DirReconcileResult = {
     added: [],
@@ -318,7 +319,7 @@ function reconcileOwnedDir(
   // (slug A → slug B) lands cleanly even if the operator does both in
   // the same heartbeat window.
   for (const slug of onDisk) {
-    if (desired.has(slug)) continue;
+    if (desired.has(slug) || held.has(slug)) continue;
     if (PROTECTED_SKILLS.has(slug)) {
       result.protected.push(slug);
       continue;
@@ -398,6 +399,7 @@ function reconcileOwnedDir(
 function reconcileAdditiveDir(
   skillsRoot: string,
   desired: Map<string, string>,
+  held: ReadonlySet<string>,
 ): DirReconcileResult {
   const result: DirReconcileResult = {
     added: [],
@@ -416,7 +418,7 @@ function reconcileAdditiveDir(
   // Removals first — but ONLY for Caura-owned (marker-bearing) orphans.
   // Anything without the marker is foreign and is never touched.
   for (const slug of onDisk) {
-    if (desired.has(slug)) continue;
+    if (desired.has(slug) || held.has(slug)) continue;
     // Ownership gates everything in an additive dir: a foreign slug is left
     // alone even if its name collides with a PROTECTED one. A foreign
     // "memclaw" dir (no marker) is the client's, not ours — ignore it // legacy-name-floor: bundled protected skill slug
@@ -593,6 +595,13 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   //    synthesises frontmatter from ``data.name`` and ``data.description``
   //    before writing, unless the content already starts with a ``---``
   //    fence (in which case the author's own frontmatter is preserved).
+  //
+  //    Two catalog rows that resolve to one slug (``forge/X``, ``agent/X``
+  //    and ``X``) leave it ambiguous: neither is written, and the slug is
+  //    HELD, so a copy already on disk is kept rather than pruned as an
+  //    orphan (L-223). Pruning it would take a working skill off the node
+  //    because a second one with the same name appeared; the server refuses
+  //    to approve such a second skill, and this covers any it never saw.
   const desired = new Map<string, string>();
   const catalogSourceBySlug = new Map<string, string>();
   const ambiguousSlugs = new Set<string>();
@@ -648,8 +657,8 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   for (const target of targets) {
     const dirResult =
       target.mode === "additive"
-        ? reconcileAdditiveDir(target.dir, desired)
-        : reconcileOwnedDir(target.dir, desired);
+        ? reconcileAdditiveDir(target.dir, desired, ambiguousSlugs)
+        : reconcileOwnedDir(target.dir, desired, ambiguousSlugs);
     addedAll.push(...dirResult.added);
     removedAll.push(...dirResult.removed);
     protectedAll.push(...dirResult.protected);
