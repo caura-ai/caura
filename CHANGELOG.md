@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.30.0](https://github.com/caura-ai/caura/compare/backend-v3.29.1...backend-v3.30.0) (2026-10-09)
+
+
+### Features
+
+* **clients:** keep the search envelope and read as an agent ([#2012](https://github.com/caura-ai/caura/issues/2012)) ([f147f61](https://github.com/caura-ai/caura/commit/f147f61722ca7aae046e8eea73c42a887f8b86c1))
+
+
+### Performance
+
+* **storage:** index the contradiction window and expiry sweep ([#2009](https://github.com/caura-ai/caura/issues/2009)) ([f0818c0](https://github.com/caura-ai/caura/commit/f0818c089aed077d5b66a9cfbc51be770a4307c5))
+* **storage:** write a batch of entity links in one transaction ([#2015](https://github.com/caura-ai/caura/issues/2015)) ([419c3bc](https://github.com/caura-ai/caura/commit/419c3bc29f7e3168f3872d57d30c0cbdc92e9ca2))
+
 ## [3.29.1](https://github.com/caura-ai/caura/compare/backend-v3.29.0...backend-v3.29.1) (2026-10-08)
 
 
