@@ -144,7 +144,11 @@ describe("agent identity is resolved, never invented", () => {
         min_similarity: 0, diagnostic: true, include_brief,
       });
       const requests = captured.filter(c => ["/api/v1/search", "/api/v1/recall"].includes(c.url.pathname));
-      assert.equal(requests.length, include_brief ? 2 : 1);
+      // A brief is one /recall, which runs the search itself (L-199).
+      assert.deepEqual(
+        requests.map(c => c.url.pathname),
+        [include_brief ? "/api/v1/recall" : "/api/v1/search"],
+      );
       for (const req of requests) {
         assert.equal(req.body?.valid_at, "2026-09-30");
         assert.equal(req.body?.min_similarity, 0);

@@ -38,6 +38,9 @@ export async function apiCall(
   const url = new URL(`${CAURA_API_PREFIX}${normalized}`, CAURA_API_URL);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
+      // Callers cast optional fields into this map, and set() would send them
+      // as the text "undefined" or "null", a value the server accepts (L-58).
+      if (v === undefined || v === null) continue;
       url.searchParams.set(k, v);
     }
   }

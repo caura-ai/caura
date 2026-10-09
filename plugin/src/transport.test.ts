@@ -124,6 +124,21 @@ describe("apiCall — CAURA_API_PREFIX handling", () => {
       "http://localhost:8000/api/v1/memories?tenant_id=t1",
     );
   });
+
+  test("L-58: an undefined or null query value is left out, not sent as text", async () => {
+    // Callers cast optional fields into the string map; URLSearchParams.set
+    // stringifies them, so the server read ``collection=undefined``.
+    await apiCall("GET", "/memories", undefined, {
+      tenant_id: "t1",
+      collection: undefined as unknown as string,
+      fleet_id: null as unknown as string,
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(
+      calls[0].url,
+      "http://localhost:8000/api/v1/memories?tenant_id=t1",
+    );
+  });
 });
 
 describe("apiCall — extraHeaders (bulk X-Bulk-Attempt-Id support)", () => {

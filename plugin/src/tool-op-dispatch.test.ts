@@ -112,6 +112,21 @@ describe("document operations require a usable collection before any request", (
   }
 });
 
+describe("document reads and deletes require a doc_id before any request", () => {
+  // L-58: an omitted doc_id became the path segment ``/documents/undefined``,
+  // so the agent was told the document did not exist, and a delete aimed at
+  // a document literally named "undefined".
+  for (const op of ["read", "delete"]) {
+    test(`${op} rejects missing, empty and non-string doc_ids`, async () => {
+      for (const doc_id of [undefined, null, "", "   ", 123]) {
+        const outcome = await outcomeOf("caura_doc", { op, collection: "c-1", doc_id });
+        assert.deepEqual(captured, [], `doc_id ${String(doc_id)} reached the network`);
+        assert.match(String(outcome), /requires a non-empty doc_id/);
+      }
+    });
+  }
+});
+
 describe("an unrecognised op is refused, not dispatched as a write", () => {
   // One value per tool: after the guard there is no branching on the op VALUE,
   // so every unmatched string reaches the same line and further values would

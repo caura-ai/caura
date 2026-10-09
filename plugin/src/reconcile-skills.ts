@@ -52,7 +52,7 @@ import {
   existsSync, mkdirSync, readdirSync, readFileSync,
   rmSync, statSync, writeFileSync,
 } from "fs";
-import { join, resolve } from "path";
+import path, { join, resolve } from "path";
 
 import { apiCall } from "./transport.js";
 import { CAURA_TENANT_ID, CAURA_FLEET_ID, readEnv } from "./env.js";
@@ -179,6 +179,23 @@ function ownedSkillsDir(): string {
 }
 
 /**
+ * Path segments below the root of an absolute ``dir``: 3 for
+ * ``/home/me/skills`` and for ``C:\Users\me\skills``, 0 for ``/`` or ``C:\``.
+ *
+ * Counted with the platform's own separator (L-57). Splitting on "/" counted
+ * every resolved Windows path as one segment, so the depth guard below
+ * skipped every CAURA_SKILL_TARGETS entry on Windows as too shallow.
+ * ``pathImpl`` exists for tests, which run on one platform.
+ */
+export function skillTargetDepth(
+  dir: string,
+  pathImpl: Pick<typeof path, "parse" | "sep"> = path,
+): number {
+  const { root } = pathImpl.parse(dir);
+  return dir.slice(root.length).split(pathImpl.sep).filter(Boolean).length;
+}
+
+/**
  * Resolve the target dirs to reconcile this tick.
  *
  * Always includes the plugin's owned dir (``owned`` mode). Additional
@@ -234,10 +251,9 @@ export function resolveSkillTargets(): SkillTarget[] {
     }
     const normalized = resolve(dir);
     // Safety: owned-mode reconcile rmSync's orphans under the target, so a
-    // too-shallow path (``/``, ``/tmp``) would be catastrophic if
+    // too-shallow path (``/``, ``/tmp``, ``C:\``) would be catastrophic if
     // misconfigured. Require at least two path segments.
-    const parts = normalized.split("/").filter(Boolean);
-    if (parts.length < 2) {
+    if (skillTargetDepth(normalized) < 2) {
       console.warn(
         `[caura] CAURA_SKILL_TARGETS: entry dir ${normalized} is too shallow; skipping`,
       );

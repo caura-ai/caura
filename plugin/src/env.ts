@@ -101,7 +101,30 @@ export const CAURA_API_KEY = readEnv(["CAURA_API_KEY", "MEMCLAW_API_KEY"]) || ""
 export const CAURA_FLEET_ID = readEnv(["CAURA_FLEET_ID", "MEMCLAW_FLEET_ID"]) || "";  // legacy-name-ok: rule 3 dual-read alias
 export let CAURA_TENANT_ID = readEnv(["CAURA_TENANT_ID", "MEMCLAW_TENANT_ID"]) || "";  // legacy-name-ok: rule 3 dual-read alias
 export const CAURA_NODE_NAME = readEnv(["CAURA_NODE_NAME", "MEMCLAW_NODE_NAME"]) || "";  // legacy-name-ok: rule 3 dual-read alias
-export const CAURA_AGENT_ID = readEnv(["CAURA_AGENT_ID", "MEMCLAW_AGENT_ID"]) || "";  // legacy-name-ok: rule 3 dual-read alias
+export let CAURA_AGENT_ID = readEnv(["CAURA_AGENT_ID", "MEMCLAW_AGENT_ID"]) || "";  // legacy-name-ok: rule 3 dual-read alias
+
+/**
+ * Apply the plugin's own config block, which OpenClaw hands ``register(api)``
+ * as ``api.pluginConfig`` (``plugins.entries.<id>.config`` in openclaw.json).
+ *
+ * openclaw.plugin.json declares CAURA_AGENT_ID there, so that is where an
+ * operator sets it, and the plugin read it only from the environment: a value
+ * set where the manifest says was ignored without a word (L-159). A value
+ * there wins over .env, as the more specific setting; the new name wins over
+ * the legacy one, as it does in .env.
+ */
+export function applyPluginConfig(config: unknown): void {
+  if (!config || typeof config !== "object") return;
+  const block = config as Record<string, unknown>;
+  for (const key of ["CAURA_AGENT_ID", "MEMCLAW_AGENT_ID"]) {  // legacy-name-ok: rule 3 dual-read alias
+    const value = block[key];
+    if (typeof value === "string" && value.trim()) {
+      CAURA_AGENT_ID = value.trim();
+      return;
+    }
+  }
+}
+
 // Default to true for all automatic conversation-memory writes: user messages
 // from ingest, turn summaries, compaction summaries and the pre-compaction
 // memory-flush turn (index.ts). Setting false disables these four paths;

@@ -23,7 +23,7 @@
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "fs";
-import { join } from "path";
+import { join, posix, win32 } from "path";
 import { tmpdir } from "os";
 import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
 
@@ -39,7 +39,7 @@ const originalHome = process.env.HOME;
 const tmpHome = mkdtempSync(join(tmpdir(), "reconcile-skills-test-home-"));
 process.env.HOME = tmpHome;
 
-const { reconcileSkills, PROTECTED_SKILLS, resolveSkillTargets, OWNED_MARKER } = await import("./reconcile-skills.js");
+const { reconcileSkills, PROTECTED_SKILLS, resolveSkillTargets, OWNED_MARKER, skillTargetDepth } = await import("./reconcile-skills.js");
 
 const SKILLS_ROOT = join(tmpHome, ".openclaw", "plugins", FROZEN_PLUGIN_ID, "skills");
 
@@ -578,6 +578,17 @@ describe("resolveSkillTargets (config plumbing)", () => {
     const targets = resolveSkillTargets();
     assert.equal(targets.length, 2); // owned default + /tmp/skills-ok
     assert.deepEqual([targets[1].dir, targets[1].mode], ["/tmp/skills-ok", "additive"]);
+  });
+
+  test("L-57: a target's depth is counted with the platform's own separator", () => {
+    // The guard split on "/", and a resolved Windows path has none, so every
+    // Windows target counted as one segment and was skipped as too shallow.
+    assert.equal(skillTargetDepth("C:\\Users\\me\\skills", win32), 3);
+    assert.equal(skillTargetDepth("C:\\Users", win32), 1);
+    assert.equal(skillTargetDepth("C:\\", win32), 0);
+    assert.equal(skillTargetDepth("/home/me/skills", posix), 3);
+    assert.equal(skillTargetDepth("/tmp", posix), 1);
+    assert.equal(skillTargetDepth("/", posix), 0);
   });
 });
 
