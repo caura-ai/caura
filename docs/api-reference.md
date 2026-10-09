@@ -24,7 +24,7 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/memories/rollback-session` | POST | Undo a broker session's writes (`{"session_id"}`): its live memories and the rows derived from them become `outdated`, what they had superseded or contradicted becomes `active` again (`restored`), and its held ones are rejected as a person rejects them (`cancelled` and soft-deleted), with their auto-chunks. A person only |
 | `/memories/{id}/contradictions` | GET | View contradiction chain |
 | `/memories` | DELETE | Bulk soft-delete. Skips held memories (`quarantined`), as every delete does, because a person decides on those. A fleet or tenant purge still removes them |
-| `/memories/stats` | GET | Counts by type, agent, and status, plus `pending: {embedding, enrichment, fanout}` (live rows still owed background work) and `settled` (all zero). Benchmarks and other measure-after-ingest callers should poll until `settled: true` before measuring — see [BENCHMARKS.md](../BENCHMARKS.md#reproduce-it-yourself). With no embedding provider configured, `embedding_configured` is `false`: rows are stored unembedded and searched by keyword, `pending.embedding` counts them, and `settled` ignores that count |
+| `/memories/stats` | GET | Counts by type, agent, and status, plus `pending: {embedding, enrichment, fanout}` (live rows still owed background work), `stranded: {embedding}` (the pending-embedding rows written over an hour ago, which nothing will come back for; re-embed them with `python -m core_storage_api.scripts.backfill_embeddings`) and `settled` (all zero once the stranded rows are set aside). Benchmarks and other measure-after-ingest callers should poll until `settled: true` before measuring, and check `stranded`, since those rows are searched by keyword only — see [BENCHMARKS.md](../BENCHMARKS.md#reproduce-it-yourself). With no embedding provider configured, `embedding_configured` is `false`: rows are stored unembedded and searched by keyword, `pending.embedding` counts them, and `settled` ignores that count |
 | `/search` | POST | Hybrid semantic + keyword search with graph-enhanced retrieval |
 | `/recall` | POST | Search + LLM synthesis — `summary` is the answer to the query (the model reasons step by step internally; only its final answer is surfaced), alongside the source memories under `memories` (also mirrored to `items` for /search-shaped consumers — **`items` is deprecated and scheduled for removal in v4.0.0**; send `items_alias: false` to drop that copy now and halve the response, and read `memories`. The MCP recall brief already omits it by default). `top_k` is the result count — `limit` is accepted as an alias for it |
 | `/ingest/preview` | POST | Extract 5-20 atomic facts from a URL or text (no writes) |
@@ -58,7 +58,7 @@ See also the [public API stability contract](public-api-stability.md) and the
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/insights/generate` | POST | LLM-powered analysis. Focus: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover` |
+| `/insights/generate` | POST | LLM-powered analysis. Focus: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. When no LLM provider answers, the result carries `skipped_reason: "llm_unavailable"` and no findings, and prior insights are left as they were (MCP `caura_insights` says the same) |
 
 **Agents**
 

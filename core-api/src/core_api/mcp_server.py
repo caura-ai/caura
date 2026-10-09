@@ -4052,6 +4052,7 @@ async def caura_insights(
         _build_method,
         _DiscoverResult,
         _persist_findings,
+        skipped_reason_of,
         synthesize_insights,
     )
     from core_api.services.organization_settings import resolve_config
@@ -4151,6 +4152,8 @@ async def caura_insights(
             "insight_memory_ids": [mid for mid in insight_ids if mid],
             "gate_rejected": synth.get("gate_rejected", 0),
             "insights_ms": int((time.perf_counter() - t0) * 1000),
+            # L-134: same as REST — an outage is named, not left to the prose.
+            **skipped_reason_of(synth),
         }
         return _with_latency(_dumps(result), t0)
     except HTTPException as e:

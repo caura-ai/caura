@@ -20,7 +20,7 @@ import os
 # (no candidates built, no service call) independent of RANK_PROVIDER,
 # which selects *which* ranker runs when enabled. Keeps the component
 # dark by default; flip to true (plus a non-noop RANK_PROVIDER) to turn
-# reranking on. Per-tenant override: tenant_config.rank_enabled.
+# reranking on. Environment only: there is no per-tenant switch (L-98).
 RANK_ENABLED: bool = os.environ.get("RANK_ENABLED", "").strip().lower() in (
     "true",
     "1",

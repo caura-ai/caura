@@ -28,8 +28,7 @@ from common.ranking.providers.remote import RemoteRanker
 logger = logging.getLogger(__name__)
 
 # Cache the in-process cross-encoder per model name so the (large) model
-# loads once per process rather than on every search. Keyed on model name
-# so a per-tenant ``rank_model`` override gets its own cached instance.
+# loads once per process rather than on every search.
 _local_ranker_cache: dict[str, LocalCrossEncoderRanker] = {}
 
 # LRU-bounded cache of RemoteRanker instances keyed on the full client config
@@ -64,7 +63,7 @@ def _get_or_create_remote_ranker(
     return ranker
 
 
-def get_rank_provider(name: str, tenant_config: object | None = None) -> RankProvider:
+def get_rank_provider(name: str) -> RankProvider:
     """Construct a rank provider by name.
 
     Parameters
@@ -72,16 +71,18 @@ def get_rank_provider(name: str, tenant_config: object | None = None) -> RankPro
     name:
         ``"noop"`` (default), ``"local"`` (in-process MiniLM), ``"remote"``
         (HTTP ``/rerank`` sidecar), or ``"fake"`` (tests).
-    tenant_config:
-        Optional ``ResolvedConfig``-shaped object for per-tenant overrides
-        (``rank_model`` / ``rank_base_url`` / ``rank_api_key``). Duck-typed
-        via ``getattr`` — may be ``None``.
+
+    Model, base URL and key come from the environment (``RANK_MODEL``,
+    ``RANK_BASE_URL``, ``RANK_API_KEY``) only. There are no per-tenant rank
+    settings (L-98): the reads that looked for them could never find one, and
+    a tenant-chosen ``rank_base_url`` would have pointed this process at any
+    URL with the platform key as the fallback credential.
 
     Raises
     ------
     ValueError
         If the provider name is unknown, or ``remote`` is selected with no
-        base URL configured (RANK_BASE_URL / tenant ``rank_base_url``).
+        ``RANK_BASE_URL`` configured.
     """
     if name == ProviderName.NONE or name == "noop":
         return NoopRanker()
@@ -89,11 +90,8 @@ def get_rank_provider(name: str, tenant_config: object | None = None) -> RankPro
     if name == ProviderName.FAKE:
         return FakeRanker()
 
-    def _tc(attr: str):
-        return getattr(tenant_config, attr, None) if tenant_config is not None else None
-
     if name == ProviderName.LOCAL:
-        model = _tc("rank_model") or RANK_MODEL
+        model = RANK_MODEL
         cached = _local_ranker_cache.get(model)
         if cached is None:
             cached = LocalCrossEncoderRanker(model_name=model)
@@ -101,16 +99,11 @@ def get_rank_provider(name: str, tenant_config: object | None = None) -> RankPro
         return cached
 
     if name == "remote":
-        base_url = _tc("rank_base_url") or RANK_BASE_URL
-        if not base_url:
+        if not RANK_BASE_URL:
             raise ValueError(
-                "rank provider 'remote' requires a base URL "
-                "(set RANK_BASE_URL or tenant rank_base_url)"
+                "rank provider 'remote' requires a base URL (set RANK_BASE_URL)"
             )
-        api_key = (
-            _tc("rank_api_key") or RANK_API_KEY or os.environ.get("RANK_API_KEY", "")
-        )
-        model = _tc("rank_model") or RANK_MODEL
-        return _get_or_create_remote_ranker(base_url, api_key, model)
+        api_key = RANK_API_KEY or os.environ.get("RANK_API_KEY", "")
+        return _get_or_create_remote_ranker(RANK_BASE_URL, api_key, RANK_MODEL)
 
     raise ValueError(f"Unknown rank provider: {name}")
