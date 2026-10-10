@@ -15,6 +15,7 @@ agent.
 - [`performance.md`](performance.md) — the benchmark numbers at operator scale:
   what to expect in your own system, and what the numbers cannot tell you.
 - [`operator-forge-cron.md`](operator-forge-cron.md) — driving the Skill
+- [`telemetry.md`](telemetry.md) — anonymous daily heartbeat a self-hosted server sends.
   Factory's Forge and promoter ticks from an external scheduler.
 
 ## Building against the API
