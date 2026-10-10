@@ -34,9 +34,9 @@ function isLoopbackHost(hostname: string): boolean {
   );
 }
 
-function envAllowsInsecureHttp(): boolean {
+function insecureHttpEnvValue(): string | undefined {
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
-  return ["true", "1"].includes(env?.CAURA_ALLOW_INSECURE_HTTP ?? "");
+  return env?.CAURA_ALLOW_INSECURE_HTTP;
 }
 
 /**
@@ -56,11 +56,18 @@ function assertKeyTransportAllowed(baseUrl: string, allowInsecureHttp: boolean |
     throw new Error(`${expected}; got ${url.protocol}`);
   }
   if (url.protocol === "https:" || isLoopbackHost(url.hostname)) return;
-  if (allowInsecureHttp ?? envAllowsInsecureHttp()) return;
+  const envValue = allowInsecureHttp === undefined ? insecureHttpEnvValue() : undefined;
+  if (allowInsecureHttp ?? ["true", "1"].includes(envValue ?? "")) return;
+  // Do not include the unrecognized env value in errors; it could be sensitive.
+  const invalidEnv =
+    envValue !== undefined && !["true", "1"].includes(envValue)
+      ? " CAURA_ALLOW_INSECURE_HTTP is set but was ignored: only the exact case-sensitive values 'true' and '1' opt in."
+      : "";
   throw new Error(
     `Refusing to send the API key to ${url.host}: baseUrl uses plain HTTP to a non-loopback host, ` +
       `so the key would cross the network in cleartext. Use https://, or pass allowInsecureHttp: true ` +
-      `(or set CAURA_ALLOW_INSECURE_HTTP=true) to accept the risk, e.g. on a trusted private network.`,
+      `(or set CAURA_ALLOW_INSECURE_HTTP=true) to accept the risk, e.g. on a trusted private network.` +
+      invalidEnv,
   );
 }
 

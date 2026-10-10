@@ -468,13 +468,26 @@ for (const value of ["true", "1"]) {
   });
 }
 
-for (const value of ["", "false", "0", "yes"]) {
-  test(`CAURA_ALLOW_INSECURE_HTTP=${JSON.stringify(value)} does not opt in`, () => {
+for (const value of ["", "false", "0", "yes", "True", "TRUE", "on"]) {
+  test(`CAURA_ALLOW_INSECURE_HTTP=${JSON.stringify(value)} is rejected clearly`, () => {
     withEnvOptIn(value, () => {
-      assert.throws(() => clientFor("http://caura.example"));
+      assert.throws(
+        () => clientFor("http://caura.example"),
+        /is set but was ignored: only the exact case-sensitive values 'true' and '1'/,
+      );
     });
   });
 }
+
+test("unrecognized env value is not copied into transport errors", () => {
+  withEnvOptIn("secret-sample-not-a-token", () => {
+    assert.throws(() => clientFor("http://caura.example"), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.doesNotMatch(error.message, /secret-sample-not-a-token/);
+      return true;
+    });
+  });
+});
 
 test("an explicit allowInsecureHttp: false beats the env opt-in", () => {
   withEnvOptIn("true", () => {
