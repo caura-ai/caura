@@ -25,6 +25,11 @@ error — and the SDKs forward the field verbatim, so it no-op'd silently.
 Both are fixed by one shared ``_resolve_read_identity``, which is the point:
 two routes parsing the same ``SearchRequest`` must not disagree about what its
 fields mean.
+
+L-124 later narrowed the guard. An agent credential now always reads as itself
+(``auth.effective_agent_id``), so for one ``filter_agent_id`` only filters by
+author and is no longer refused, as on MCP ``caura_recall``; ``caller_agent_id``
+still asserts an identity and is still refused.
 """
 
 from __future__ import annotations
@@ -137,13 +142,16 @@ async def _setup(client, sc):
 # ---------------------------------------------------------------------------
 
 
-async def test_recall_refuses_a_filter_agent_id_that_is_not_the_caller(
+async def test_recall_a_peer_filter_does_not_disclose_the_peers_private_row(
     client, sc, as_auth
 ):
-    """THE DISCLOSURE. Fails without the fix: 200 carrying peer B's private row.
+    """THE DISCLOSURE, still closed after L-124 stopped refusing the filter.
 
-    Agent A names peer B. Pre-fix that made B the visibility identity, so B's
-    ``scope_agent`` content came back to A.
+    Agent A names peer B. Before H-06 that made B the visibility identity, so
+    B's ``scope_agent`` content came back to A. H-06 answered 403; L-124 lets
+    the filter through as an author filter, as MCP ``caura_recall`` does,
+    because an agent credential now always reads as itself. So A gets B's
+    rows among those A may read, and B's only row is private.
     """
     tenant_id, _, query, peer, attacker = await _setup(client, sc)
     as_auth(tenant_id, attacker)
@@ -152,13 +160,43 @@ async def test_recall_refuses_a_filter_agent_id_that_is_not_the_caller(
         "/api/v1/recall",
         json={"tenant_id": tenant_id, "query": query, "filter_agent_id": peer},
     )
-    assert resp.status_code == 403, (
-        f"recall let an agent name a peer; body={resp.text[:400]}"
+    assert resp.status_code == 200, resp.text
+    # The rows, not ``resp.text``: the response echoes the query, which is the
+    # private row's content.
+    assert resp.json()["memories"] == [], (
+        f"a peer filter surfaced the peer's private row; body={resp.text[:400]}"
     )
-    assert "does not match the authenticated agent identity" in resp.text
-    # On the content too: a later change answering 200-with-filtering instead
-    # of 403 must still not surface the peer's private row.
-    assert "peer B private scope_agent memory" not in resp.text
+
+
+async def test_recall_a_peer_filter_reads_as_the_caller(
+    client, sc, as_auth, monkeypatch
+):
+    """L-124: the filter reaches the search as the author filter only.
+
+    The identity stays the credential's own, which is what keeps the
+    disclosure above closed and the trust<2 fleet forcing keyed on A.
+    Asserted on the arguments for the reason the omitted-filter test below
+    gives.
+    """
+    from core_api.services import memory_service
+
+    tenant_id, _, query, peer, attacker = await _setup(client, sc)
+    as_auth(tenant_id, attacker)
+    seen: dict = {}
+
+    async def _capture(*args, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(memory_service, "search_memories", _capture)
+
+    resp = await client.post(
+        "/api/v1/recall",
+        json={"tenant_id": tenant_id, "query": query, "filter_agent_id": peer},
+    )
+    assert resp.status_code == 200, resp.text
+    assert seen.get("caller_agent_id") == attacker
+    assert seen.get("filter_agent_id") == peer
 
 
 async def test_recall_refuses_a_caller_agent_id_that_is_not_the_caller(
@@ -181,26 +219,28 @@ async def test_recall_refuses_a_caller_agent_id_that_is_not_the_caller(
     assert "does not match the authenticated agent identity" in resp.text
 
 
-async def test_recall_refuses_an_explicitly_empty_filter_agent_id(client, sc, as_auth):
+async def test_recall_refuses_an_explicitly_empty_caller_agent_id(client, sc, as_auth):
     """An empty string is an assertion, not an omission.
 
     #1364 collapsed eight hand-written self-plane conditions onto one gate and
     had to reconcile their one genuine disagreement: five compared
     unconditionally, so an empty string was already a 403 there; three guarded
-    on truthiness and let it through, and these two ``/recall`` knobs were two
+    on truthiness and let it through, and the two ``/recall`` knobs were two
     of the three. The gate took the stricter reading and pinned it only as a
     unit test on the helper. This is that decision at the route level, in the
     spelling a client actually produces — not ``?agent_id=`` but a serializer
     that emits ``""`` for an unset field, which reaches ``/recall`` and
     ``/search`` through this body. Measured: answers 200, not 403, if the gate
-    goes back to a truthiness guard.
+    goes back to a truthiness guard. Pinned on ``caller_agent_id``, the knob
+    that still asserts an identity; since L-124 ``filter_agent_id`` only
+    filters for an agent credential.
     """
     tenant_id, _, query, _peer, attacker = await _setup(client, sc)
     as_auth(tenant_id, attacker)
 
     resp = await client.post(
         "/api/v1/recall",
-        json={"tenant_id": tenant_id, "query": query, "filter_agent_id": ""},
+        json={"tenant_id": tenant_id, "query": query, "caller_agent_id": ""},
     )
     assert resp.status_code == 403, resp.text
 

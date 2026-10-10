@@ -2409,6 +2409,13 @@ def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[Agen
     still name any agent — the restriction is on agent-scoped credentials,
     which is where the threat is.
 
+    L-124 narrowed it to ``caller_agent_id``. ``auth.effective_agent_id``
+    makes an agent credential read as itself whatever the body names, so for
+    one ``filter_agent_id`` reaches neither escalation: it is only the author
+    filter, narrowing to a peer's rows among those the caller may already
+    read, as MCP ``caura_recall`` allows. Refusing it made the same request
+    answer 403 on REST and 200 on MCP.
+
     SHARED because ``/recall`` shipped without any of it. It re-derived the
     identity itself, straight from ``body.filter_agent_id``, so both
     escalations above were live on that route while ``/search`` refused them —
@@ -2417,10 +2424,9 @@ def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[Agen
     ``SearchRequest`` must not disagree about what the fields mean; one
     implementation is the only way that stays true.
     """
-    auth.enforce_self_agent(body.filter_agent_id, field="filter_agent_id")
-    # Same rule for the identity knob: ``caller_agent_id`` feeds the visibility
-    # identity directly, so leaving it unguarded reopens the same escalation
-    # under a different field name.
+    # ``caller_agent_id`` feeds the visibility identity directly, so an agent
+    # credential may name only itself there. ``filter_agent_id`` is not refused
+    # (L-124, above): for an agent credential it is only the author filter.
     auth.enforce_self_agent(body.caller_agent_id, field="caller_agent_id")
     if body.filter_agent_id is not None:
         body.filter_agent_id = canonical_service_agent_id(body.filter_agent_id)
@@ -2439,6 +2445,19 @@ def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[Agen
     # authenticated. Gates the recall_count bump — see the note at the callsite.
     identity_asserted = bool(not auth.agent_id and body.caller_agent_id)
     return eff_agent_id, identity_asserted
+
+
+def _filter_to_explain(auth: AuthContext, body: SearchRequest, eff_agent_id: str | None) -> str | None:
+    """The ``filter_agent_id`` CAURA-723's probe explains on an empty page, or None.
+
+    Every one a tenant-scoped caller sends. From an agent credential, a peer's:
+    since L-124 that is only a filter (``_resolve_read_identity``), so a typo'd
+    peer empties the page as it does for a tenant key and gets the same warning.
+    Never the agent's own id, the authenticated identity the probe stays off.
+    """
+    if auth.agent_id and body.filter_agent_id == eff_agent_id:
+        return None
+    return body.filter_agent_id
 
 
 # ax-0917-h-05 — a stable slug, same contract as SUCCESSOR_ENRICHMENT_INCOMPLETE.
@@ -2869,10 +2888,11 @@ async def _search_inner(
             # prefers ``caller_agent_id``, but ``filter_agent_id`` is the one
             # that becomes a SQL predicate — so keying on the identity reported
             # the wrong id when a caller sent a valid ``caller_agent_id`` beside
-            # a typo'd filter, and the typo went unwarned. Both are ``None``
-            # under an authenticated agent identity, where naming anything but
-            # itself was already refused with a 403.
-            filter_agent_id=body.filter_agent_id if not auth.agent_id else None,
+            # a typo'd filter, and the typo went unwarned. ``caller_agent_id``
+            # is ``None`` under an authenticated agent identity, where naming
+            # anything but itself is refused with a 403; a peer
+            # ``filter_agent_id`` is explained since L-124 (``_filter_to_explain``).
+            filter_agent_id=_filter_to_explain(auth, body, eff_agent_id),
             caller_agent_id=body.caller_agent_id if not auth.agent_id else None,
             had_results=bool(results),
             agent_preexisted=_agent_reg.get("preexisted"),
@@ -3277,7 +3297,7 @@ async def recall_endpoint(
     recall_warnings.extend(
         await explain_agent_scope(
             tenant_id=body.tenant_id,
-            filter_agent_id=body.filter_agent_id if not auth.agent_id else None,
+            filter_agent_id=_filter_to_explain(auth, body, eff_agent_id),
             caller_agent_id=body.caller_agent_id if not auth.agent_id else None,
             had_results=bool(memories),
             agent_preexisted=_agent_reg.get("preexisted"),

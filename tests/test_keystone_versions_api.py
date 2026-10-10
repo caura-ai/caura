@@ -62,15 +62,19 @@ async def test_versions_resolve_for_the_agent_the_list_would(monkeypatch) -> Non
     monkeypatch.setattr(
         keystones, "canonical_service_agent_id", lambda a: f"canonical-{a}"
     )
+    # ``raising=False``: before L-122 the routes had no lookup to stub.
+    lookup = AsyncMock(return_value={"fleet_id": "f-home"})
+    monkeypatch.setattr(keystones, "lookup_agent", lookup, raising=False)
     me = AuthContext(tenant_id="t1")
-    # An agent without a fleet is dropped, as the list drops it.
+    # An agent without a fleet reads its home fleet, as the list does (L-122).
     await _list_versions(me, agent_id="a1", limit=10, before=3)
     assert sc.list_keystone_versions.await_args.kwargs == {
-        "fleet_id": None,
-        "agent_id": None,
+        "fleet_id": "f-home",
+        "agent_id": "canonical-a1",
         "limit": 10,
         "before": 3,
     }
+    lookup.assert_awaited_once_with("t1", "canonical-a1")
     await _list_versions(me, fleet_id="f1", agent_id="a1")
     assert sc.list_keystone_versions.await_args.kwargs["agent_id"] == "canonical-a1"
     await keystones.get_keystone_version(

@@ -70,6 +70,34 @@ def _ctx(source, cfg, returned_rows, raw_rows):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile_top_k", "final_top_k", "logged"),
+    [
+        # The tenant's default profile set 10; the request carried the default 5.
+        (10, 10, 10),
+        # RECENT_CONTEXT capped the profile's 20 to 5: the cap is what ran.
+        (20, 5, 5),
+        # A short-circuit skipped ExecuteScoredSearch: the profile's budget.
+        (10, None, 10),
+    ],
+    ids=["profile", "strategy-cap", "short-circuit"],
+)
+async def test_l15_the_event_logs_the_budget_the_search_ran_with(
+    monkeypatch, profile_top_k, final_top_k, logged
+):
+    captured = _capture(monkeypatch)
+    ctx = _ctx("mcp_recall", _cfg(recall=True), [_row(0.6, 0.55)], [_row(0.6, 0.55)])
+    ctx.data["search_params"]["top_k"] = profile_top_k
+    if final_top_k is not None:
+        ctx.data["final_top_k"] = final_top_k
+
+    await LogRecallEvent().execute(ctx)
+
+    [(event, _)] = captured
+    assert event["top_k"] == logged
+
+
+@pytest.mark.asyncio
 async def test_skips_search_when_search_flag_off(monkeypatch):
     captured = _capture(monkeypatch)
     # recall_logging_enabled on, but the search flag is off → /search not logged.

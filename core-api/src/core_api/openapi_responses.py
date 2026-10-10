@@ -160,7 +160,10 @@ class RecallDiagnostic(BaseModel):
     recall_model: str | None
     recall_provider: str | None
     all_candidates: list
-    top_k_used: int | None
+    top_k_used: int | None = Field(
+        description="Row budget the search ran with, after the agent and tenant search profiles and any "
+        "strategy cap (what /search's diagnostic reports as top_k_requested), not the request's own top_k."
+    )
     retrieval_strategy: str | None
     search_params: dict
     # CAURA-722 — documented on ``SearchDiagnostic``. ``None`` on the count
@@ -173,7 +176,9 @@ class RecallResponse(BaseModel):
     query: str
     summary: str
     memory_count: int
-    memories: list[MemoryOut]
+    memories: list[MemoryOut] = Field(
+        description="The matched rows in rank order, as /search returns them; the summary reads them by date."
+    )
     # ax-0917-h-03 — DEPRECATED, and deliberately still emitted by default here.
     #
     # ``POST /recall`` is a SemVer-stable REST surface (docs/public-api-stability.md,
