@@ -6,9 +6,13 @@ A thin wrapper over the Caura REST API. Point it at a managed
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import urllib.parse
 from typing import Any
 
@@ -88,12 +92,20 @@ class Caura:
         timeout: float = 30.0,
         transport: httpx.BaseTransport | None = None,
         allow_insecure_http: bool | None = None,
+        retries: int = 0,
+        retry_backoff: float = 0.5,
     ) -> None:
         if not api_key:
             raise ValueError("api_key is required")
         if not tenant_id:
             raise ValueError("tenant_id is required")
         _check_key_transport(base_url, allow_insecure_http)
+        if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= 10:
+            raise ValueError("retries must be an integer between 0 and 10")
+        if not math.isfinite(retry_backoff) or retry_backoff < 0:
+            raise ValueError("retry_backoff must be a finite non-negative number")
+        self.retries = retries
+        self.retry_backoff = retry_backoff
         self.tenant_id = tenant_id
         self.agent_id = agent_id
         self._http = httpx.Client(
@@ -283,11 +295,45 @@ class Caura:
         self._raise_for_status(response)
         return response.json()
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    @staticmethod
+    def _retry_after_seconds(value: str | None) -> float | None:
+        """Interpret RFC 9110 Retry-After delta seconds or an HTTP-date."""
+        if not value:
+            return None
         try:
-            return self._http.request(method, path, **kwargs)
-        except httpx.TransportError as exc:
-            raise TransportError(f"Request failed: {exc}") from exc
+            delay = float(value)
+            if math.isfinite(delay) and delay >= 0:
+                return delay
+        except ValueError:
+            pass
+        try:
+            date = parsedate_to_datetime(value)
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=timezone.utc)
+            return max(0.0, (date - datetime.now(timezone.utc)).total_seconds())
+        except (ValueError, TypeError, OverflowError):
+            return None
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        # POST searches/recalls are read-only API operations, whereas writing,
+        # interview submission and all other POSTs may produce side effects.
+        safe_retry = method.upper() in ("GET", "HEAD") or (
+            method.upper() == "POST" and path in ("/api/v1/search", "/api/v1/recall")
+        )
+        attempts = self.retries if safe_retry else 0
+        for attempt in range(attempts + 1):
+            try:
+                response = self._http.request(method, path, **kwargs)
+            except httpx.TransportError as exc:
+                if attempt >= attempts:
+                    raise TransportError(f"Request failed: {exc}") from exc
+                time.sleep(self.retry_backoff * 2**attempt)
+                continue
+            if response.status_code not in (429, 502, 503, 504) or attempt >= attempts:
+                return response
+            retry_after = self._retry_after_seconds(response.headers.get("Retry-After"))
+            time.sleep(retry_after if retry_after is not None else self.retry_backoff * 2**attempt)
+        raise AssertionError("retry loop unexpectedly exhausted")
 
     @staticmethod
     def _raise_for_status(response: httpx.Response) -> None:
