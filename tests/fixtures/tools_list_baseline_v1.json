@@ -1122,6 +1122,22 @@
           "description": "Clear every tuned knob.",
           "title": "Reset",
           "type": "boolean"
+        },
+        "reset_knobs": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Clear only these knobs; others are kept.",
+          "title": "Reset Knobs"
         }
       },
       "title": "caura_tuneArguments",

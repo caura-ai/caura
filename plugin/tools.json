@@ -940,6 +940,13 @@
         "name": "reset",
         "required": false,
         "type": "bool"
+      },
+      {
+        "default": null,
+        "description": "Clear only these knobs; others are kept.",
+        "name": "reset_knobs",
+        "required": false,
+        "type": "list[str] | None"
       }
     ],
     "plugin_exposed": true,

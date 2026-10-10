@@ -19,7 +19,6 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from common import permanent_failure
@@ -108,6 +107,7 @@ from core_api.services.agent_service import (
     resolve_write_agent,
 )
 from core_api.services.audit_service import log_action, log_cross_tenant_read
+from core_api.services.caller_identity import missing_agent_id_error
 from core_api.services.ingest_service import (
     ALLOWED_INGEST_MIME_TYPES,
     BINARY_INGEST_MIME_TYPES,
@@ -288,37 +288,6 @@ def _reject_reserved_memory_type(memory_type: str | None, *, index: int | None =
     if index is not None:
         detail = f"items[{index}]: {detail}"
     raise HTTPException(status_code=422, detail=detail)
-
-
-def _missing_agent_id_error() -> RequestValidationError:
-    """Build the 422 raised when a write omits ``agent_id`` and nothing can
-    supply one: not standalone, and a credential that authenticates no agent.
-
-    Mirrors the shape FastAPI produces for a missing required field, so the
-    app's validation-envelope handler renders it as a 422 INVALID_ARGUMENTS.
-    RequestValidationError stores errors verbatim and ``.errors()`` returns
-    them as-is, so a pre-rendered dict is the supported input; the handler
-    only reads ``msg`` and runs the list through ``jsonable_encoder``.
-    """
-    return RequestValidationError(
-        errors=[
-            {
-                "type": "missing",
-                "loc": ("body", "agent_id"),
-                # Names both ways out, because the caller that hits this has
-                # exactly one real question — "what do I send instead?" — and
-                # provisioning an agent-scoped credential is the answer that
-                # makes the field go away rather than one more value to repeat.
-                "msg": (
-                    "agent_id is required for a credential that authenticates no agent. "
-                    "Send it in the body, or use an agent-scoped credential "
-                    "(kind=agent_key), whose own identity is used when the field is "
-                    "omitted; the standalone single-tenant deployment may also omit it."
-                ),
-                "input": None,
-            }
-        ]
-    )
 
 
 @router.get("/tenants", responses={200: {"model": list[str]}})
@@ -1544,7 +1513,7 @@ async def write_memory(
             chosen_agent_id = DEFAULT_AGENT_ID
             body = body.model_copy(update={"agent_id": chosen_agent_id})
         else:
-            raise _missing_agent_id_error()
+            raise missing_agent_id_error()
     # Deterministic auth rejection must happen before claiming idempotency, or
     # a bad credential leaves a pending receipt that masks the stable 409.
     chosen_agent_id = _resolve_rest_write_agent_id(auth, chosen_agent_id)
@@ -1771,7 +1740,7 @@ async def write_memories_bulk(
             chosen_agent_id = DEFAULT_AGENT_ID
             body = body.model_copy(update={"agent_id": chosen_agent_id})
         else:
-            raise _missing_agent_id_error()
+            raise missing_agent_id_error()
     if not bulk_attempt_id:
         # Required as of CAURA-602 — without it we can't make the bulk
         # write retry-safe, and silent-create regressions reappear under

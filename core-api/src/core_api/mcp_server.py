@@ -117,6 +117,7 @@ from core_api.services.organization_settings import (
     get_raw_settings,
     get_settings_for_display,
     resolve_config,
+    validate_knob_resets,
     validate_search_profile,
 )
 from core_api.services.recall_service import summarize_memories
@@ -826,8 +827,8 @@ def _refuse_default_agent_on_gateway(agent_id: str) -> str | None:
     documented as ``agent row missing from list_agents``.
 
     The shared ``CAURA_API_KEY`` (Path 2) binds no agent either. Outside
-    standalone, REST refuses a write that names none (``_missing_agent_id_error``
-    in routes/memories.py), so this refuses the default there too (L-101). Path 2
+    standalone, REST refuses a write that names none (``missing_agent_id_error``
+    in services/caller_identity.py), so this refuses the default there too (L-101). Path 2
     sets the tenant from ``X-Tenant-ID`` without the gateway flag, which is how
     it is told apart here.
 
@@ -2558,6 +2559,9 @@ async def caura_tune(
     graph_max_hops: Annotated[int | None, Field(description="0-3.")] = None,
     similarity_blend: Annotated[float | None, Field(description="0-1.")] = None,
     reset: Annotated[bool, Field(description="Clear every tuned knob.")] = False,
+    reset_knobs: Annotated[
+        list[str] | None, Field(description="Clear only these knobs; others are kept.")
+    ] = None,
 ) -> ToolReply:
     t0 = time.perf_counter()
     if err := _check_auth():
@@ -2583,12 +2587,18 @@ async def caura_tune(
         return _with_latency(_error_response("INVALID_ARGUMENTS", f"{e}"), t0)
 
     updates = profile.model_dump(exclude_none=True)
+    if reset_knobs:
+        # L-119 — the same refusals as REST PATCH /agents/{id}/tune?reset_knobs=.
+        try:
+            validate_knob_resets(reset_knobs, updates, reset_all=reset)
+        except ValueError as e:
+            return _with_latency(_error_response("INVALID_ARGUMENTS", str(e)), t0)
     if reset and updates:
         message = "reset clears every knob; set knobs in a separate call."
         return _with_latency(_error_response("INVALID_ARGUMENTS", message), t0)
     # No knobs and no reset is a read, which REST's GET /agents/{id}/tune serves
     # without write scope and without creating the agent row (L-104).
-    is_read = not updates and not reset
+    is_read = not updates and not reset and not reset_knobs
     if not is_read and (err := _check_write_scope()):
         return err
     # WRITE → home tenant only. ``resolve_write_agent`` scopes the lookup or
@@ -2623,17 +2633,20 @@ async def caura_tune(
                 resource_id=agent.get("id"),
                 detail={"agent_id": agent_id, "reset": True, "via": "mcp", **_audit_actor()},
             )
-        if updates:
+        if updates or reset_knobs:
+            for knob in reset_knobs or ():
+                current.pop(knob, None)
             current.update(updates)
             current = validate_search_profile(current)
             await get_storage_client().update_search_profile(agent["agent_id"], tenant_id, current)
+            cleared = {"reset_knobs": reset_knobs} if reset_knobs else {}
             await log_action(
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 action="agent_tune",
                 resource_type="agent",
                 resource_id=agent.get("id"),
-                detail={"agent_id": agent_id, "changes": updates, "via": "mcp", **_audit_actor()},
+                detail={"agent_id": agent_id, "changes": updates, **cleared, "via": "mcp", **_audit_actor()},
             )
         return _with_latency(_dumps({"agent_id": agent_id, "search_profile": current}), t0)
     except HTTPException as e:
