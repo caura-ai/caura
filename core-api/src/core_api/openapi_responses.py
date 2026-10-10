@@ -36,9 +36,9 @@ from core_api.schemas import MemoryOut, SearchWarning
 class MemoryPendingWork(BaseModel):
     embedding: int = Field(
         description=(
-            "Live rows whose vector has not landed yet (`embedding IS NULL`). With no embedding "
-            "provider configured (`embedding_configured` false) these rows stay unembedded, and "
-            "`settled` ignores them."
+            "Live rows whose vector has not landed yet (`embedding IS NULL`), stranded ones included "
+            "(see `stranded`). With no embedding provider configured (`embedding_configured` false) "
+            "these rows stay unembedded, and `settled` ignores them."
         )
     )
     enrichment: int = Field(
@@ -46,6 +46,17 @@ class MemoryPendingWork(BaseModel):
     )
     fanout: int = Field(
         description="Live rows whose persisted atomic facts have not been fanned out into child memories yet."
+    )
+
+
+class MemoryStrandedWork(BaseModel):
+    embedding: int = Field(
+        description=(
+            "The `pending.embedding` rows written over an hour ago. Nothing is coming back for them: "
+            "the embed exhausted its retries, died with its process or dead-lettered (or, on a "
+            "deferred deployment, a backlog longer than an hour is still draining). Re-embed them "
+            "with `python -m core_storage_api.scripts.backfill_embeddings`."
+        )
     )
 
 
@@ -71,9 +82,15 @@ class MemoryStatsResponse(BaseModel):
     settled: bool | None = Field(
         default=None,
         description=(
-            "True when every `pending` count is zero, or every count but `embedding` when "
-            "`embedding_configured` is false. Wait for this before measuring a freshly ingested store."
+            "True when every `pending` count is zero once the `stranded` rows are set aside, or every "
+            "count but `embedding` when `embedding_configured` is false. Wait for this before measuring a "
+            "freshly ingested store, and check `stranded`: rows counted there are unembedded, so search "
+            "finds them by keyword only."
         ),
+    )
+    stranded: MemoryStrandedWork | None = Field(
+        default=None,
+        description="Pending rows nothing will come back for, which `settled` does not wait on.",
     )
     embedding_configured: bool | None = Field(
         default=None,
@@ -696,6 +713,14 @@ class InsightsResponse(BaseModel):
     insight_memory_ids: list[str]
     gate_rejected: int
     insights_ms: int
+    skipped_reason: str | None = Field(
+        default=None,
+        description=(
+            "Present when the analysis did not run: `llm_unavailable` means no LLM provider answered, "
+            "so `findings` is empty because nothing was analysed, not because nothing was found. "
+            "Prior insights are left as they were."
+        ),
+    )
 
 
 class HealthResponse(BaseModel):

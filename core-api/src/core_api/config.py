@@ -600,6 +600,12 @@ class Settings(BaseSettings):
     # before reading the log as a blast radius. See caura-ai/caura#1205.
     enforce_mcp_plan_limits: bool = False
     stm_backend: str = "memory"  # memory | redis
+    # Worker processes serving this API (L-35). The image starts its workers
+    # from ``WEB_CONCURRENCY`` (core-api/Dockerfile), and the uvicorn CLI reads
+    # it when ``--workers`` is not given, so this is the one place a process
+    # learns the count: nothing in a worker can see its siblings. Read only by
+    # the in-memory STM guard below.
+    web_concurrency: int = 1
     stm_notes_ttl: int = 86400  # 24h
     stm_bulletin_ttl: int = 172800  # 48h
 
@@ -691,6 +697,21 @@ class Settings(BaseSettings):
                 f"must be >= BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS "
                 f"({BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS}s)."
             )
+        for budget in ("request_timeout_seconds", "bulk_request_timeout_seconds"):
+            # L-08: the same ceiling as the interview and MCP budgets below.
+            # Past it the platform severs the connection with its own bare
+            # 504 at 120s while the handler keeps running and may commit, so
+            # the app's structured 504 (phase, retry guidance) never arrives.
+            # ``BULK_REQUEST_TIMEOUT_SECONDS=150`` is the natural reaction to
+            # bulk 504s, which is why this is checked rather than documented.
+            value = getattr(self, budget)
+            if value > PLATFORM_REQUEST_CEILING_SECONDS:
+                raise ValueError(
+                    f"{budget} ({value}s) must be <= PLATFORM_REQUEST_CEILING_SECONDS "
+                    f"({PLATFORM_REQUEST_CEILING_SECONDS}s); raise the platform "
+                    "timeout (nginx proxy_read_timeout / Cloud Run) and update "
+                    "the constant before raising this budget."
+                )
         if self.interview_request_timeout_seconds > PLATFORM_REQUEST_CEILING_SECONDS:
             # A budget past the platform ceiling can never fire — the
             # gateway/Cloud Run severs the connection first while the
@@ -936,6 +957,26 @@ class Settings(BaseSettings):
                 "structured JSON output, which Anthropic's OpenAI-compatible "
                 "endpoint rejects (HTTP 400 on every call). Set "
                 "ENTITY_EXTRACTION_PROVIDER to openai, openrouter or gemini."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _refuse_in_memory_stm_across_workers(self) -> "Settings":
+        """Refuse in-memory STM when more than one worker serves the API.
+
+        L-35. ``InMemorySTM`` lives in one process, so with two workers each
+        holds its own notes and bulletins and a read lands on whichever worker
+        the kernel picks: STM reads differently request to request. The
+        warning meant to catch this read ``WEB_CONCURRENCY``, which nothing
+        set, so it never fired. The image now starts its workers from that
+        variable, and this refuses the combination outright (Eldad, 2026-10-09).
+        """
+        if self.use_stm and self.stm_backend == "memory" and self.web_concurrency > 1:
+            raise ValueError(
+                f"USE_STM=true with STM_BACKEND=memory cannot serve {self.web_concurrency} "
+                "workers (WEB_CONCURRENCY): each would keep its own STM, so notes and "
+                "bulletins would read differently request to request. Set "
+                "STM_BACKEND=redis (with REDIS_URL), or WEB_CONCURRENCY=1."
             )
         return self
 

@@ -143,4 +143,11 @@ ENTRYPOINT ["/app/docker-entrypoint.sh"]
 # it. This is defence in depth, not the primary fix for the staging
 # crash-loop; that is the missing --no-cpu-throttling on the Cloud Run
 # service (caura-enterprise#1321).
-CMD ["python", "-m", "common.serve", "core_api.app:app", "--settings", "core_api.config:settings", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "65", "--timeout-worker-healthcheck", "30"]
+#
+# The worker count lives in WEB_CONCURRENCY rather than in the CMD (L-35):
+# core-api reads it (``Settings.web_concurrency``) to refuse in-memory STM
+# across workers, and nothing else tells a worker how many siblings it has.
+# Override it at deploy time to change the count. The CMD runs in a shell only
+# to expand it; ``exec`` then replaces the shell with python.
+ENV WEB_CONCURRENCY=2
+CMD ["/bin/sh", "-c", "exec python -m common.serve core_api.app:app --settings core_api.config:settings --host 0.0.0.0 --port 8000 --workers \"${WEB_CONCURRENCY}\" --timeout-keep-alive 65 --timeout-worker-healthcheck 30"]

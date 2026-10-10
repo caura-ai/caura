@@ -115,6 +115,7 @@ from common.models.memory import (
     PENDING_ENRICHMENT_SQL,
     PENDING_FANOUT_SQL,
     PENDING_WORK_SQL,
+    STRANDED_EMBEDDING_SQL,
 )
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.models.recall_log import RecallCandidate, RecallEvent
@@ -286,18 +287,20 @@ def _normalized_object_sql(column):
 
 
 def pending_work_count_stmt(filters: list[ColumnElement[bool]]) -> Select:
-    """``(embedding, enrichment, fanout)`` pending counts over ``filters``.
+    """``(embedding, enrichment, fanout, stranded embedding)`` counts over ``filters``.
 
     lme-0929-m-03. ``PENDING_WORK_SQL`` is ANDed in verbatim so the query
     implies the predicate of the partial index ``ix_memories_pending_work``
     (built from the same constant) and the planner can serve it from that
     index, which holds only pending rows. Module-level so the plan can be
-    checked against the exact statement the service runs.
+    checked against the exact statement the service runs. The stranded count
+    (L-96) is a subset of the embedding one, so it needs no other rows.
     """
     return select(
         func.count().filter(text(PENDING_EMBEDDING_SQL)),
         func.count().filter(text(PENDING_ENRICHMENT_SQL)),
         func.count().filter(text(PENDING_FANOUT_SQL)),
+        func.count().filter(text(STRANDED_EMBEDDING_SQL)),
     ).where(*filters, text(PENDING_WORK_SQL))
 
 
@@ -7556,13 +7559,15 @@ class PostgresService:
     ) -> dict:
         """Return ``{total, by_type, by_agent, by_status}`` (+ optional
         ``by_tenant`` / ``deleted`` / ``total_including_deleted`` /
-        ``pending`` + ``settled``).
+        ``pending`` + ``stranded`` + ``settled``).
 
         ``include_pending`` (lme-0929-m-03) adds ``pending: {embedding,
         enrichment, fanout}`` — live rows in the same scope that still have
         background work outstanding, read from durable row markers (see
-        ``common.models.memory.PENDING_WORK_SQL``) — and ``settled`` (all
-        three zero). One extra query served by the partial index
+        ``common.models.memory.PENDING_WORK_SQL``) — ``stranded: {embedding}``
+        (L-96: the pending-embedding rows over an hour old, see
+        ``STRANDED_EMBEDDING_SQL``), and ``settled`` (all three zero once the
+        stranded rows are set aside). One extra query served by the partial index
         ``ix_memories_pending_work``, which holds only pending rows, so its
         cost is O(pending) rather than O(tenant). Off by default so the MCP
         ``caura_stats`` and report callers keep their exact shape and cost.
@@ -7790,12 +7795,19 @@ class PostgresService:
             result["deleted"] = deleted
             result["total_including_deleted"] = total + deleted
         if include_pending:
-            pending = await self._memory_pending_work_counts(filters)
+            pending, stranded = await self._memory_pending_work_counts(filters)
             result["pending"] = pending
-            result["settled"] = not any(pending.values())
+            # L-96: a stranded row is still pending, but nothing is coming back
+            # for it, so ``settled`` does not wait on it.
+            result["stranded"] = stranded
+            result["settled"] = not (
+                pending["embedding"] - stranded["embedding"] or pending["enrichment"] or pending["fanout"]
+            )
         return result
 
-    async def _memory_pending_work_counts(self, filters: list[ColumnElement[bool]]) -> dict[str, int]:
+    async def _memory_pending_work_counts(
+        self, filters: list[ColumnElement[bool]]
+    ) -> tuple[dict[str, int], dict[str, int]]:
         """Count live rows under ``filters`` that still owe background work.
 
         ``filters`` must already carry ``deleted_at IS NULL`` plus the caller's
@@ -7803,14 +7815,17 @@ class PostgresService:
         ``ix_memories_pending_work`` is keyed on exactly that text, and the
         planner only uses a partial index whose predicate the query implies.
         A row can be pending on several axes at once and is counted in each.
+        Returns ``(pending, stranded)``; ``stranded`` (L-96) has only an
+        ``embedding`` count, of rows also counted in ``pending``.
         """
         async with get_read_session() as session:
             row = (await session.execute(pending_work_count_stmt(filters))).one()
-        return {
+        pending = {
             "embedding": int(row[0] or 0),
             "enrichment": int(row[1] or 0),
             "fanout": int(row[2] or 0),
         }
+        return pending, {"embedding": int(row[3] or 0)}
 
     async def memory_daily_durable_counts(
         self,

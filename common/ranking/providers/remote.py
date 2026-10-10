@@ -111,8 +111,8 @@ class RemoteRanker:
         Per INSTANCE, which stands in for per backend config: the registry
         caches one ranker per ``(base_url, api_key, model)``, so live instances
         are distinct backends. That covers the collisions a URL-only scope
-        would miss — same URL with a per-tenant ``rank_model``, or same URL and
-        model behind different ``rank_api_key`` credentials — without putting
+        would miss — same URL with a different model, or same URL and model
+        behind different API keys — without putting
         any of those values, least of all the credential, into the string. The
         URL still reaches the operator: it is in the message.
 
@@ -124,8 +124,8 @@ class RemoteRanker:
         toward saying too much about a real fault rather than too little, the
         same direction ``_PERMANENT_LOGGED_MAX`` overflow errs in. Deriving the
         scope from the config instead would hold across eviction, but only by
-        reintroducing a value-derived key over tenant-supplied strings, which
-        is what the credential and delimiter problems came from.
+        reintroducing a value-derived key over configured strings, which is
+        what the credential and delimiter problems came from.
         """
         return f"remote:{self._instance_id}"
 
@@ -210,11 +210,14 @@ class RemoteRanker:
                 key=f"{self.dedup_scope}|response-not-a-list",
             )
 
-        # Re-project the ranked results back onto the INPUT order. Missing
-        # indices (a partial response) keep 0.0 — the sort then places them
-        # last, which is the safe degradation for a candidate the service
-        # dropped rather than crashing the search.
-        scores = [0.0] * len(candidates)
+        # Re-project the ranked results back onto the INPUT order. Every
+        # candidate has to come back (L-06). A partial response (a Cohere-style
+        # server-side top_n, a sidecar that drops some) used to leave the
+        # missing ones at 0.0 and report success, burying real first-stage
+        # hits below every scored one. That is the outcome ``rank`` already
+        # refuses for a failed chunk, so it fails here too, and as permanent:
+        # such an endpoint truncates the same way on every retry.
+        scores: list[float | None] = [None] * len(candidates)
         for item in results:
             idx = item["index"]
             if not (0 <= idx < len(candidates)):
@@ -223,7 +226,15 @@ class RemoteRanker:
             if score is None:
                 score = item.get("relevance_score")
             scores[idx] = float(score)
-        return scores
+        covered = sum(score is not None for score in scores)
+        if covered < len(candidates):
+            raise PermanentRankError(
+                f"rerank response from {self._base_url}/rerank scored {covered} of "
+                f"{len(candidates)} candidates — is a server-side top_n set? Every "
+                "candidate has to come back.",
+                key=f"{self.dedup_scope}|partial-response",
+            )
+        return cast("list[float]", scores)
 
     async def rank(self, query: str, candidates: list[RankCandidate]) -> list[float]:
         """Score every candidate, splitting across requests if the pool is big.

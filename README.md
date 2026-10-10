@@ -627,8 +627,10 @@ Export `.env` into the process environment before starting each service. The ser
 set -a; . ./.env; set +a
 PYTHONPATH=.:core-storage-api/src uvicorn core_storage_api.app:app --host 127.0.0.1 --port 8002
 # Then, in a second shell with the same .env exported:
-PYTHONPATH=.:core-api/src uvicorn core_api.app:app --host 0.0.0.0 --port 8000 --workers 2
+WEB_CONCURRENCY=2 PYTHONPATH=.:core-api/src uvicorn core_api.app:app --host 0.0.0.0 --port 8000
 ```
+
+uvicorn takes its worker count from `WEB_CONCURRENCY` when `--workers` is not given, and core-api reads the same variable: with `USE_STM=true` and `STM_BACKEND=memory` it refuses to start on more than one worker, since each worker would keep its own STM. Use `STM_BACKEND=redis` there.
 
 ### Deployment topologies
 

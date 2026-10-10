@@ -19,7 +19,7 @@ covers "the marker clears", not just "the marker counts".
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -31,21 +31,30 @@ pytestmark = pytest.mark.asyncio
 _VEC = [0.1] * 1024
 
 
-async def _add(svc: PostgresService, tenant: str, *, agent: str = "m03-a", embedding=_VEC, metadata=None):
-    row = await svc.memory_add(
-        {
-            "tenant_id": tenant,
-            "fleet_id": "m03-fleet",
-            "agent_id": agent,
-            "content": f"m03 {uuid.uuid4()}",
-            "memory_type": "fact",
-            "weight": 0.5,
-            "status": "active",
-            "visibility": "scope_team",
-            "embedding": embedding,
-            "metadata_": metadata or {},
-        }
-    )
+async def _add(
+    svc: PostgresService,
+    tenant: str,
+    *,
+    agent: str = "m03-a",
+    embedding=_VEC,
+    metadata=None,
+    created_at: datetime | None = None,
+):
+    data = {
+        "tenant_id": tenant,
+        "fleet_id": "m03-fleet",
+        "agent_id": agent,
+        "content": f"m03 {uuid.uuid4()}",
+        "memory_type": "fact",
+        "weight": 0.5,
+        "status": "active",
+        "visibility": "scope_team",
+        "embedding": embedding,
+        "metadata_": metadata or {},
+    }
+    if created_at is not None:
+        data["created_at"] = created_at
+    row = await svc.memory_add(data)
     return row.id
 
 
@@ -91,6 +100,32 @@ async def test_each_marker_counts_and_clears_through_the_writers_own_patch(_ensu
     stats = await _pending(svc, tenant)
     assert stats["pending"] == {"embedding": 0, "enrichment": 0, "fanout": 0}
     assert stats["settled"] is True
+
+
+async def test_l96_a_stranded_row_is_reported_and_does_not_hold_settled(_ensure_schema):
+    """L-96: an unembedded row older than an hour is stranded, not in flight.
+
+    Embeds that exhausted their retries, died with their process or
+    dead-lettered leave a row at ``embedding IS NULL`` that nothing will come
+    back for. Counted as pending, one such row kept ``settled`` false forever.
+    It is still counted in ``pending.embedding``, and also in
+    ``stranded.embedding``, which ``settled`` does not wait on (Eldad,
+    2026-10-09). A fresh unembedded row is still in flight and still holds it.
+    """
+    svc = PostgresService()
+    tenant = f"m03x-{uuid.uuid4().hex[:8]}"
+    await _add(svc, tenant, embedding=None, created_at=datetime.now(UTC) - timedelta(hours=2))
+
+    stats = await _pending(svc, tenant)
+    assert stats["pending"] == {"embedding": 1, "enrichment": 0, "fanout": 0}
+    assert stats["stranded"] == {"embedding": 1}
+    assert stats["settled"] is True
+
+    await _add(svc, tenant, embedding=None)
+    stats = await _pending(svc, tenant)
+    assert stats["pending"]["embedding"] == 2
+    assert stats["stranded"] == {"embedding": 1}
+    assert stats["settled"] is False
 
 
 async def test_scoping_by_agent_and_fleet(_ensure_schema):
