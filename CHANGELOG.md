@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.30.2](https://github.com/caura-ai/caura/compare/backend-v3.30.1...backend-v3.30.2) (2026-10-10)
+
+
+### Bug Fixes
+
+* B27 configuration and provider failure handling ([#2019](https://github.com/caura-ai/caura/issues/2019)) ([cecb5ca](https://github.com/caura-ai/caura/commit/cecb5cae439fa59656ca31c645b46a20b47ac455))
+
 ## [3.30.1](https://github.com/caura-ai/caura/compare/backend-v3.30.0...backend-v3.30.1) (2026-10-09)
 
 
