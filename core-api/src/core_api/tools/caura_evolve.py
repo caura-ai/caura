@@ -30,12 +30,18 @@ _SPEC = ToolSpec(
     trust_required=1,
     impl_status="live",
     error_codes=(
+        "CONFLICT",
+        "DUPLICATE_MEMORY",
+        "FLEET_SCOPE_FORBIDDEN",
         "FORBIDDEN",
         "INTERNAL_ERROR",
         "INVALID_ARGUMENTS",
         "MISSING_AGENT_ID",
         "PLAN_LIMIT_READ_ONLY",
+        "REQUEST_BUDGET_EXCEEDED",
         "UNAUTHORIZED",
+        "UNAVAILABLE",
+        "UPSTREAM_TIMEOUT",
     ),
 )
 register(_SPEC)
