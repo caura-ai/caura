@@ -206,7 +206,7 @@ class Caura:
         """Liveness probe (GET /api/v1/health)."""
         response = self._request("GET", "/api/v1/health")
         self._raise_for_status(response)
-        return response.json()
+        return self._json(response)
 
     def get_document(
         self,
@@ -230,7 +230,7 @@ class Caura:
             params={"tenant_id": tenant_id or self.tenant_id, "collection": collection},
         )
         self._raise_for_status(response)
-        return response.json()
+        return self._json(response)
 
     def submit_interview(
         self,
@@ -272,7 +272,7 @@ class Caura:
             body["command_id"] = command_id
         response = self._request("POST", "/api/v1/interview/submit", json=body, timeout=timeout)
         self._raise_for_status(response)
-        result = response.json()
+        result = self._json(response)
         if isinstance(result, dict):
             result["http_status"] = response.status_code
         return result
@@ -281,7 +281,7 @@ class Caura:
     def _post(self, path: str, body: dict[str, Any]) -> Any:
         response = self._request("POST", path, json=body)
         self._raise_for_status(response)
-        return response.json()
+        return self._json(response)
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         try:
@@ -323,6 +323,15 @@ class Caura:
                 retry_after=retry_after,
             )
         raise CauraAPIError(response.status_code, message or "request failed", details=details)
+
+    @staticmethod
+    def _json(response: httpx.Response) -> Any:
+        # A 2xx with a non-JSON body (captive portal, misconfigured proxy) must
+        # surface as a CauraError, not a bare JSONDecodeError.
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise CauraAPIError(response.status_code, "response was not valid JSON") from exc
 
     # ------------------------------------------------------------- lifecycle
     def close(self) -> None:

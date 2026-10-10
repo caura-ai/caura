@@ -205,6 +205,31 @@ def test_health():
     assert make_client(handler).health()["status"] == "ok"
 
 
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.health(),
+        lambda c: c.write("x"),
+        lambda c: c.search("x"),
+        lambda c: c.recall("x"),
+        lambda c: c.get_document("d1", collection="c"),
+        lambda c: c.submit_interview(node_id="n", agent_id="a", cursor_from=0, cursor_to=1, events=[]),
+    ],
+    ids=["health", "write", "search", "recall", "get_document", "submit_interview"],
+)
+def test_non_json_success_body_raises_api_error(call):
+    """A 2xx with an HTML body (captive portal, proxy) must not leak JSONDecodeError."""
+
+    def handler(request):
+        return httpx.Response(200, text="<html>captive portal login</html>")
+
+    with pytest.raises(CauraAPIError) as exc:
+        call(make_client(handler))
+    assert exc.value.status_code == 200
+    assert str(exc.value) == "[200] response was not valid JSON"
+    assert isinstance(exc.value.__cause__, json.JSONDecodeError)
+
+
 def test_health_raises_auth_error():
     def handler(request):
         return httpx.Response(401, json={"error": {"message": "invalid key"}})
