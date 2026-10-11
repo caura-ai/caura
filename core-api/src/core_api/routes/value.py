@@ -58,6 +58,14 @@ def shape(raw: dict, spend_summary: dict | None) -> dict:
             "tokens_reported": int(t.get("origin_tokens_in") or 0) + int(t.get("origin_tokens_out") or 0),
             "turns_reported": int(t.get("origin_turns") or 0),
             "reuses_with_tokens": int(t.get("reuses_with_tokens") or 0),
+            # The confirmed version: reuses whose session reported success for
+            # work that named the memory (Evolve).
+            "confirmed": {
+                "reuses": int(t.get("confirmed_reuses") or 0),
+                "minutes": round(int(t.get("confirmed_seconds") or 0) / 60, 1),
+                "tokens_reported": int(t.get("confirmed_tokens") or 0),
+                "failed_reuses": int(t.get("failed_reuses") or 0),
+            },
         },
         "knowledge_shared": {
             "cross_agent_reuses": int(t.get("cross_agent_reuses") or 0),

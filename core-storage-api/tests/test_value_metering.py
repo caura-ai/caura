@@ -275,3 +275,57 @@ async def test_only_resolved_contradictions_count_as_prevented(client: AsyncClie
             )
     p = (await _value(client, tenant))["prevented"]
     assert (p["conflicts_resolved"], p["conflicts_waiting"]) == (1, 2)
+
+
+async def test_a_reported_success_confirms_only_this_sessions_reuse_of_named_memories(client: AsyncClient):
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    used, ignored = await _memory(client, tenant, "teacher"), await _memory(client, tenant, "teacher")
+    for m in (used, ignored):
+        await _post(
+            client,
+            "origins",
+            tenant,
+            {
+                "memory_id": m,
+                "session_id": "w",
+                "agent_id": "teacher",
+                "written_at": _iso(T0),
+                "origin_tokens_in": 1000,
+                "origin_tokens_out": 100,
+                "origin_source": "hook",
+            },
+        )
+    await _post(
+        client,
+        "sessions",
+        tenant,
+        {
+            "sessions": [
+                {"session_id": "w", "first_seen": _iso(T0 - timedelta(minutes=10)), "last_seen": _iso(T0)}
+            ]
+        },
+    )
+    at = _iso(T0 + timedelta(hours=1))
+    await _post(
+        client,
+        "reuse",
+        tenant,
+        {"session_id": "r", "reader_agent_id": "learner", "memory_ids": [used, ignored], "recalled_at": at},
+    )
+    # Naming a memory this session never reused marks nothing; another session's report marks nothing here.
+    assert (
+        await _post(
+            client, "outcomes", tenant, {"session_id": "other", "memory_ids": [used], "outcome": "success"}
+        )
+    )["marked"] == 0
+    assert (
+        await _post(
+            client, "outcomes", tenant, {"session_id": "r", "memory_ids": [used], "outcome": "success"}
+        )
+    )["marked"] == 1
+    t = (await _value(client, tenant))["totals"]
+    assert (t["confirmed_reuses"], t["confirmed_tokens"], t["failed_reuses"]) == (1, 1100, 0)
+    # The latest report wins.
+    await _post(client, "outcomes", tenant, {"session_id": "r", "memory_ids": [used], "outcome": "failure"})
+    t = (await _value(client, tenant))["totals"]
+    assert (t["confirmed_reuses"], t["failed_reuses"]) == (0, 1)

@@ -81,6 +81,8 @@ def upgrade() -> None:
         sa.Column("writer_agent_id", sa.Text(), nullable=False, server_default=sa.text("''")),
         sa.Column("writer_session_id", sa.Text(), nullable=False, server_default=sa.text("''")),
         sa.Column("first_recalled_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("outcome", sa.Text(), nullable=True),
+        sa.Column("outcome_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_index("ix_memory_reuse_tenant_recalled", "memory_reuse", ["tenant_id", "first_recalled_at"])
     # A new, empty table: no CONCURRENTLY needed. Backs the cascade from memories.

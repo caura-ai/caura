@@ -200,3 +200,13 @@ def test_a_bulk_write_records_an_origin_per_created_item_a_moment_apart(schedule
     assert [r["memory_id"] for r in rows] == ["m0", "m2"]
     assert all(r["session_id"] == "broker-s" for r in rows)
     assert rows[0]["written_at"] < rows[1]["written_at"]
+
+
+def test_an_evolve_report_in_a_session_schedules_its_outcome(scheduled):
+    sc.set_session("mcp-9", "mcp")
+    value_ledger.schedule_outcome("t1", ["m1", "m2"], "success")
+    value_ledger.schedule_outcome("t1", [], "success")
+    value_ledger.schedule_outcome("t1", ["m1"], "nonsense")
+    assert [c["body"] for c in scheduled] == [
+        {"session_id": "mcp-9", "memory_ids": ["m1", "m2"], "outcome": "success"}
+    ]

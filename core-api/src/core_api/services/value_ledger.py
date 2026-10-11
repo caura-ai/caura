@@ -135,3 +135,29 @@ def schedule_reuse(results: list[Any], *, tenant_id: str | None, reader_agent_id
         )
     except Exception:
         logger.warning("value metering: reuse skipped", exc_info=True)
+
+
+async def _record_outcome(tenant_id: str, body: dict) -> None:
+    try:
+        await get_storage_client().value_record_outcome(tenant_id, body)
+    except Exception:
+        logger.warning("value metering: outcome not recorded", exc_info=True)
+
+
+def schedule_outcome(tenant_id: str, memory_ids: list[str] | None, outcome_type: str) -> None:
+    """After an Evolve report: confirm (or not) this session's reuse of the memories it named."""
+    try:
+        session_id = current_session_id()
+        ids = [str(m) for m in (memory_ids or []) if m][:200]
+        if (
+            not tenant_id
+            or not session_id
+            or not ids
+            or outcome_type not in ("success", "failure", "partial")
+        ):
+            return
+        track_task(
+            _record_outcome(tenant_id, {"session_id": session_id, "memory_ids": ids, "outcome": outcome_type})
+        )
+    except Exception:
+        logger.warning("value metering: outcome skipped", exc_info=True)

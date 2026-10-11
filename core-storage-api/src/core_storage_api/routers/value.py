@@ -90,6 +90,25 @@ async def record_reuse(tenant_id: str, body: Reuse) -> dict:
     return {"recorded": recorded}
 
 
+class Outcome(BaseModel):
+    session_id: str = _Id
+    memory_ids: list[UUID] = Field(min_length=1, max_length=200)
+    outcome: str = Field(pattern=r"^(success|failure|partial)$")
+
+
+@router.post("/outcomes")
+async def record_outcome(tenant_id: str, body: Outcome) -> dict:
+    """What a session reported about work that relied on memories it reused: ``{"marked": n}``."""
+    _require_tenant(tenant_id)
+    marked = await _svc.value_record_outcome(
+        tenant_id,
+        session_id=body.session_id,
+        memory_ids=[str(m) for m in body.memory_ids],
+        outcome=body.outcome,
+    )
+    return {"marked": marked}
+
+
 class ValueQuery(BaseModel):
     start: datetime
     end: datetime

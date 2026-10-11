@@ -345,7 +345,9 @@ def test_the_writer_session_population_is_pinned() -> None:
     # 136 -> 139: value metering (migration 067) writes sessions, memory
     # origins and reuse (``value_touch_sessions``, ``value_record_origin``,
     # ``value_record_reuse``); ``value_query`` reads on the replica.
-    assert len(methods) == 139, f"{len(methods)} methods open a writer session"
+    # 139 -> 140: ``value_record_outcome`` marks a session's reuse with its
+    # reported Evolve outcome.
+    assert len(methods) == 140, f"{len(methods)} methods open a writer session"
     assert len(pure) == 60, f"{len(pure)} of them show no write marker"
 
 

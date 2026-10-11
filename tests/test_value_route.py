@@ -20,6 +20,10 @@ RAW = {
         "reuses_with_tokens": 3,
         "origin_turns": 25,
         "cross_agent_reuses": 7,
+        "confirmed_reuses": 2,
+        "confirmed_seconds": 1200,
+        "confirmed_tokens": 40_000,
+        "failed_reuses": 1,
     },
     "sessions": 16,
     "daily": [{"day": "2026-10-11", "reuses": 10, "origin_seconds": 5400}],
@@ -60,6 +64,12 @@ def test_the_report_states_shares_and_units():
     )
     assert r["knowledge_shared"]["cross_agent_share"] == 0.7
     assert r["caura_cost"] == {"model_tokens": 47_000, "model_calls": 86}
+    assert r["work_reused"]["confirmed"] == {
+        "reuses": 2,
+        "minutes": 20.0,
+        "tokens_reported": 40_000,
+        "failed_reuses": 1,
+    }
     empty = value_route.shape({"totals": {}, "sessions": 0}, None)
     assert empty["sessions_helped_share"] is None and empty["caura_cost"] is None
 

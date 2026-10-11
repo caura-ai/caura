@@ -6925,6 +6925,31 @@ class PostgresService:
             )
             return len(inserted.all())
 
+    async def value_record_outcome(
+        self, tenant_id: str, *, session_id: str, memory_ids: list[str], outcome: str
+    ) -> int:
+        """Mark this session's reuse of the named memories with what it reported.
+
+        Only reuse rows the session has: a memory it never recalled from
+        another session cannot be confirmed by naming it. The latest report
+        wins. Returns the rows marked.
+        """
+        ids = [UUID(m) for m in dict.fromkeys(memory_ids)]
+        if not ids:
+            return 0
+        async with get_session() as session:
+            marked = await session.execute(
+                sql_update(MemoryReuse)
+                .where(
+                    MemoryReuse.tenant_id == tenant_id,
+                    MemoryReuse.session_id == session_id,
+                    MemoryReuse.memory_id.in_(ids),
+                )
+                .values(outcome=outcome, outcome_at=func.now())
+                .returning(MemoryReuse.memory_id)
+            )
+            return len(marked.all())
+
     async def value_query(self, tenant_id: str, *, start: datetime, end: datetime, top: int = 8) -> dict:
         """One tenant's value figures in ``[start, end)``."""
         in_window = (MemoryReuse.first_recalled_at >= start, MemoryReuse.first_recalled_at < end)
@@ -6941,6 +6966,7 @@ class PostgresService:
                 MemoryOrigin.origin_tokens_out,
                 MemoryOrigin.origin_turns,
                 MemoryOrigin.memory_id.is_not(None).label("origin_recorded"),
+                MemoryReuse.outcome,
             )
             .outerjoin(MemoryOrigin, MemoryOrigin.memory_id == MemoryReuse.memory_id)
             .where(MemoryReuse.tenant_id == tenant_id, *in_window)
@@ -6973,6 +6999,20 @@ class PostgresService:
                             func.count(reuse.c.origin_tokens_in).label("reuses_with_tokens"),
                             func.coalesce(func.sum(reuse.c.origin_turns), 0).label("origin_turns"),
                             func.count().filter(cross).label("cross_agent_reuses"),
+                            # Confirmed: the session later reported success for work
+                            # that named this memory (Evolve).
+                            func.count().filter(reuse.c.outcome == "success").label("confirmed_reuses"),
+                            func.coalesce(
+                                func.sum(reuse.c.origin_seconds).filter(reuse.c.outcome == "success"), 0
+                            ).label("confirmed_seconds"),
+                            func.coalesce(
+                                func.sum(
+                                    func.coalesce(reuse.c.origin_tokens_in, 0)
+                                    + func.coalesce(reuse.c.origin_tokens_out, 0)
+                                ).filter(reuse.c.outcome == "success"),
+                                0,
+                            ).label("confirmed_tokens"),
+                            func.count().filter(reuse.c.outcome == "failure").label("failed_reuses"),
                         )
                     )
                 )

@@ -130,6 +130,12 @@ class MemoryReuse(Base):
     first_recalled_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
+    #: What the session later reported about work that relied on this memory
+    #: (Evolve: ``success``, ``failure`` or ``partial``), when it named it.
+    outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    outcome_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     __table_args__ = (
         Index("ix_memory_reuse_tenant_recalled", "tenant_id", "first_recalled_at"),

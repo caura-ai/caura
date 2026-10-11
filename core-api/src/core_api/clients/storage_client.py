@@ -1892,6 +1892,13 @@ class CoreStorageClient:
         )
         return result or {}  # type: ignore[return-value]
 
+    async def value_record_outcome(self, tenant_id: str, body: dict) -> dict:
+        """A session's reported outcome for memories it reused; the latest wins, so safe to retry."""
+        result = await self._post(
+            f"/value/outcomes?tenant_id={quote(tenant_id, safe='')}", body, idempotent=True
+        )
+        return result or {}  # type: ignore[return-value]
+
     async def value_query(self, tenant_id: str, body: dict) -> dict:
         """One tenant's value figures."""
         result = await self._post(
