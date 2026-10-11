@@ -79,6 +79,7 @@ from core_api.routes.skills_inbox import router as skills_inbox_router
 from core_api.routes.stats import router as stats_router
 from core_api.routes.stm import router as stm_router
 from core_api.routes.telemetry import router as telemetry_router
+from core_api.routes.usage import router as usage_router
 from core_api.tasks import cancel_all_tasks
 
 # CAURA-631: sentinel bucket for audit events that arrive without a
@@ -1259,6 +1260,7 @@ app.include_router(conflicts_router, prefix="/api/v1")
 app.include_router(lifecycle_router, prefix="/api/v1")
 app.include_router(scheduler_lease_router, prefix="/api/v1")
 app.include_router(org_deletion_router, prefix="/api/v1")
+app.include_router(usage_router, prefix="/api/v1")
 
 # Test-only endpoints (time-warp, etc.) — only registered when TESTING=1
 if _os.getenv("TESTING") == "1":
