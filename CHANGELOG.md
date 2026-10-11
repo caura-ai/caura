@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.30.9](https://github.com/caura-ai/caura/compare/backend-v3.30.8...backend-v3.30.9) (2026-10-11)
+
+
+### Bug Fixes
+
+* Forge and the skills inbox keep their contracts (B32) ([#2039](https://github.com/caura-ai/caura/issues/2039)) ([90796fb](https://github.com/caura-ai/caura/commit/90796fb1d5b2459a0d4b35efa5f79b95408e8f98))
+
 ## [3.30.8](https://github.com/caura-ai/caura/compare/backend-v3.30.7...backend-v3.30.8) (2026-10-11)
 
 
