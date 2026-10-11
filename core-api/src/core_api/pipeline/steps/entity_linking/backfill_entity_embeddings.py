@@ -55,9 +55,8 @@ async def _embed_page(rows: list[dict], tenant_config: Any) -> list[dict]:
                 try:
                     return await get_embedding(row["canonical_name"], tenant_config, background=True)
                 except Exception:
-                    logger.warning(
-                        "Failed to embed entity %s (%s)", row["id"], row["canonical_name"], exc_info=True
-                    )
+                    # The id names it; the name is tenant content (L-77).
+                    logger.warning("Failed to embed entity %s", row["id"], exc_info=True)
                     return None
 
         embeddings = await asyncio.gather(*(one(row) for row in rows))

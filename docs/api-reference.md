@@ -189,6 +189,13 @@ request body.
 | `quarantine.reject` | `memory` | `PATCH /memories/{id}/status` to `cancelled`, on a held memory | — |
 | `session.rollback` | `memory` | `POST /memories/rollback-session`, one row per memory it changed | — |
 
+A single-memory delete writes two kinds of row, on REST and MCP alike. The
+`delete` row records the request: one per call, naming the caller and the
+client. A `soft_delete` row records each memory the delete removed: the one
+named, and every chunk or fact derived from it, each naming that memory's
+owner. So count `delete` rows for deletes requested, and `soft_delete` rows for
+memories removed.
+
 **Rate limiting (managed platform)**
 
 These limits apply to the managed platform at `caura.ai`. A self-hosted deployment enforces its own, looser per-route limits out of the box — see the [self-hosted rate limiting](../README.md#rate-limiting) section.

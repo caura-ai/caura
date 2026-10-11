@@ -209,7 +209,7 @@ async def handle_embed_request(event: Event) -> None:
     # background budget — core-api wraps its embed in a per-tenant slot
     # (``memory_service``) and core-worker has no equivalent yet.
     async with per_tenant_storage_slot(request.tenant_id):
-        await update_memory_embedding(
+        landed = await update_memory_embedding(
             storage,
             memory_id=request.memory_id,
             tenant_id=request.tenant_id,
@@ -222,6 +222,10 @@ async def handle_embed_request(event: Event) -> None:
             # than guessing.
             embedded_content_hash=request.content_hash,
         )
+    if not landed:
+        # Storage refused it (404/422), already logged where it happened.
+        # EMBEDDED means the vector is on the row, so it is not sent (L-54).
+        return
 
     # Back-channel: announce successful embed so core-api can fire
     # post-embed contradiction detection. Closes the documented
@@ -738,12 +742,15 @@ async def handle_enrich_request(event: Event) -> None:
     # consumer above. The LLM enrichment call upstream is the
     # expensive step but doesn't touch the storage-writer pool.
     async with per_tenant_storage_slot(request.tenant_id):
-        await update_memory_enrichment(
+        landed = await update_memory_enrichment(
             storage,
             memory_id=request.memory_id,
             tenant_id=request.tenant_id,
             fields=patch,
         )
+    if not landed:
+        # As for EMBEDDED above: refused (404/422), logged, not announced (L-54).
+        return
 
     # Back-channel: announce successful enrichment so core-api (or any
     # other subscriber) can react. Best-effort — a publish failure

@@ -171,6 +171,12 @@ class Memory(Base):
     # Distinct from supersession, which needs no such field: there the event IS
     # the creation of the superseding memory, so ``new_mem.created_at`` is
     # already the right timestamp.
+    #
+    # Every statement that sets ``status`` stamps it (L-142), with ONE exception:
+    # the expiry sweep's flip to ``outdated`` leaves it alone (Eldad,
+    # 2026-10-11). The contradiction signal counts ``outdated`` rows by this
+    # column, and an expired row is not a contradiction. So for a row the sweep
+    # outdated, it holds the time of the change before that one, or NULL.
     status_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # Contradiction tracking

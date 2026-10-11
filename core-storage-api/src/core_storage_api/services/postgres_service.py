@@ -383,7 +383,8 @@ async def _change_derived_rows(
     children = derived_rows_where(tenant_id, [parent_id])
     deleted: list[dict] = []
     if derived.get("soft_delete_children"):
-        gone = {"deleted_at": datetime.now(UTC), "status": "deleted"}
+        now = datetime.now(UTC)
+        gone = {"deleted_at": now, "status": "deleted", "status_changed_at": now}
         taken = await session.execute(
             sql_update(Memory).where(*children).values(**gone).returning(Memory.id, Memory.agent_id)
         )
@@ -585,6 +586,15 @@ def _entity_compatible_groups(cluster_ids: list[UUID], names: dict[UUID, str]) -
 # ``memory_find_near_duplicate_pairs``). ``scope_agent`` is private to its
 # author and never becomes part of a shared crystal.
 _CRYSTALLIZER_SHARED_VISIBILITIES = ("scope_team", "scope_org")
+
+
+# The rows the expiry sweep archives: either column ends a row's life, and every
+# live status is a candidate. ``memory_find_expired_still_active`` reports
+# exactly these (L-148), so the hygiene report and the sweep cannot disagree.
+# Binds ``:live_statuses``.
+_EXPIRED_LIVE_ROWS = (
+    "(ts_valid_end < NOW() OR expires_at < NOW()) AND status = ANY(:live_statuses) AND deleted_at IS NULL"
+)
 
 
 def _scope_sql(
@@ -3204,7 +3214,6 @@ class PostgresService:
         memory_id: UUID,
         tenant_id: str,
         embedding: list[float],
-        metadata: dict | None = None,
         embedded_content_hash: str | None = None,
     ) -> bool:
         # ``tenant_id`` scopes the write to the row's home tenant: a
@@ -3213,6 +3222,11 @@ class PostgresService:
         # Returns whether a row matched so the route can surface a 404 on
         # a no-op (mirrors memory_update / memory_update_status) instead of
         # a silent 200 that lets callers over-count successful writes.
+        #
+        # ``deleted_at IS NULL`` as on those two (L-42): a re-embed that reads
+        # the content, embeds it, and writes back can lose a race with a
+        # delete, and the vector must not land on the tombstone while the
+        # caller counts a success.
         #
         # ``embedded_content_hash`` is the hash of the text the CALLER
         # embedded, and is deliberately a parameter rather than being read
@@ -3230,11 +3244,9 @@ class PostgresService:
             values: dict = {"embedding": embedding}
             if embedded_content_hash is not None:
                 values["embedded_content_hash"] = embedded_content_hash
-            if metadata is not None:
-                values["metadata_"] = metadata
             result = await session.execute(
                 sql_update(Memory)
-                .where(Memory.id == memory_id, Memory.tenant_id == tenant_id)
+                .where(Memory.id == memory_id, Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None))
                 .values(**values)
             )
             return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
@@ -5278,6 +5290,11 @@ class PostgresService:
         past their expiry forever — the same literal-``active`` mistake
         ``memory_count_active`` documents. ``archived`` and the contradiction
         outcomes are not live, so a second tick still finds nothing to do.
+
+        The one status writer that leaves ``status_changed_at`` alone (L-142,
+        Eldad 2026-10-11). The contradiction signal counts ``outdated`` rows by
+        that column, and an expired row is not a contradiction: stamped, every
+        expiry would read as a fresh contradiction on the row's run.
         """
         async with get_session() as session:
             params: dict = {
@@ -5297,9 +5314,7 @@ class PostgresService:
                     SELECT id FROM memories
                     WHERE tenant_id = :tenant_id
                       {fleet_clause}
-                      AND (ts_valid_end < NOW() OR expires_at < NOW())
-                      AND status = ANY(:live_statuses)
-                      AND deleted_at IS NULL
+                      AND {_EXPIRED_LIVE_ROWS}
                     LIMIT :batch_size
                 )
                 RETURNING id
@@ -5330,7 +5345,7 @@ class PostgresService:
 
             result = await session.execute(
                 text(f"""
-                UPDATE memories SET status = 'archived'
+                UPDATE memories SET status = 'archived', status_changed_at = NOW()
                 WHERE id IN (
                     SELECT id FROM memories
                     WHERE tenant_id = :tenant_id
@@ -6253,16 +6268,22 @@ class PostgresService:
         tenant_id: str,
         fleet_id: str | None,
     ) -> list[tuple]:
+        """Up to 100 rows the next expiry sweep archives, longest-expired first.
+
+        The sweep's own predicate (L-148). This tested ``ts_valid_end`` and
+        ``status = 'active'`` alone, so a row ending on ``expires_at``, or live
+        as ``confirmed``/``pending``, was archived without ever being reported.
+        """
         async with get_session() as session:
             scope, params = _scope_sql(tenant_id, fleet_id)
+            params["live_statuses"] = list(LIVE_MEMORY_STATUSES)
             result = await session.execute(
                 text(f"""
                 SELECT m.id
                 FROM memories m
                 WHERE {scope}
-                  AND m.ts_valid_end < NOW()
-                  AND m.status = 'active'
-                  AND m.deleted_at IS NULL
+                  AND {_EXPIRED_LIVE_ROWS}
+                ORDER BY LEAST(m.ts_valid_end, m.expires_at), m.id
                 LIMIT 100
             """),
                 params,
@@ -7121,11 +7142,15 @@ class PostgresService:
                 if exclude_ids:
                     children.append(Memory.id.notin_(exclude_ids))
                 result = await session.execute(
-                    sql_update(Memory).where(*children).values(deleted_at=now, status="deleted")
+                    sql_update(Memory)
+                    .where(*children)
+                    .values(deleted_at=now, status="deleted", status_changed_at=now)
                 )
                 deleted += result.rowcount or 0  # type: ignore[attr-defined]
             result = await session.execute(
-                sql_update(Memory).where(*selected(Memory)).values(deleted_at=now, status="deleted")
+                sql_update(Memory)
+                .where(*selected(Memory))
+                .values(deleted_at=now, status="deleted", status_changed_at=now)
             )
             return deleted + (result.rowcount or 0)  # type: ignore[attr-defined]
 
@@ -8457,9 +8482,13 @@ class PostgresService:
                 }
             except IntegrityError:
                 # TOCTOU recovery — SELECT + merge in one writer session.
+                # By type and tenant, not by name (L-77): a canonical name is
+                # tenant content, often a person's, and log sinks have no tenant
+                # access control and outlive a purge.
                 logger.info(
-                    "Entity bulk-upsert race: '%s' created concurrently, re-selecting",
-                    item["canonical_name"],
+                    "Entity bulk-upsert race: a %s entity of tenant %s was created concurrently, re-selecting",
+                    item["entity_type"],
+                    item["tenant_id"],
                 )
                 async with get_session() as session:
                     sel = select(Entity).where(
@@ -8623,9 +8652,11 @@ class PostgresService:
                     )
                 return entity
 
+            # By type and tenant, not by name (L-77), as the bulk race above.
             logger.info(
-                "Entity dedup race: '%s' already exists, re-selecting",
-                data.get("canonical_name"),
+                "Entity dedup race: a %s entity of tenant %s already exists, re-selecting",
+                data.get("entity_type"),
+                data.get("tenant_id"),
             )
             # ``_fleet_scope`` rather than a NULL branch: the index groups
             # ``COALESCE(fleet_id, '')``, so the row that just won the conflict
@@ -12803,7 +12834,7 @@ class PostgresService:
                 text(
                     """
                     UPDATE memories
-                    SET status = 'outdated'
+                    SET status = 'outdated', status_changed_at = NOW()
                     WHERE tenant_id = :tenant_id
                       AND agent_id = :agent_id
                       AND memory_type = 'insight'
@@ -12841,7 +12872,7 @@ class PostgresService:
                 text(
                     """
                     UPDATE memories
-                    SET status = 'active'
+                    SET status = 'active', status_changed_at = NOW()
                     WHERE id = ANY(CAST(:prior_ids AS uuid[]))
                       AND status = 'outdated'
                       AND tenant_id = :tenant_id
