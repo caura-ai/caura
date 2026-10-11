@@ -80,14 +80,19 @@ class Memory(Base):
     memory_type: Mapped[str] = mapped_column(Text, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     embedding = mapped_column(Vector(VECTOR_DIM))
-    weight: Mapped[float] = mapped_column(Float, server_default=text("0.5"))
+    # ``weight`` and ``created_at`` are nullable: migration 001 created them so
+    # and no migration tightened them (L-97). The annotations name the type the
+    # server defaults give a row written without them.
+    weight: Mapped[float] = mapped_column(
+        Float, nullable=True, server_default=text("0.5")
+    )
     source_uri: Mapped[str | None] = mapped_column(Text)
     run_id: Mapped[str | None] = mapped_column(Text)
     # ``json``, not JSONB: migration 001 creates it that way (CAURA-595), and
     # ``test_models_match_the_migrated_schema`` holds the model to the schema.
     metadata_: Mapped[dict | None] = mapped_column("metadata", JSON)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("now()")
+        DateTime(timezone=True), nullable=True, server_default=text("now()")
     )
     title: Mapped[str | None] = mapped_column(Text)
     content_hash: Mapped[str | None] = mapped_column(Text)

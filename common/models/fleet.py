@@ -38,11 +38,13 @@ class FleetNode(Base):
     # binding shipped (migration 055), or after a tenant credential released
     # it; the next heartbeat binds it again.
     owner_principal: Mapped[str | None] = mapped_column(Text)
+    # Both nullable: migration 001 created them so and no migration tightened
+    # them (L-97).
     last_heartbeat: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("now()")
+        DateTime(timezone=True), nullable=True, server_default=text("now()")
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("now()")
+        DateTime(timezone=True), nullable=True, server_default=text("now()")
     )
 
 
@@ -82,10 +84,12 @@ class FleetCommand(Base):
     # them that way (CAURA-595), and ``test_models_match_the_migrated_schema``
     # holds the models to the schema.
     payload: Mapped[dict | None] = mapped_column(JSON)
-    status: Mapped[str] = mapped_column(Text, server_default="pending")
+    # ``status`` and ``created_at`` are nullable: migration 001 created them so
+    # and no migration tightened them (L-97).
+    status: Mapped[str] = mapped_column(Text, nullable=True, server_default="pending")
     result: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("now()")
+        DateTime(timezone=True), nullable=True, server_default=text("now()")
     )
     acked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
