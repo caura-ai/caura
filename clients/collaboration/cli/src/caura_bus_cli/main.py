@@ -1,6 +1,7 @@
 """Operator CLI using the same Caura credential boundary as every other client."""
 
 import asyncio
+import getpass
 import json
 import os
 from importlib.metadata import version as package_version
@@ -13,6 +14,7 @@ from caura_bus_core import RESYNC_EVENT, Bus, PlatformError, ResponseCollector, 
 from caura_bus_core.config import CONFIG_ENV_VAR, DEFAULT_CONFIG_PATH
 
 from .hooks import DEFAULT_LISTEN_SECONDS, install_hooks
+from .join import JoinError, JoinOptions, run_join
 from .runtime import CodexQueue, WakeState, listen, load_key, receive, state_path, supervise
 from .setup import Options, SetupError, run_setup
 
@@ -217,7 +219,78 @@ def setup(
     raise typer.Exit(code)
 
 
-def execute(config, operation):
+def tty_prompt(label: str, secret: bool = False) -> str:
+    """Prompt on the controlling terminal, also when stdin is a pipe (``curl ... | sh``)."""
+    try:
+        tty = open("/dev/tty", "r+")
+    except OSError:
+        raise JoinError(f"no terminal to ask for the {label.lower()}") from None
+    with tty:
+        if secret:
+            return getpass.getpass(f"{label}: ", stream=tty)
+        tty.write(f"{label}: ")
+        tty.flush()
+        return tty.readline().strip()
+
+
+@app.command()
+def join(
+    url: str = typer.Option(..., help="Caura gateway origin, e.g. https://caura.example"),
+    email: str | None = typer.Option(None, envvar="CAURA_EMAIL", help="Your dashboard sign-in email"),
+    name: str | None = typer.Option(None, help="Agent name (default: <runtime>-<dir>-<4 hex>)"),
+    runtime: str = typer.Option("auto", help="auto, claude or codex"),
+    directory: Path = typer.Option(Path("."), "--dir", help="Project directory the runtime starts in"),
+    description: str | None = typer.Option(None, help="Register this agent's expertise for discovery"),
+    tenant: str | None = typer.Option(None, help="Workspace (default: your landing workspace)"),
+    no_hooks: bool = typer.Option(False, "--no-hooks", help="Skip wake-up hooks / the Codex waker"),
+):
+    """Sign in as yourself, mint an agent key and connect this runtime: no dashboard step needed.
+
+    The password is read from CAURA_PASSWORD or prompted on the terminal. It is
+    used for this one sign-in only and never stored.
+    """
+    try:
+        # Take the secrets out of the environment so no child process (claude mcp add) inherits them.
+        password = os.environ.pop("CAURA_PASSWORD", "")
+        totp_env = os.environ.pop("CAURA_TOTP_CODE", "").strip()
+        if not email:
+            email = tty_prompt("Caura email")
+        password = password or tty_prompt("Caura password", secret=True)
+        code = run_join(
+            JoinOptions(
+                url=url,
+                email=email,
+                password=password,
+                directory=directory,
+                runtime=runtime,
+                name=name,
+                description=description,
+                tenant=tenant,
+                hooks=not no_hooks,
+                totp=(lambda: totp_env) if totp_env else (lambda: tty_prompt("Two-factor code", secret=True)),
+            ),
+            typer.echo,
+            asyncio.run,
+        )
+    except JoinError as exc:
+        hint = ""
+        if "no terminal" in str(exc):
+            hint = " (set CAURA_EMAIL / CAURA_PASSWORD, or run the command in a terminal)"
+        typer.echo(f"caura-bus join: {exc}{hint}", err=True)
+        raise typer.Exit(1) from None
+    except (SetupError, ValueError, OSError) as exc:
+        typer.echo(f"caura-bus join: {exc}", err=True)
+        raise typer.Exit(1) from None
+    raise typer.Exit(code)
+
+
+def execute(config, operation, key_file=None):
+    try:
+        load_key(key_file)
+    except (ValueError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
     async def run():
         async with Bus(load_config(config)) as bus:
             result = await operation(bus)
@@ -231,9 +304,12 @@ def execute(config, operation):
 
 
 @app.command()
-def doctor(config: Path | None = typer.Option(None)):
+def doctor(
+    config: Path | None = typer.Option(None),
+    key_file: Path | None = typer.Option(None, help="0600 file holding the agent key"),
+):
     """Verify gateway access and the credential's effective identity."""
-    execute(config, lambda bus: bus.connect())
+    execute(config, lambda bus: bus.connect(), key_file)
 
 
 @app.command()
@@ -247,6 +323,7 @@ def send(
     expect_reply_within_seconds: int | None = typer.Option(None, min=60, max=604800),
     capability: str | None = None,
     config: Path | None = typer.Option(None),
+    key_file: Path | None = typer.Option(None, help="0600 file holding the agent key"),
 ):
     """Send a message; keep the idempotency key to safely retry an uncertain send."""
 
@@ -265,7 +342,7 @@ def send(
         )
         return receipt.model_dump()
 
-    execute(config, run)
+    execute(config, run, key_file)
 
 
 @app.command()

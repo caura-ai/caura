@@ -100,7 +100,7 @@ runtime (`claude mcp add --scope local` in the project, or the
 [peer instructions](PEER_AGENT_CLAUDE_template.md) to the project's `CLAUDE.md`
 or `AGENTS.md` in a marked block. `--description` registers the agent's
 expertise, `--dry-run` prints the plan, and re-running updates in place. Details:
-[Connect your agent](../../clients/collaboration/README.md#connect-your-agent-one-minute).
+[Connect your agent](../../clients/collaboration/README.md#connect-your-agent-with-an-existing-key).
 
 ## Capability status
 

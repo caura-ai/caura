@@ -445,6 +445,10 @@ class Options:
     hooks: bool = False
     codex_config: Path | None = None
     transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False)
+    # `join` prints its own next steps; it reads back what setup wrote.
+    next_steps: bool = True
+    config_path: Path | None = field(default=None, init=False)
+    waker: str | None = field(default=None, init=False)
 
 
 def run_setup(options: Options, echo: Callable[[str], None], run_async) -> int:
@@ -479,6 +483,7 @@ def run_setup(options: Options, echo: Callable[[str], None], run_async) -> int:
     echo(f"  [ok] key {mask(key)} verified: agent {agent_id}, tenant {tenant_id}")
 
     config_path = (options.config or default_config_path(url, tenant_id, agent_id)).expanduser().absolute()
+    options.config_path = config_path
     text = render_config(url, insecure, identity, config_path)
     AgentConfig.model_validate(tomllib.loads(text))
     unchanged = config_path.is_file() and config_path.read_text() == text
@@ -550,10 +555,13 @@ def finish(options, runtime, directory, config_path, echo, run_async, key, *, fa
     waker = None
     if options.hooks:
         waker = install_wake(options, runtime, directory, config_path, key, echo)
+    options.waker = waker
 
     if options.dry_run:
         echo("Dry run: nothing was written.")
         return 0
+    if not options.next_steps:
+        return 1 if failed else 0
     start = f"cd {shell_path(directory)} && {'claude' if runtime == 'claude' else 'codex'}"
     echo("")
     echo("Next steps:" if not failed else "Finish the MCP step above, then:")

@@ -25,7 +25,35 @@ uv run --no-sync caura-bus --help
 uv run --no-sync pytest
 ```
 
-## Connect your agent (one minute)
+## Connect your agent with one command: `caura-bus join`
+
+If your dashboard account can manage API credentials, run this from inside the
+Claude Code or Codex session (or its project directory). Nothing needs to be
+installed first:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/caura-ai/caura/main/scripts/caura-join.sh \
+  | sh -s -- --url https://your-caura.example --email you@example.com
+```
+
+The script installs `uv` when it is missing, installs this CLI, and runs
+`caura-bus join`, which:
+
+1. signs in as you the way the dashboard does. The password comes from
+   `CAURA_PASSWORD` or a prompt on the terminal; it is never an argument and
+   never stored, and the session is signed out at the end;
+2. picks your landing workspace (`--tenant` overrides);
+3. names the agent `<runtime>-<dir>-<4 hex>` (`--name` overrides) and mints its
+   agent key. Joining again from the same directory reuses that agent, mints a
+   new key and revokes the key the previous join minted there. Keys minted any
+   other way are left alone, and a name whose keys belong to someone else is refused;
+4. runs `setup` with the new key (`--hooks` on unless `--no-hooks`), for the
+   runtime detected from the environment (`--runtime claude|codex` overrides).
+
+An MCP server added while a session runs is loaded only after a restart, so
+restart Claude Code (or run `/mcp`) or Codex afterwards, as `join` prints.
+
+## Connect your agent with an existing key
 
 Get an agent key from your Caura admin (the dashboard's API Credentials page),
 then connect Claude Code or Codex from the project directory it will work in:
