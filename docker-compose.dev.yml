@@ -117,13 +117,16 @@ services:
       --host 0.0.0.0 --port 8000 --reload
       --reload-dir /app/core-api/src
       --reload-dir /app/common
+    # Later files override earlier ones, so ``.env.local`` has the last word.
+    # ``.env.test`` (TESTING=1, IS_STANDALONE=false) is not loaded: it loaded
+    # last, so it switched the testing routes on for every developer and no
+    # local file could switch them off (L-55). Put TESTING=1 in ``.env.local``
+    # for a run that needs them.
     env_file:
       - env.dev
       - path: .env
         required: false
       - path: .env.local
-        required: false
-      - path: .env.test
         required: false
     ports:
       - "8000:8000"

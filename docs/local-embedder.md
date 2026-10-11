@@ -309,7 +309,10 @@ unset) tells the SDK to request 1024-dim output. So:
 - **Provider switch is just an env-var change** — no migration, no re-embed
   required (though you may want to re-embed for vector-space consistency
   if you've been writing under a different vendor — re-run
-  `python -m core_storage_api.scripts.backfill_embeddings` after switching).
+  `docker compose run --rm --env-from-file .env core-storage-api python -m core_storage_api.scripts.backfill_embeddings`
+  after switching; `--env-from-file .env` carries the provider settings the
+  storage service does not load, as the
+  [upgrade guide](upgrading-from-v1.md) explains).
 
 To stop the unused TEI container too, drop the `--profile embed-local` flag
 on the next `up`:
