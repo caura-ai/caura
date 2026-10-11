@@ -106,6 +106,54 @@ class MemoryCountResponse(BaseModel):
     count: int
 
 
+class MemoryFieldCluster(BaseModel):
+    id: int
+    label: str = Field(description="Short label from the cluster's most distinctive entities.")
+    x: float
+    y: float
+    size: int
+
+
+class MemoryFieldPoint(BaseModel):
+    id: str
+    x: float = Field(description="Normalised horizontal position, 0-1.")
+    y: float = Field(description="Normalised vertical position, 0-1.")
+    cluster: int = Field(description="Cluster id, or -1 when the memory has no embedding yet.")
+    agent_id: str | None = None
+    fleet_id: str | None = None
+    memory_type: str | None = None
+    weight: float | None = None
+    title: str | None = None
+    preview: str = Field(description="First 240 characters of content.")
+    content_chars: int = Field(description="Full content length in characters.")
+    created_at: str | None = None
+    recall_count: int = 0
+    last_recalled_at: str | None = None
+    status: str | None = None
+    visibility: str | None = None
+    supersedes_id: str | None = None
+    superseded_by: str | None = Field(
+        default=None, description="Newest returned memory that supersedes this one, if any."
+    )
+    entity_ids: list[str] = Field(default_factory=list)
+
+
+class MemoryFieldEntity(BaseModel):
+    id: str
+    label: str | None = None
+    type: str | None = None
+
+
+class MemoryFieldResponse(BaseModel):
+    kind: str = Field(description="Layout algorithm; 'pca2' today.")
+    model_version: str = Field(description="Short hash of the layout inputs.")
+    computed_at: str
+    total: int = Field(description="Memories visible to the caller (points holds the newest `limit`).")
+    clusters: list[MemoryFieldCluster]
+    points: list[MemoryFieldPoint]
+    entities: list[MemoryFieldEntity] = Field(description="Entities linked from the returned points.")
+
+
 class BulkDeleteResponse(BaseModel):
     deleted: int = Field(description="Number of memories soft-deleted.")
 

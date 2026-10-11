@@ -119,6 +119,7 @@ from core_api.services.ingest_service import (
     ingest_commit,
     ingest_preview,
 )
+from core_api.services.memory_field import FIELD_DEFAULT_LIMIT, FIELD_MAX_LIMIT, get_memory_field
 from core_api.services.memory_service import (
     _memory_to_out,
     create_memories_bulk,
@@ -898,6 +899,57 @@ async def memory_count(
         caller_tenant_id=auth.tenant_id,
     )
     return {"count": count}
+
+
+@router.get("/memories/field", responses={200: {"model": _oar.MemoryFieldResponse}})
+async def memory_field(
+    tenant_id: str = Query(..., min_length=1),
+    fleet_id: str | None = Query(default=None),
+    agent_id: str | None = Query(
+        default=None,
+        description=(
+            "Visibility identity for a tenant credential, as on `GET /memories`. "
+            "An agent credential always reads as itself."
+        ),
+    ),
+    limit: int = Query(
+        default=FIELD_DEFAULT_LIMIT,
+        ge=1,
+        le=FIELD_MAX_LIMIT,
+        description=f"Most recent memories to place, 1-{FIELD_MAX_LIMIT}.",
+    ),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """A 2D map layout of the caller's memories, computed from their embeddings.
+
+    Each point carries normalised ``x``/``y`` in ``[0, 1]``, its ``cluster``
+    (``-1`` when the memory has no embedding yet; those sit near the centre),
+    and the list fields a map needs. ``clusters`` carries an anchor, a size and
+    a short label per cluster; ``entities`` resolves the ``entity_ids`` on the
+    returned points. Superseded and archived memories are included (as on
+    ``GET /memories``); deleted ones are not. ``total`` is how many memories
+    the caller can see; ``points`` holds the newest ``limit`` of them.
+
+    Same tenant check, fleet-read gate and visibility scoping as
+    ``GET /memories``, so the map never places a memory the caller's list would
+    not show. Results are cached in-process for a few minutes and recomputed
+    when a memory is written, embedded, deleted or changes status. Declared
+    before ``/memories/{memory_id}`` so ``field`` is not parsed as an id.
+    """
+    auth.enforce_readable_tenant(tenant_id)
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
+    # Same identity resolution and fleet gate as ``list_memories``.
+    caller_agent_id = auth.effective_agent_id(agent_id)
+    await _gate_fleet_read(auth, tenant_id, caller_agent_id, fleet_id)
+    scope_body = {
+        "tenant_id": tenant_id,
+        "caller_agent_id": None if auth.is_person else caller_agent_id,
+        "include_scope_agent": auth.is_person,
+        "caller_tenant_id": auth.tenant_id,
+        "fleet_id": fleet_id,
+    }
+    return await get_memory_field(scope_body, limit=limit)
 
 
 def _require_person(auth: AuthContext, what: str) -> None:

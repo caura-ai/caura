@@ -11,8 +11,10 @@ shared engine from ``core_storage_api.database.init.get_engine``.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import struct
 from collections import OrderedDict, defaultdict
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -501,6 +503,23 @@ def _visibility_scope_clause(
         Memory.visibility == "scope_team",
         and_(*own_rows),
     )
+
+
+def _encode_embedding_f32(embedding: Any) -> str | None:
+    """A pgvector value as base64 little-endian float32, or None.
+
+    Used by the field page read, which ships thousands of 1024-dim vectors per
+    page; base64 float32 is about a quarter of the JSON-float encoding. Works
+    whether pgvector hands back a numpy array or a plain sequence.
+    """
+    if embedding is None:
+        return None
+    if hasattr(embedding, "astype"):
+        raw = embedding.astype("<f4").tobytes()
+    else:
+        values = [float(x) for x in embedding]
+        raw = struct.pack(f"<{len(values)}f", *values)
+    return base64.b64encode(raw).decode("ascii")
 
 
 def _utc_day(column: Any) -> ColumnElement[Any]:
@@ -7450,6 +7469,193 @@ class PostgresService:
 
         async with get_read_session() as session:
             return _attach_agent_display_names((await session.execute(stmt)).all())
+
+    # ------------------------------------------------------------------
+    #  Memory field (2D map layout input)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _field_scope_filters(
+        *,
+        tenant_id: str,
+        caller_agent_id: str | None,
+        caller_tenant_id: str | None,
+        fleet_id: str | None,
+        include_scope_agent: bool,
+    ) -> list[ColumnElement[bool]]:
+        """WHERE clauses for the field reads, held to ``memory_list_by_filters``.
+
+        The field is a picture of what ``GET /memories`` lists, so every row it
+        places must be one that route would list to the same caller: the same
+        tenant binding, the same visibility predicate (``scope_agent`` rows only
+        for their author, every scope for a signed-in person via
+        ``include_scope_agent``), the same strict org-blind fleet confinement,
+        and the same exclusions (soft-deleted and held rows). Superseded and
+        archived rows stay in, as they do on the list — the map draws them as
+        ghosts. No cross-tenant widening: the field route pins one tenant.
+        """
+        filters: list[ColumnElement[bool]] = [Memory.tenant_id == tenant_id]
+        if caller_agent_id or not include_scope_agent:
+            filters.append(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
+        if fleet_id:
+            # Same arguments as ``memory_list_by_filters`` — see the comment
+            # there; this is a security confinement (ax-0917-m-19).
+            filters.append(_fleet_scope_clause(Memory, [fleet_id], strict=True, include_org_visibility=False))
+        filters.append(Memory.deleted_at.is_(None))
+        filters.append(Memory.status != QUARANTINED_MEMORY_STATUS)
+        return filters
+
+    async def memory_field_signature(
+        self,
+        *,
+        tenant_id: str,
+        caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
+        fleet_id: str | None = None,
+        include_scope_agent: bool = False,
+    ) -> dict:
+        """Cheap change-detector for the field layout cache.
+
+        Returns ``{count, embedded, newest}``: how many rows the field would
+        place, how many of them carry an embedding, and the newest
+        ``created_at`` / ``status_changed_at`` among them. A write, an
+        embedding landing, a delete or a status flip moves at least one of the
+        three, so core-api can serve a cached layout while all three hold.
+        Recall counters are not tracked here; the cache TTL bounds their age.
+        """
+        filters = self._field_scope_filters(
+            tenant_id=tenant_id,
+            caller_agent_id=caller_agent_id,
+            caller_tenant_id=caller_tenant_id,
+            fleet_id=fleet_id,
+            include_scope_agent=include_scope_agent,
+        )
+        stmt = select(
+            func.count(),
+            func.count().filter(Memory.embedding.isnot(None)),
+            func.max(
+                func.greatest(Memory.created_at, func.coalesce(Memory.status_changed_at, Memory.created_at))
+            ),
+        ).where(*filters)
+        async with get_read_session() as session:
+            count, embedded, newest = (await session.execute(stmt)).one()
+        return {
+            "count": int(count or 0),
+            "embedded": int(embedded or 0),
+            "newest": newest.isoformat() if newest else None,
+        }
+
+    async def memory_field_page(
+        self,
+        *,
+        tenant_id: str,
+        caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
+        fleet_id: str | None = None,
+        include_scope_agent: bool = False,
+        limit: int = 2000,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
+    ) -> dict:
+        """One keyset page (newest first) of compact rows for the field layout.
+
+        Each row carries the list fields the map draws, a 240-char ``preview``
+        and the full ``content_chars`` (both computed in SQL so full content
+        never crosses the wire), the row's linked ``entity_ids``, and its
+        embedding as base64 little-endian float32 (``embedding_b64``, null when
+        not embedded yet) — a quarter of the JSON-float size. ``entities``
+        carries id/label/type for the entities linked from this page.
+        ``next_cursor`` is ``{ts, id}`` of the last row when a further page may
+        exist, else null.
+        """
+        filters = self._field_scope_filters(
+            tenant_id=tenant_id,
+            caller_agent_id=caller_agent_id,
+            caller_tenant_id=caller_tenant_id,
+            fleet_id=fleet_id,
+            include_scope_agent=include_scope_agent,
+        )
+        if cursor_ts is not None and cursor_id is not None:
+            filters.append(tuple_(Memory.created_at, Memory.id) < tuple_(cursor_ts, cursor_id))  # type: ignore[arg-type]
+        stmt = (
+            select(
+                Memory.id,
+                Memory.agent_id,
+                Memory.fleet_id,
+                Memory.memory_type,
+                Memory.weight,
+                Memory.title,
+                func.substr(Memory.content, 1, 240).label("preview"),
+                func.char_length(Memory.content).label("content_chars"),
+                Memory.created_at,
+                Memory.recall_count,
+                Memory.last_recalled_at,
+                Memory.status,
+                Memory.visibility,
+                Memory.supersedes_id,
+                Memory.embedding,
+            )
+            .where(*filters)
+            .order_by(Memory.created_at.desc(), Memory.id.desc())
+            .limit(limit)
+        )
+        async with get_read_session() as session:
+            rows = (await session.execute(stmt)).all()
+            ids = [r.id for r in rows]
+            links: dict[UUID, list[str]] = defaultdict(list)
+            entities: dict[str, dict] = {}
+            if ids:
+                link_stmt = (
+                    select(
+                        MemoryEntityLink.memory_id,
+                        Entity.id,
+                        Entity.canonical_name,
+                        Entity.entity_type,
+                    )
+                    .join(Entity, Entity.id == MemoryEntityLink.entity_id)
+                    .where(
+                        MemoryEntityLink.memory_id.in_(ids),
+                        # Both ends bound to the tenant: the memory side by
+                        # ``ids`` (from the tenant-bound page above), the
+                        # entity side here — the invariant
+                        # ``_link_within_tenant`` states, spelled as a join
+                        # because its correlated EXISTS cannot sit beside an
+                        # ``Entity`` already in this FROM.
+                        Entity.tenant_id == tenant_id,
+                    )
+                )
+                for mem_id, ent_id, name, etype in (await session.execute(link_stmt)).all():
+                    eid = str(ent_id)
+                    if eid not in links[mem_id]:
+                        links[mem_id].append(eid)
+                    entities.setdefault(eid, {"id": eid, "label": name, "type": etype})
+        out_rows = []
+        for r in rows:
+            out_rows.append(
+                {
+                    "id": str(r.id),
+                    "agent_id": r.agent_id,
+                    "fleet_id": r.fleet_id,
+                    "memory_type": r.memory_type,
+                    "weight": r.weight,
+                    "title": r.title,
+                    "preview": r.preview or "",
+                    "content_chars": int(r.content_chars or 0),
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "recall_count": r.recall_count or 0,
+                    "last_recalled_at": r.last_recalled_at.isoformat() if r.last_recalled_at else None,
+                    "status": r.status,
+                    "visibility": r.visibility,
+                    "supersedes_id": str(r.supersedes_id) if r.supersedes_id else None,
+                    "entity_ids": links.get(r.id, []),
+                    "embedding_b64": _encode_embedding_f32(r.embedding),
+                }
+            )
+        next_cursor = None
+        if len(rows) == limit and rows:
+            last = rows[-1]
+            next_cursor = {"ts": last.created_at.isoformat(), "id": str(last.id)}
+        return {"rows": out_rows, "entities": list(entities.values()), "next_cursor": next_cursor}
 
     async def memory_stats_breakdown(
         self,

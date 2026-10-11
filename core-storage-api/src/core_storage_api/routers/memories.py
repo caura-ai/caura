@@ -1731,6 +1731,65 @@ async def list_by_filters(request: Request) -> list[dict]:
     return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 
 
+def _field_scope_args(tenant_id: str, body: dict) -> dict:
+    """The visibility/fleet args shared by the two field reads (see
+    ``PostgresService._field_scope_filters``). ``tenant_id`` is required by
+    each route itself, where the tenant-scope gate reads it."""
+    return {
+        "tenant_id": tenant_id,
+        "caller_agent_id": body.get("caller_agent_id"),
+        "caller_tenant_id": body.get("caller_tenant_id"),
+        "fleet_id": body.get("fleet_id"),
+        "include_scope_agent": bool(body.get("include_scope_agent", False)),
+    }
+
+
+@router.post("/field-signature")
+async def field_signature(request: Request) -> dict:
+    """Change-detector for core-api's field layout cache.
+
+    Body: ``{tenant_id, caller_agent_id?, caller_tenant_id?, fleet_id?,
+    include_scope_agent?}`` — the visibility arguments ``/list`` takes.
+    Returns ``{count, embedded, newest}`` over the rows the field would place.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    args = _field_scope_args(tenant_id, body)
+    return await _svc.memory_field_signature(**args)
+
+
+@router.post("/field-page")
+async def field_page(request: Request) -> dict:
+    """One keyset page of compact rows WITH embeddings for the 2D field layout.
+
+    Body: the ``/field-signature`` visibility arguments plus ``limit``
+    (1-2000, default 2000) and an optional ``cursor_ts``/``cursor_id`` pair
+    from the previous page's ``next_cursor``. Newest first. Visibility follows
+    ``/list`` exactly, so the field never places a row the caller's memory
+    list would not show. Returns ``{rows, entities, next_cursor}``; each row's
+    embedding is base64 little-endian float32 (``embedding_b64``).
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    args = _field_scope_args(tenant_id, body)
+    try:
+        limit = max(1, min(int(body.get("limit", 2000)), 2000))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="'limit' must be a positive integer") from None
+    cursor_ts_raw = body.get("cursor_ts")
+    cursor_id_raw = body.get("cursor_id")
+    if bool(cursor_ts_raw) != bool(cursor_id_raw):
+        raise HTTPException(status_code=422, detail="cursor_ts and cursor_id must be sent together")
+    try:
+        cursor_ts = datetime.fromisoformat(cursor_ts_raw) if cursor_ts_raw else None
+        cursor_id = UUID(cursor_id_raw) if cursor_id_raw else None
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"invalid cursor fields: {exc}") from exc
+    if cursor_ts is not None and cursor_ts.tzinfo is None:
+        raise HTTPException(status_code=422, detail="cursor_ts must be timezone-aware")
+    return await _svc.memory_field_page(**args, limit=limit, cursor_ts=cursor_ts, cursor_id=cursor_id)
+
+
 @router.post("/stats-breakdown")
 async def stats_breakdown(request: Request) -> dict:
     """Visibility-scoped stats breakdown (MCP ``caura_stats``).

@@ -1719,6 +1719,32 @@ class CoreStorageClient:
             raise RuntimeError("core-storage-api /memories/list returned 404")
         return result  # type: ignore[return-value]
 
+    async def memory_field_signature(self, data: dict) -> dict:
+        """``{count, embedded, newest}`` over the rows the memory field would
+        place — the field layout cache's change-detector.
+
+        ``data`` carries ``{tenant_id, caller_agent_id?, caller_tenant_id?,
+        fleet_id?, include_scope_agent?}``, the visibility arguments of
+        ``list_memories_by_filters``.
+        """
+        result = await self._post("/memories/field-signature", data, read=True)
+        if result is None:
+            raise RuntimeError("core-storage-api /memories/field-signature returned 404")
+        return result  # type: ignore[return-value]
+
+    async def memory_field_page(self, data: dict) -> dict:
+        """One keyset page of compact rows WITH embeddings for the field layout.
+
+        ``data`` is the ``memory_field_signature`` body plus ``limit`` (<= 2000)
+        and ``cursor_ts``/``cursor_id`` from the previous page's
+        ``next_cursor``. Returns ``{rows, entities, next_cursor}``; each row's
+        embedding is ``embedding_b64`` (base64 little-endian float32) or null.
+        """
+        result = await self._post("/memories/field-page", data, read=True)
+        if result is None:
+            raise RuntimeError("core-storage-api /memories/field-page returned 404")
+        return result  # type: ignore[return-value]
+
     async def memory_stats_breakdown(self, data: dict) -> dict:
         """Visibility-scoped stats breakdown (MCP ``caura_stats``).
 
