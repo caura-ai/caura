@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from pydantic import Field, field_validator, model_validator
 
 from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.constants import EVOLVE_MAX_RELATED_IDS, EVOLVE_OUTCOME_TYPES, VALID_SCOPES
+from core_api.middleware.idempotency import IDEMPOTENCY_HEADER, idempotency_for, release_claim_on_error
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.audit_service import log_action
 from core_api.services.caller_identity import resolve_caller_and_gate
@@ -97,7 +100,9 @@ class EvolveRequest(TenantScopedBody):
 @router.post("/evolve/report", responses={200: {"model": _oar.EvolveReportResponse}})
 async def report_outcome_endpoint(
     body: EvolveRequest,
+    request: Request,
     auth: AuthContext = Depends(get_auth_context),
+    idempotency_key: str | None = Header(None, alias=IDEMPOTENCY_HEADER),
 ):
     """Report an action outcome to evolve memory weights and generate rules.
 
@@ -109,6 +114,11 @@ async def report_outcome_endpoint(
 
     Trust gating: scope='agent' requires trust ≥ 1, scope='fleet'/'all'
     requires trust ≥ 2. Admin keys bypass.
+
+    Every report adjusts weights, by design: the same outcome reported after
+    two different actions is two reports. A retry after a timeout is the same
+    report, so send an ``Idempotency-Key``: a retry with it replays the first
+    answer and adjusts nothing (L-30, Eldad 2026-10-11).
     """
     auth.enforce_tenant(body.tenant_id)
     auth.enforce_read_only()
@@ -143,38 +153,46 @@ async def report_outcome_endpoint(
         action="evolve",
     )
 
-    await check_and_increment(body.tenant_id, "evolve")
+    # After the trust gate, so a refused caller leaves no claim; before the
+    # quota charge, so a replay does not pay for a second report.
+    _idem = await idempotency_for(request, body.tenant_id, idempotency_key, agent_id=caller_agent_id)
+    if _idem and (_replay := _idem.cached_replay):
+        _body, _status = _replay
+        return JSONResponse(content=_body, status_code=_status)
+    async with release_claim_on_error(_idem):
+        await check_and_increment(body.tenant_id, "evolve")
 
-    from core_api.services.evolve_service import report_outcome
+        from core_api.services.evolve_service import report_outcome
 
-    # The service raises ValueError for its defensive validation gates
-    # (outcome_type, outcome non-empty, scope, fleet_id coupling) so it
-    # stays decoupled from FastAPI. Translate here so the REST contract
-    # stays 422 for bad input; a 500 would be misleading when the body was
-    # simply malformed in a way Pydantic couldn't catch.
-    try:
-        result = await report_outcome(
+        # The service raises ValueError for its defensive validation gates
+        # (outcome_type, outcome non-empty, scope, fleet_id coupling) so it
+        # stays decoupled from FastAPI. Translate here so the REST contract
+        # stays 422 for bad input; a 500 would be misleading when the body was
+        # simply malformed in a way Pydantic couldn't catch.
+        try:
+            result = await report_outcome(
+                tenant_id=body.tenant_id,
+                outcome=body.outcome,
+                outcome_type=body.outcome_type,
+                related_ids=body.related_ids,
+                scope=body.scope,
+                agent_id=caller_agent_id,
+                fleet_id=body.fleet_id,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+
+        await log_action(
             tenant_id=body.tenant_id,
-            outcome=body.outcome,
-            outcome_type=body.outcome_type,
-            related_ids=body.related_ids,
-            scope=body.scope,
-            agent_id=caller_agent_id,
-            fleet_id=body.fleet_id,
+            action="evolve_report",
+            resource_type="outcome",
+            detail={
+                "outcome_type": body.outcome_type,
+                "scope": body.scope,
+                "agent_id": caller_agent_id,
+                "related_ids": body.related_ids,
+            },
         )
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
-
-    await log_action(
-        tenant_id=body.tenant_id,
-        action="evolve_report",
-        resource_type="outcome",
-        detail={
-            "outcome_type": body.outcome_type,
-            "scope": body.scope,
-            "agent_id": caller_agent_id,
-            "related_ids": body.related_ids,
-        },
-    )
-
+    if _idem:
+        await _idem.record(jsonable_encoder(result), 200)
     return result

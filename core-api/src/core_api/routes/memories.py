@@ -1523,14 +1523,17 @@ async def write_memory(
     # tenant retry storm starves its own legitimate new writes.
     # ``idempotency_for`` handles transport-prefixing (``header:`` /
     # ``body:``) and length validation; each transport gets a disjoint
-    # cache namespace.
+    # cache namespace, and each writing agent its own (L-12).
     if idempotency_key:
-        _idem = await idempotency_for(request, body.tenant_id, idempotency_key, source="header")
+        _idem = await idempotency_for(
+            request, body.tenant_id, idempotency_key, agent_id=chosen_agent_id, source="header"
+        )
     else:
         _idem = await idempotency_for(
             request,
             body.tenant_id,
             idempotency_key_from_metadata(body.metadata),
+            agent_id=chosen_agent_id,
             source="body",
         )
     if _idem and (_replay := _idem.cached_replay):
@@ -1762,8 +1765,19 @@ async def write_memories_bulk(
     body.agent_id = chosen_agent_id
 
     # Idempotency replay short-circuits BEFORE the per-tenant slot — a
-    # cached retry must not consume a write-concurrency slot.
-    _idem = await idempotency_for(request, body.tenant_id, idempotency_key)
+    # cached retry must not consume a write-concurrency slot. The claim
+    # outlasts the bulk budget, which is armed only after the agent and fleet
+    # checks below: an expired claim let a same-key retry run the bulk a second
+    # time, metered twice, while the first was still in flight (L-07).
+    _idem = await idempotency_for(
+        request,
+        body.tenant_id,
+        idempotency_key,
+        agent_id=chosen_agent_id,
+        pending_ttl_seconds=(
+            app_settings.bulk_request_timeout_seconds + app_settings.idempotency_pending_ttl_seconds
+        ),
+    )
     if _idem and (_replay := _idem.cached_replay):
         _body, _status = _replay
         # Replays bypass the per-tenant slot and the bulk

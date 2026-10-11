@@ -65,6 +65,7 @@ from core_api.errors import (
 )
 from core_api.heartbeat.clients import record_mcp as _record_mcp_client
 from core_api.middleware.idempotency import (
+    IdempotencyGuard,
     arguments_hash,
     idempotency_for_hash,
     idempotency_key_from_metadata,
@@ -1886,8 +1887,9 @@ async def caura_write(
                 if refuse := _check_plan_limit("create", tenant_id):
                     return _with_latency(refuse, t0)
                 # ``metadata.idempotency_key`` replays a retried write here as it
-                # does on REST POST /memories (L-103). A tool call has no request
-                # bytes of its own, so its arguments are what is hashed.
+                # does on REST POST /memories (L-103), per writing agent (L-12).
+                # A tool call has no request bytes of its own, so its arguments
+                # are what is hashed.
                 guard = await idempotency_for_hash(
                     tenant_id,
                     idempotency_key_from_metadata(metadata),
@@ -1904,6 +1906,7 @@ async def caura_write(
                         visibility=visibility,
                         write_mode=write_mode,
                     ),
+                    agent_id=agent_id,
                     source="mcp",
                 )
                 if guard is not None and (replay := guard.cached_replay) is not None:
@@ -4201,6 +4204,9 @@ async def caura_evolve(
     scope: Annotated[str, Field(description="agent|fleet|all.")] = "agent",
     agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     fleet_id: Annotated[str | None, Field(description="Required when scope='fleet'.")] = None,
+    idempotency_key: Annotated[
+        str | None, Field(description="A retry with the same key replays the first answer.")
+    ] = None,
 ) -> ToolReply:
     """Record a real-world outcome against the memories that influenced the
     action: adjust weights, generate preventive rules on failure. Closes the
@@ -4208,8 +4214,15 @@ async def caura_evolve(
 
     scope='agent' (default) requires trust ≥ 1 and limits adjustments to
     memories the caller wrote. scope='fleet'/'all' requires trust ≥ 2.
+
+    ``idempotency_key`` makes a retry safe (L-30, Eldad 2026-10-11). Every
+    report adjusts weights, by design: the same outcome reported after two
+    different actions is two reports. A retry after a timeout or a redelivery
+    is the same report, and without a key it adjusted them again.
     """
     t0 = time.perf_counter()
+    # Claimed after the trust gate; the handlers below release it on a failure.
+    guard: IdempotencyGuard | None = None
     if err := _check_auth():
         return err
     if err := _check_write_scope():
@@ -4290,6 +4303,24 @@ async def caura_evolve(
                 )
             if terr:
                 return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
+            # Before the quota charge, as on caura_write: a replay is not a
+            # second report and does not pay for one.
+            guard = await idempotency_for_hash(
+                tenant_id,
+                idempotency_key,
+                arguments_hash(
+                    outcome=outcome,
+                    outcome_type=outcome_type,
+                    related_ids=related_ids,
+                    scope=scope,
+                    agent_id=agent_id,
+                    fleet_id=fleet_id,
+                ),
+                agent_id=agent_id,
+                source="mcp",
+            )
+            if guard is not None and (replay := guard.cached_replay) is not None:
+                return _with_latency(replay[0]["result"], t0)
             await check_and_increment(tenant_id, "evolve")
 
             # A15: classify why no weights will move, mirroring the REST
@@ -4360,13 +4391,20 @@ async def caura_evolve(
                 weight_adjustment_skipped_reason=weight_adjustment_skipped_reason,
                 t0=t0,
             )
-        return _with_latency(_dumps(result), t0)
+        serialized = _dumps(result)
+        if guard is not None:
+            await guard.record({"result": serialized})
+        return _with_latency(serialized, t0)
     except HTTPException as e:
+        if guard is not None:
+            await guard.release()
         return _with_latency(
             _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
         )
     except Exception as e:
         logger.exception("Unhandled error in caura_evolve")
+        if guard is not None:
+            await guard.release()
         return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
 
 

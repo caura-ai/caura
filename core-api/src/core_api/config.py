@@ -455,8 +455,10 @@ class Settings(BaseSettings):
     # row pending; without a short TTL it would soft-ban the key for the
     # full 24h. The expired-row reclaim path in ``idempotency_claim``
     # auto-recovers stuck pending rows once this TTL elapses. Sized
-    # generously above realistic handler latency (single write <2s, bulk
-    # write <60s, search <2s).
+    # generously above realistic handler latency (single write <2s, search
+    # <2s). The bulk write may run its whole ``bulk_request_timeout_seconds``
+    # after storage work of its own, so it claims for that budget plus this
+    # TTL (L-07): an expired claim let a same-key retry run the bulk twice.
     idempotency_pending_ttl_seconds: int = 90
     environment: Literal["development", "production", "sandbox"] = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"

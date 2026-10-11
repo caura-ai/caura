@@ -496,7 +496,7 @@ async def upsert_document(
             doc_id=body.doc_id,
             force=body.force,
         )
-    _idem = await idempotency_for(request, body.tenant_id, idempotency_key)
+    _idem = await idempotency_for(request, body.tenant_id, idempotency_key, agent_id=author)
     if _idem and (_replay := _idem.cached_replay):
         _body, _status = _replay
         return JSONResponse(content=_body, status_code=_status)

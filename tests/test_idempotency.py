@@ -18,6 +18,7 @@ import uuid
 
 import pytest
 
+from core_api.middleware.idempotency import stored_key
 from tests.conftest import get_test_auth, uid
 
 pytestmark = pytest.mark.asyncio
@@ -406,24 +407,24 @@ async def test_expired_row_does_not_block_fresh_claim(client, sc):
     """
     tenant_id, headers = get_test_auth()
     key = _new_key()
-
-    # Seed an expired row directly via storage_client. Namespacing prefix
-    # matches what the middleware writes (``header:<key>``).
-    await sc.upsert_idempotency(
-        tenant_id=tenant_id,
-        idempotency_key=f"header:{key}",
-        request_hash="stale-hash",
-        response_body={"stale": True},
-        status_code=201,
-        expires_at="2000-01-01T00:00:00+00:00",
-    )
-
     body = {
         "tenant_id": tenant_id,
         "agent_id": f"idem-expired-{uid()}",
         "memory_type": "fact",
         "content": f"reclaim content {uid()}",
     }
+
+    # Seed an expired row directly via storage_client, under the key the
+    # middleware stores this request's claim at.
+    await sc.upsert_idempotency(
+        tenant_id=tenant_id,
+        idempotency_key=stored_key("header", body["agent_id"], key),
+        request_hash="stale-hash",
+        response_body={"stale": True},
+        status_code=201,
+        expires_at="2000-01-01T00:00:00+00:00",
+    )
+
     h = {**headers, "Idempotency-Key": key}
     resp = await client.post("/api/v1/memories", json=body, headers=h)
     assert resp.status_code == 201

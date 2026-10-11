@@ -52,7 +52,7 @@ See also the [public API stability contract](public-api-stability.md) and the
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/evolve/report` | POST | Report an outcome (success/failure/partial) against recalled memories |
+| `/evolve/report` | POST | Report an outcome (success/failure/partial) against recalled memories. A retry with the same `Idempotency-Key` replays the first answer instead of adjusting weights again |
 
 **Insights**
 
