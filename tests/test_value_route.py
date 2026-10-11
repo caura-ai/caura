@@ -25,7 +25,11 @@ RAW = {
     "daily": [{"day": "2026-10-11", "reuses": 10, "origin_seconds": 5400}],
     "teachers": [{"agent_id": "research-1", "reuses": 5, "origin_seconds": 3000}],
     "learners": [{"agent_id": "support-agent-5", "reuses": 4, "origin_seconds": 2000}],
-    "prevented": {"conflicts_caught": 2, "outdated_kept_out": 5},
+    "prevented": {
+        "conflicts_resolved": 2,
+        "outdated_kept_out": 5,
+        "conflicts_waiting": 3,
+    },
 }
 
 

@@ -3,7 +3,9 @@
 docs/plans/value-metering.md. The figures, and the rules that keep them honest:
 
 * ``sessions`` — agent sessions active in the window; ``sessions_helped`` —
-  those that recalled at least one memory written in another session.
+  those that recalled at least one memory written in another session whose
+  origin was recorded. A memory older than value metering is still counted as
+  reused, but not as help: the work behind it is unknown.
 * ``work_reused`` — the work behind the memories those sessions reused, each
   memory counted once per session: minutes (always observed), calls to Caura
   in that stretch (a lower bound on turns), and tokens/turns where a hook,
@@ -13,8 +15,9 @@ docs/plans/value-metering.md. The figures, and the rules that keep them honest:
 * ``knowledge_shared`` — reuses where the reading agent is not the writer,
   and the agents whose memories others use most ("teachers") and who use
   others' most ("learners").
-* ``prevented`` — contradictions caught and outdated memories kept out of
-  recall in the window.
+* ``prevented`` — contradictions a person resolved (dismissed ones were
+  false alarms) and outdated memories kept out of recall, in the window; and
+  the contradictions still waiting for review, which are not prevented yet.
 * ``caura_cost`` — Caura's own model tokens, one line (usage metering).
 
 Gated like ``/spend``: tenant and admin credentials; agent keys and org
@@ -47,6 +50,7 @@ def shape(raw: dict, spend_summary: dict | None) -> dict:
         "sessions_helped_share": (helped / sessions) if sessions else None,
         "work_reused": {
             "reuses": reuses,
+            "reuses_with_origin": int(t.get("reuses_with_origin") or 0),
             "memories_reused": int(t.get("memories_reused") or 0),
             "minutes": round(int(t.get("origin_seconds") or 0) / 60, 1),
             "reuses_with_time": int(t.get("reuses_with_time") or 0),

@@ -228,3 +228,50 @@ async def test_every_route_needs_a_tenant(client: AsyncClient):
         f"{PREFIX}/value/query", json={"start": _iso(T0), "end": _iso(T0 + timedelta(days=1))}
     )
     assert r.status_code == 422
+
+
+async def test_recalling_a_memory_older_than_value_metering_is_reuse_but_not_help(client: AsyncClient):
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    old = await _memory(client, tenant, "a1")  # no origin: written before metering
+    new = await _memory(client, tenant, "a1")
+    await _post(
+        client,
+        "origins",
+        tenant,
+        {"memory_id": new, "session_id": "w", "agent_id": "a1", "written_at": _iso(T0)},
+    )
+    at = _iso(T0 + timedelta(hours=1))
+    await _post(
+        client,
+        "reuse",
+        tenant,
+        {"session_id": "only-old", "reader_agent_id": "a2", "memory_ids": [old], "recalled_at": at},
+    )
+    await _post(
+        client,
+        "reuse",
+        tenant,
+        {"session_id": "with-new", "reader_agent_id": "a2", "memory_ids": [new], "recalled_at": at},
+    )
+    t = (await _value(client, tenant))["totals"]
+    assert (t["reuses"], t["reuses_with_origin"], t["sessions_helped"]) == (2, 1, 1)
+
+
+async def test_only_resolved_contradictions_count_as_prevented(client: AsyncClient):
+    from sqlalchemy import text
+
+    from core_storage_api.services.postgres_service import get_session
+
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    a, b = await _memory(client, tenant, "a1"), await _memory(client, tenant, "a1")
+    async with get_session() as s:
+        for status in ("resolved", "dismissed", "pending", "pending"):
+            await s.execute(
+                text(
+                    "INSERT INTO memory_conflicts (id, tenant_id, new_memory_id, old_memory_id, relationship, review_status, resolved_at, created_at) "
+                    "VALUES (gen_random_uuid(), :t, :a, :b, 'exact_value', :st, CASE WHEN :st = 'pending' THEN NULL ELSE CAST(:at AS timestamptz) END, :at)"
+                ),
+                {"t": tenant, "a": a, "b": b, "st": status, "at": T0},
+            )
+    p = (await _value(client, tenant))["prevented"]
+    assert (p["conflicts_resolved"], p["conflicts_waiting"]) == (1, 2)

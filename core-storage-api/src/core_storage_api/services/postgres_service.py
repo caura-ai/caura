@@ -6940,6 +6940,7 @@ class PostgresService:
                 MemoryOrigin.origin_tokens_in,
                 MemoryOrigin.origin_tokens_out,
                 MemoryOrigin.origin_turns,
+                MemoryOrigin.memory_id.is_not(None).label("origin_recorded"),
             )
             .outerjoin(MemoryOrigin, MemoryOrigin.memory_id == MemoryReuse.memory_id)
             .where(MemoryReuse.tenant_id == tenant_id, *in_window)
@@ -6956,7 +6957,13 @@ class PostgresService:
                     await session.execute(
                         select(
                             func.count().label("reuses"),
-                            func.count(func.distinct(reuse.c.session_id)).label("sessions_helped"),
+                            # Helped = recalled a memory whose origin was recorded, so
+                            # the work behind it is known. Recalls of memories older
+                            # than value metering count as reuse, not as help.
+                            func.count(func.distinct(reuse.c.session_id))
+                            .filter(reuse.c.origin_recorded)
+                            .label("sessions_helped"),
+                            func.count().filter(reuse.c.origin_recorded).label("reuses_with_origin"),
                             func.count(func.distinct(reuse.c.memory_id)).label("memories_reused"),
                             func.coalesce(func.sum(reuse.c.origin_seconds), 0).label("origin_seconds"),
                             func.count(reuse.c.origin_seconds).label("reuses_with_time"),
@@ -7022,14 +7029,24 @@ class PostgresService:
 
             teachers = await leaders(reuse.c.writer_agent_id)
             learners = await leaders(reuse.c.reader_agent_id)
+            # Confirmed only: a person resolved it. Dismissed ones were false
+            # alarms; pending ones are not prevented yet, so they are reported
+            # as waiting rather than counted.
+            decided = func.coalesce(MemoryConflict.resolved_at, MemoryConflict.created_at)
             conflicts = await session.scalar(
                 select(func.count())
                 .select_from(MemoryConflict)
                 .where(
                     MemoryConflict.tenant_id == tenant_id,
-                    MemoryConflict.created_at >= start,
-                    MemoryConflict.created_at < end,
+                    MemoryConflict.review_status == "resolved",
+                    decided >= start,
+                    decided < end,
                 )
+            )
+            pending = await session.scalar(
+                select(func.count())
+                .select_from(MemoryConflict)
+                .where(MemoryConflict.tenant_id == tenant_id, MemoryConflict.review_status == "pending")
             )
             changed = func.coalesce(Memory.status_changed_at, Memory.created_at)
             superseded = await session.scalar(
@@ -7055,7 +7072,11 @@ class PostgresService:
             ],
             "teachers": teachers,
             "learners": learners,
-            "prevented": {"conflicts_caught": int(conflicts or 0), "outdated_kept_out": int(superseded or 0)},
+            "prevented": {
+                "conflicts_resolved": int(conflicts or 0),
+                "outdated_kept_out": int(superseded or 0),
+                "conflicts_waiting": int(pending or 0),
+            },
         }
 
     async def tenant_usage_query(
