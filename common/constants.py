@@ -870,3 +870,13 @@ NODE_PRINCIPAL_TENANT = "tenant"
 # (``enc:v1:<Fernet token>``). Here so storage can tell a legacy plaintext key
 # from an encrypted one without holding the key (M-99).
 ENCRYPTED_SETTING_PREFIX = "enc:v1:"
+
+
+# ---------------------------------------------------------------------------
+# Document writes
+# ---------------------------------------------------------------------------
+
+# ``detail.error`` on storage's 409 when a document write that named the
+# statuses it may replace (``expected_status``) found the stored document in
+# another, or found none where one had to exist. Nothing was written (L-24).
+DOCUMENT_STATUS_CHANGED = "document_status_changed"

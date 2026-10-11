@@ -1765,6 +1765,15 @@ class SettingsChangedError(Exception):
     """
 
 
+class DocumentStatusChangedError(Exception):
+    """A document write named the statuses it may replace, and the stored document
+    was in none of them, or missing where it had to exist (L-24).
+
+    Answered 409 ``DOCUMENT_STATUS_CHANGED`` by ``app``. Nothing was written: the
+    caller decided on a status another writer has since moved.
+    """
+
+
 def _fleet_scope(column, fleet_id: str | None):
     """Fleet predicate matching an index that groups on ``COALESCE(fleet_id, '')``.
 
@@ -11233,6 +11242,7 @@ class PostgresService:
         agent_id: str | None = None,
         system: bool = False,
         force: bool = False,
+        expected_status: Sequence[str | None] | None = None,
         session: AsyncSession | None = None,
     ) -> Document:
         """INSERT ... ON CONFLICT DO UPDATE. Returns the upserted Document.
@@ -11253,6 +11263,14 @@ class PostgresService:
 
         The check and the write share one transaction: the caller's when it
         passes ``session`` (a keystone write records its version in it).
+
+        L-24 — ``expected_status`` lists the ``data.status`` values the stored
+        document may hold for the write to land; ``None`` among them means it
+        may also not exist yet. The skills inbox and Forge read a document,
+        decide on its status, and write the whole of it back, so without this a
+        status another writer set in between was silently replaced. The check
+        is the write's own ``WHERE``, so nothing lands between them; a miss
+        raises ``DocumentStatusChangedError`` and writes nothing.
         """
         if collection.startswith("_") and not system:
             raise ValueError(f"Collection '{collection}' is system-managed; use the dedicated endpoint.")
@@ -11267,36 +11285,64 @@ class PostgresService:
                     agent_id=agent_id,
                     system=system,
                     force=force,
+                    expected_status=expected_status,
                     session=own,
                 )
         if not force:
             await self._guard_document_shrink(session, tenant_id, collection, doc_id, data)
-        stmt = (
-            pg_insert(Document)
-            .values(
-                tenant_id=tenant_id,
-                fleet_id=fleet_id,
-                collection=collection,
-                doc_id=doc_id,
-                data=data,
-                agent_id=agent_id,
+        new_values = {
+            "data": data,
+            "fleet_id": fleet_id,
+            # ax-0917-m-14 — the upsert replaces the document, so
+            # the author recorded is whoever wrote THIS version.
+            # Keeping the original author would attribute someone
+            # else's edit to the first writer.
+            "agent_id": agent_id,
+            "updated_at": datetime.now(UTC),
+        }
+        allowed = [status for status in expected_status or () if status is not None]
+        status_matches = Document.data["status"].astext.in_(allowed)
+        stmt: Any
+        if expected_status is not None and None not in expected_status:
+            # The document has to exist, so an upsert, which would insert it,
+            # is the wrong statement.
+            stmt = (
+                sql_update(Document)
+                .where(
+                    Document.tenant_id == tenant_id,
+                    Document.collection == collection,
+                    Document.doc_id == doc_id,
+                    status_matches,
+                )
+                .values(**new_values)
+                .returning(Document)
+                .execution_options(synchronize_session=False)
             )
-            .on_conflict_do_update(
-                constraint="uq_documents_tenant_collection_doc",
-                set_={
-                    "data": data,
-                    "fleet_id": fleet_id,
-                    # ax-0917-m-14 — the upsert replaces the document, so
-                    # the author recorded is whoever wrote THIS version.
-                    # Keeping the original author would attribute someone
-                    # else's edit to the first writer.
-                    "agent_id": agent_id,
-                    "updated_at": datetime.now(UTC),
-                },
+        else:
+            stmt = (
+                pg_insert(Document)
+                .values(
+                    tenant_id=tenant_id,
+                    fleet_id=fleet_id,
+                    collection=collection,
+                    doc_id=doc_id,
+                    data=data,
+                    agent_id=agent_id,
+                )
+                .on_conflict_do_update(
+                    constraint="uq_documents_tenant_collection_doc",
+                    set_=new_values,
+                    where=None if expected_status is None else status_matches,
+                )
+                .returning(Document)
             )
-            .returning(Document)
-        )
-        return (await session.execute(stmt)).scalar_one()
+        doc = (await session.execute(stmt)).scalar_one_or_none()
+        if doc is None:
+            raise DocumentStatusChangedError(
+                f"document '{collection}/{doc_id}' is not in a status this write may replace "
+                f"({list(expected_status or ())}); nothing was written. Reload it and decide again."
+            )
+        return doc
 
     # C34 — a replacement this much smaller than what is stored is treated as
     # a truncated payload, not an intentional edit. 10% keeps ordinary

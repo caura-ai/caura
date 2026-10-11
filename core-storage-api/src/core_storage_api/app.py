@@ -12,11 +12,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from common import permanent_failure
+from common.constants import DOCUMENT_STATUS_CHANGED
 from common.settings_version import SETTINGS_CHANGED
 from common.structlog_config import configure_logging
 from core_storage_api.config import settings
 from core_storage_api.services.postgres_service import (
     BulkRowShapeError,
+    DocumentStatusChangedError,
     DuplicateContentHashError,
     PointerNotInTenantError,
     SettingsChangedError,
@@ -223,6 +225,17 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=409,
             content={"detail": {"error": SETTINGS_CHANGED, "message": str(exc)}},
+        )
+
+    @app.exception_handler(DocumentStatusChangedError)
+    async def _document_status_changed_handler(
+        request: Request, exc: DocumentStatusChangedError
+    ) -> JSONResponse:
+        # L-24. Shaped like ``SETTINGS_CHANGED``: a 409 whose ``detail`` names
+        # the case, so core-api tells it from any other refusal of the write.
+        return JSONResponse(
+            status_code=409,
+            content={"detail": {"error": DOCUMENT_STATUS_CHANGED, "message": str(exc)}},
         )
 
     @app.exception_handler(BulkRowShapeError)

@@ -13,6 +13,7 @@ from uuid import UUID
 import httpx
 
 from common import permanent_failure
+from common.constants import DOCUMENT_STATUS_CHANGED
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from common.http_retry import CONNECT_PHASE_MAX_ATTEMPTS, with_connect_phase_retry, with_retry
 from common.settings_version import SETTINGS_CHANGED
@@ -148,6 +149,30 @@ def _storage_settings_changed(response: httpx.Response) -> StorageSettingsChange
     message = detail.get("message")
     return StorageSettingsChangedError(
         message if isinstance(message, str) and message else "the organization settings changed"
+    )
+
+
+class DocumentStatusChangedError(Exception):
+    """Storage refused a document write: the stored document was not in a status
+    the write named in ``expected_status`` (L-24).
+
+    The caller read the document, decided on its status, and another writer
+    moved it before the write. Nothing was written; the caller reloads and
+    decides again.
+    """
+
+
+def _storage_document_status_changed(response: httpx.Response) -> DocumentStatusChangedError | None:
+    """The typed error for storage's ``DOCUMENT_STATUS_CHANGED`` 409, or ``None``."""
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(detail, dict) or detail.get("error") != DOCUMENT_STATUS_CHANGED:
+        return None
+    message = detail.get("message")
+    return DocumentStatusChangedError(
+        message if isinstance(message, str) and message else "the document's status changed"
     )
 
 
@@ -2302,8 +2327,24 @@ class CoreStorageClient:
     # Documents
     # =====================================================================
 
-    async def upsert_document(self, data: dict) -> dict:
-        return await self._post("/documents", data)  # type: ignore[return-value]
+    async def upsert_document(
+        self, data: dict, *, expected_status: Sequence[str | None] | None = None
+    ) -> dict:
+        """Write a whole document.
+
+        ``expected_status`` (L-24) lists the ``data.status`` values the stored
+        document may hold for the write to land, ``None`` among them meaning it
+        may not exist yet. Otherwise storage writes nothing and this raises
+        ``DocumentStatusChangedError``. Without it the write replaces whatever
+        is stored.
+        """
+        body = data if expected_status is None else {**data, "expected_status": list(expected_status)}
+        try:
+            return await self._post("/documents", body)  # type: ignore[return-value]
+        except httpx.HTTPStatusError as exc:
+            if (changed := _storage_document_status_changed(exc.response)) is not None:
+                raise changed from exc
+            raise
 
     async def upsert_document_xmax(self, data: dict) -> dict:
         return await self._post("/documents/upsert-xmax", data, read=False)  # type: ignore[return-value]
