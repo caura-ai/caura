@@ -5904,6 +5904,11 @@ async def search_memories(
     )
     if recall_ctx is not None:
         recall_ctx["recall_tracked"] = bool(legacy_results) and allow_recall_bump
+    # The pipeline records this in RecordRecallValue; wired here too so the
+    # hotfix lever does not silently stop the savings figures.
+    from core_api.pipeline.steps.search.record_recall_value import schedule_recall_value
+
+    schedule_recall_value(legacy_results, tenant_id=tenant_id, caller_agent_id=caller_agent_id, source=source)
     return legacy_results
 
 

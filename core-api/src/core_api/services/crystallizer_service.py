@@ -20,7 +20,7 @@ from common.enrichment.constants import (
     SERVER_RESERVED_MEMORY_TYPES,
 )
 from common.events.lifecycle_publishers import publish_crystallize_on_demand_request
-from common.usage import scoped
+from common.usage import record_value, scoped
 from core_api.clients.storage_client import get_storage_client
 
 try:
@@ -48,6 +48,7 @@ from core_api.constants import (
     MEMORY_TYPES_WRITE,
 )
 from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
+from core_api.services.ingest_chunking import doc_token_count
 
 logger = logging.getLogger(__name__)
 
@@ -748,6 +749,7 @@ async def _run_crystallization(
         from core_api.services.memory_service import create_memory
 
         new_ids = []
+        written_tokens = 0
         duplicate_facts = 0
         failed_facts = 0
         for fact in extracted:
@@ -784,6 +786,7 @@ async def _run_crystallization(
                     is_inferred=True,
                 )
                 new_ids.append(str(mem_out.id))
+                written_tokens += doc_token_count(fact["content"])
             except HTTPException as exc:
                 # H-07: a 409 here is the EXPECTED outcome, not a fault, and it
                 # used to escape this handler entirely — ``HTTPException`` is not
@@ -882,9 +885,22 @@ async def _run_crystallization(
                 else {}
             )
             skipped_set = set(batch_result.get("skipped") or [])
+            retired = (
+                [m for m in cluster_memories if str(m.get("id")) not in skipped_set]
+                if cluster_ids_to_archive
+                else []
+            )
             for item in cluster_ids_to_archive:
                 if item["memory_id"] not in skipped_set:
                     archived_ids.append(item["memory_id"])
+            # Usage metering: what the merge took out of recall, and what it
+            # put back. Recorded only once the sources are really retired.
+            if retired:
+                record_value("hygiene.retired_memories", len(retired))
+                record_value(
+                    "hygiene.retired_tokens", sum(doc_token_count(m.get("content") or "") for m in retired)
+                )
+                record_value("hygiene.written_tokens", written_tokens)
             if skipped_set:
                 # Surface the dropped ids so an operator can grep by
                 # cluster — the cluster's source_ids appear in the

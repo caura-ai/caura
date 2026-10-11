@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 
 from common.constants import QUARANTINED_MEMORY_STATUS
+from common.usage import record_value, usage_scope
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
 from core_api.services.entity_extraction_worker import process_entity_extraction
+from core_api.services.ingest_chunking import doc_token_count
 from core_api.services.system_metadata import set_system_value
 from core_api.services.task_tracker import tracked_task
 from core_api.tasks import track_task
@@ -17,7 +19,9 @@ from core_api.tasks import track_task
 logger = logging.getLogger(__name__)
 
 
-async def _merge_near_duplicate(new_id: str, candidate_id: str, tenant_id: str) -> dict:
+async def _merge_near_duplicate(
+    new_id: str, candidate_id: str, tenant_id: str, *, candidate_tokens: int | None = None
+) -> dict:
     """Retire the near-duplicate this write supersedes (A71).
 
     Two writes, and the ORDER is the safety property:
@@ -86,7 +90,26 @@ async def _merge_near_duplicate(new_id: str, candidate_id: str, tenant_id: str) 
         logger.info("near-duplicate merge: linked %s -> %s; the candidate is gone", new_id, candidate_id)
         return await _record_merge(sc, new_id, tenant_id, skipped="candidate_not_retired")
     logger.info("near_duplicate_merged new=%s superseded=%s tenant_id=%s", new_id, candidate_id, tenant_id)
+    await _record_retired(sc, candidate_id, tenant_id, candidate_tokens)
     return await _record_merge(sc, new_id, tenant_id, skipped=None)
+
+
+async def _record_retired(sc, candidate_id: str, tenant_id: str, tokens: int | None) -> None:
+    """Usage metering: the duplicate this merge took out of recall.
+
+    Only the retired row counts. The new row was the agent's own write and
+    would have been stored anyway, so it is not offset against the saving.
+    A release replay has no size in hand and reads the row once.
+    """
+    try:
+        if tokens is None:
+            row = await sc.get_memory(candidate_id, tenant_id, read=False)
+            tokens = doc_token_count((row or {}).get("content") or "")
+        with usage_scope(tenant_id=tenant_id, operation="near-duplicate-merge"):
+            record_value("hygiene.retired_memories", 1)
+            record_value("hygiene.retired_tokens", tokens)
+    except Exception:
+        logger.warning("near-duplicate merge: savings not recorded", exc_info=True)
 
 
 async def _record_merge(sc, new_id: str, tenant_id: str, *, skipped: str | None) -> dict:
@@ -133,7 +156,12 @@ class ScheduleBackgroundTasks:
             # the pending decision (``release_replay``).
             from core_api.services.memory_service import _merged_metadata
 
-            outcome = await _merge_near_duplicate(str(memory_id), str(merge_target), data.tenant_id)
+            outcome = await _merge_near_duplicate(
+                str(memory_id),
+                str(merge_target),
+                data.tenant_id,
+                candidate_tokens=ctx.data.get("merge_supersedes_tokens"),
+            )
             # L-17: the 201 shows what the row now records about the merge.
             stored = memory.get("metadata_")
             memory["metadata_"] = _merged_metadata(
