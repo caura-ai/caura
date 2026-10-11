@@ -50,13 +50,35 @@ def test_bounds_padding_and_cluster_count():
     ids, vecs, _ = _blobs(500)
     layout = compute_layout(ids, vecs, np.ones(len(ids), dtype=bool))
     assert _in_bounds(layout)
-    # ~6% padding: the extremes touch the padded frame on at least one axis.
-    assert min(min(layout.x), min(layout.y)) == pytest.approx(0.06, abs=1e-6)
-    assert max(max(layout.x), max(layout.y)) == pytest.approx(0.94, abs=1e-6)
+    # Each axis: its 3rd-97th percentile spans the padded frame, and outliers
+    # are clamped into [0.02, 0.98].
+    for axis in (layout.x, layout.y):
+        assert np.percentile(axis, 3) == pytest.approx(0.06, abs=1e-6)
+        assert np.percentile(axis, 97) == pytest.approx(0.94, abs=1e-6)
+        assert min(axis) >= 0.02 and max(axis) <= 0.98
     assert len(layout.sizes) == choose_k(500)
     assert sum(layout.sizes) == 500
     assert layout.sizes == sorted(layout.sizes, reverse=True)
     assert all(0 <= a[0] <= 1 and 0 <= a[1] <= 1 for a in layout.anchors)
+
+
+def test_a_far_tiny_cluster_does_not_squeeze_the_rest():
+    """Several similar-size topics plus a 2-point cluster far from all of them:
+    the field still fills the square instead of crowding into one side."""
+    rng = np.random.default_rng(3)
+    centres = rng.normal(size=(6, DIM)) * 3
+    lab = np.repeat(np.arange(6), 20)
+    vecs = centres[lab] + rng.normal(size=(120, DIM)) * 0.3
+    far = np.zeros((2, DIM))
+    far[:, 0] = 60.0
+    vecs = np.vstack([vecs, far + rng.normal(size=(2, DIM)) * 0.1]).astype(np.float16)
+    ids = [f"m{i:04d}" for i in range(len(vecs))]
+    layout = compute_layout(ids, vecs, np.ones(len(ids), dtype=bool))
+    assert len([s for s in layout.sizes if s >= 10]) >= 4
+    for axis in (layout.x, layout.y):
+        low = sum(v < 0.5 for v in axis) / len(axis)
+        assert 0.4 <= low <= 0.6, low
+    assert _in_bounds(layout)
 
 
 def test_clusters_follow_the_embedding_structure():

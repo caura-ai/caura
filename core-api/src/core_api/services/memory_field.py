@@ -10,7 +10,8 @@ projection that needs only numpy (no umap / sklearn / numba):
    by a few repulsion passes so clusters do not overlap.
 4. Members placed inside their cluster by that cluster's own local 2D PCA,
    scaled to a radius proportional to ``sqrt(member count)``.
-5. Everything normalised into ``[0, 1]`` with ~6% padding.
+5. Each axis normalised by the 3rd-97th percentile of the points to
+   ``[0.06, 0.94]``, outliers clamped into ``[0.02, 0.98]``.
 
 Deterministic for the same inputs. Rows without an embedding yet still appear,
 with ``cluster = -1``, near the centre with a small jitter derived from their id.
@@ -55,6 +56,11 @@ _MAX_CLUSTERS = 24
 _PADDING = 0.06
 _REPULSION_ITERS = 60
 _UNPLACED_JITTER = 0.03
+_ROBUST_LO_PCT = 3.0
+_ROBUST_HI_PCT = 97.0
+_CLAMP_LO = 0.02
+_CLAMP_HI = 0.98
+_MAX_ANCHOR_SHIFT = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +165,37 @@ def _local_2d(points: np.ndarray, radius: float) -> np.ndarray:
     return local
 
 
+def _spread_anchors(anchors: np.ndarray, sizes: np.ndarray) -> np.ndarray:
+    """Centre the centroid layout on its size-weighted mean, scale each axis to
+    [-1, 1] and compress it (signed square root), so one outlying centroid
+    cannot push every other cluster into a corner of the map."""
+    centre = (anchors * sizes[:, None]).sum(axis=0) / sizes.sum()
+    out = anchors - centre
+    for axis in range(out.shape[1]):
+        span = float(np.abs(out[:, axis]).max())
+        if span > 1e-12:
+            out[:, axis] = np.sign(out[:, axis]) * np.sqrt(np.abs(out[:, axis]) / span)
+    return out
+
+
+def _robust_range(coords: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-axis 3rd-97th percentile of ``coords``, falling back to min/max on
+    an axis whose percentile range is degenerate."""
+    lo = np.percentile(coords, _ROBUST_LO_PCT, axis=0)
+    hi = np.percentile(coords, _ROBUST_HI_PCT, axis=0)
+    flat = hi - lo <= 1e-12
+    lo = np.where(flat, coords.min(axis=0), lo)
+    hi = np.where(flat, coords.max(axis=0), hi)
+    return lo, hi
+
+
 def _repel(anchors: np.ndarray, radii: np.ndarray) -> np.ndarray:
-    """Push overlapping cluster discs apart; deterministic."""
+    """Push overlapping cluster discs apart; deterministic. No anchor moves
+    more than ``_MAX_ANCHOR_SHIFT`` from where the centroid PCA put it, so a
+    tiny cluster cannot be shoved out to the edge of the map."""
     k = anchors.shape[0]
     a = anchors.copy()
+    start = anchors.copy()
     for _ in range(_REPULSION_ITERS):
         moved = False
         for i in range(k):
@@ -185,6 +218,10 @@ def _repel(anchors: np.ndarray, radii: np.ndarray) -> np.ndarray:
                 a[i] -= unit * push * wi
                 a[j] += unit * push * (1.0 - wi)
                 moved = True
+        shift = a - start
+        dist = np.hypot(shift[:, 0], shift[:, 1])
+        over = dist > _MAX_ANCHOR_SHIFT
+        a[over] = start[over] + shift[over] / dist[over][:, None] * _MAX_ANCHOR_SHIFT
         if not moved:
             break
     return a
@@ -248,8 +285,7 @@ def compute_layout(ids: Sequence[str], vectors: np.ndarray, has_vec: np.ndarray)
         anchors = (centroids - c_mean) @ c_axes.T
         if anchors.shape[1] < 2:
             anchors = np.hstack([anchors, np.zeros((k, 2 - anchors.shape[1]))])
-        span = float(np.abs(anchors).max())
-        anchors = anchors / span if span > 1e-12 else anchors
+        anchors = _spread_anchors(anchors, sizes)
     else:
         anchors = np.zeros((1, 2))
     radii = 0.6 * np.sqrt(sizes / m)
@@ -259,16 +295,16 @@ def compute_layout(ids: Sequence[str], vectors: np.ndarray, has_vec: np.ndarray)
     for c, rows in enumerate(ordered):
         coords[rows] = anchors[c] + _local_2d(reduced[rows], float(radii[c]))
 
-    # Normalise into [pad, 1 - pad], same scale on both axes, centred.
-    lo = coords.min(axis=0)
-    hi = coords.max(axis=0)
-    span = float((hi - lo).max())
-    scale = (1.0 - 2 * _PADDING) / span if span > 1e-12 else 0.0
-    offset = 0.5 - (lo + hi) / 2.0 * scale
+    # Normalise each axis by the 3rd-97th percentile of the POINTS, mapped to
+    # [pad, 1 - pad], outliers clamped into [0.02, 0.98]. Min/max scaling let
+    # one far-off tiny cluster squeeze everything else into a corner.
+    lo, hi = _robust_range(coords)
+    scale = np.where(hi - lo > 1e-12, (1.0 - 2 * _PADDING) / np.maximum(hi - lo, 1e-12), 0.0)
+    offset = np.where(hi - lo > 1e-12, _PADDING - lo * scale, 0.5)
 
     def _norm(p: np.ndarray) -> tuple[float, float]:
-        q = p * scale + offset
-        return float(np.clip(q[0], 0.0, 1.0)), float(np.clip(q[1], 0.0, 1.0))
+        q = np.clip(p * scale + offset, _CLAMP_LO, _CLAMP_HI)
+        return float(q[0]), float(q[1])
 
     members: list[list[int]] = []
     for c, rows in enumerate(ordered):
