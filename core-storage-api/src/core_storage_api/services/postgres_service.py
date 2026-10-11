@@ -2372,9 +2372,20 @@ class PostgresService:
         # strictly after the previous one, in batch order, when the caller set
         # no timestamp. Every row gets the column, so the batch's column list
         # stays uniform; a 1000-row batch spans one millisecond.
-        if "created_at" not in row_keys[0]:
-            for i, mapped in enumerate(rows):
+        #
+        # An explicit None for ``created_at`` or ``weight`` means "not given"
+        # here too (L-97). The single-row write already treats it so: the ORM
+        # leaves a None out of its INSERT and the server default applies. This
+        # INSERT rendered it as NULL, which both columns accept, since migration
+        # 001 created them nullable (Eldad chose not to tighten them,
+        # 2026-10-11). A NULL weight made the row's search score NULL. Each None
+        # gets what an absent key gets, in its place, so the list stays uniform:
+        # the stamp above, or the column's own ``DEFAULT``.
+        for i, mapped in enumerate(rows):
+            if mapped.get("created_at") is None:
                 mapped["created_at"] = func.now() + timedelta(microseconds=i)
+            if "weight" in mapped and mapped["weight"] is None:
+                mapped["weight"] = literal_column("DEFAULT")
 
         async with get_session() as session:
             # Before the INSERT: one foreign or unknown pointer would otherwise
