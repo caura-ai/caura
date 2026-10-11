@@ -1,7 +1,9 @@
 # Value metering: the work memory saves
 
 Status: in progress (Erni + Claude), stacked on `CAURA-000-usage-metering`.
-Done: A, B, C (plugin and SDKs). Open: C (Claude Code / Codex hook), D, E.
+Done: A, B, C (plugin and SDKs), D (Value page; per-operation spend moved to
+caura-ops › Model Spend), E. Open: C (Claude Code / Codex hook, after this ships:
+it needs `origin` on the broker's frozen bulk contract).
 
 ## Why
 
