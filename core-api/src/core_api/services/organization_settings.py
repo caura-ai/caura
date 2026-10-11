@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from cachetools import TTLCache
 from croniter import CroniterBadCronError, croniter
 
-from common.constants import SEARCH_KNOBS
+from common.constants import AGENT_TUNABLE_KEYS, SEARCH_KNOBS
 from common.events.base import Event
 from common.events.factory import get_event_bus
 from common.events.lifecycle_purge_request import (
@@ -1585,6 +1585,26 @@ def validate_search_profile(profile: dict) -> dict:
         cleaned[key] = value
 
     return cleaned
+
+
+def validate_knob_resets(reset_knobs: list[str], updates: dict, *, reset_all: bool) -> None:
+    """Raise ``ValueError`` unless a per-knob reset can be carried out (L-119).
+
+    ``reset_knobs`` clears the named agent-tunable knobs and keeps the rest; on
+    the tune surfaces ``null`` still means "not set", so a client that sends
+    nulls for the fields it does not use resets nothing. Shared by
+    ``PATCH /agents/{id}/tune`` and MCP ``caura_tune`` so both refuse the same
+    requests: an unknown knob, one both set and reset in the same call, and a
+    list beside ``reset``, which already clears every knob.
+    """
+    unknown = sorted(set(reset_knobs) - set(AGENT_TUNABLE_KEYS))
+    if unknown:
+        raise ValueError(f"reset_knobs names unknown knobs {unknown}; tunable: {sorted(AGENT_TUNABLE_KEYS)}.")
+    if reset_all:
+        raise ValueError("reset clears every knob; send reset_knobs without it.")
+    both = sorted(set(reset_knobs) & updates.keys())
+    if both:
+        raise ValueError(f"{both} both set and reset in one call; send one or the other.")
 
 
 # ── Storage-backed read/write ──

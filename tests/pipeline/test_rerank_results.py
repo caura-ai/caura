@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import core_api.pipeline.steps.search.rerank_results as rerank_mod
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.steps.search.rerank_results import RerankResults
 
@@ -27,20 +28,21 @@ def _row(content: str, similarity: float):
     )
 
 
+@pytest.fixture
+def rerank_on(monkeypatch):
+    """``RANK_ENABLED=true``. Read at import, so set on the step's module."""
+    monkeypatch.setattr(rerank_mod, "RANK_ENABLED", True)
+
+
 @pytest.mark.asyncio
-async def test_rerank_reorders_by_ranker_score():
+async def test_rerank_reorders_by_ranker_score(rerank_on, monkeypatch):
     # First-stage order: unrelated first, "alpha" match last. The fake
     # ranker scores word overlap with the query, so it must promote the
     # "alpha" row to the front.
+    monkeypatch.setenv("RANK_PROVIDER", "fake")
     r_unrelated = _row("totally unrelated", 0.9)
     r_match = _row("alpha alpha alpha", 0.1)
-    ctx = PipelineContext(
-        data={
-            "raw_rows": [r_unrelated, r_match],
-            "query": "alpha",
-            "tenant_config": SimpleNamespace(rank_enabled=True, rank_provider="fake"),
-        },
-    )
+    ctx = PipelineContext(data={"raw_rows": [r_unrelated, r_match], "query": "alpha"})
     await RerankResults().execute(ctx)
     assert ctx.data["raw_rows"][0] is r_match
     assert ctx.data["raw_rows"][1] is r_unrelated
@@ -56,44 +58,28 @@ async def test_disabled_by_default_skips():
 
 
 @pytest.mark.asyncio
-async def test_noop_keeps_first_stage_order():
+async def test_noop_keeps_first_stage_order(rerank_on):
     # Enabled + default provider (noop). Similarity is NOT descending in input
     # order; a correct noop must still keep the exact first-stage order.
     r0 = _row("x", 0.2)
     r1 = _row("y", 0.9)
     r2 = _row("z", 0.5)
-    ctx = PipelineContext(
-        data={
-            "raw_rows": [r0, r1, r2],
-            "query": "q",
-            "tenant_config": SimpleNamespace(
-                rank_enabled=True
-            ),  # provider defaults noop
-        },
-    )
+    ctx = PipelineContext(data={"raw_rows": [r0, r1, r2], "query": "q"})
     await RerankResults().execute(ctx)
     assert ctx.data["raw_rows"] == [r0, r1, r2]
 
 
 @pytest.mark.asyncio
-async def test_skips_on_entity_lookup_plan():
+async def test_skips_on_entity_lookup_plan(rerank_on):
     plan = SimpleNamespace(skip_scored_search=True)
-    ctx = PipelineContext(
-        data={
-            "retrieval_plan": plan,
-            "query": "q",
-            "tenant_config": SimpleNamespace(rank_enabled=True),
-        },
-    )
+    ctx = PipelineContext(data={"retrieval_plan": plan, "query": "q"})
     result = await RerankResults().execute(ctx)
     assert result is not None and result.outcome.name == "SKIPPED"
 
 
 @pytest.mark.asyncio
-async def test_no_raw_rows_is_skipped():
+async def test_no_raw_rows_is_skipped(rerank_on):
     # Enabled, but no candidate pool (e.g. upstream produced nothing) → skip.
-    ctx = PipelineContext(
-        data={"query": "q", "tenant_config": SimpleNamespace(rank_enabled=True)}
-    )
+    ctx = PipelineContext(data={"query": "q"})
     result = await RerankResults().execute(ctx)
     assert result is not None and result.outcome.name == "SKIPPED"

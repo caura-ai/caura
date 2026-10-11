@@ -172,8 +172,9 @@ def mcp_env(monkeypatch):
     # Write tools call ``enforce_fleet_write`` to lazy-create the Agent row;
     # in unit tests there's no real DB, so stub it as a no-op returning the
     # caller's identity. Tests that want to assert the call replace this via
-    # ``service("enforce_fleet_write")``.
-    async def _stub_enforce_fleet_write(tenant_id, agent_id, fleet_id):
+    # ``service("enforce_fleet_write")``. ``agent`` is the row the handler
+    # already holds (L-178); the stub answers as it did before it was passed.
+    async def _stub_enforce_fleet_write(tenant_id, agent_id, fleet_id, *, agent=None):
         return {
             "agent_id": agent_id,
             "tenant_id": tenant_id,

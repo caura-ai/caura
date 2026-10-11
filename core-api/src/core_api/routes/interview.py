@@ -239,7 +239,7 @@ async def submit_interview(
     if not body.fleet_id and agent.get("fleet_id"):
         body.fleet_id = agent["fleet_id"]
     if auth.tenant_id:  # skip enforcement for admin
-        await enforce_fleet_write(tenant_id, body.agent_id, body.fleet_id)
+        await enforce_fleet_write(tenant_id, body.agent_id, body.fleet_id, agent=agent)
 
     # ``node_id`` keys the watermark and the job doc. Its shape says which of
     # two kinds of stream it names:

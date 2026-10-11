@@ -58,6 +58,8 @@ from core_api.constants import (
 from core_api.errors import (
     AUTH_ORG_SUSPENDED,
     AUTH_PLAN_LIMIT,
+    EMBEDDING_NOT_CONFIGURED,
+    EMBEDDING_NOT_CONFIGURED_MESSAGE,
     REQUEST_BUDGET_EXCEEDED,
     code_for_status,
 )
@@ -115,6 +117,7 @@ from core_api.services.organization_settings import (
     get_raw_settings,
     get_settings_for_display,
     resolve_config,
+    validate_knob_resets,
     validate_search_profile,
 )
 from core_api.services.recall_service import summarize_memories
@@ -824,8 +827,8 @@ def _refuse_default_agent_on_gateway(agent_id: str) -> str | None:
     documented as ``agent row missing from list_agents``.
 
     The shared ``CAURA_API_KEY`` (Path 2) binds no agent either. Outside
-    standalone, REST refuses a write that names none (``_missing_agent_id_error``
-    in routes/memories.py), so this refuses the default there too (L-101). Path 2
+    standalone, REST refuses a write that names none (``missing_agent_id_error``
+    in services/caller_identity.py), so this refuses the default there too (L-101). Path 2
     sets the tenant from ``X-Tenant-ID`` without the gateway flag, which is how
     it is told apart here.
 
@@ -1560,7 +1563,7 @@ async def caura_recall(
         # trust-1 agent widen its read by naming a second fleet (parity with
         # REST /search and /recall).
         if fleet_ids:
-            await enforce_fleet_read_many(tenant_id, agent_id, fleet_ids)
+            await enforce_fleet_read_many(tenant_id, agent_id, fleet_ids, agent=_ag)
         # D13 — same fix as REST /recall: bill the recall counter (flag-gated).
         # AFTER the fleet gate, as REST gates first: a recall refused with
         # FORBIDDEN read nothing and must not be charged (L-102).
@@ -1852,12 +1855,10 @@ async def caura_write(
                     ),
                     t0,
                 )
-            # Register the calling agent (auto-create row on first write) and
-            # enforce trust gating for cross-fleet writes — same surface the
-            # REST write path uses. Without this, MCP writes succeed without
-            # ever creating an Agent row, so a follow-up
-            # PATCH /agents/{id}/trust 404s.
-            agent = await enforce_fleet_write(tenant_id, agent_id, fleet_id)
+            # Trust gating for cross-fleet writes — same surface the REST write
+            # path uses — on the row ``resolve_write_agent`` registered and
+            # returned above, which is not read a second time (L-178).
+            agent = await enforce_fleet_write(tenant_id, agent_id, fleet_id, agent=agent)
             # Mirror the REST write paths (routes/memories.py:937, :1125): an
             # omitted fleet_id resolves to the caller's home fleet, so an MCP
             # write scopes like a REST write instead of persisting
@@ -2558,6 +2559,9 @@ async def caura_tune(
     graph_max_hops: Annotated[int | None, Field(description="0-3.")] = None,
     similarity_blend: Annotated[float | None, Field(description="0-1.")] = None,
     reset: Annotated[bool, Field(description="Clear every tuned knob.")] = False,
+    reset_knobs: Annotated[
+        list[str] | None, Field(description="Clear only these knobs; others are kept.")
+    ] = None,
 ) -> ToolReply:
     t0 = time.perf_counter()
     if err := _check_auth():
@@ -2583,12 +2587,18 @@ async def caura_tune(
         return _with_latency(_error_response("INVALID_ARGUMENTS", f"{e}"), t0)
 
     updates = profile.model_dump(exclude_none=True)
+    if reset_knobs:
+        # L-119 — the same refusals as REST PATCH /agents/{id}/tune?reset_knobs=.
+        try:
+            validate_knob_resets(reset_knobs, updates, reset_all=reset)
+        except ValueError as e:
+            return _with_latency(_error_response("INVALID_ARGUMENTS", str(e)), t0)
     if reset and updates:
         message = "reset clears every knob; set knobs in a separate call."
         return _with_latency(_error_response("INVALID_ARGUMENTS", message), t0)
     # No knobs and no reset is a read, which REST's GET /agents/{id}/tune serves
     # without write scope and without creating the agent row (L-104).
-    is_read = not updates and not reset
+    is_read = not updates and not reset and not reset_knobs
     if not is_read and (err := _check_write_scope()):
         return err
     # WRITE → home tenant only. ``resolve_write_agent`` scopes the lookup or
@@ -2623,17 +2633,20 @@ async def caura_tune(
                 resource_id=agent.get("id"),
                 detail={"agent_id": agent_id, "reset": True, "via": "mcp", **_audit_actor()},
             )
-        if updates:
+        if updates or reset_knobs:
+            for knob in reset_knobs or ():
+                current.pop(knob, None)
             current.update(updates)
             current = validate_search_profile(current)
             await get_storage_client().update_search_profile(agent["agent_id"], tenant_id, current)
+            cleared = {"reset_knobs": reset_knobs} if reset_knobs else {}
             await log_action(
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 action="agent_tune",
                 resource_type="agent",
                 resource_id=agent.get("id"),
-                detail={"agent_id": agent_id, "changes": updates, "via": "mcp", **_audit_actor()},
+                detail={"agent_id": agent_id, "changes": updates, **cleared, "via": "mcp", **_audit_actor()},
             )
         return _with_latency(_dumps({"agent_id": agent_id, "search_profile": current}), t0)
     except HTTPException as e:
@@ -2936,14 +2949,14 @@ async def caura_doc(
                 # install credential's ``agent_id`` is a claim, so a doc — and
                 # the memory minted from it below — must not land under an
                 # agent another install owns.
-                _, agent_id = await resolve_write_agent(
+                write_agent, agent_id = await resolve_write_agent(
                     agent_id,
                     tenant_id,
                     fleet_id,
                     is_install_credential=_is_install_credential(),
                     install_uuid=_get_install_uuid(),
                 )
-                write_agent = await enforce_fleet_write(tenant_id, agent_id, fleet_id)
+                write_agent = await enforce_fleet_write(tenant_id, agent_id, fleet_id, agent=write_agent)
                 # M-89: an agent awaiting approval writes nothing, as in
                 # caura_write; the write would also mint a memory as it.
                 if write_agent.get("trust_level", 0) == 0:
@@ -3384,7 +3397,7 @@ async def caura_doc(
                     return _with_latency(
                         _error_response("INVALID_ARGUMENTS", "op=search requires a non-empty 'query'."), t0
                     )
-                from common.embedding import get_embedding
+                from common.embedding import embedding_configured, get_embedding
 
                 # Same-provider query embedding — see routes/documents.py
                 # search: the query vector must come from the provider that
@@ -3403,6 +3416,13 @@ async def caura_doc(
                 # Interactive search — see documents.py: not background.
                 query_embedding = await get_embedding(query, tenant_config, background=False)
                 if query_embedding is None:
+                    # No provider at all is permanent, unlike a provider that
+                    # failed once — see routes/documents.py (L-224).
+                    if not embedding_configured(tenant_config):
+                        return _with_latency(
+                            _error_response(EMBEDDING_NOT_CONFIGURED, EMBEDDING_NOT_CONFIGURED_MESSAGE),
+                            t0,
+                        )
                     return _with_latency(
                         _error_response(
                             "UPSTREAM_ERROR",
@@ -4045,6 +4065,7 @@ async def caura_insights(
         _build_method,
         _DiscoverResult,
         _persist_findings,
+        skipped_reason_of,
         synthesize_insights,
     )
     from core_api.services.organization_settings import resolve_config
@@ -4144,6 +4165,8 @@ async def caura_insights(
             "insight_memory_ids": [mid for mid in insight_ids if mid],
             "gate_rejected": synth.get("gate_rejected", 0),
             "insights_ms": int((time.perf_counter() - t0) * 1000),
+            # L-134: same as REST — an outage is named, not left to the prose.
+            **skipped_reason_of(synth),
         }
         return _with_latency(_dumps(result), t0)
     except HTTPException as e:

@@ -38,9 +38,10 @@ class InsightsRequest(TenantScopedBody):
     agent_id: str | None = Field(
         default=None,
         description=(
-            "Identifier of the requesting agent. Optional: the gateway-"
-            "verified ``X-Agent-ID`` header takes precedence when present; "
-            "falls back to 'mcp-agent' when both are absent."
+            "Identifier of the requesting agent. The gateway-verified "
+            "``X-Agent-ID`` header takes precedence when present. Required when "
+            "neither that header nor an agent-scoped credential names one (422), "
+            "except on the standalone deployment, which falls back to 'mcp-agent'."
         ),
     )
 

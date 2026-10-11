@@ -10,6 +10,66 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.30.3](https://github.com/caura-ai/caura/compare/backend-v3.30.2...backend-v3.30.3) (2026-10-10)
+
+
+### Dependencies
+
+* **docker:** bump datadog/serverless-init from `f494334` to `161423d` in /core-api ([#1849](https://github.com/caura-ai/caura/issues/1849)) ([1cd552b](https://github.com/caura-ai/caura/commit/1cd552b5cc98bd07763bdd5b447d3921c7e0770d))
+
+## [3.30.2](https://github.com/caura-ai/caura/compare/backend-v3.30.1...backend-v3.30.2) (2026-10-10)
+
+
+### Bug Fixes
+
+* B27 configuration and provider failure handling ([#2019](https://github.com/caura-ai/caura/issues/2019)) ([cecb5ca](https://github.com/caura-ai/caura/commit/cecb5cae439fa59656ca31c645b46a20b47ac455))
+
+## [3.30.1](https://github.com/caura-ai/caura/compare/backend-v3.30.0...backend-v3.30.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* B41 recheck defects (L-229, L-224, L-223) ([#2017](https://github.com/caura-ai/caura/issues/2017)) ([0779ad3](https://github.com/caura-ai/caura/commit/0779ad30a2f58beed1af7fe8b013646bb936176e))
+* **plugin:** plugin batch (B36, L-163, L-199) ([#2018](https://github.com/caura-ai/caura/issues/2018)) ([07e8b0d](https://github.com/caura-ai/caura/commit/07e8b0deabcbaf4ac943993c36a02133e1f40750))
+
+
+### Dependencies
+
+* update google-genai requirement from &gt;=2.23.0 to &gt;=2.28.0 ([#1981](https://github.com/caura-ai/caura/issues/1981)) ([24bd278](https://github.com/caura-ai/caura/commit/24bd278990471bbad788ef31a22e5d2a6ff1d35c))
+* update httpx2 requirement from &lt;3,&gt;=2 to &gt;=2.13.1,&lt;3 ([#1750](https://github.com/caura-ai/caura/issues/1750)) ([018a3e5](https://github.com/caura-ai/caura/commit/018a3e52f653b855a94253162000716d16059b8c))
+* update openai requirement from &lt;4,&gt;=3 to &gt;=3.24.0,&lt;4 ([#1982](https://github.com/caura-ai/caura/issues/1982)) ([c7e688f](https://github.com/caura-ai/caura/commit/c7e688f35f220873af3b41db9ff598c0467a0700))
+
+## [3.30.0](https://github.com/caura-ai/caura/compare/backend-v3.29.1...backend-v3.30.0) (2026-10-09)
+
+
+### Features
+
+* **clients:** keep the search envelope and read as an agent ([#2012](https://github.com/caura-ai/caura/issues/2012)) ([f147f61](https://github.com/caura-ai/caura/commit/f147f61722ca7aae046e8eea73c42a887f8b86c1))
+
+
+### Performance
+
+* **storage:** index the contradiction window and expiry sweep ([#2009](https://github.com/caura-ai/caura/issues/2009)) ([f0818c0](https://github.com/caura-ai/caura/commit/f0818c089aed077d5b66a9cfbc51be770a4307c5))
+* **storage:** write a batch of entity links in one transaction ([#2015](https://github.com/caura-ai/caura/issues/2015)) ([419c3bc](https://github.com/caura-ai/caura/commit/419c3bc29f7e3168f3872d57d30c0cbdc92e9ca2))
+
+## [3.29.1](https://github.com/caura-ai/caura/compare/backend-v3.29.0...backend-v3.29.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **write:** the write path records what it did, and does less ([#2004](https://github.com/caura-ai/caura/issues/2004)) ([472a3c3](https://github.com/caura-ai/caura/commit/472a3c34d01c37de56f97c90e6651fe6f15a7908))
+
+
+### Performance
+
+* **agents:** read each request's agent row once ([#2008](https://github.com/caura-ai/caura/issues/2008)) ([85b6d6f](https://github.com/caura-ai/caura/commit/85b6d6fc1bf76640a32a040934dfa55769440c45))
+* **storage:** reads load and send no vector their caller drops ([#2006](https://github.com/caura-ai/caura/issues/2006)) ([ef42a3c](https://github.com/caura-ai/caura/commit/ef42a3c1bc2aa358df031e562ebde9318f80a777))
+
+
+### Dependencies
+
+* **plugin:** bump @types/node from 26.6.1 to 26.6.4 in /plugin in the npm-minor-patch group across 1 directory ([#1748](https://github.com/caura-ai/caura/issues/1748)) ([38305bb](https://github.com/caura-ai/caura/commit/38305bb85b095cd42d2cc2d0d3bcaa75dfbb437d))
+
 ## [3.29.0](https://github.com/caura-ai/caura/compare/backend-v3.28.0...backend-v3.29.0) (2026-10-07)
 
 

@@ -19,7 +19,6 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from common import permanent_failure
@@ -30,6 +29,7 @@ from common.constants import (
     QUARANTINED_MEMORY_STATUS,
     SESSION_ROLLBACK_ACTION,
 )
+from common.embedding import embedding_configured
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api import openapi_responses as _oar
 from core_api import request_phase
@@ -107,6 +107,7 @@ from core_api.services.agent_service import (
     resolve_write_agent,
 )
 from core_api.services.audit_service import log_action, log_cross_tenant_read
+from core_api.services.caller_identity import missing_agent_id_error
 from core_api.services.ingest_service import (
     ALLOWED_INGEST_MIME_TYPES,
     BINARY_INGEST_MIME_TYPES,
@@ -287,37 +288,6 @@ def _reject_reserved_memory_type(memory_type: str | None, *, index: int | None =
     if index is not None:
         detail = f"items[{index}]: {detail}"
     raise HTTPException(status_code=422, detail=detail)
-
-
-def _missing_agent_id_error() -> RequestValidationError:
-    """Build the 422 raised when a write omits ``agent_id`` and nothing can
-    supply one: not standalone, and a credential that authenticates no agent.
-
-    Mirrors the shape FastAPI produces for a missing required field, so the
-    app's validation-envelope handler renders it as a 422 INVALID_ARGUMENTS.
-    RequestValidationError stores errors verbatim and ``.errors()`` returns
-    them as-is, so a pre-rendered dict is the supported input; the handler
-    only reads ``msg`` and runs the list through ``jsonable_encoder``.
-    """
-    return RequestValidationError(
-        errors=[
-            {
-                "type": "missing",
-                "loc": ("body", "agent_id"),
-                # Names both ways out, because the caller that hits this has
-                # exactly one real question — "what do I send instead?" — and
-                # provisioning an agent-scoped credential is the answer that
-                # makes the field go away rather than one more value to repeat.
-                "msg": (
-                    "agent_id is required for a credential that authenticates no agent. "
-                    "Send it in the body, or use an agent-scoped credential "
-                    "(kind=agent_key), whose own identity is used when the field is "
-                    "omitted; the standalone single-tenant deployment may also omit it."
-                ),
-                "input": None,
-            }
-        ]
-    )
 
 
 @router.get("/tenants", responses={200: {"model": list[str]}})
@@ -813,7 +783,7 @@ async def memory_stats(
     # Type/agent/status breakdown (GROUPING SETS) via core-storage-api. Aggregates
     # across the readable set when the caller has cross-tenant read AND didn't pin
     # tenant_id; pinning to a specific tenant returns just that tenant's stats.
-    return await get_storage_client().memory_stats_breakdown(
+    stats = await get_storage_client().memory_stats_breakdown(
         {
             "tenant_id": tenant_id,
             "fleet_id": fleet_id,
@@ -840,6 +810,35 @@ async def memory_stats(
             "caller_tenant_id": auth.tenant_id,
         }
     )
+    return await _settle_without_an_embedder(stats, tenant_id)
+
+
+async def _settle_without_an_embedder(stats: dict, tenant_id: str) -> dict:
+    """Say whether an embedder is configured, and settle without one (L-224).
+
+    With no embedding provider, every row is stored ``embedding=NULL`` and stays
+    so, so ``pending.embedding`` can never reach zero and ``settled`` never
+    flipped, though docs/api-reference.md tells callers to poll for it. The
+    count stays (those rows are unembedded); ``settled`` then waits only for
+    enrichment and fan-out. Resolved for ``tenant_id``, the tenant a
+    cross-tenant aggregate is read as.
+    """
+    pending = stats.get("pending")
+    if not isinstance(pending, dict):
+        return stats
+    from core_api.services.organization_settings import resolve_config
+
+    try:
+        tenant_config = await resolve_config(tenant_id)
+    except Exception:
+        # The same degrade-to-process-provider idiom as the search paths.
+        logger.warning("stats: failed to resolve tenant config (tenant=%s)", tenant_id, exc_info=True)
+        tenant_config = None
+    configured = embedding_configured(tenant_config)
+    stats["embedding_configured"] = configured
+    if not configured:
+        stats["settled"] = not any(count for axis, count in pending.items() if axis != "embedding")
+    return stats
 
 
 @router.get("/memories/count", responses={200: {"model": _oar.MemoryCountResponse}})
@@ -1514,7 +1513,7 @@ async def write_memory(
             chosen_agent_id = DEFAULT_AGENT_ID
             body = body.model_copy(update={"agent_id": chosen_agent_id})
         else:
-            raise _missing_agent_id_error()
+            raise missing_agent_id_error()
     # Deterministic auth rejection must happen before claiming idempotency, or
     # a bad credential leaves a pending receipt that masks the stable 409.
     chosen_agent_id = _resolve_rest_write_agent_id(auth, chosen_agent_id)
@@ -1589,7 +1588,7 @@ async def _write_memory_inner(
         body.fleet_id = agent["fleet_id"]
     usage = None
     if auth.tenant_id:  # skip enforcement + metering for admin
-        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
+        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id, agent=agent)
     _observe_rest_reserved_write(auth, body.agent_id or chosen_agent_id)
     result = await create_memory(body)
     # Metered only after the write succeeded, like the bulk route: a write that
@@ -1741,7 +1740,7 @@ async def write_memories_bulk(
             chosen_agent_id = DEFAULT_AGENT_ID
             body = body.model_copy(update={"agent_id": chosen_agent_id})
         else:
-            raise _missing_agent_id_error()
+            raise missing_agent_id_error()
     if not bulk_attempt_id:
         # Required as of CAURA-602 — without it we can't make the bulk
         # write retry-safe, and silent-create regressions reappear under
@@ -1857,7 +1856,7 @@ async def _write_memories_bulk_inner(
     if not body.fleet_id and agent.get("fleet_id"):
         body.fleet_id = agent["fleet_id"]
     if auth.tenant_id:  # skip enforcement for admin
-        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
+        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id, agent=agent)
 
     # Metering deliberately does NOT happen here — see after the write. This
     # used to be ``usage = await bulk_check_and_increment(...)`` on this line,
@@ -2379,6 +2378,13 @@ def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[Agen
     still name any agent — the restriction is on agent-scoped credentials,
     which is where the threat is.
 
+    L-124 narrowed it to ``caller_agent_id``. ``auth.effective_agent_id``
+    makes an agent credential read as itself whatever the body names, so for
+    one ``filter_agent_id`` reaches neither escalation: it is only the author
+    filter, narrowing to a peer's rows among those the caller may already
+    read, as MCP ``caura_recall`` allows. Refusing it made the same request
+    answer 403 on REST and 200 on MCP.
+
     SHARED because ``/recall`` shipped without any of it. It re-derived the
     identity itself, straight from ``body.filter_agent_id``, so both
     escalations above were live on that route while ``/search`` refused them —
@@ -2387,10 +2393,9 @@ def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[Agen
     ``SearchRequest`` must not disagree about what the fields mean; one
     implementation is the only way that stays true.
     """
-    auth.enforce_self_agent(body.filter_agent_id, field="filter_agent_id")
-    # Same rule for the identity knob: ``caller_agent_id`` feeds the visibility
-    # identity directly, so leaving it unguarded reopens the same escalation
-    # under a different field name.
+    # ``caller_agent_id`` feeds the visibility identity directly, so an agent
+    # credential may name only itself there. ``filter_agent_id`` is not refused
+    # (L-124, above): for an agent credential it is only the author filter.
     auth.enforce_self_agent(body.caller_agent_id, field="caller_agent_id")
     if body.filter_agent_id is not None:
         body.filter_agent_id = canonical_service_agent_id(body.filter_agent_id)
@@ -2409,6 +2414,19 @@ def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[Agen
     # authenticated. Gates the recall_count bump — see the note at the callsite.
     identity_asserted = bool(not auth.agent_id and body.caller_agent_id)
     return eff_agent_id, identity_asserted
+
+
+def _filter_to_explain(auth: AuthContext, body: SearchRequest, eff_agent_id: str | None) -> str | None:
+    """The ``filter_agent_id`` CAURA-723's probe explains on an empty page, or None.
+
+    Every one a tenant-scoped caller sends. From an agent credential, a peer's:
+    since L-124 that is only a filter (``_resolve_read_identity``), so a typo'd
+    peer empties the page as it does for a tenant key and gets the same warning.
+    Never the agent's own id, the authenticated identity the probe stays off.
+    """
+    if auth.agent_id and body.filter_agent_id == eff_agent_id:
+        return None
+    return body.filter_agent_id
 
 
 # ax-0917-h-05 — a stable slug, same contract as SUCCESSOR_ENRICHMENT_INCOMPLETE.
@@ -2712,7 +2730,7 @@ async def _search_inner(
             # (length != 1), so the list reached storage unchecked and came back
             # with full ``scope_team`` content.
             if body.fleet_ids:
-                await enforce_fleet_read_many(body.tenant_id, eff_agent_id, body.fleet_ids)
+                await enforce_fleet_read_many(body.tenant_id, eff_agent_id, body.fleet_ids, agent=_agent)
         usage = await check_and_increment(body.tenant_id, "search")
     set_usage_headers(response, usage)
     from core_api.services.organization_settings import resolve_config
@@ -2839,10 +2857,11 @@ async def _search_inner(
             # prefers ``caller_agent_id``, but ``filter_agent_id`` is the one
             # that becomes a SQL predicate — so keying on the identity reported
             # the wrong id when a caller sent a valid ``caller_agent_id`` beside
-            # a typo'd filter, and the typo went unwarned. Both are ``None``
-            # under an authenticated agent identity, where naming anything but
-            # itself was already refused with a 403.
-            filter_agent_id=body.filter_agent_id if not auth.agent_id else None,
+            # a typo'd filter, and the typo went unwarned. ``caller_agent_id``
+            # is ``None`` under an authenticated agent identity, where naming
+            # anything but itself is refused with a 403; a peer
+            # ``filter_agent_id`` is explained since L-124 (``_filter_to_explain``).
+            filter_agent_id=_filter_to_explain(auth, body, eff_agent_id),
             caller_agent_id=body.caller_agent_id if not auth.agent_id else None,
             had_results=bool(results),
             agent_preexisted=_agent_reg.get("preexisted"),
@@ -2957,7 +2976,7 @@ async def ingest_commit_endpoint(
     if not body.fleet_id and agent.get("fleet_id"):
         body.fleet_id = agent["fleet_id"]
     if auth.tenant_id:  # skip enforcement for admin
-        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
+        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id, agent=agent)
     result = await ingest_commit(body)
     if auth.tenant_id:  # skip for admin
         # One unit PER FACT, not one per request. A commit writes
@@ -3165,7 +3184,7 @@ async def recall_endpoint(
             # peer's trust level; gating the right principal on only the
             # single-fleet case would still let it widen by naming two.
             if body.fleet_ids:
-                await enforce_fleet_read_many(body.tenant_id, eff_agent_id, body.fleet_ids)
+                await enforce_fleet_read_many(body.tenant_id, eff_agent_id, body.fleet_ids, agent=_agent)
         # D13 — a recall is a recall, not a search: plans meter them separately
         # and the recalls counter never moved because this site (and the MCP
         # twin) billed "search". Flag-gated; see ``recall_operation``.
@@ -3247,7 +3266,7 @@ async def recall_endpoint(
     recall_warnings.extend(
         await explain_agent_scope(
             tenant_id=body.tenant_id,
-            filter_agent_id=body.filter_agent_id if not auth.agent_id else None,
+            filter_agent_id=_filter_to_explain(auth, body, eff_agent_id),
             caller_agent_id=body.caller_agent_id if not auth.agent_id else None,
             had_results=bool(memories),
             agent_preexisted=_agent_reg.get("preexisted"),

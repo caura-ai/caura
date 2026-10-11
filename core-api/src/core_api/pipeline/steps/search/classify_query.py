@@ -661,11 +661,10 @@ class ClassifyQuery:
         # the exclusive route when it can, and the row build below can never
         # produce more rows than ``memory_boost`` has entries — so an under-sized
         # pool cannot pass that gate whatever the load returns. Loading anyway
-        # spent a per-tenant storage permit and pulled full rows (embedding and
-        # tsvector included) for a result the caller discards. Reporting the
-        # pool size lets the caller say why it declined, since ``[]`` alone
-        # cannot distinguish "under-filled" from "no linked memories at all"
-        # (the ``not memory_boost`` return above).
+        # spent a per-tenant storage permit and a storage read for a result the
+        # caller discards. Reporting the pool size lets the caller say why it
+        # declined, since ``[]`` alone cannot distinguish "under-filled" from
+        # "no linked memories at all" (the ``not memory_boost`` return above).
         #
         # One-directional on purpose. The converse is NOT decidable here: the
         # load applies visibility filters (caller_agent_id / status / valid_at)

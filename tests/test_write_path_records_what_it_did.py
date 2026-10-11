@@ -354,7 +354,9 @@ class _BulkStorage:
             "deleted_at": None,
         }
 
-    async def bulk_get_memories(self, ids, tenant_id, *, read=True):
+    async def bulk_get_memories(
+        self, ids, tenant_id, *, read=True, with_embedding=False
+    ):
         self.bulk_reads.append((list(ids), read))
         return [self._row(memory_id) for memory_id in ids]
 

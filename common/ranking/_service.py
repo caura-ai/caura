@@ -1,8 +1,9 @@
 """Service-level ranking entrypoint with retry, timeout, and degrade-to-first-stage.
 
-Mirrors ``common/embedding/_service.py``. Reads provider selection from a
-tenant override (``tenant_config.rank_provider``) or the ``RANK_PROVIDER``
-env, defaulting to ``noop``. The contract every caller relies on:
+Mirrors ``common/embedding/_service.py``. Reads provider selection from the
+``RANK_PROVIDER`` env, defaulting to ``noop``. Reranking is configured by the
+environment only (L-98): there are no per-tenant rank settings. The contract
+every caller relies on:
 
     get_ranking(...) -> list[float] | None
 
@@ -79,17 +80,16 @@ _misconfiguration_logged: set[str] = set()
 # trip-wire keeps counting occurrences.
 #
 # Entries are cleared per BACKEND on that backend's next success, never
-# wholesale: one process serves many tenants and holds a rank provider per
-# ``(base_url, api_key, model)``, so a healthy tenant's success must not
-# re-arm — or suppress — a different tenant's broken sidecar. Clearing
-# globally would put ERROR volume right back on a traffic curve, this time
-# driven by unrelated tenants.
+# wholesale: a process holds a rank provider per ``(base_url, api_key,
+# model)``, so one backend's success must not re-arm — or suppress — another
+# backend's fault. Clearing globally would put ERROR volume right back on a
+# traffic curve, this time driven by an unrelated backend.
 _permanent_logged: set[str] = set()
 
 # Bound it. Each entry is one (backend, condition) pair, so the steady state is
 # tiny — but a provider whose scope is per-instance means a long-lived process
-# that rotates tenant rank config accumulates a dead entry per retired backend,
-# the same leak ``_registry.py`` caps its ranker cache at 32 to avoid. On
+# accumulates a dead entry per retired instance, the same leak
+# ``_registry.py`` caps its ranker cache at 32 to avoid. On
 # overflow we drop the whole set rather than track recency: the only cost is
 # that a still-broken backend may report once more than strictly needed, which
 # is the safe direction to fail.
@@ -117,24 +117,20 @@ def _clear_permanent_for(provider: object) -> None:
     )
 
 
-def _resolve_provider_name(tenant_config: object | None) -> str:
-    """Tenant override first, else ``RANK_PROVIDER`` env, else ``"noop"``."""
-    if tenant_config is not None:
-        name = getattr(tenant_config, "rank_provider", None)
-        if name:
-            return name
+def _resolve_provider_name() -> str:
+    """``RANK_PROVIDER`` env, else ``"noop"``."""
     return os.environ.get("RANK_PROVIDER") or "noop"
 
 
-def _resolve_provider_or_degrade(tenant_config: object | None):
+def _resolve_provider_or_degrade():
     """Resolve the provider, mapping an unknown-name ``ValueError`` to ``None``.
 
     Returns ``None`` on misconfiguration (logged once per provider name),
     so the caller keeps first-stage order instead of crashing the search.
     """
-    provider_name = _resolve_provider_name(tenant_config)
+    provider_name = _resolve_provider_name()
     try:
-        return get_rank_provider(provider_name, tenant_config)
+        return get_rank_provider(provider_name)
     except ValueError:
         if provider_name not in _misconfiguration_logged:
             _misconfiguration_logged.add(provider_name)
@@ -150,7 +146,6 @@ def _resolve_provider_or_degrade(tenant_config: object | None):
 async def get_ranking(
     query: str,
     candidates: list[RankCandidate],
-    tenant_config: object | None = None,
 ) -> list[float] | None:
     """Score ``candidates`` for ``query``; return one score each, input order.
 
@@ -162,7 +157,7 @@ async def get_ranking(
     """
     if not candidates:
         return None
-    provider = _resolve_provider_or_degrade(tenant_config)
+    provider = _resolve_provider_or_degrade()
     if provider is None:
         return None
 
@@ -180,7 +175,7 @@ async def get_ranking(
             await _stats.record_success()
             # Re-arm THIS backend's permanent-fault ERROR: if it was fixed and
             # later regresses, the next fault reports in full rather than
-            # staying silent at DEBUG forever. Scoped, so a healthy tenant
+            # staying silent at DEBUG forever. Scoped, so a healthy backend
             # can't re-arm a still-broken one.
             _clear_permanent_for(provider)
             return scores

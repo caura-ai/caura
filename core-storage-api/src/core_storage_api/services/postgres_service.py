@@ -115,6 +115,7 @@ from common.models.memory import (
     PENDING_ENRICHMENT_SQL,
     PENDING_FANOUT_SQL,
     PENDING_WORK_SQL,
+    STRANDED_EMBEDDING_SQL,
 )
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.models.recall_log import RecallCandidate, RecallEvent
@@ -286,18 +287,20 @@ def _normalized_object_sql(column):
 
 
 def pending_work_count_stmt(filters: list[ColumnElement[bool]]) -> Select:
-    """``(embedding, enrichment, fanout)`` pending counts over ``filters``.
+    """``(embedding, enrichment, fanout, stranded embedding)`` counts over ``filters``.
 
     lme-0929-m-03. ``PENDING_WORK_SQL`` is ANDed in verbatim so the query
     implies the predicate of the partial index ``ix_memories_pending_work``
     (built from the same constant) and the planner can serve it from that
     index, which holds only pending rows. Module-level so the plan can be
-    checked against the exact statement the service runs.
+    checked against the exact statement the service runs. The stranded count
+    (L-96) is a subset of the embedding one, so it needs no other rows.
     """
     return select(
         func.count().filter(text(PENDING_EMBEDDING_SQL)),
         func.count().filter(text(PENDING_ENRICHMENT_SQL)),
         func.count().filter(text(PENDING_FANOUT_SQL)),
+        func.count().filter(text(STRANDED_EMBEDDING_SQL)),
     ).where(*filters, text(PENDING_WORK_SQL))
 
 
@@ -1637,6 +1640,21 @@ def _attach_agent_display_names(rows: Any) -> list[Memory]:
         mem.agent_display_name = agent_display_name
         out.append(mem)
     return out
+
+
+def _without_vectors(*, keep_embedding: bool = False) -> tuple[Any, ...]:
+    """Loader options that leave a memory's two large columns out of a select.
+
+    ``embedding`` is 1024 floats that Postgres renders as text and pgvector parses
+    back into a list, and ``search_vector`` is the row's tsvector. A read whose rows
+    are serialised with ``MEMORY_LIST_FIELDS``, or dictified without them, never
+    touches either (L-188, L-189, L-194). Reading a deferred column later raises
+    rather than loading it, as these rows are read after their session closes.
+    ``keep_embedding`` keeps the vector for a caller that reads it.
+    """
+    if keep_embedding:
+        return (defer(Memory.search_vector),)
+    return (defer(Memory.embedding), defer(Memory.search_vector))
 
 
 def _recorded_winners(
@@ -4676,7 +4694,7 @@ class PostgresService:
             .join(scored_cte, Memory.id == scored_cte.c.mem_id)
             .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
             .order_by(scored_cte.c.score.desc(), Memory.created_at.desc())
-            .options(defer(Memory.embedding), defer(Memory.search_vector))
+            .options(*_without_vectors())
         )
         if use_ann_pool:
             stmt = stmt.outerjoin(pool_cte, Memory.id == pool_cte.c.id)
@@ -4816,6 +4834,7 @@ class PostgresService:
             stmt = (
                 select(Memory, Agent.display_name.label("agent_display_name"))
                 .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+                .options(*_without_vectors())
                 .where(
                     Memory.id.in_(memory_ids),
                     Memory.tenant_id.in_(readable_tenant_ids)
@@ -4965,6 +4984,7 @@ class PostgresService:
             edges = await session.execute(
                 select(Memory, display)
                 .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+                .options(*_without_vectors())
                 .where(Memory.supersedes_id.in_(supersedes_ids), *scope)
             )
             found: list[tuple[Memory, UUID]] = [
@@ -4974,7 +4994,11 @@ class PostgresService:
                 supersedes_ids, tenant_id, *scope, readable_tenant_ids=readable_tenant_ids
             )
             for stmt in winners:
-                named = stmt.add_columns(display).outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+                named = (
+                    stmt.add_columns(display)
+                    .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+                    .options(*_without_vectors())
+                )
                 rows = (await session.execute(named)).all()
                 memories = _attach_agent_display_names((row[0], row[2]) for row in rows)
                 found.extend(zip(memories, (row[1] for row in rows), strict=True))
@@ -5099,6 +5123,7 @@ class PostgresService:
                 .group_by(Memory.id)
                 .order_by(func.count(func.distinct(other_ent.c.canonical_name)).desc())
                 .limit(limit)
+                .options(*_without_vectors())
             )
 
             result = await session.execute(stmt)
@@ -5116,29 +5141,34 @@ class PostgresService:
         agent_id: str | None = None,
     ) -> list[Memory]:
         async with get_session() as session:
-            stmt = select(Memory).where(
-                Memory.tenant_id == tenant_id,
-                Memory.deleted_at.is_(None),
-                Memory.status.in_(("active", "confirmed", "pending")),
-                Memory.subject_entity_id == subject_entity_id,
-                # A36 — match every spelling of the SAME attribute, not just
-                # the one this write happened to use. ``status`` and
-                # ``current_status`` are two members of
-                # ``SINGLE_VALUE_PREDICATES`` naming one attribute, and exact
-                # equality meant a subject holding one of each was never
-                # compared: no conflict raised, both rows live, both
-                # unpenalised. Expanded here rather than at write time so
-                # ALREADY-STORED rows are covered and the predicate a caller
-                # reads back is still the one its writer chose. A predicate in
-                # no cluster yields a single-member IN — the same query as the
-                # equality it replaces.
-                func.lower(Memory.predicate).in_(sorted(predicate_cluster(predicate))),
-                # A35 — compare NORMALISED forms. Raw inequality made
-                # "7,500 rpm" and "7500 RPM" look like competing values for the
-                # same attribute and flagged a contradiction that was only a
-                # formatting difference.
-                _normalized_object_sql(Memory.object_value) != _normalized_object_sql(literal(object_value)),
-                Memory.id != memory_id,
+            stmt = (
+                select(Memory)
+                .options(*_without_vectors())
+                .where(
+                    Memory.tenant_id == tenant_id,
+                    Memory.deleted_at.is_(None),
+                    Memory.status.in_(("active", "confirmed", "pending")),
+                    Memory.subject_entity_id == subject_entity_id,
+                    # A36 — match every spelling of the SAME attribute, not just
+                    # the one this write happened to use. ``status`` and
+                    # ``current_status`` are two members of
+                    # ``SINGLE_VALUE_PREDICATES`` naming one attribute, and exact
+                    # equality meant a subject holding one of each was never
+                    # compared: no conflict raised, both rows live, both
+                    # unpenalised. Expanded here rather than at write time so
+                    # ALREADY-STORED rows are covered and the predicate a caller
+                    # reads back is still the one its writer chose. A predicate in
+                    # no cluster yields a single-member IN — the same query as the
+                    # equality it replaces.
+                    func.lower(Memory.predicate).in_(sorted(predicate_cluster(predicate))),
+                    # A35 — compare NORMALISED forms. Raw inequality made
+                    # "7,500 rpm" and "7500 RPM" look like competing values for the
+                    # same attribute and flagged a contradiction that was only a
+                    # formatting difference.
+                    _normalized_object_sql(Memory.object_value)
+                    != _normalized_object_sql(literal(object_value)),
+                    Memory.id != memory_id,
+                )
             )
             # ``COALESCE`` grouping, as in the dedup gates: NULL and ``''`` are
             # one fleet scope, so a row stored with ``''`` is a candidate for
@@ -5208,6 +5238,7 @@ class PostgresService:
                 .join(found, Memory.id == found.c.id)
                 .where((1.0 - found.c.distance) >= threshold)
                 .order_by(found.c.distance)
+                .options(*_without_vectors())
             )
             await _scan_past_other_tenants(session)
             result = await session.execute(stmt)
@@ -6516,7 +6547,7 @@ class PostgresService:
         async with get_session() as session:
             stmt = (
                 select(Memory)
-                .options(defer(Memory.embedding), defer(Memory.search_vector))
+                .options(*_without_vectors())
                 .where(*prior_ingest_where(tenant_id, doc_hash, fleet_id=fleet_id, agent_id=agent_id))
                 .order_by(Memory.created_at.desc())
             )
@@ -6803,6 +6834,7 @@ class PostgresService:
         memory_ids: list[UUID],
         *,
         tenant_id: str,
+        with_embedding: bool = False,
     ) -> dict[UUID, Memory]:
         """Fetch multiple memories by ID within one tenant, as {id: Memory}.
 
@@ -6816,15 +6848,22 @@ class PostgresService:
         Python comparison the next refactor could drop with no test failing.
 
         Filtering here means another tenant's row is never selected at all.
+
+        The rows leave out their vectors unless ``with_embedding`` (L-189): only
+        the bulk re-embed reads one.
         """
         if not memory_ids:
             return {}
         async with get_session() as session:
-            stmt = select(Memory).where(
-                Memory.id.in_(memory_ids),
-                Memory.tenant_id == tenant_id,
-                Memory.deleted_at.is_(None),
-                Memory.status != QUARANTINED_MEMORY_STATUS,
+            stmt = (
+                select(Memory)
+                .options(*_without_vectors(keep_embedding=with_embedding))
+                .where(
+                    Memory.id.in_(memory_ids),
+                    Memory.tenant_id == tenant_id,
+                    Memory.deleted_at.is_(None),
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
+                )
             )
             result = await session.execute(stmt)
             return {m.id: m for m in result.scalars().all()}
@@ -7234,9 +7273,10 @@ class PostgresService:
         Returns up to ``limit`` rows (the route passes ``limit`` already
         widened to ``limit+1`` so it can detect ``has_more`` and build the
         next cursor). Mirrors the prior inline admin query's filter, cursor,
-        and tiebreaker exactly. Read-only (reader replica).
+        and tiebreaker exactly. Read-only (reader replica). The route serialises
+        ``MEMORY_LIST_FIELDS``, so the vectors are not loaded (L-194).
         """
-        stmt = select(Memory)
+        stmt = select(Memory).options(*_without_vectors())
         if tenant_id:
             stmt = stmt.where(Memory.tenant_id == tenant_id)
         if fleet_id:
@@ -7391,8 +7431,12 @@ class PostgresService:
         a non-empty ``readable_tenant_ids`` expands ``tenant_id = $1`` to
         ``tenant_id = ANY($1)``; ``tenant_id`` stays the binding/home tenant.
         """
-        base = select(Memory, Agent.display_name.label("agent_display_name")).outerjoin(
-            Agent, _AGENT_DISPLAY_JOIN
+        # The route serialises ``MEMORY_LIST_FIELDS``, so the vectors are not
+        # loaded: a 500-row page parsed ~6 MB of vector text it then dropped (L-194).
+        base = (
+            select(Memory, Agent.display_name.label("agent_display_name"))
+            .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+            .options(*_without_vectors())
         )
         if readable_tenant_ids:
             stmt = base.where(Memory.tenant_id.in_(readable_tenant_ids))
@@ -7515,13 +7559,15 @@ class PostgresService:
     ) -> dict:
         """Return ``{total, by_type, by_agent, by_status}`` (+ optional
         ``by_tenant`` / ``deleted`` / ``total_including_deleted`` /
-        ``pending`` + ``settled``).
+        ``pending`` + ``stranded`` + ``settled``).
 
         ``include_pending`` (lme-0929-m-03) adds ``pending: {embedding,
         enrichment, fanout}`` — live rows in the same scope that still have
         background work outstanding, read from durable row markers (see
-        ``common.models.memory.PENDING_WORK_SQL``) — and ``settled`` (all
-        three zero). One extra query served by the partial index
+        ``common.models.memory.PENDING_WORK_SQL``) — ``stranded: {embedding}``
+        (L-96: the pending-embedding rows over an hour old, see
+        ``STRANDED_EMBEDDING_SQL``), and ``settled`` (all three zero once the
+        stranded rows are set aside). One extra query served by the partial index
         ``ix_memories_pending_work``, which holds only pending rows, so its
         cost is O(pending) rather than O(tenant). Off by default so the MCP
         ``caura_stats`` and report callers keep their exact shape and cost.
@@ -7749,12 +7795,19 @@ class PostgresService:
             result["deleted"] = deleted
             result["total_including_deleted"] = total + deleted
         if include_pending:
-            pending = await self._memory_pending_work_counts(filters)
+            pending, stranded = await self._memory_pending_work_counts(filters)
             result["pending"] = pending
-            result["settled"] = not any(pending.values())
+            # L-96: a stranded row is still pending, but nothing is coming back
+            # for it, so ``settled`` does not wait on it.
+            result["stranded"] = stranded
+            result["settled"] = not (
+                pending["embedding"] - stranded["embedding"] or pending["enrichment"] or pending["fanout"]
+            )
         return result
 
-    async def _memory_pending_work_counts(self, filters: list[ColumnElement[bool]]) -> dict[str, int]:
+    async def _memory_pending_work_counts(
+        self, filters: list[ColumnElement[bool]]
+    ) -> tuple[dict[str, int], dict[str, int]]:
         """Count live rows under ``filters`` that still owe background work.
 
         ``filters`` must already carry ``deleted_at IS NULL`` plus the caller's
@@ -7762,14 +7815,17 @@ class PostgresService:
         ``ix_memories_pending_work`` is keyed on exactly that text, and the
         planner only uses a partial index whose predicate the query implies.
         A row can be pending on several axes at once and is counted in each.
+        Returns ``(pending, stranded)``; ``stranded`` (L-96) has only an
+        ``embedding`` count, of rows also counted in ``pending``.
         """
         async with get_read_session() as session:
             row = (await session.execute(pending_work_count_stmt(filters))).one()
-        return {
+        pending = {
             "embedding": int(row[0] or 0),
             "enrichment": int(row[1] or 0),
             "fanout": int(row[2] or 0),
         }
+        return pending, {"embedding": int(row[3] or 0)}
 
     async def memory_daily_durable_counts(
         self,
@@ -8305,19 +8361,21 @@ class PostgresService:
         if not items:
             return []
 
-        # Partition by action; updates and creates each use a per-item
-        # session (for FK-error isolation — a constraint error on item
-        # N must not roll back items 0..N-1). Per-row sessions for both
-        # paths cost connection pool checkouts but stay within one HTTP
-        # — same big win.
+        # One transaction per item, deliberately, unlike
+        # ``entity_bulk_upsert_links`` (L-196; Eldad, 2026-10-09). Each costs a
+        # commit, which waits for a WAL flush. But an update, or a create that
+        # merges into a row already there, locks that row (``entity_merge``),
+        # and one transaction for the batch would hold every such lock until the
+        # batch commits: concurrent extractions naming the same entity would
+        # queue behind one another, and two batches locking overlapping
+        # entities in different orders could deadlock. Per item, a lock lasts
+        # only that item's short transaction, and a constraint error on item N
+        # leaves items 0..N-1 written.
         results: list[dict | None] = [None] * len(items)
 
         updates = [it for it in items if it["action"] == "update"]
         creates = [it for it in items if it["action"] == "create"]
 
-        # Per-item sessions so a constraint error on item N doesn't roll
-        # back items 0..N-1. The HTTP-roundtrip win is what matters; per-
-        # item session checkout cost is negligible.
         for item in updates:
             eid = item["entity_id"]
             if not isinstance(eid, UUID):
@@ -9755,36 +9813,15 @@ class PostgresService:
         reported exactly like one whose endpoint does not exist — see
         ``error="fk_violation"`` below.
 
+        One transaction (L-196): the ownership read, then every link in one
+        INSERT, and one commit. Each link used to open its own session and
+        commit, so a 500-link batch waited on 500 WAL flushes in turn.
+
         Cap enforced at the router level.
         """
         if not items:
             return []
 
-        # Composite PK is (memory_id, entity_id); ``role`` is not part of
-        # the unique key. INSERT ... ON CONFLICT DO UPDATE with the
-        # no-op SET (``role = memory_entity_links.role``) is the standard
-        # trick that lets RETURNING fire on both branches so we can
-        # detect insert-vs-existed via the ``xmax`` system column.
-        #
-        # Per-item sessions: an FK violation (memory_id or entity_id
-        # pointing at a deleted/nonexistent row) on item N would
-        # otherwise roll back items 0..N-1 in a shared transaction.
-        # Keyed by ``input_idx`` rather than (mid, eid) so a caller
-        # accidentally sending the same pair twice doesn't lose the
-        # second slot's result to map overwrite.
-        idx_to_result: dict[int, dict[str, Any]] = {}
-
-        # Ownership resolved once for the whole batch, in its own session, then
-        # tested per item below. Two queries rather than two per item — and the
-        # sets are what the per-item test needs anyway, since a batch may name
-        # one memory many times.
-        #
-        # A separate session from the inserts is deliberate and safe: neither
-        # parent's ``tenant_id`` is caller-writable (``_MEMORY_IMMUTABLE_FIELDS``
-        # names it on memories, ``_ENTITY_UPDATABLE_FIELDS`` omits it on
-        # entities), so a row cannot change hands between this read and the
-        # write. Sharing one session instead would undo the per-item isolation
-        # the comment above describes.
         pair_ids = [
             (
                 mid if isinstance(mid, UUID) else UUID(mid),
@@ -9793,98 +9830,135 @@ class PostgresService:
             for mid, eid in ((it["memory_id"], it["entity_id"]) for it in items)
         ]
         async with get_session() as session:
+            # Ownership resolved once for the whole batch, then tested per item
+            # below. Two queries rather than two per item — and the sets are what
+            # the per-item test needs anyway, since a batch may name one memory
+            # many times.
             owned_memories, owned_entities = await self._owned_link_endpoints(
                 session,
                 tenant_id,
                 {mid for mid, _ in pair_ids},
                 {eid for _, eid in pair_ids},
             )
+            owned = [mid in owned_memories and eid in owned_entities for mid, eid in pair_ids]
+            # Each pair is written with its first item's role: a later item
+            # naming the same pair finds the row the first one wrote.
+            roles: dict[tuple[UUID, UUID], str] = {}
+            for it, pair, is_owned in zip(items, pair_ids, owned, strict=True):
+                if is_owned:
+                    roles.setdefault(pair, it["role"])
+            # One row per pair, in pair order, so two batches that share pairs
+            # lock those rows in the same order.
+            pairs = sorted(roles)
 
-        for it, (mid, eid) in zip(items, pair_ids, strict=True):
-            if mid not in owned_memories or eid not in owned_entities:
-                # Same ``error`` value as the FK branch below, because the two
-                # are one answer to the caller: a row outside your tenant is
-                # not distinguishable from a row that is not there, and making
-                # it distinguishable would turn a batch endpoint into a
-                # bulk existence oracle. The log line carries the real cause.
-                logger.warning(
-                    "Entity link bulk-upsert refused: memory_id=%s entity_id=%s not in tenant %s",
-                    mid,
-                    eid,
-                    tenant_id,
-                )
-                idx_to_result[it["input_idx"]] = {
-                    "input_idx": it["input_idx"],
-                    "memory_id": str(mid),
-                    "entity_id": str(eid),
-                    "role": it["role"],
-                    "created": False,
-                    "error": "fk_violation",
-                }
-                continue
-            # Annotated because ``literal_column("xmax")`` types as ``Any``, and
-            # mypy will not infer a variable whose type is partly ``Any``.
-            ins_stmt: ReturningInsert[tuple[UUID, UUID, str, Any]] = (
-                pg_insert(MemoryEntityLink)
-                .values(
-                    memory_id=mid,
-                    entity_id=eid,
-                    role=it["role"],
-                    source=LINK_SOURCE_EXTRACTION,
-                )
-                .on_conflict_do_update(
-                    index_elements=[
+            def upsert(batch: list[tuple[UUID, UUID]]) -> ReturningInsert[tuple[UUID, UUID, str, Any]]:
+                # Composite PK is (memory_id, entity_id); ``role`` is not part
+                # of the unique key. The no-op SET (``role =
+                # memory_entity_links.role``) is the standard trick that lets
+                # RETURNING fire on both branches, so an insert is told from an
+                # existing row by the ``xmax`` system column.
+                return (
+                    pg_insert(MemoryEntityLink)
+                    .values(
+                        [
+                            {
+                                "memory_id": mid,
+                                "entity_id": eid,
+                                "role": roles[(mid, eid)],
+                                "source": LINK_SOURCE_EXTRACTION,
+                            }
+                            for mid, eid in batch
+                        ]
+                    )
+                    .on_conflict_do_update(
+                        index_elements=[MemoryEntityLink.memory_id, MemoryEntityLink.entity_id],
+                        # ``source`` is deliberately NOT in the SET, so an
+                        # existing row keeps the provenance it has. Extraction
+                        # re-mining an entity a caller curated does not take the
+                        # row over: the caller asked for that link to be there,
+                        # and a later edit dropping the mention must not delete
+                        # it. The cost is that a row which predates the column
+                        # keeps its conservative ``caller`` default forever —
+                        # under-deleting, which is the recoverable direction.
+                        set_={"role": MemoryEntityLink.role},
+                    )
+                    .returning(
                         MemoryEntityLink.memory_id,
                         MemoryEntityLink.entity_id,
-                    ],
-                    # ``source`` is deliberately NOT in the SET, so an existing
-                    # row keeps the provenance it has. Extraction re-mining an
-                    # entity a caller curated does not take the row over: the
-                    # caller asked for that link to be there, and a later edit
-                    # dropping the mention must not delete it. The cost is that
-                    # a row which predates the column keeps its conservative
-                    # ``caller`` default forever — under-deleting, which is the
-                    # recoverable direction.
-                    set_={"role": MemoryEntityLink.role},
+                        MemoryEntityLink.role,
+                        literal_column("xmax"),
+                    )
                 )
-                .returning(
-                    MemoryEntityLink.memory_id,
-                    MemoryEntityLink.entity_id,
-                    MemoryEntityLink.role,
-                    literal_column("xmax"),
-                )
-            )
-            try:
-                async with get_session() as session:
-                    row = (await session.execute(ins_stmt)).one()
-                # xmax=0 ⇒ INSERT inserted; non-zero ⇒ existing row hit
-                # by the DO UPDATE no-op.
-                idx_to_result[it["input_idx"]] = {
-                    "input_idx": it["input_idx"],
-                    "memory_id": str(mid),
-                    "entity_id": str(eid),
-                    "role": row[2],
-                    "created": int(row[3]) == 0,
-                }
-            except IntegrityError:
-                # FK violation on memory_id or entity_id — report per-row
-                # so the caller can continue processing the other links
-                # rather than losing the whole batch.
-                logger.warning(
-                    "Entity link bulk-upsert FK violation: memory_id=%s entity_id=%s",
-                    mid,
-                    eid,
-                )
-                idx_to_result[it["input_idx"]] = {
-                    "input_idx": it["input_idx"],
-                    "memory_id": str(mid),
-                    "entity_id": str(eid),
-                    "role": it["role"],
-                    "created": False,
-                    "error": "fk_violation",
-                }
 
-        return [idx_to_result[it["input_idx"]] for it in items]
+            # ``(stored role, inserted)`` per pair that landed. xmax=0 ⇒ the
+            # INSERT inserted; non-zero ⇒ an existing row hit by the no-op.
+            landed: dict[tuple[UUID, UUID], tuple[str, bool]] = {}
+            if pairs:
+                try:
+                    async with session.begin_nested():
+                        result = await session.execute(upsert(pairs))
+                        for mid, eid, role, xmax in result:
+                            landed[(mid, eid)] = (role, int(xmax) == 0)
+                except IntegrityError:
+                    # An endpoint hard-deleted since the ownership read fails
+                    # the statement's FK check as a whole. Write each pair in
+                    # its own savepoint instead, so only a pair that fails is
+                    # lost, and reported below as ``fk_violation``.
+                    for pair in pairs:
+                        try:
+                            async with session.begin_nested():
+                                result = await session.execute(upsert([pair]))
+                                _mid, _eid, role, xmax = result.one()
+                            landed[pair] = (role, int(xmax) == 0)
+                        except IntegrityError:
+                            logger.warning(
+                                "Entity link bulk-upsert FK violation: memory_id=%s entity_id=%s",
+                                pair[0],
+                                pair[1],
+                            )
+
+        results: list[dict] = []
+        written: set[tuple[UUID, UUID]] = set()
+        for it, (mid, eid), is_owned in zip(items, pair_ids, owned, strict=True):
+            row = landed.get((mid, eid))
+            if row is None:
+                # Not in the tenant, or gone by the insert. The same ``error``
+                # value for both, because the two are one answer to the caller:
+                # a row outside your tenant is not distinguishable from a row
+                # that is not there, and making it distinguishable would turn a
+                # batch endpoint into a bulk existence oracle. The log line
+                # carries the real cause.
+                if not is_owned:
+                    logger.warning(
+                        "Entity link bulk-upsert refused: memory_id=%s entity_id=%s not in tenant %s",
+                        mid,
+                        eid,
+                        tenant_id,
+                    )
+                results.append(
+                    {
+                        "input_idx": it["input_idx"],
+                        "memory_id": str(mid),
+                        "entity_id": str(eid),
+                        "role": it["role"],
+                        "created": False,
+                        "error": "fk_violation",
+                    }
+                )
+                continue
+            role, inserted = row
+            results.append(
+                {
+                    "input_idx": it["input_idx"],
+                    "memory_id": str(mid),
+                    "entity_id": str(eid),
+                    "role": role,
+                    # Only the first item naming a pair can have created it.
+                    "created": inserted and (mid, eid) not in written,
+                }
+            )
+            written.add((mid, eid))
+        return results
 
     # ------------------------------------------------------------------
     # Crystallizer helpers (entity)
@@ -12276,7 +12350,7 @@ class PostgresService:
         return out
 
     @staticmethod
-    def _insights_dedup_stmt(filters: list, order_by, limit: int):
+    def _insights_dedup_stmt(filters: list, order_by, limit: int, *, keep_embedding: bool = False):
         """Build a one-exemplar-per-exact-title select for the theme-finding
         insight reads (patterns / stale / failures / discover-sample).
 
@@ -12307,6 +12381,8 @@ class PostgresService:
           needs the window annotations themselves (failures sorts by
           ``inner.c.dup_count`` so high-frequency patterns aren't cut by
           LIMIT below one-off rows).
+        - The rows leave out their vectors (L-194); ``keep_embedding`` keeps
+          the embedding for discover-sample, the one read that returns it.
         """
         dedup_key = func.coalesce(func.nullif(Memory.title, ""), cast(Memory.id, String))
         inner = (
@@ -12328,6 +12404,7 @@ class PostgresService:
             .where(inner.c.rn == 1)
             .order_by(*order_cols)
             .limit(limit)
+            .options(*_without_vectors(keep_embedding=keep_embedding))
         )
 
     def _insights_annotated_rows_to_dicts(self, rows, *, include_embedding: bool = False) -> list[dict]:
@@ -12353,6 +12430,7 @@ class PostgresService:
         async with get_read_session() as session:
             stmt = (
                 select(Memory)
+                .options(*_without_vectors())
                 .where(
                     *base,
                     Memory.status != "deleted",
@@ -12374,6 +12452,7 @@ class PostgresService:
             if superseded_ids and len(rows) < max_memories:
                 sup_stmt = (
                     select(Memory)
+                    .options(*_without_vectors())
                     .where(
                         *base,
                         Memory.memory_type != "insight",
@@ -12408,6 +12487,7 @@ class PostgresService:
                 if entity_ids:
                     extra_stmt = (
                         select(Memory)
+                        .options(*_without_vectors())
                         .where(
                             *base,
                             Memory.status != "deleted",
@@ -12464,6 +12544,7 @@ class PostgresService:
             if window_start is None:
                 stmt = (
                     select(Memory)
+                    .options(*_without_vectors())
                     .where(*filters)
                     .order_by(Memory.recall_count.desc(), Memory.weight.asc())
                     .limit(max_memories)
@@ -12524,7 +12605,13 @@ class PostgresService:
         ]
         async with get_read_session() as session:
             if window_start is None:
-                stmt = select(Memory).where(*filters).order_by(Memory.created_at.asc()).limit(max_memories)
+                stmt = (
+                    select(Memory)
+                    .options(*_without_vectors())
+                    .where(*filters)
+                    .order_by(Memory.created_at.asc())
+                    .limit(max_memories)
+                )
                 result = await session.execute(stmt)
                 return self._insights_rows_to_dicts(result.scalars().all())
             filters.append(Memory.created_at > window_start)
@@ -12564,6 +12651,7 @@ class PostgresService:
 
             mem_stmt = (
                 select(Memory)
+                .options(*_without_vectors())
                 .where(
                     *base,
                     Memory.status != "deleted",
@@ -12606,7 +12694,13 @@ class PostgresService:
         ]
         async with get_read_session() as session:
             if window_start is None:
-                stmt = select(Memory).where(*filters).order_by(Memory.created_at.desc()).limit(max_memories)
+                stmt = (
+                    select(Memory)
+                    .options(*_without_vectors())
+                    .where(*filters)
+                    .order_by(Memory.created_at.desc())
+                    .limit(max_memories)
+                )
                 result = await session.execute(stmt)
                 return self._insights_rows_to_dicts(result.scalars().all())
             filters.append(Memory.created_at > window_start)
@@ -12658,11 +12752,17 @@ class PostgresService:
         ]
         async with get_read_session() as session:
             if window_start is None:
-                stmt = select(Memory).where(*filters).order_by(Memory.created_at.desc()).limit(sample_size)
+                stmt = (
+                    select(Memory)
+                    .options(*_without_vectors(keep_embedding=True))
+                    .where(*filters)
+                    .order_by(Memory.created_at.desc())
+                    .limit(sample_size)
+                )
                 result = await session.execute(stmt)
                 return self._insights_rows_to_dicts(result.scalars().all(), include_embedding=True)
             filters.append(Memory.created_at > window_start)
-            stmt = self._insights_dedup_stmt(filters, (func.random(),), sample_size)
+            stmt = self._insights_dedup_stmt(filters, (func.random(),), sample_size, keep_embedding=True)
             result = await session.execute(stmt)
             return self._insights_annotated_rows_to_dicts(result.all(), include_embedding=True)
 

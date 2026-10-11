@@ -55,9 +55,10 @@ class EvolveRequest(TenantScopedBody):
     agent_id: str | None = Field(
         default=None,
         description=(
-            "Identifier of the reporting agent. Optional: the gateway-"
-            "verified ``X-Agent-ID`` header takes precedence when present; "
-            "falls back to 'mcp-agent' when both are absent."
+            "Identifier of the reporting agent. The gateway-verified "
+            "``X-Agent-ID`` header takes precedence when present. Required when "
+            "neither that header nor an agent-scoped credential names one (422), "
+            "except on the standalone deployment, which falls back to 'mcp-agent'."
         ),
     )
     fleet_id: str | None = Field(

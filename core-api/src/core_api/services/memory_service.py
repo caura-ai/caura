@@ -3259,10 +3259,11 @@ async def _reembed_memories_bulk(
     # L-184: one read for the batch, on the writer. Per-id GETs cost N round
     # trips where bulk-get answers 1000 ids at once, and they went to the
     # reader moments after the insert, where lag read a row back as missing
-    # and it was skipped with no retry.
+    # and it was skipped with no retry. With the embedding, which bulk-get
+    # leaves out unless asked (L-189), for the race guard in ``_store``.
     try:
         mems = await sc.bulk_get_memories(
-            [str(memory_id) for (memory_id, _), _ in pairs], tenant_id, read=False
+            [str(memory_id) for (memory_id, _), _ in pairs], tenant_id, read=False, with_embedding=True
         )
     except Exception:
         # Broad for the same reason as the batch call above: a transient read

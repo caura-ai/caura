@@ -50,6 +50,22 @@ PENDING_FANOUT_SQL = "(metadata ->> 'atomic_facts') IS NOT NULL"
 PENDING_WORK_SQL = (
     f"({PENDING_EMBEDDING_SQL} OR {PENDING_ENRICHMENT_SQL} OR {PENDING_FANOUT_SQL})"
 )
+#: L-96. A row still unembedded an hour after it was written is stranded, not in
+#: flight: an embed that exhausted its retries, died with its process or
+#: dead-lettered leaves the row at NULL with nothing coming back for it short of
+#: a backfill (``core_storage_api.scripts.backfill_embeddings``). Counted apart
+#: so ``settled`` stops waiting on it; it is still counted as pending.
+#:
+#: The hour is a judgement, not a guarantee (Eldad, 2026-10-09): past the point
+#: where a retry already in flight should have landed, short of making a
+#: measurement after ingest wait a day. A deferred deployment draining a longer
+#: backlog reports its tail as stranded too, and ``stranded.embedding`` says so.
+#: ``created_at`` is the clock because only a new row is unembedded (or every
+#: row, after a vector-dimension migration): an edit keeps the old vector until
+#: the new one lands.
+STRANDED_EMBEDDING_SQL = (
+    f"({PENDING_EMBEDDING_SQL} AND created_at < now() - interval '1 hour')"
+)
 
 
 class Memory(Base):
@@ -328,4 +344,42 @@ Index(
     Memory.created_at,
     Memory.id,
     postgresql_where=text("deleted_at IS NULL AND status = 'quarantined'"),
+)
+
+
+# Backs the contradiction-signal window (L-185). The reader windows on
+# ``COALESCE(status_changed_at, created_at)``, since 045 left the column
+# unbackfilled, so the key is that expression; 045's index on the bare column
+# could not serve it. Contradicted rows only. Created CONCURRENTLY in migration
+# 065, which drops 045's, with the same key and predicate.
+Index(
+    "ix_memories_contradicted_window",
+    Memory.tenant_id,
+    func.coalesce(Memory.status_changed_at, Memory.created_at),
+    postgresql_where=text("status IN ('outdated', 'conflicted')"),
+)
+
+
+# Back the two arms of the expiry sweep (L-191): live rows with an
+# ``expires_at`` or a ``ts_valid_end``, so the sweep reads by index only the rows
+# that can expire, and the planner ORs the two. The statuses are
+# ``LIVE_MEMORY_STATUSES``, which the sweep binds. Created CONCURRENTLY in
+# migration 065 with the same keys and predicates.
+Index(
+    "ix_memories_expires_at",
+    Memory.tenant_id,
+    Memory.expires_at,
+    postgresql_where=text(
+        "deleted_at IS NULL AND status IN ('active', 'confirmed', 'pending') "
+        "AND expires_at IS NOT NULL"
+    ),
+)
+Index(
+    "ix_memories_valid_end",
+    Memory.tenant_id,
+    Memory.ts_valid_end,
+    postgresql_where=text(
+        "deleted_at IS NULL AND status IN ('active', 'confirmed', 'pending') "
+        "AND ts_valid_end IS NOT NULL"
+    ),
 )

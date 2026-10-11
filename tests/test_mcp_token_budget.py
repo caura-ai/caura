@@ -133,7 +133,13 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # home-fleet default, and caura_manage no longer calling bulk_delete MCP-only.
 # The +117 over 5368 includes the M-19 change above, which was never measured,
 # so the split between the two is not known. Ceiling 5390 -> 5510, leaving 25.
-CEILING_TOKENS = 5510
+#
+# 2026-10-11 (L-119): ``caura_tune.reset_knobs`` clears the named knobs and keeps
+# the rest, as REST ``PATCH /agents/{id}/tune?reset_knobs=`` now does. Neither
+# surface could undo one knob's tuning without discarding the others. About +55
+# counted by hand, not measured (tiktoken was not available where this was
+# written), so the next entry should measure the fixture. Ceiling 5510 -> 5570.
+CEILING_TOKENS = 5570
 
 
 def _count(path: Path) -> int:

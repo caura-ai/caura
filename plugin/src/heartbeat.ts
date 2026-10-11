@@ -18,7 +18,8 @@ import {
 } from "fs";
 import { dirname, join } from "path";
 import { createHash } from "crypto";
-import { execSync } from "child_process";
+import { exec, execSync } from "child_process";
+import { promisify } from "util";
 import { hostname, platform, release, networkInterfaces } from "os";
 import { getOpenClawBaseDir } from "./paths.js";
 
@@ -392,7 +393,78 @@ function cleanupStaleBackups(): void {
 
 let _insecureSkillsSyncWarned = false;
 
-export async function sendHeartbeat(): Promise<void> {
+const execAsync = promisify(exec);
+let openclawVersionLookup: Promise<string | undefined> | undefined;
+
+/**
+ * The OpenClaw CLI's version, read once per process (L-197). Every tick ran
+ * ``openclaw --version`` with execSync, which blocks the gateway's event loop
+ * (this plugin runs inside it) for as long as the CLI takes to start, up to
+ * the 3s timeout, once a minute, to re-read a value that only a restart can
+ * change. Asynchronous now, and the answer is kept: a version, or no CLI on
+ * PATH, which fails the same way every time. A lookup that timed out, as it
+ * can on a busy host at startup, is asked again on the next tick.
+ */
+function readOpenclawVersion(): Promise<string | undefined> {
+  openclawVersionLookup ??= execAsync("openclaw --version", {
+    encoding: "utf8",
+    timeout: 3000,
+    windowsHide: true,
+  }).then(
+    ({ stdout }) => stdout.trim() || undefined,
+    (e: { killed?: boolean }) => {
+      if (e?.killed) openclawVersionLookup = undefined;
+      return undefined;
+    },
+  );
+  return openclawVersionLookup;
+}
+
+// The tick in flight, if any (L-56).
+let heartbeatInFlight: Promise<void> | undefined;
+
+/**
+ * Send one heartbeat, or join the one already running.
+ *
+ * index.ts drives this with setInterval, which does not wait for the async
+ * tick. A tick parked on a slow command (an interview submit waits up to 300s)
+ * let later ticks start beside it, each rerunning the skill reconciler against
+ * the same directories and posting another heartbeat (L-56). A call made while
+ * a tick runs now gets that tick's promise, and the next interval starts fresh.
+ * The tick no longer waits for the commands it receives (``queueCommands``),
+ * so joining it never holds a heartbeat back for a slow command.
+ */
+export function sendHeartbeat(): Promise<void> {
+  heartbeatInFlight ??= runHeartbeat().finally(() => {
+    heartbeatInFlight = undefined;
+  });
+  return heartbeatInFlight;
+}
+
+// Commands from heartbeat responses, run one at a time in arrival order.
+let commandQueue: Promise<void> = Promise.resolve();
+
+/**
+ * Queue the commands a heartbeat response carries, without waiting for them.
+ *
+ * A tick that awaited its commands held the next heartbeat back for as long
+ * as the slowest one ran: an interview submit waits up to 300s, and the
+ * server marks a node stale after 90s without a heartbeat and offline after
+ * 300s. They still run one at a time, as they did within a tick. The server
+ * acks a command when it hands it out and never sends it again, so a later
+ * tick cannot queue one twice.
+ */
+function queueCommands(commands: Parameters<typeof processCommand>[0][]): void {
+  for (const cmd of commands) {
+    commandQueue = commandQueue
+      .then(() => processCommand(cmd))
+      .catch((e: unknown) => {
+        logError(`command ${String(cmd?.command)} failed`, e);
+      });
+  }
+}
+
+async function runHeartbeat(): Promise<void> {
   cleanupStaleBackups();
   verifyDeployPostRestart();
   if (!CAURA_TENANT_ID || !CAURA_NODE_NAME) return;
@@ -442,17 +514,7 @@ export async function sendHeartbeat(): Promise<void> {
     // Network interfaces unavailable
   }
 
-  // Get OpenClaw version
-  let openclawVersion: string | undefined;
-  try {
-    const ver = execSync("openclaw --version 2>/dev/null || echo unknown", {
-      encoding: "utf-8",
-      timeout: 3000,
-    }).trim();
-    if (ver && ver !== "unknown") openclawVersion = ver;
-  } catch {
-    // openclaw CLI not available
-  }
+  const openclawVersion = await readOpenclawVersion();
 
   const srcPath = join(pluginDir, "src", "index.ts");
   let pluginHash: string | undefined;
@@ -647,34 +709,26 @@ export async function sendHeartbeat(): Promise<void> {
 
   try {
     const result = (await apiCall("POST", "/fleet/heartbeat", body)) as Record<string, any>;
-    if (result?.commands?.length) {
-      for (const cmd of result.commands) {
-        await processCommand(cmd);
-      }
-    }
+    if (result?.commands?.length) queueCommands(result.commands);
   } catch (e: unknown) {
     logError("heartbeat failed", e);
   }
 
-  // Periodic health check every 10 heartbeats.
+  // Periodic reachability probe every 10 heartbeats.
   //
-  // Feeds the reachability tracker (plugin/src/health.ts). Previously the
-  // outcome was only console.warn'd on an empty-index result; now success
-  // flips the tracker to "reachable" and network-class failure flips it to
-  // "unreachable" so the memory-runtime paths can surface honest
-  // availability via `getMemorySearchManager` / `status` / the probes.
+  // Feeds the reachability tracker (plugin/src/health.ts): success flips it to
+  // "reachable" and a failure to "unreachable", so the memory-runtime paths
+  // can surface honest availability via `getMemorySearchManager` / `status` /
+  // the probes.
   //
-  // An empty-results search against a populated tenant can happen for
-  // benign reasons (new tenant, throttled embeddings) and is NOT treated as
-  // unreachable — only genuine network-class throws are.
+  // GET /whoami, the route ensureTenantId already calls: unmetered, and with
+  // the tenant key it looks nothing up. This was a POST /search, which scored
+  // every live row of the tenant, took a search rate-limit slot and counted
+  // as a metered search on the platform, all for one bit (L-198).
   heartbeatCount++;
   if (heartbeatCount % 10 === 0 && CAURA_TENANT_ID) {
     try {
-      (await apiCall("POST", "/search", {
-        tenant_id: CAURA_TENANT_ID,
-        query: "health check",
-        top_k: 1,
-      })) as Record<string, any>;
+      await apiCall("GET", "/whoami");
       markReachable();
     } catch (e: unknown) {
       const msg = logError("heartbeat health check failed", e);
