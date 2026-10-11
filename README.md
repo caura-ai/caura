@@ -640,7 +640,7 @@ The **reader/writer split** is an opt-in topology for high-write-rate deploys th
 
 - Set `CORE_STORAGE_ROLE=writer` on the write-serving instance; `=reader` on the read-serving instance(s).
 - Set `CORE_STORAGE_READ_URL` on `core-api` to the reader service URL. Leave `CORE_STORAGE_API_URL` pointing at the writer.
-- `READ_DATABASE_URL` on each `core-storage-api` can point at a read replica if you have one.
+- `READ_DATABASE_URL` on each `core-storage-api` can point at a read replica if you have one. On the writer it serves the reads that tolerate replica lag. On a reader every query uses it, and `DATABASE_URL` is not connected to.
 - Set the same non-empty `CORE_STORAGE_SHARED_SECRET` on `core-api`, every
   `core-storage-api` writer/reader, and any other internal storage caller. All
   storage requests must carry it as `X-Storage-Secret`; missing or incorrect

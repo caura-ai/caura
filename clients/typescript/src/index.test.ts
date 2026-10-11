@@ -315,6 +315,42 @@ test("429 without retry-after has null retryAfter", async () => {
   );
 });
 
+for (const dateFormat of ["imf", "rfc850", "asctime"]) {
+  test(`429 parses an HTTP-date retry-after (${dateFormat})`, async () => {
+    const deadline = new Date(Date.now() + 120000);
+    const imf = deadline.toUTCString();
+    const weekday = deadline.toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
+    const value =
+      dateFormat === "rfc850"
+        ? imf.replace(/^(\w+), (\d+) (\w+) (\d{2})(\d{2})/, `${weekday}, $2-$3-$5`)
+        : dateFormat === "asctime"
+          ? imf.replace(/^(\w+), (\d+) (\w+) (\d+) (\S+) GMT$/, "$1 $3 $2 $5 $4")
+          : imf;
+    const client = makeClient(() => new Response("{}", { status: 429, headers: { "retry-after": value } }));
+    await assert.rejects(
+      client.health(),
+      (err: unknown) =>
+        err instanceof RateLimitError &&
+        err.retryAfter !== null &&
+        err.retryAfter >= 115 &&
+        err.retryAfter <= 120,
+    );
+  });
+}
+
+for (const [value, expected] of [
+  ["Sun, 06 Nov 1994 08:49:37 GMT", 0],
+  ["not a date", null],
+] as const) {
+  test(`429 handles a past or invalid retry-after (${value})`, async () => {
+    const client = makeClient(() => new Response("{}", { status: 429, headers: { "retry-after": value } }));
+    await assert.rejects(
+      client.health(),
+      (err: unknown) => err instanceof RateLimitError && err.retryAfter === expected,
+    );
+  });
+}
+
 test("500 maps to CauraApiError", async () => {
   const client = makeClient(() => jsonResponse(500, { message: "boom" }));
   await assert.rejects(client.recall("q"), CauraApiError);
@@ -397,9 +433,29 @@ test("transport mapping does not wrap serialization errors", async () => {
   await assert.rejects(client.write("hello", { metadata: circular }), TypeError);
 });
 
-test("transport mapping does not wrap invalid JSON", async () => {
-  const client = makeClient(() => new Response("not json"));
-  await assert.rejects(client.health(), SyntaxError);
+test("a 2xx response that is not JSON is a CauraApiError, not a bare SyntaxError", async () => {
+  const client = makeClient(() => new Response("<html>login</html>", { status: 200 }));
+  for (const call of [() => client.health(), () => client.write("x")]) {
+    await assert.rejects(call(), (error: unknown) => {
+      assert.ok(error instanceof CauraApiError);
+      assert.ok(error instanceof CauraError);
+      assert.ok(!(error instanceof TransportError));
+      assert.equal(error.statusCode, 200);
+      assert.equal(error.message, "[200] response was not valid JSON");
+      assert.ok(error.cause instanceof SyntaxError);
+      return true;
+    });
+  }
+});
+
+test("a non-JSON error body still maps by status", async () => {
+  const client = makeClient(() => new Response("<html>bad gateway</html>", { status: 502 }));
+  await assert.rejects(client.health(), (error: unknown) => {
+    assert.ok(error instanceof CauraApiError);
+    assert.equal(error.statusCode, 502);
+    assert.equal(error.message, "[502] request failed");
+    return true;
+  });
 });
 
 // L-66: the key never crosses the network in cleartext unless the caller opts in.

@@ -16,8 +16,6 @@ this surface to the public internet.
 
 from __future__ import annotations
 
-import json
-
 from fastapi import APIRouter, HTTPException, Request
 
 from core_storage_api.services.postgres_service import PostgresService
@@ -34,14 +32,9 @@ async def preview_tenant_counts(request: Request) -> dict:
     no rows are reported as ``0`` so the caller gets the full
     breakdown without round-tripping for each missing entry.
     """
-    try:
-        body = await request.json()
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        # ``UnicodeDecodeError`` is NOT a subclass of
-        # ``JSONDecodeError``; catching both matches the
-        # ``tenant_suppression`` router's hardened shape (PR #244
-        # round 1).
-        raise HTTPException(status_code=422, detail="request body must be valid JSON") from exc
+    # Malformed JSON and a body that is not UTF-8 are both answered 422 by the
+    # app-wide handler in ``app.py`` (L-37).
+    body = await request.json()
     # Reject non-object JSON bodies — ``body.get`` on a list / string
     # would raise ``AttributeError`` and surface as 500. Same defence
     # PR #244 round 1 added to ``tenant_suppression``.

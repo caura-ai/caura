@@ -22,8 +22,9 @@ class AuditLog(Base):
     # ``json``, not JSONB: migration 001 creates it that way (CAURA-595), and
     # ``test_models_match_the_migrated_schema`` holds the model to the schema.
     detail: Mapped[dict | None] = mapped_column(JSON)
+    # Nullable: migration 001 created it so and no migration tightened it (L-97).
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("now()")
+        DateTime(timezone=True), nullable=True, server_default=text("now()")
     )
     # ── Tamper-evident hash chain (migration 025) ────────────────────
     # Per-tenant linked-hash chain. These are NULL on pre-migration rows

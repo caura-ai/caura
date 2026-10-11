@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 import sys
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from pathlib import Path
 
 import httpx
@@ -205,6 +207,31 @@ def test_health():
     assert make_client(handler).health()["status"] == "ok"
 
 
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.health(),
+        lambda c: c.write("x"),
+        lambda c: c.search("x"),
+        lambda c: c.recall("x"),
+        lambda c: c.get_document("d1", collection="c"),
+        lambda c: c.submit_interview(node_id="n", agent_id="a", cursor_from=0, cursor_to=1, events=[]),
+    ],
+    ids=["health", "write", "search", "recall", "get_document", "submit_interview"],
+)
+def test_non_json_success_body_raises_api_error(call):
+    """A 2xx with an HTML body (captive portal, proxy) must not leak JSONDecodeError."""
+
+    def handler(request):
+        return httpx.Response(200, text="<html>captive portal login</html>")
+
+    with pytest.raises(CauraAPIError) as exc:
+        call(make_client(handler))
+    assert exc.value.status_code == 200
+    assert str(exc.value) == "[200] response was not valid JSON"
+    assert isinstance(exc.value.__cause__, json.JSONDecodeError)
+
+
 def test_health_raises_auth_error():
     def handler(request):
         return httpx.Response(401, json={"error": {"message": "invalid key"}})
@@ -260,6 +287,28 @@ def test_rate_limit_error_without_retry_after():
     assert exc.value.retry_after is None
 
 
+@pytest.mark.parametrize("date_format", ["imf", "rfc850", "asctime"])
+def test_rate_limit_error_parses_retry_after_http_date(date_format):
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=120)
+    value = {
+        "imf": format_datetime(deadline, usegmt=True),
+        "rfc850": deadline.strftime("%A, %d-%b-%y %H:%M:%S GMT"),
+        "asctime": deadline.strftime("%a %b %d %H:%M:%S %Y"),
+    }[date_format]
+    client = make_client(lambda request: httpx.Response(429, headers={"Retry-After": value}))
+    with client, pytest.raises(RateLimitError) as exc:
+        client.health()
+    assert 115 <= exc.value.retry_after <= 120
+
+
+@pytest.mark.parametrize("value, expected", [("Sun, 06 Nov 1994 08:49:37 GMT", 0), ("not a date", None)])
+def test_rate_limit_error_with_past_or_invalid_retry_after(value, expected):
+    client = make_client(lambda request: httpx.Response(429, headers={"Retry-After": value}))
+    with client, pytest.raises(RateLimitError) as exc:
+        client.health()
+    assert exc.value.retry_after == expected
+
+
 def test_generic_api_error():
     def handler(request):
         return httpx.Response(500, json={"message": "boom"})
@@ -281,3 +330,69 @@ def test_requires_api_key_and_tenant():
         Caura("", tenant_id="t")
     with pytest.raises(ValueError):
         Caura("k", tenant_id="")
+
+
+# ---------------------------------------------------------------- submit_interview
+
+INTERVIEW_WINDOW = {
+    "node_id": "n1",
+    "agent_id": "a1",
+    "cursor_from": 0,
+    "cursor_to": 2,
+    "events": [{"type": "msg"}],
+}
+
+
+@pytest.mark.parametrize("status", [200, 207])
+def test_submit_interview_reports_the_http_status(status):
+    def handler(request):
+        return httpx.Response(status, json={"window_id": "w1"})
+
+    result = make_client(handler).submit_interview(**INTERVIEW_WINDOW)
+    assert result == {"window_id": "w1", "http_status": status}
+
+
+def test_submit_interview_body_uses_the_client_tenant_and_omits_unset_ids():
+    seen = {}
+
+    def handler(request):
+        assert request.url.path == "/api/v1/interview/submit"
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={})
+
+    make_client(handler).submit_interview(**INTERVIEW_WINDOW)
+    assert seen["body"] == {"tenant_id": "t1", **INTERVIEW_WINDOW}
+
+
+def test_submit_interview_body_takes_tenant_fleet_and_command_arguments():
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={})
+
+    make_client(handler).submit_interview(**INTERVIEW_WINDOW, tenant_id="t2", fleet_id="f1", command_id="c1")
+    assert seen["body"] == {
+        "tenant_id": "t2",
+        **INTERVIEW_WINDOW,
+        "fleet_id": "f1",
+        "command_id": "c1",
+    }
+
+
+def test_submit_interview_uses_its_own_120s_timeout():
+    seen = {}
+
+    def handler(request):
+        seen["timeout"] = request.extensions["timeout"]
+        return httpx.Response(200, json={})
+
+    make_client(handler).submit_interview(**INTERVIEW_WINDOW)
+    assert set(seen["timeout"].values()) == {120.0}
+
+
+def test_submit_interview_returns_a_non_dict_body_unchanged():
+    def handler(request):
+        return httpx.Response(200, json=[])
+
+    assert make_client(handler).submit_interview(**INTERVIEW_WINDOW) == []

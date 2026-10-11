@@ -24,8 +24,9 @@ class BackgroundTaskLog(Base):
     )
     error_message: Mapped[str | None] = mapped_column(Text)
     error_traceback: Mapped[str | None] = mapped_column(Text)
+    # Nullable: migration 001 created it so and no migration tightened it (L-97).
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("now()"),
+        DateTime(timezone=True), nullable=True, server_default=text("now()"),
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # When a row was marked ``rerun`` or ``skipped``; the same for every row one

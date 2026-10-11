@@ -144,8 +144,19 @@ def _build_engine(url: str) -> AsyncEngine:
 
 
 def get_engine() -> AsyncEngine:
-    """Return the writer engine (primary DB), creating on first call."""
+    """Return the writer engine (primary DB), creating on first call.
+
+    On a reader given ``read_database_url`` this is the read engine (L-139). A
+    reader serves no writes and runs no migrations, and ``config.py`` says it
+    uses the read pool as its primary connection. The SaaS reader does that by
+    setting ``DATABASE_URL`` to the read pool. A reader set up from the README
+    sets ``READ_DATABASE_URL`` and leaves ``DATABASE_URL`` on the primary, and
+    there every ``get_session`` call site, about two thirds of them, used to
+    read from the primary.
+    """
     global _engine
+    if settings.core_storage_role == "reader" and settings.read_database_url.get_secret_value():
+        return get_read_engine()
     if _engine is None:
         _engine = _build_engine(settings.database_url.get_secret_value())
     return _engine
@@ -163,6 +174,18 @@ def get_read_engine() -> AsyncEngine:
     if _read_engine is None:
         _read_engine = _build_engine(read_database_url)
     return _read_engine
+
+
+async def dispose_engines() -> None:
+    """Close every engine this process built, whatever its role (L-139).
+
+    Shutdown used to dispose only the writer engine, and on a reader nothing,
+    so the read engine's pool was never closed, nor the writer engine a reader's
+    ``get_session`` call sites built. An engine never built is not built here.
+    """
+    for engine in (_engine, _read_engine):
+        if engine is not None:
+            await engine.dispose()
 
 
 async def get_session():
