@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.30.7](https://github.com/caura-ai/caura/compare/backend-v3.30.6...backend-v3.30.7) (2026-10-11)
+
+
+### Bug Fixes
+
+* a bulk item's null weight gets the column default (L-97) ([#2036](https://github.com/caura-ai/caura/issues/2036)) ([25bc89e](https://github.com/caura-ai/caura/commit/25bc89ee4712fb67ce108338612a174c2c9bcc47))
+* **client-python:** raise CauraAPIError for non-JSON 2xx bodies ([#2013](https://github.com/caura-ai/caura/issues/2013)) ([d6580f7](https://github.com/caura-ai/caura/commit/d6580f765a964a7b686d73b9abedc672301aad94))
+* **client-typescript:** raise CauraApiError for a non-JSON 2xx body ([#2014](https://github.com/caura-ai/caura/issues/2014)) ([9ba140d](https://github.com/caura-ai/caura/commit/9ba140ddeec4837f3636a3fe858ce107030e4b12))
+* **clients:** parse HTTP-date Retry-After values ([#2010](https://github.com/caura-ai/caura/issues/2010)) ([f575803](https://github.com/caura-ai/caura/commit/f575803feaeb3f08771e134bd2aa57bd5a8db842))
+* **events:** type pull_executor concretely in _hold_leases ([#1596](https://github.com/caura-ai/caura/issues/1596)) ([#1698](https://github.com/caura-ai/caura/issues/1698)) ([45dff80](https://github.com/caura-ai/caura/commit/45dff808bc39391d41277c29a20817ff7f08e47f))
+* **release:** keep the core-operations version in sync ([#1717](https://github.com/caura-ai/caura/issues/1717)) ([96a7907](https://github.com/caura-ai/caura/commit/96a790739c66f54efd9aa5e8194645a78fcfa9b1))
+* storage answers for the database it has (B28) ([#2033](https://github.com/caura-ai/caura/issues/2033)) ([67a0a57](https://github.com/caura-ai/caura/commit/67a0a579660dd69159a995257ac672f30ea527b0))
+
 ## [3.30.6](https://github.com/caura-ai/caura/compare/backend-v3.30.5...backend-v3.30.6) (2026-10-11)
 
 
