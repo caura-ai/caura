@@ -80,6 +80,7 @@ def connect_plan(
     description: str | None,
     tenant: str | None,
     hooks: bool,
+    memory: bool = True,
     env: Mapping[str, str] | None = None,
     ancestor: Callable[[], str | None] | None = None,
 ) -> BrokerPlan:
@@ -123,6 +124,15 @@ def connect_plan(
         notes.append("--tenant is not passed: the broker uses the workspace you approve in the browser.")
     if not hooks:
         notes.append("--no-hooks is not passed: the broker always installs wake-ups.")
+    # A broker that knows --no-memory also registers the server's memory MCP.
+    if "no-memory" in broker.flags:
+        if not memory:
+            argv.append("--no-memory")
+    elif memory:
+        notes.append(
+            "This broker does not register the Caura memory MCP; upgrade it, or use "
+            "`caura-bus join --no-broker` to get the memory server wired too."
+        )
     return BrokerPlan(argv=argv, notes=notes, runnable=runnable)
 
 

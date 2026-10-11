@@ -60,10 +60,12 @@ def env(tmp_path, monkeypatch):
         f"#!{sys.executable}\nimport json,os,sys\n"
         f"with open({str(capture)!r},'a') as f:\n"
         " f.write(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd()})+'\\n')\n"
-        "sys.exit(int(os.environ.get('FAKE_CLAUDE_EXIT','0')) if sys.argv[1:3]==['mcp','add'] else 0)\n"
+        "var='FAKE_CLAUDE_MEMORY_EXIT' if '--transport' in sys.argv else 'FAKE_CLAUDE_EXIT'\n"
+        "sys.exit(int(os.environ.get(var,'0')) if sys.argv[1:3]==['mcp','add'] else 0)\n"
     )
     claude.chmod(0o700)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.delenv("CAURA_API_KEY", raising=False)
@@ -118,7 +120,7 @@ def test_claude_setup_verifies_writes_private_config_and_wires_local_mcp(env):
     assert "allow_insecure_http" not in config
     assert KEY not in env.config.read_text()
 
-    remove, add = calls(env.capture)
+    remove, add, memory_remove, memory_add = calls(env.capture)
     assert remove["argv"] == ["mcp", "remove", "--scope", "local", "caura-bus"]
     assert add["cwd"] == str(env.project.resolve()) == remove["cwd"]
     mcp = add["argv"][add["argv"].index("--") + 1]
@@ -126,6 +128,23 @@ def test_claude_setup_verifies_writes_private_config_and_wires_local_mcp(env):
     assert f"CAURA_API_KEY={KEY}" in add["argv"]
     assert f"CAURA_BUS_AGENT_CONFIG={env.config}" in add["argv"]
     assert Path(mcp).is_absolute() and Path(mcp).name == "caura-bus-mcp"
+
+    # The same server's memory MCP, local scope so it overrides a user-scope `caura`.
+    assert memory_remove["argv"] == ["mcp", "remove", "--scope", "local", "caura"]
+    assert memory_add["cwd"] == str(env.project.resolve())
+    assert memory_add["argv"] == [
+        "mcp",
+        "add",
+        "--scope",
+        "local",
+        "--transport",
+        "http",
+        "caura",
+        f"{URL}/mcp/",
+        "--header",
+        f"X-API-Key: {KEY}",
+    ]
+    assert "claude mcp list" in result.output
 
     text = (env.project / "CLAUDE.md").read_text()
     assert text.startswith("# Team rules\n\nKeep tests green.\n\n" + setup_mod.MARK_START)
@@ -144,7 +163,7 @@ def test_rerun_is_idempotent(env):
     assert (env.project / "CLAUDE.md").read_text() == first_md
     assert first_md.count(setup_mod.MARK_START) == 1
     # Each run replaces the previous MCP entry instead of adding a second one.
-    assert [c["argv"][1] for c in calls(env.capture)] == ["remove", "add", "remove", "add"]
+    assert [c["argv"][1] for c in calls(env.capture)] == ["remove", "add"] * 4
 
 
 def test_identity_comes_from_server_and_mismatch_changes_nothing(env):
@@ -284,7 +303,7 @@ def test_codex_updates_only_its_table_keeps_backup_and_is_idempotent(env):
 def test_codex_creates_config_when_absent(env):
     result = invoke("--runtime", "codex", "--dir", str(env.project))
     assert result.exit_code == 0, result.output
-    assert set(tomllib.loads(env.codex.read_text())["mcp_servers"]) == {"caura-bus"}
+    assert set(tomllib.loads(env.codex.read_text())["mcp_servers"]) == {"caura-bus", "caura-caura-test"}
     assert not env.codex.with_name("config.toml.caura-bus-setup.bak").exists()
 
 
@@ -395,3 +414,145 @@ def test_dry_run_hooks_writes_nothing(env):
     assert "wake hooks" in result.output
     assert not env.config.with_suffix(".key").exists()
     assert not (env.project / ".claude").exists()
+
+
+# --- memory MCP of the same server ------------------------------------------
+
+LEGACY = setup_mod.MEMORY_LIKE_NAMES[1]  # the pre-rename entry name
+
+
+@pytest.mark.parametrize(
+    ("url", "name"),
+    [
+        ("https://34-62-39-7.sslip.io", "caura-34-62-39-7-sslip-io"),
+        ("http://127.0.0.1:55003", "caura-127-0-0-1-55003"),
+        ("https://Caura.Example", "caura-caura-example"),
+    ],
+)
+def test_codex_memory_name_is_per_host(url, name):
+    assert setup_mod.codex_memory_name(url) == name
+    assert setup_mod.memory_url(url) == url + "/mcp/"
+
+
+def test_codex_memory_table_written_per_host_in_place_with_one_backup(env):
+    env.codex.parent.mkdir()
+    original = (
+        'model = "gpt-5"\n\n'
+        "[mcp_servers.caura-caura-test]\n"
+        'url = "https://old.example/mcp/"\n'
+        'http_headers = { "X-API-Key" = "old" }\n'
+        "startup_timeout_sec = 20 # keep me\n\n"
+        "[mcp_servers.caura-caura-test.tools.caura_write]\n"
+        'approval_mode = "approve"\n'
+    )
+    env.codex.write_text(original)
+    result = invoke("--runtime", "codex", "--dir", str(env.project))
+    assert result.exit_code == 0, result.output
+    assert KEY not in result.output
+    data = tomllib.loads(env.codex.read_text())
+    entry = data["mcp_servers"]["caura-caura-test"]
+    assert entry["url"] == f"{URL}/mcp/" and entry["http_headers"] == {"X-API-Key": KEY}
+    assert entry["startup_timeout_sec"] == 20
+    assert entry["tools"] == {"caura_write": {"approval_mode": "approve"}}
+    assert set(data["mcp_servers"]) == {"caura-bus", "caura-caura-test"} and data["model"] == "gpt-5"
+    assert "# keep me" in env.codex.read_text() and mode(env.codex) == 0o600
+    assert env.codex.with_name("config.toml.caura-bus-setup.bak").read_text() == original
+    assert "codex mcp list" in result.output
+
+    updated = env.codex.read_text()
+    again = invoke("--runtime", "codex", "--dir", str(env.project))
+    assert again.exit_code == 0 and "already current" in again.output
+    assert env.codex.read_text() == updated
+
+
+def test_codex_memory_subtable_header_is_refused_unchanged(env):
+    env.codex.parent.mkdir()
+    text = '[mcp_servers.caura-caura-test]\nurl = "https://x/mcp/"\n\n[mcp_servers.caura-caura-test.http_headers]\nX-API-Key = "old"\n'
+    env.codex.write_text(text)
+    result = invoke("--runtime", "codex", "--dir", str(env.project))
+    assert result.exit_code == 1
+    assert "[mcp_servers.caura-caura-test] would produce invalid TOML" in result.output
+    assert env.codex.read_text() == text and KEY not in result.output
+
+
+def test_no_memory_skips_the_memory_server(env):
+    result = invoke("--runtime", "claude", "--dir", str(env.project), "--no-memory")
+    assert result.exit_code == 0, result.output
+    assert [c["argv"][4] for c in calls(env.capture)] == ["caura-bus", "caura-bus"]
+    assert "claude mcp list" not in result.output
+    result = invoke("--runtime", "codex", "--dir", str(env.project), "--no-memory")
+    assert result.exit_code == 0, result.output
+    assert set(tomllib.loads(env.codex.read_text())["mcp_servers"]) == {"caura-bus"}
+
+
+def test_claude_warns_about_memory_entries_pointing_elsewhere(env):
+    (env.home / ".claude.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "caura": {"type": "http", "url": "https://caura.ai/mcp/"},
+                    LEGACY: {"type": "http", "url": f"https://{LEGACY}.net/mcp"},
+                    "caura-bus": {"command": "/x/caura-bus-mcp"},
+                    "caura-here": {"type": "http", "url": f"{URL}/mcp/"},
+                    "github": {"type": "http", "url": "https://api.github.com/mcp"},
+                }
+            }
+        )
+    )
+    (env.project / ".mcp.json").write_text(json.dumps({"mcpServers": {LEGACY: {"command": "npx"}}}))
+    result = invoke("--runtime", "claude", "--dir", str(env.project))
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "user-scope MCP server 'caura' -> caura.ai is overridden in this project" in out
+    assert f"user-scope MCP server '{LEGACY}' -> {LEGACY}.net: still loaded in this project" in out
+    assert f"project .mcp.json server '{LEGACY}' (a local command" in out
+    assert "caura-here" not in out and "github" not in out and "caura-bus' ->" not in out
+    assert f"cd {env.project.resolve()} && claude mcp list" in out
+    assert KEY not in out
+
+
+def test_claude_config_dir_is_honoured_for_warnings(env, monkeypatch):
+    other = env.home / "alt"
+    other.mkdir()
+    (other / ".claude.json").write_text(json.dumps({"mcpServers": {"caura": {"url": "https://prod/mcp/"}}}))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(other))
+    result = invoke("--runtime", "claude", "--dir", str(env.project))
+    assert "'caura' -> prod is overridden" in result.output
+
+
+def test_codex_warns_about_other_memory_entries(env):
+    env.codex.parent.mkdir()
+    env.codex.write_text(
+        '[mcp_servers.caura]\nurl = "https://caura.ai/mcp/"\n\n'
+        '[mcp_servers.caura-qa]\nurl = "https://caura.test/mcp/"\n'
+    )
+    result = invoke("--runtime", "codex", "--dir", str(env.project))
+    assert result.exit_code == 0, result.output
+    assert "Codex MCP server 'caura' -> caura.ai: Codex loads it too" in result.output
+    assert "caura-qa" not in result.output  # same host: not a conflict
+
+
+def test_failing_memory_add_is_reported_masked_and_fails(env, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_MEMORY_EXIT", "4")
+    result = invoke("--runtime", "claude", "--dir", str(env.project))
+    assert result.exit_code == 1
+    assert "for the memory server failed (4)" in result.output and KEY not in result.output
+
+
+def test_dry_run_shows_memory_plan_masked(env):
+    for runtime, needle in (("claude", "caura https://caura.test/mcp/"), ("codex", "caura-caura-test")):
+        result = invoke("--runtime", runtime, "--dir", str(env.project), "--dry-run")
+        assert result.exit_code == 0, result.output
+        assert needle in result.output and KEY not in result.output
+    assert not calls(env.capture) and not env.codex.exists()
+
+
+def test_manual_memory_command_reads_key_from_environment(tmp_path):
+    command = setup_mod.claude_memory_manual_command(tmp_path, URL)
+    assert '"X-API-Key: ${CAURA_API_KEY:?export your agent key first}"' in command
+    assert "--transport http caura https://caura.test/mcp/ --header" in command
+
+
+def test_peer_instructions_point_durable_memory_at_this_server():
+    text = setup_mod.peer_template()
+    assert "use the `caura` memory tools of THIS Caura server" in text

@@ -192,3 +192,25 @@ def test_plan_notes_options_the_broker_does_not_take(tmp_path):
             hooks=True,
             env={},
         )
+
+
+def test_plan_passes_no_memory_only_to_a_broker_that_knows_it(tmp_path):
+    base = {"agent", "runtime", "project", "url"}
+    common = dict(
+        url=URL,
+        runtime="claude",
+        directory=tmp_path,
+        name="a",
+        description=None,
+        tenant=None,
+        hooks=True,
+        env={},
+    )
+    old = broker_mod.Broker(path="/b/caura", flags=base)
+    plan = broker_mod.connect_plan(old, memory=True, **common)
+    assert "does not register the Caura memory MCP" in " ".join(plan.notes)
+    assert "--no-memory" not in broker_mod.connect_plan(old, memory=False, **common).argv
+    new = broker_mod.Broker(path="/b/caura", flags=base | {"no-memory"})
+    assert "--no-memory" not in broker_mod.connect_plan(new, memory=True, **common).argv
+    assert broker_mod.connect_plan(new, memory=True, **common).notes == []
+    assert broker_mod.connect_plan(new, memory=False, **common).argv[-1] == "--no-memory"

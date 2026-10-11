@@ -2,8 +2,9 @@
 
 Everything identity-related comes from the server: the key is verified first and
 the effective agent and tenant are read back from it. Each step only rewrites
-what setup owns (its agent config, the ``caura-bus`` MCP entry, and a marked
-instruction block), so re-running updates in place.
+what setup owns (its agent config, the ``caura-bus`` MCP entry, the same
+server's ``caura`` memory MCP entry, and a marked instruction block), so
+re-running updates in place.
 """
 
 from __future__ import annotations
@@ -27,6 +28,14 @@ import httpx
 from caura_bus_core import AgentConfig, Bus, PlatformError, load_config
 
 SERVER_NAME = "caura-bus"
+# The memory MCP of the same Caura server. Claude Code gets a local-scope
+# ``caura`` entry, which overrides a user-scope one of the same name in this
+# project. Codex has only a per-user config, so its entry is named per host.
+MEMORY_SERVER_NAME = "caura"
+MEMORY_PATH = "/mcp/"
+MEMORY_HEADER = "X-API-Key"
+# Entry names that usually hold a memory server pointing at some Caura.
+MEMORY_LIKE_NAMES = ("caura", "memclaw")  # legacy-name-floor: users' pre-rename MCP entry name
 MARK_START = "<!-- caura-bus:peer-instructions:start"
 MARK_END = "<!-- caura-bus:peer-instructions:end -->"
 MARK_HEADER = MARK_START + " (managed by `caura-bus setup`; re-running setup replaces this block) -->"
@@ -34,9 +43,17 @@ LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 RUNTIMES = {"claude": "claude", "claude-code": "claude", "codex": "codex"}
 INSTRUCTION_FILES = {"claude": "CLAUDE.md", "codex": "AGENTS.md"}
 RUNTIME_NAMES = {"claude": "Claude Code", "codex": "Codex"}
-CODEX_HEADER = re.compile(r'^\[\s*mcp_servers\s*\.\s*(?:"caura-bus"|caura-bus)\s*\]\s*(?:#.*)?$', re.M)
 NEXT_HEADER = re.compile(r"^[ \t]*\[", re.M)
 OWNED_KEYS = re.compile(r"^[ \t]*(?:command|args|env)[ \t]*=")
+MEMORY_OWNED_KEYS = re.compile(r"^[ \t]*(?:url|http_headers|command|args|env)[ \t]*=")
+
+
+def codex_header(name: str) -> re.Pattern[str]:
+    quoted = re.escape(name)
+    return re.compile(rf'^\[\s*mcp_servers\s*\.\s*(?:"{quoted}"|{quoted})\s*\]\s*(?:#.*)?$', re.M)
+
+
+CODEX_HEADER = codex_header(SERVER_NAME)
 
 
 class SetupError(RuntimeError):
@@ -259,43 +276,78 @@ def codex_block(key: str, config: Path, mcp: Path) -> list[str]:
     ]
 
 
-def without_ours(data: dict) -> dict:
+def without_table(data: dict, name: str, owned: tuple[str, ...]) -> dict:
     data = json.loads(json.dumps(data, default=str))
-    entry = data.get("mcp_servers", {}).get(SERVER_NAME)
+    entry = data.get("mcp_servers", {}).get(name)
     if isinstance(entry, dict):
-        for name in ("command", "args", "env"):
-            entry.pop(name, None)
+        for key in owned:
+            entry.pop(key, None)
         if not entry:
-            data["mcp_servers"].pop(SERVER_NAME)
+            data["mcp_servers"].pop(name)
         if not data["mcp_servers"]:
             data.pop("mcp_servers")
     return data
 
 
-def update_codex_text(text: str, key: str, config: Path, mcp: Path) -> str:
-    """Add or update only [mcp_servers.caura-bus]; refuse anything that would change more."""
+@dataclass
+class CodexTable:
+    """One ``[mcp_servers.<name>]`` table setup owns some keys of."""
+
+    name: str
+    lines: list[str]
+    owned: tuple[str, ...]
+    owned_pattern: re.Pattern[str]
+    expected: dict[str, Any]
+
+
+def bus_table(key: str, config: Path, mcp: Path) -> CodexTable:
+    return CodexTable(
+        name=SERVER_NAME,
+        lines=codex_block(key, config, mcp),
+        owned=("command", "args", "env"),
+        owned_pattern=OWNED_KEYS,
+        expected={"command": str(mcp), "env": {"CAURA_API_KEY": key, "CAURA_BUS_AGENT_CONFIG": str(config)}},
+    )
+
+
+def memory_table(url: str, key: str) -> CodexTable:
+    endpoint = memory_url(url)
+    return CodexTable(
+        name=codex_memory_name(url),
+        lines=[
+            f"url = {toml_str(endpoint)}",
+            "http_headers = { " + toml_str(MEMORY_HEADER) + " = " + toml_str(key) + " }",
+        ],
+        owned=("url", "http_headers", "command", "args", "env"),
+        owned_pattern=MEMORY_OWNED_KEYS,
+        expected={"url": endpoint, "http_headers": {MEMORY_HEADER: key}},
+    )
+
+
+def update_codex_table(text: str, table: CodexTable) -> str:
+    """Add or update only [mcp_servers.<name>]; refuse anything that would change more."""
+    name = table.name
     try:
         before = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise SetupError(f"existing Codex config is not valid TOML ({exc}); not modified") from None
-    ours = codex_block(key, config, mcp)
-    match = CODEX_HEADER.search(text)
+    match = codex_header(name).search(text)
     if match is None:
-        if SERVER_NAME in before.get("mcp_servers", {}):
+        if name in before.get("mcp_servers", {}):
             raise SetupError(
-                f"Codex config defines mcp_servers.{SERVER_NAME} without a [mcp_servers.{SERVER_NAME}] "
+                f"Codex config defines mcp_servers.{name} without a [mcp_servers.{name}] "
                 "table header; edit it by hand or move it into that table, then re-run setup"
             )
         updated = (text.rstrip("\n") + "\n\n" if text.strip() else "") + "\n".join(
-            [f"[mcp_servers.{SERVER_NAME}]", *ours]
+            [f"[mcp_servers.{name}]", *table.lines]
         )
         updated += "\n"
     else:
         start = match.end() + 1 if match.end() < len(text) else match.end()
         following = NEXT_HEADER.search(text, start)
         end = following.start() if following else len(text)
-        kept = [line for line in text[start:end].splitlines() if not OWNED_KEYS.match(line)]
-        body = "\n".join([*ours, *kept]).rstrip("\n") + "\n"
+        kept = [line for line in text[start:end].splitlines() if not table.owned_pattern.match(line)]
+        body = "\n".join([*table.lines, *kept]).rstrip("\n") + "\n"
         if following:
             body += "\n"
         prefix = text[:start] if text[:start].endswith("\n") else text[:start] + "\n"
@@ -304,31 +356,190 @@ def update_codex_text(text: str, key: str, config: Path, mcp: Path) -> str:
         after = tomllib.loads(updated)
     except tomllib.TOMLDecodeError as exc:
         raise SetupError(
-            f"updating [mcp_servers.{SERVER_NAME}] would produce invalid TOML ({exc}); "
-            "the table probably uses multi-line command/args/env values. Not modified."
+            f"updating [mcp_servers.{name}] would produce invalid TOML ({exc}); the table probably "
+            "uses multi-line values or a separate sub-table for a key setup manages. Not modified."
         ) from None
-    entry = after.get("mcp_servers", {}).get(SERVER_NAME, {})
-    expected_env = {"CAURA_API_KEY": key, "CAURA_BUS_AGENT_CONFIG": str(config)}
-    if entry.get("command") != str(mcp) or entry.get("env") != expected_env or "args" in entry:
-        raise SetupError(f"could not verify the updated [mcp_servers.{SERVER_NAME}] table; not modified")
-    if without_ours(before) != without_ours(after):
+    entry = after.get("mcp_servers", {}).get(name, {})
+    unexpected = [key for key in table.owned if key not in table.expected and key in entry]
+    if any(entry.get(key) != value for key, value in table.expected.items()) or unexpected:
+        raise SetupError(f"could not verify the updated [mcp_servers.{name}] table; not modified")
+    if without_table(before, name, table.owned) != without_table(after, name, table.owned):
         raise SetupError("updating the Codex config would change other settings; not modified")
     return updated
 
 
-def wire_codex(key: str, config: Path, mcp: Path, path: Path | None = None) -> str:
+def update_codex_text(text: str, key: str, config: Path, mcp: Path) -> str:
+    return update_codex_table(text, bus_table(key, config, mcp))
+
+
+def wire_codex(tables: list[CodexTable], path: Path | None = None) -> list[str]:
+    """Update every table in one write, with one backup of the previous file."""
     path = path or codex_config_path()
     text = path.read_text() if path.exists() else ""
-    updated = update_codex_text(text, key, config, mcp)
+    updated = text
+    for table in tables:
+        updated = update_codex_table(updated, table)
+    names = ", ".join(f"[mcp_servers.{table.name}]" for table in tables)
     if updated == text:
-        return f"[mcp_servers.{SERVER_NAME}] already current in {show(path)}"
+        return [f"{names} already current in {show(path)}"]
     if path.exists():
         backup = path.with_name(path.name + ".caura-bus-setup.bak")
         shutil.copy2(path, backup)
         os.chmod(backup, 0o600)
     write_private(path, updated)  # it now holds an agent key
-    return f"[mcp_servers.{SERVER_NAME}] written to {show(path)}" + (
-        f" (backup {path.name}.caura-bus-setup.bak)" if text else ""
+    return [
+        f"{names} written to {show(path)}" + (f" (backup {path.name}.caura-bus-setup.bak)" if text else "")
+    ]
+
+
+# --- 3b. memory MCP of the same server -----------------------------------
+
+
+def memory_url(url: str) -> str:
+    return url.rstrip("/") + MEMORY_PATH
+
+
+def host_slug(url: str) -> str:
+    netloc = urlsplit(url).netloc.lower()
+    return re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9]+", "-", netloc)).strip("-") or "host"
+
+
+def codex_memory_name(url: str) -> str:
+    return f"{MEMORY_SERVER_NAME}-{host_slug(url)}"
+
+
+def memory_like(name: str) -> bool:
+    lowered = name.lower()
+    return any(lowered == base or lowered.startswith(base + "-") for base in MEMORY_LIKE_NAMES)
+
+
+def entry_target(entry: Any) -> str | None:
+    """The host an MCP entry talks to, ``""`` for a command we cannot read, None if not an entry."""
+    if not isinstance(entry, dict):
+        return None
+    target = entry.get("url")
+    if isinstance(target, str) and target:
+        return (urlsplit(target).hostname or target).lower()
+    return "" if entry.get("command") else None
+
+
+def other_memory_entries(servers: Any, ours: str, url: str) -> list[str]:
+    """Describe memory-like entries other than ``ours`` that do not point at this server."""
+    if not isinstance(servers, dict):
+        return []
+    host = (urlsplit(url).hostname or "").lower()
+    found = []
+    for name, entry in servers.items():
+        if name == ours or name == SERVER_NAME or not memory_like(str(name)):
+            continue
+        target = entry_target(entry)
+        if target is None or target == host:
+            continue
+        if target == "":
+            if str(name).lower().startswith(MEMORY_SERVER_NAME + "-"):
+                continue  # caura-bus and friends: local commands, not memory servers
+            found.append(f"{name!r} (a local command; cannot tell which server it uses)")
+        else:
+            found.append(f"{name!r} -> {target}")
+    return found
+
+
+def claude_config_file() -> Path:
+    base = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    return (Path(base) if base else Path.home()) / ".claude.json"
+
+
+def read_json(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def claude_memory_warnings(directory: Path, url: str) -> list[str]:
+    """Memory-like Claude Code entries that would still be loaded here and point elsewhere."""
+    warnings = []
+    user = other_memory_entries(read_json(claude_config_file()).get("mcpServers"), "", url)
+    for item in user:
+        overridden = item.startswith(repr(MEMORY_SERVER_NAME) + " ")
+        warnings.append(
+            f"user-scope MCP server {item}"
+            + (
+                f" is overridden in this project by the local {MEMORY_SERVER_NAME!r} entry"
+                if overridden
+                else ": still loaded in this project, so the agent may save memories there"
+            )
+        )
+    project = other_memory_entries(read_json(directory / ".mcp.json").get("mcpServers"), "", url)
+    for item in project:
+        overridden = item.startswith(repr(MEMORY_SERVER_NAME) + " ")
+        warnings.append(
+            f"project .mcp.json server {item}"
+            + (" is overridden by the local entry" if overridden else ": the agent may save memories there")
+        )
+    return warnings
+
+
+def codex_memory_warnings(text: str, url: str) -> list[str]:
+    try:
+        servers = tomllib.loads(text).get("mcp_servers")
+    except tomllib.TOMLDecodeError:
+        return []
+    return [
+        f"Codex MCP server {item}: Codex loads it too, so the agent may save memories there"
+        for item in other_memory_entries(servers, codex_memory_name(url), url)
+    ]
+
+
+def claude_memory_argv(claude: str, url: str, key: str) -> list[str]:
+    # --header is variadic, so it goes after the name and URL.
+    return [
+        claude,
+        "mcp",
+        "add",
+        "--scope",
+        "local",
+        "--transport",
+        "http",
+        MEMORY_SERVER_NAME,
+        memory_url(url),
+        "--header",
+        f"{MEMORY_HEADER}: {key}",
+    ]
+
+
+def claude_memory_manual_command(directory: Path, url: str) -> str:
+    command = shlex.join(claude_memory_argv("claude", url, "KEYPLACEHOLDER")).replace(
+        f"'{MEMORY_HEADER}: KEYPLACEHOLDER'",
+        f'"{MEMORY_HEADER}: ${{CAURA_API_KEY:?export your agent key first}}"',
+    )
+    return f"cd {shlex.quote(str(directory))} && {command}"
+
+
+def wire_claude_memory(directory: Path, url: str, key: str) -> str:
+    claude = shutil.which("claude")
+    if not claude:
+        raise SetupError(
+            "`claude` is not on PATH. Run this yourself (with CAURA_API_KEY exported):\n  "
+            + claude_memory_manual_command(directory, url)
+        )
+    subprocess.run(
+        [claude, "mcp", "remove", "--scope", "local", MEMORY_SERVER_NAME],
+        cwd=directory,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    result = subprocess.run(
+        claude_memory_argv(claude, url, key), cwd=directory, capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        detail = scrub((result.stderr or result.stdout).strip(), key)
+        raise SetupError(f"`claude mcp add` for the memory server failed ({result.returncode}): {detail}")
+    return (
+        f"claude mcp add --scope local --transport http {MEMORY_SERVER_NAME} {memory_url(url)} "
+        f"(project {show(directory)}; the key is stored in {show(claude_config_file())})"
     )
 
 
@@ -444,6 +655,8 @@ class Options:
     dry_run: bool = False
     hooks: bool = False
     codex_config: Path | None = None
+    # Also register this server's memory MCP (`caura`), so durable memories land here.
+    memory: bool = True
     transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False)
     # `join` prints its own next steps; it reads back what setup wrote.
     next_steps: bool = True
@@ -506,24 +719,48 @@ def run_setup(options: Options, echo: Callable[[str], None], run_async) -> int:
         if options.dry_run:
             echo(f"  {prefix}run in {directory}:")
             echo("      " + shlex.join(claude_add_argv("claude", mask(key), config_path, mcp)))
+            if options.memory:
+                echo("      " + shlex.join(claude_memory_argv("claude", url, mask(key))))
         else:
             try:
                 echo("  [ok] MCP server " + wire_claude(directory, key, config_path, mcp))
+                if options.memory:
+                    echo("  [ok] memory MCP server " + wire_claude_memory(directory, url, key))
             except SetupError as exc:
                 echo(f"  [!!] {exc}")
                 return finish(options, runtime, directory, config_path, echo, run_async, key, failed=True)
+        if options.memory:
+            for warning in claude_memory_warnings(directory, url):
+                echo(f"  [!!] {warning}")
+            echo(
+                f"       check which servers this project loads: cd {shell_path(directory)} && claude mcp list"
+            )
     else:
         codex_path = (options.codex_config or codex_config_path()).expanduser()
+        tables = [bus_table(key, config_path, mcp)]
+        if options.memory:
+            tables.append(memory_table(url, key))
+        current = codex_path.read_text() if codex_path.exists() else ""
         if options.dry_run:
-            update_codex_text(codex_path.read_text() if codex_path.exists() else "", key, config_path, mcp)
+            planned = current
+            for table in tables:
+                planned = update_codex_table(planned, table)
             echo(
                 f"  {prefix}add/update [mcp_servers.{SERVER_NAME}] in {show(codex_path)} (backup kept, mode 600)"
             )
             echo(
                 f"      command = {mcp}; env CAURA_API_KEY={mask(key)}, CAURA_BUS_AGENT_CONFIG={config_path}"
             )
+            if options.memory:
+                echo(f"  {prefix}add/update [mcp_servers.{codex_memory_name(url)}] in {show(codex_path)}")
+                echo(f"      url = {memory_url(url)}; http_headers {MEMORY_HEADER}={mask(key)}")
         else:
-            echo("  [ok] MCP server " + wire_codex(key, config_path, mcp, codex_path))
+            for line in wire_codex(tables, codex_path):
+                echo("  [ok] MCP server" + ("s " if options.memory else " ") + line)
+        if options.memory:
+            for warning in codex_memory_warnings(current, url):
+                echo(f"  [!!] {warning}")
+            echo("       check which servers Codex loads: codex mcp list")
     return finish(options, runtime, directory, config_path, echo, run_async, key, failed=False)
 
 
@@ -572,6 +809,9 @@ def finish(options, runtime, directory, config_path, echo, run_async, key, *, fa
     if waker:
         echo(f"     In another terminal, keep the wake listener running:  {waker}")
     echo('  2. Try: "Use the caura-bus peer tool: discover available peers and tell me who they are."')
+    if options.memory:
+        listing = "claude mcp list" if runtime == "claude" else "codex mcp list"
+        echo(f"     Memory: `{listing}` should show this server's memory MCP ({memory_url(options.url)}).")
     echo(
         "  3. Check the connection any time:  CAURA_API_KEY=<your key> caura-bus doctor "
         f"--config {shell_path(config_path)}"

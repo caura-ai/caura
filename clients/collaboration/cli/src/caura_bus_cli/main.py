@@ -199,6 +199,9 @@ def setup(
         "--hooks",
         help="Also enable wake-ups: Claude Code hooks, or the Codex waker command (stores the key 0600)",
     ),
+    no_memory: bool = typer.Option(
+        False, "--no-memory", help="Do not register this server's Caura memory MCP (`caura`)"
+    ),
 ):
     """Connect Claude Code or Codex to Caura: verify the key, write config, wire MCP and instructions."""
     if not key:
@@ -213,6 +216,7 @@ def setup(
         config=config,
         dry_run=dry_run,
         hooks=hooks,
+        memory=not no_memory,
     )
     try:
         code = run_setup(options, typer.echo, asyncio.run)
@@ -246,6 +250,9 @@ def join(
     description: str | None = typer.Option(None, help="Register this agent's expertise for discovery"),
     tenant: str | None = typer.Option(None, help="Workspace (default: your landing workspace)"),
     no_hooks: bool = typer.Option(False, "--no-hooks", help="Skip wake-up hooks / the Codex waker"),
+    no_memory: bool = typer.Option(
+        False, "--no-memory", help="Do not register this server's Caura memory MCP (`caura`)"
+    ),
     broker: bool | None = typer.Option(
         None,
         "--broker/--no-broker",
@@ -260,7 +267,7 @@ def join(
     command and offers to run it instead.
     """
     if broker is not False:
-        prefer_broker(url, name, runtime, directory, description, tenant, not no_hooks, broker)
+        prefer_broker(url, name, runtime, directory, description, tenant, not no_hooks, broker, not no_memory)
     try:
         # Take the secrets out of the environment so no child process (claude mcp add) inherits them.
         password = os.environ.pop("CAURA_PASSWORD", "")
@@ -279,6 +286,7 @@ def join(
                 description=description,
                 tenant=tenant,
                 hooks=not no_hooks,
+                memory=not no_memory,
                 totp=(lambda: totp_env) if totp_env else (lambda: tty_prompt("Two-factor code", secret=True)),
             ),
             typer.echo,
@@ -296,7 +304,7 @@ def join(
     raise typer.Exit(code)
 
 
-def prefer_broker(url, name, runtime, directory, description, tenant, hooks, required):
+def prefer_broker(url, name, runtime, directory, description, tenant, hooks, required, memory=True):
     """Offer `caura agent connect` when the broker is installed; return to continue with join."""
     found = broker_mod.find_broker()
     if found is None:
@@ -314,6 +322,7 @@ def prefer_broker(url, name, runtime, directory, description, tenant, hooks, req
             description=description,
             tenant=tenant,
             hooks=hooks,
+            memory=memory,
         )
     except JoinError as exc:
         if required:

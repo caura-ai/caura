@@ -186,6 +186,7 @@ Write an explicit Caura memory after (1) receiving a human decision via
 `resume_context`, (2) sending or receiving a completion report, and (3) making a
 design ruling. Save only the decision/outcome text, not bodies of other messages
 or credentials. The bus does not write memories on your behalf.
+For all durable memory, use the `caura` memory tools of THIS Caura server (in Codex the `caura-<host>` server), never another Caura or memory server.
 
 Call `peer(op="memory_context", args={"delivery_id":"..."})`, then pass the
 returned object unchanged as `metadata` to the existing same-tenant Caura core

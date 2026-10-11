@@ -225,6 +225,9 @@ def test_claude_join_signs_in_mints_and_runs_setup(env):
     assert config.with_suffix(".key").read_text().strip() == raw  # hooks on by default
     add = [c for c in claude_calls(env.capture) if c["argv"][:2] == ["mcp", "add"]]
     assert add and f"CAURA_API_KEY={raw}" in add[0]["argv"]
+    # The same server's memory MCP is registered too, with the same key.
+    assert add[1]["argv"][-4:] == ["caura", f"{URL}/mcp/", "--header", f"X-API-Key: {raw}"]
+    assert "caura-bus and the caura memory server" in result.output
     assert (env.project / "CLAUDE.md").exists()
     assert (env.project / ".claude" / "settings.local.json").exists()
     assert f"Agent {name} is registered in workspace {TENANT}" in result.output
@@ -240,9 +243,18 @@ def test_codex_join_writes_codex_config_and_prints_waker(env):
     assert name.startswith("codex-my-project-")
     codex = tomllib.loads((env.home / ".codex" / "config.toml").read_text())
     assert codex["mcp_servers"]["caura-bus"]["env"]["CAURA_API_KEY"] in env.dashboard.keys
+    memory = codex["mcp_servers"]["caura-caura-test"]
+    assert memory["url"] == f"{URL}/mcp/" and memory["http_headers"]["X-API-Key"] in env.dashboard.keys
     assert (env.project / "AGENTS.md").exists()
     assert "Restart Codex" in result.output
     assert "caura-bus wake --runtime codex --thread latest" in result.output
+
+
+def test_join_no_memory_wires_only_the_bus(env):
+    result = invoke("--dir", str(env.project), "--no-memory")
+    assert result.exit_code == 0, result.output
+    adds = [c for c in claude_calls(env.capture) if c["argv"][:2] == ["mcp", "add"]]
+    assert [c["argv"][4] for c in adds] == ["caura-bus"]
 
 
 def test_no_hooks_skips_key_file(env):

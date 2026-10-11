@@ -271,6 +271,7 @@ class JoinOptions:
     description: str | None = None
     tenant: str | None = None
     hooks: bool = True
+    memory: bool = True
     totp: Callable[[], str] | None = field(default=None, repr=False)
     env: Mapping[str, str] | None = field(default=None, repr=False)
     ancestor: Callable[[], str | None] = field(default=_ancestor_runtime, repr=False)
@@ -375,6 +376,7 @@ def run_join(options: JoinOptions, echo: Callable[[str], None], run_async) -> in
             agent_id=name,
             description=options.description,
             hooks=options.hooks,
+            memory=options.memory,
             codex_config=options.codex_config,
             transport=options.setup_transport,
             next_steps=False,
@@ -410,7 +412,8 @@ def run_join(options: JoinOptions, echo: Callable[[str], None], run_async) -> in
     echo(f"Agent {name} is registered in workspace {tenant}.")
     echo("Next steps:")
     if runtime == "claude":
-        echo("  1. Restart this Claude Code session (or run /mcp) to load caura-bus.")
+        loaded = "caura-bus and the caura memory server" if options.memory else "caura-bus"
+        echo(f"  1. Restart this Claude Code session (or run /mcp) to load {loaded}.")
         echo("     An MCP server added while a session is running is not loaded until the session restarts.")
         if options.hooks:
             echo("     Wake-up hooks are read at startup too, so a restart is best.")
@@ -421,6 +424,9 @@ def run_join(options: JoinOptions, echo: Callable[[str], None], run_async) -> in
             echo("     Send it one message, then keep this running in another terminal for wake-ups:")
             echo(f"       {setup_options.waker}")
     echo('  2. Try: "Use the caura-bus peer tool: discover available peers and tell me who they are."')
+    if options.memory:
+        listing = "claude mcp list" if runtime == "claude" else "codex mcp list"
+        echo(f"     `{listing}` should show this server's memory MCP at {url}/mcp/.")
     if setup_options.config_path:
         config_path = setup_options.config_path
         key_hint = (

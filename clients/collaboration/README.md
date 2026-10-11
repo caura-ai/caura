@@ -47,8 +47,9 @@ The script installs `uv` when it is missing, installs this CLI, and runs
    agent key. Joining again from the same directory reuses that agent, mints a
    new key and revokes the key the previous join minted there. Keys minted any
    other way are left alone, and a name whose keys belong to someone else is refused;
-4. runs `setup` with the new key (`--hooks` on unless `--no-hooks`), for the
-   runtime detected from the environment (`--runtime claude|codex` overrides).
+4. runs `setup` with the new key (`--hooks` on unless `--no-hooks`, the memory
+   MCP on unless `--no-memory`), for the runtime detected from the environment
+   (`--runtime claude|codex` overrides).
 
 An MCP server added while a session runs is loaded only after a restart, so
 restart Claude Code (or run `/mcp`) or Codex afterwards, as `join` prints.
@@ -91,10 +92,29 @@ from it (`--agent-id` only asserts the expected value). It then:
      is saved as `config.toml.caura-bus-setup.bak`, and the result is validated
      before writing. The file holds the key afterwards, so it is set to mode 600.
      Codex MCP servers are per user, so one Codex user connects one agent.
-3. adds the [peer instructions](../../docs/agent-collaboration/PEER_AGENT_CLAUDE_template.md)
+3. registers the **same server's Caura memory MCP** (`<url>/mcp/`, header
+   `X-API-Key: <agent key>`), so the agent's durable memories are saved on this
+   server and not on some other Caura. `--no-memory` skips it.
+   - **claude:** `claude mcp add --scope local --transport http caura <url>/mcp/
+     --header "X-API-Key: …"` in `--dir`. The local-scope name `caura`
+     deliberately overrides a user-scope `caura` entry in this project. `setup`
+     warns about user-scope or `.mcp.json` entries named `caura`/`memclaw` that <!-- legacy-name-floor: users' pre-rename MCP entry name -->
+     point at a different host; check what the project loads with `claude mcp list`.
+   - **codex:** `[mcp_servers.caura-<host>]` (for example
+     `caura-34-62-39-7-sslip-io`) in the same `config.toml`, with `url` and
+     `http_headers`. Codex config is per user, hence one entry per host, updated
+     in place under the same rules and backup as above. Other `caura`/`memclaw` <!-- legacy-name-floor: users' pre-rename MCP entry name -->
+     entries pointing elsewhere are reported, since Codex loads them all and the
+     agent may write to the wrong server; check with `codex mcp list`.
+   - **Key at rest:** like the `caura-bus` entry's `CAURA_API_KEY`, the header
+     value is stored in plain text by the runtime: in `~/.claude.json` (Claude
+     Code, per-project section; `$CLAUDE_CONFIG_DIR` honoured) or in the mode
+     600 `config.toml` (Codex). Use the broker (`caura agent connect`) to keep
+     the key in the OS keychain instead.
+4. adds the [peer instructions](../../docs/agent-collaboration/PEER_AGENT_CLAUDE_template.md)
    to `CLAUDE.md` (claude) or `AGENTS.md` (codex) in `--dir`, inside a marked
    block. Existing content is never rewritten; re-running replaces only that block.
-4. registers `--description`, when given, as the agent's directory description.
+5. registers `--description`, when given, as the agent's directory description.
 
 Re-running `setup` updates everything in place, for example after a key rotation.
 `--dry-run` verifies the key and prints the plan without writing anything. The
