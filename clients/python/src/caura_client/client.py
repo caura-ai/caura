@@ -88,6 +88,7 @@ class Caura:
         timeout: float = 30.0,
         transport: httpx.BaseTransport | None = None,
         allow_insecure_http: bool | None = None,
+        session_id: str | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("api_key is required")
@@ -106,6 +107,20 @@ class Caura:
             timeout=timeout,
             transport=transport,
         )
+        self.set_session(session_id)
+
+    def set_session(self, session_id: str | None) -> None:
+        """Put later calls in an agent session (``X-Caura-Session-Id``), or in none.
+
+        Caura's value report counts per session: a memory is reused once per
+        session that recalls it, and its origin is the work its session did
+        before writing it. Start a new one per conversation or task run.
+        """
+        self.session_id = session_id
+        if session_id:
+            self._http.headers["X-Caura-Session-Id"] = session_id
+        else:
+            self._http.headers.pop("X-Caura-Session-Id", None)
 
     # ------------------------------------------------------------------ ops
     def write(
@@ -116,9 +131,16 @@ class Caura:
         memory_type: str | None = None,
         fleet_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        origin: dict[str, int] | None = None,
         **extra: Any,
     ) -> Memory:
-        """Persist a memory. Returns the enriched ``Memory`` (POST /api/v1/memories)."""
+        """Persist a memory. Returns the enriched ``Memory`` (POST /api/v1/memories).
+
+        ``origin``: the work behind this memory, from your model provider's own
+        usage since the session's previous write — ``tokens_in``,
+        ``tokens_out``, ``turns``. Read it from the provider's responses; leave
+        it out rather than estimate.
+        """
         body: dict[str, Any] = {"tenant_id": self.tenant_id, "content": content}
         resolved_agent = agent_id or self.agent_id
         if resolved_agent:
@@ -129,6 +151,8 @@ class Caura:
             body["fleet_id"] = fleet_id
         if metadata is not None:
             body["metadata"] = metadata
+        if origin:
+            body["origin"] = {**{k: origin[k] for k in ("tokens_in", "tokens_out", "turns") if k in origin}, "source": "sdk"}
         body.update(extra)
         return Memory.from_dict(self._post("/api/v1/memories", body))
 

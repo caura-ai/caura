@@ -139,6 +139,26 @@ For credentials, scopes, and the full API surface, see the
 [Caura docs](https://caura.ai/docs). Production fleets should use
 [per-agent keys](https://caura.ai/docs/integrations/per-agent-keys).
 
+## Sessions and the work behind a memory
+
+Caura's value report counts per agent session: a memory is reused once per
+session that recalls it, and its origin is the work its session did before
+writing it. Put calls in a session, and pass the provider usage you already
+have:
+
+```ts
+const mc = new Caura("mc_xxx", { tenantId: "my-team", agentId: "my-agent", sessionId: "run-a" });
+
+// Sum `usage` from your model provider's responses since the last write.
+await mc.write("Staging resets every Saturday at 23:00 UTC.", {
+  origin: { tokensIn: 18400, tokensOut: 1250, turns: 6 },
+});
+
+mc.setSession("run-b"); // a new conversation or task run
+```
+
+`origin` is sent as SDK-reported. Leave it out rather than estimate.
+
 ## Request headers
 
 Every request carries `X-API-Key` (your key), `Content-Type: application/json`

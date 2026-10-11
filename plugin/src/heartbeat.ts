@@ -860,6 +860,8 @@ async function processCommand(cmd: {
           // test compares this array with ``_plugin_files``.
           "context-engine.internal.ts",
           "openclaw-sdk-bridge.ts",
+          // ``origin-usage.ts`` — statically imported by ``context-engine.ts``.
+          "origin-usage.ts",
           "task-trail.ts",
         ];
         const FALLBACK_ROOT_FILES = [

@@ -165,6 +165,19 @@ export interface CauraOptions {
    * `CAURA_ALLOW_INSECURE_HTTP` (`true` or `1`); an explicit `false` beats it.
    */
   allowInsecureHttp?: boolean;
+  /**
+   * The agent session later calls belong to (`X-Caura-Session-Id`). Caura's
+   * value report counts per session: a memory is reused once per session that
+   * recalls it. Change it with `setSession` per conversation or task run.
+   */
+  sessionId?: string;
+}
+
+/** The work behind a memory, from your model provider's own usage since the session's previous write. */
+export interface Origin {
+  tokensIn?: number;
+  tokensOut?: number;
+  turns?: number;
 }
 
 export interface WriteOptions {
@@ -172,6 +185,8 @@ export interface WriteOptions {
   memoryType?: string;
   fleetId?: string;
   metadata?: Record<string, unknown>;
+  /** Read it from the provider's responses; leave it out rather than estimate. */
+  origin?: Origin;
   [extra: string]: unknown;
 }
 
@@ -244,17 +259,31 @@ export class Caura {
     const f = options.fetch ?? globalThis.fetch;
     if (!f) throw new Error("global fetch is unavailable; pass options.fetch or use Node 18+");
     this.fetchImpl = f;
+    this.setSession(options.sessionId);
+  }
+
+  /** Put later calls in an agent session (`X-Caura-Session-Id`), or in none. */
+  setSession(sessionId: string | undefined | null): void {
+    if (sessionId) this.headers["X-Caura-Session-Id"] = sessionId;
+    else delete this.headers["X-Caura-Session-Id"];
   }
 
   /** Persist a memory. POST /api/v1/memories */
   async write(content: string, options: WriteOptions = {}): Promise<Memory> {
-    const { agentId, memoryType, fleetId, metadata, ...extra } = options;
+    const { agentId, memoryType, fleetId, metadata, origin, ...extra } = options;
     const body: Record<string, unknown> = { tenant_id: this.tenantId, content };
     const resolvedAgent = agentId ?? this.agentId;
     if (resolvedAgent) body.agent_id = resolvedAgent;
     if (memoryType) body.memory_type = memoryType;
     if (fleetId) body.fleet_id = fleetId;
     if (metadata !== undefined) body.metadata = metadata;
+    if (origin) {
+      const o: Record<string, unknown> = { source: "sdk" };
+      if (origin.tokensIn !== undefined) o.tokens_in = origin.tokensIn;
+      if (origin.tokensOut !== undefined) o.tokens_out = origin.tokensOut;
+      if (origin.turns !== undefined) o.turns = origin.turns;
+      body.origin = o;
+    }
     Object.assign(body, extra);
     return toMemory(await this.request("POST", "/api/v1/memories", body));
   }

@@ -1,6 +1,7 @@
 # Value metering: the work memory saves
 
 Status: in progress (Erni + Claude), stacked on `CAURA-000-usage-metering`.
+Done: A, B, C (plugin and SDKs). Open: C (Claude Code / Codex hook), D, E.
 
 ## Why
 

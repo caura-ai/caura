@@ -655,3 +655,31 @@ for (const method of ["search", "recall"] as const) {
     assert.equal("callerAgentId" in bodies[1], false);
   });
 }
+
+test("a session rides every call until changed", async () => {
+  const seen: (string | undefined)[] = [];
+  const client = makeClient(
+    (_url, init) => {
+      seen.push((init.headers as Record<string, string>)["X-Caura-Session-Id"]);
+      return jsonResponse(201, { id: "m1", content: "x" });
+    },
+    { agentId: "a1", sessionId: "run-1" },
+  );
+  await client.write("x");
+  client.setSession("run-2");
+  await client.write("x");
+  client.setSession(undefined);
+  await client.write("x");
+  assert.deepEqual(seen, ["run-1", "run-2", undefined]);
+});
+
+test("origin is sent as sdk-reported, with only what was given", async () => {
+  const client = makeClient(
+    (_url, init) => {
+      assert.deepEqual(JSON.parse(init.body as string).origin, { source: "sdk", tokens_in: 1200, turns: 4 });
+      return jsonResponse(201, { id: "m1", content: "x" });
+    },
+    { agentId: "a1" },
+  );
+  await client.write("x", { origin: { tokensIn: 1200, turns: 4 } });
+});

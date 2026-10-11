@@ -435,3 +435,28 @@ def test_submit_interview_returns_a_non_dict_body_unchanged():
         return httpx.Response(200, json=[])
 
     assert make_client(handler).submit_interview(**INTERVIEW_WINDOW) == []
+
+
+def test_a_session_rides_every_call_until_changed():
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers.get("X-Caura-Session-Id"))
+        return httpx.Response(201, json={"id": "m1", "content": "x"})
+
+    c = make_client(handler, agent_id="a1", session_id="run-1")
+    c.write("x")
+    c.set_session("run-2")
+    c.write("x")
+    c.set_session(None)
+    c.write("x")
+    assert seen == ["run-1", "run-2", None]
+
+
+def test_origin_is_sent_as_sdk_reported_and_only_what_was_given():
+    def handler(request):
+        body = json.loads(request.content)
+        assert body["origin"] == {"tokens_in": 1200, "tokens_out": 300, "source": "sdk"}
+        return httpx.Response(201, json={"id": "m1", "content": "x"})
+
+    make_client(handler, agent_id="a1").write("x", origin={"tokens_in": 1200, "tokens_out": 300})

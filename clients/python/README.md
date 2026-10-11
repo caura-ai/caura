@@ -188,6 +188,25 @@ Caller-owned keys belong under `metadata` (`mc.write("...", metadata={"tags": [.
 fields, deliberately. See
 [api-surfaces.md](https://github.com/caura-ai/caura/blob/main/docs/api-surfaces.md#request-body-contract-writes-are-strict-searches-are-not).
 
+## Sessions and the work behind a memory
+
+Caura's value report counts per agent session: a memory is reused once per
+session that recalls it, and its origin is the work its session did before
+writing it. Put calls in a session, and pass the provider usage you already
+have:
+
+```python
+mc = Caura("mc_xxx", tenant_id="my-team", agent_id="my-agent", session_id="run-2026-10-11-a")
+
+# Sum `usage` from your model provider's responses since the last write.
+mc.write("Staging resets every Saturday at 23:00 UTC.",
+         origin={"tokens_in": 18_400, "tokens_out": 1_250, "turns": 6})
+
+mc.set_session("run-2026-10-11-b")  # a new conversation or task run
+```
+
+`origin` is sent as SDK-reported. Leave it out rather than estimate.
+
 ## caura-interviewer — Claude Code + Cursor adapter
 
 Installing this package provides the `caura-interviewer` CLI. When upgrading an
