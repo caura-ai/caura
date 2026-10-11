@@ -52,13 +52,6 @@
       "category": "cross-tenant-by-design"
     },
     {
-      "id": "method:dedup_review_enqueue",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write",
-      "note": "Verified: payload['tenant_id'] is assigned directly to the DedupReview row. new_memory_id and candidate_memory_id are caller-supplied and unvalidated, but inert: both are plain UUID columns with NO foreign key, so an unknown id cannot be told from a real one, and new_content/candidate_content are caller-supplied snapshots, so storage never joins back to the rows they name. Traced in #1180."
-    },
-    {
       "id": "method:entity_add",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
@@ -382,13 +375,6 @@
       "evidence": "no binding tenant read from the request",
       "category": "opaque-body-write",
       "note": "Verified: every body item carries tenant_id; memory_add_all rejects mixed-tenant batches and scopes recovery."
-    },
-    {
-      "id": "route:POST /api/v1/storage/memories/dedup-reviews",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write",
-      "note": "Verified: body tenant_id is assigned directly to the DedupReview row by dedup_review_enqueue. The two caller-supplied memory ids are unvalidated but inert -- no FK, and no join back to the rows they name. See method:dedup_review_enqueue; traced in #1180."
     },
     {
       "id": "route:POST /api/v1/storage/reports",

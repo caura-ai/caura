@@ -33,18 +33,6 @@ from common.provider_names import ProviderName
 logger = logging.getLogger(__name__)
 
 
-# Per-provider tenant-config attribute holding the API key. Hoisted to
-# module level so ``has_credentials`` doesn't allocate a fresh dict on
-# every call (tier-1 health checks hit this on the warm path).
-_TENANT_KEY_ATTR: dict[str, str] = {
-    ProviderName.OPENAI: "openai_api_key",
-    ProviderName.ANTHROPIC: "anthropic_api_key",
-    ProviderName.OPENROUTER: "openrouter_api_key",
-    ProviderName.ATLASCLOUD: "atlascloud_api_key",
-    ProviderName.GEMINI: "gemini_api_key",
-}
-
-
 def _env_key(provider: str) -> str:
     """Map a ProviderName to the env var that holds its API key."""
     if provider == ProviderName.OPENAI:
@@ -58,19 +46,6 @@ def _env_key(provider: str) -> str:
     if provider == ProviderName.GEMINI:
         return os.environ.get("GEMINI_API_KEY", "")
     return ""
-
-
-def has_credentials(provider: str, tenant_config: object | None = None) -> bool:
-    """Check whether credentials are available for *provider*.
-
-    Tenant config first (if provided), then env vars.
-    """
-    attr_name = _TENANT_KEY_ATTR.get(provider)
-    if attr_name is None:
-        return False
-    if tenant_config is not None:
-        return bool(getattr(tenant_config, attr_name, None))
-    return bool(_env_key(provider))
 
 
 # 09/02 M-10 / M-11 — the model chain did not know which provider it was

@@ -50,8 +50,9 @@ middleware never reads a demo header; that divergence is already recorded in
 prose at ``tests/test_route_authz_gaps.py``, and this file does not restate it.
 
 The third exists because ``trust_required`` is a PUBLISHED CLAIM WITH NO
-ENFORCEMENT BEHIND IT. ``required_trust()`` in ``tools/_registry.py`` is
-exported and, measured across this repo, called by nothing: the field is
+ENFORCEMENT BEHIND IT. Nothing reads it to gate a call (a ``required_trust()``
+lookup in ``tools/_registry.py`` was exported for that, called by nothing, and
+deleted in L-215): the field is
 range-checked by ``test_tools_registry.py`` and serialised into
 ``plugin/tools.json``, which ``test_tools_export_in_sync.py`` holds in lockstep
 with the registry and which is the manifest clients read. The gates that
@@ -101,7 +102,6 @@ TRUST_GATES = frozenset(
         "enforce_fleet_write",
         "enforce_fleet_read",
         "enforce_fleet_read_many",
-        "enforce_memory_read",
         "keystone_min_trust",
         "effective_keystone_min_trust",
         "_resolve_read_fleet_gate",
@@ -602,8 +602,8 @@ def test_every_mutating_op_passes_the_write_scope_gate() -> None:
 def test_declared_trust_is_corroborated_by_a_gate() -> None:
     """A published threshold must have something under it that can refuse.
 
-    ``required_trust()`` is called by nothing, so the number in the manifest
-    and the number the server applies are independent. This does not check they
+    Nothing reads ``trust_required`` to gate a call, so the number in the
+    manifest and the number the server applies are independent. This does not check they
     are EQUAL — the thresholds come from scope, not from the registry, so there
     is no single number to compare against — but a tool that advertises a trust
     requirement while reaching no trust gate at all is advertising nothing.

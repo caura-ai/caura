@@ -113,14 +113,6 @@ async def update_search_profile(agent_id: str, request: Request) -> dict:
     return {"ok": True}
 
 
-@router.get("/{agent_id}/search-profile")
-async def get_search_profile(agent_id: str, tenant_id: str) -> dict:
-    agent = await _svc.agent_get_by_id(agent_id, tenant_id)
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    return {"search_profile": getattr(agent, "search_profile", None)}
-
-
 @router.post("/{agent_id}/search-profile/reset")
 async def reset_search_profile(agent_id: str, request: Request) -> dict:
     body: dict = await request.json()

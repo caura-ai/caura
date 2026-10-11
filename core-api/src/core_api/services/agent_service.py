@@ -767,28 +767,6 @@ def memory_access_allowed_for_agent(
     return agent.get("trust_level", 0) >= (3 if write else 2)
 
 
-async def enforce_memory_read(
-    tenant_id: str,
-    caller_agent_id: AgentIdentity | None,
-    memory: Any,
-) -> None:
-    """Raise 404 if ``caller_agent_id`` may not read ``memory`` (an ORM row).
-
-    404 (not 403) is deliberate: it mirrors the list/search contract where an
-    out-of-scope row simply does not appear, and avoids confirming the
-    existence of another fleet's/agent's memory_id to an unauthorized caller.
-    """
-    allowed = await authorize_memory_access(
-        tenant_id,
-        caller_agent_id,
-        visibility=getattr(memory, "visibility", None),
-        owner_agent_id=getattr(memory, "agent_id", None),
-        fleet_id=getattr(memory, "fleet_id", None),
-    )
-    if not allowed:
-        raise HTTPException(status_code=404, detail="Memory not found")
-
-
 async def memory_reader(
     tenant_id: str,
     caller_agent_id: AgentIdentity | None,

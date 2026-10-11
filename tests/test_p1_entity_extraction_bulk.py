@@ -86,8 +86,6 @@ def _build_sc_mock(
         or [{"input_idx": i, "created": True} for i in range(len(upsert_returns))]
     )
     # Spies for the legacy per-row paths — must stay at zero call_count.
-    sc.find_entity_link = AsyncMock()
-    sc.create_entity_link = AsyncMock()
     sc.find_exact_entity = AsyncMock()
     sc.find_by_embedding_similarity = AsyncMock()
     sc.update_entity = AsyncMock()
@@ -148,8 +146,6 @@ async def test_bulk_path_collapses_to_3_storage_https_for_n_entities(
     assert sc.bulk_upsert_entities.call_count == 1
     assert sc.bulk_upsert_entity_links.call_count == 1
     # Legacy per-row paths must be untouched.
-    assert sc.find_entity_link.call_count == 0
-    assert sc.create_entity_link.call_count == 0
     assert sc.find_exact_entity.call_count == 0
     assert sc.create_entity.call_count == 0
 

@@ -80,16 +80,10 @@ async def _memory(client: AsyncClient, tenant_id: str) -> str:
 
 
 async def _link(client: AsyncClient, tenant_id: str, memory_id: str, entity_id: str) -> None:
-    resp = await client.post(
-        f"{PREFIX}/entities/links",
-        json={
-            "tenant_id": tenant_id,
-            "memory_id": memory_id,
-            "entity_id": entity_id,
-            "role": "subject",
-        },
-    )
+    item = {"input_idx": 0, "memory_id": memory_id, "entity_id": entity_id, "role": "subject"}
+    resp = await client.post(f"{PREFIX}/entities/links/bulk", json={"tenant_id": tenant_id, "items": [item]})
     assert resp.status_code == 200, resp.text
+    assert resp.json()[0].get("error") is None, resp.text
 
 
 async def _relation(client: AsyncClient, tenant_id: str, from_id: str, to_id: str) -> None:

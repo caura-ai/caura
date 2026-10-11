@@ -28,6 +28,34 @@ class AuditEntry(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AuditChainBreak(BaseModel):
+    """Where a verification stopped trusting the chain, and why."""
+
+    reason: str
+    seq: int | None = None
+    id: str | None = None
+    created_at: str | None = None
+    head_seq: int | None = None
+    chain_seq: int | None = None
+
+
+class AuditChainVerdict(BaseModel):
+    """The verdict on one window of a tenant's audit hash chain.
+
+    ``valid`` alone does not mean the chain is intact: a ``truncated`` window
+    skips the tail-against-head check. Read ``next_seq`` and verify the next
+    window until one comes back un-truncated.
+    """
+
+    tenant_id: str
+    valid: bool
+    verified_count: int
+    head_seq: int | None = None
+    truncated: bool | None = None
+    next_seq: int | None = None
+    first_broken: AuditChainBreak | None = None
+
+
 @router.get(
     "/audit-log",
     response_model=list[AuditEntry],
@@ -93,3 +121,26 @@ async def list_audit_log(
             datetime.fromisoformat(last["created_at"]), UUID(str(last["id"]))
         )
     return rows[:limit]
+
+
+@router.get("/audit-log/verify", response_model=AuditChainVerdict, response_model_exclude_none=True)
+async def verify_audit_log(
+    tenant_id: str = Query(...),
+    # The storage verifier's bound: one window is read into memory.
+    limit: int = Query(default=100_000, ge=1, le=500_000),
+    start_seq: int = Query(
+        default=1, ge=1, description="Where the window starts: the previous window's ``next_seq``."
+    ),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Verify the tenant's tamper-evident audit hash chain (L-207).
+
+    Every audit event is chained, and storage can recompute the chain, but no
+    route reached that check, so nothing could tell an intact log from one with
+    rows edited or deleted. An admin-plane read like the settings: agent
+    credentials and org members are refused.
+    """
+    auth.enforce_tenant(tenant_id)
+    auth.enforce_not_agent_credential("verify the audit chain")
+    auth.enforce_not_org_member("verify the audit chain")
+    return await get_storage_client().verify_audit_chain(tenant_id, limit=limit, start_seq=start_seq)

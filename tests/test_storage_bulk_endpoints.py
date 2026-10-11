@@ -589,7 +589,7 @@ async def test_bulk_upsert_links_creates_all_new(sc):
 
 async def test_bulk_upsert_links_is_idempotent_on_pk_collision(sc):
     """Two writes for the same (memory_id, entity_id) — second is no-op,
-    role from first call is preserved (mirrors find_entity_link → skip)."""
+    role from first call is preserved."""
     tid = _t()
     m = await _write_memory(sc, tid)
     e = await _create_entity(sc, tid, "the-entity")

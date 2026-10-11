@@ -1990,16 +1990,12 @@ class TestEntities:
         mem = (await client.post(f"{PREFIX}/memories", json=mem_payload)).json()
         memory_id = mem["id"]
 
+        item = {"input_idx": 0, "memory_id": memory_id, "entity_id": entity_id, "role": "subject"}
         link_resp = await client.post(
-            f"{PREFIX}/entities/links",
-            json={
-                "tenant_id": tenant_id,
-                "memory_id": memory_id,
-                "entity_id": entity_id,
-                "role": "subject",
-            },
+            f"{PREFIX}/entities/links/bulk", json={"tenant_id": tenant_id, "items": [item]}
         )
         assert link_resp.status_code == 200, link_resp.text
+        assert link_resp.json()[0].get("error") is None, link_resp.text
 
         # Get entity with linked memories
         resp = await client.get(
@@ -2023,38 +2019,6 @@ class TestEntities:
         fake_id = str(uuid.uuid4())
         resp = await client.get(f"{PREFIX}/entities/{fake_id}", params={"tenant_id": tenant_id})
         assert resp.status_code == 404
-
-    async def test_link_to_ghost_entity_409s_without_leaking_driver_text(
-        self,
-        client: AsyncClient,
-        tenant_id: str,
-        fleet_id: str,
-    ) -> None:
-        """A caller-supplied id that does not exist is a 409, and the body says so
-        without quoting the database.
-
-        Review round 2: the message becomes the 409 ``detail`` the caller reads, so
-        interpolating ``exc.orig`` hands out the constraint name, the table name and
-        the offending value. ``entity_add`` draws the same line.
-        """
-        mem = (await client.post(f"{PREFIX}/memories", json=_memory_payload(tenant_id, fleet_id))).json()
-        ghost_entity_id = str(uuid.uuid4())
-
-        resp = await client.post(
-            f"{PREFIX}/entities/links",
-            json={
-                "tenant_id": tenant_id,
-                "memory_id": mem["id"],
-                "entity_id": ghost_entity_id,
-                "role": "subject",
-            },
-        )
-
-        assert resp.status_code == 409, resp.text
-        detail = resp.json()["detail"]
-        assert ghost_entity_id not in detail, "the offending value must not be echoed back"
-        assert "violates" not in detail.lower(), "raw driver text reached the caller"
-        assert "memory_entity_links" not in detail, "internal table name reached the caller"
 
 
 # =====================================================================

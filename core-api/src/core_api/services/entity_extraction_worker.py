@@ -926,8 +926,7 @@ async def process_entity_extraction(
             # ---- Step 3: bulk entity-link upsert ----
             #
             # Idempotent (memory_id, entity_id) writes — pre-existing
-            # rows have their role preserved, matching today's
-            # ``find_entity_link → skip-if-exists`` flow.
+            # rows have their role preserved.
             # ``input_idx`` must be contiguous in ``[0, len(link_items))``
             # for the storage-side ``_validate_input_idxs`` check —
             # otherwise gaps in the source ``filtered`` list (entries

@@ -9,22 +9,13 @@ no longer load-bearing on core-api. Cron cadence now lives on
 
 import pytest
 
-from core_api.constants import (
-    LIFECYCLE_BATCH_SIZE,
-    LIFECYCLE_STALE_ARCHIVE_WEIGHT,
-)
+from core_api.constants import LIFECYCLE_STALE_ARCHIVE_WEIGHT
 
 
 @pytest.mark.unit
 class TestLifecycleConstants:
-    def test_batch_size(self):
-        assert LIFECYCLE_BATCH_SIZE == 500
-
     def test_stale_archive_weight(self):
         assert LIFECYCLE_STALE_ARCHIVE_WEIGHT == 0.3
-
-    def test_batch_size_reasonable(self):
-        assert 50 <= LIFECYCLE_BATCH_SIZE <= 5000
 
 
 @pytest.mark.unit

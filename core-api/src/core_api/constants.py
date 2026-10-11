@@ -113,14 +113,9 @@ OPENAI_EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embeddin
 EMBEDDING_RETRY_ATTEMPTS = 2
 EMBEDDING_RETRY_DELAY_S = 1.0
 EMBEDDING_REEMBED_DELAY_S = 30.0
-EMBEDDING_REEMBED_BATCH_SIZE = 50
 EMBEDDING_CACHE_TTL = 259200  # 3 days — embeddings are deterministic per model+query
 
 # ── Memory ──
-# Derived from MEMORY_TYPES (the SoT) so adding a new type in
-# common/enrichment/constants.py propagates here without hand-editing.
-MEMORY_TYPES_PATTERN = "^(" + "|".join(MEMORY_TYPES) + ")$"
-
 # Types a caller may CREATE: the full vocabulary minus server-reserved types
 # (outcome/rule/insight — authored only by internal flows and rejected at the
 # write boundary) and classifier-deprecated types (semantic — folded into
@@ -449,7 +444,6 @@ ANN_POOL_SHADOW = 0
 FRESHNESS_REFERENCE = 0
 FRESHNESS_DECAY_DAYS = 90
 FRESHNESS_FLOOR = 0.7
-ENTITY_BOOST_FACTOR = 1.3
 ENTITY_TOKEN_MIN_LENGTH = 2  # A7: was 3; lowered to retain 2-char acronym
 # entities (``AI`` / ``ML`` / ``PR`` / ``UI`` / ``QA`` / ``HR`` /
 # ``UK`` / ``US``…). 2-char English fillers (``in`` / ``on`` / ``to``
@@ -926,8 +920,6 @@ EVOLVE_RULE_TEMPERATURE = 0.3  # analytical rule generation
 EVOLVE_OUTCOME_TYPES = ("success", "failure", "partial")
 EVOLVE_MAX_RELATED_IDS = 50  # cap on memories touched per evolve call
 
-MEMORY_RECALL_SUMMARY_NUM_SENTENCES = 10
-
 # ── Pagination ──
 DEFAULT_LIST_LIMIT = 50
 MAX_LIST_LIMIT = 500
@@ -938,37 +930,7 @@ MAX_AUDIT_LIMIT = 200
 AUDIT_NEXT_CURSOR_HEADER = "X-Next-Cursor"
 DEFAULT_ENTITY_LIMIT = 100
 
-# ── Tier limits ──
-TIER_LIMITS = {
-    "free": {
-        "max_memories": 10_000,
-        "writes_per_month": 5_000,
-        "searches_per_month": 5_000,
-    },
-    "pro": {
-        "max_memories": 250_000,
-        "writes_per_month": 25_000,
-        "searches_per_month": 50_000,
-    },
-    "business": {
-        "max_memories": 1_000_000,
-        "writes_per_month": 100_000,
-        "searches_per_month": 500_000,
-    },
-    "custom": {
-        "max_memories": None,
-        "writes_per_month": None,
-        "searches_per_month": None,
-    },
-}
-
 # ── Agent trust levels ──
-TRUST_LEVELS = {
-    0: "restricted",
-    1: "standard",
-    2: "cross_fleet",
-    3: "admin",
-}
 DEFAULT_TRUST_LEVEL = 1
 MIN_TRUST_LEVEL = 0
 MAX_TRUST_LEVEL = 3
@@ -976,10 +938,8 @@ MAX_TRUST_LEVEL = 3
 # ── Auth ──
 API_KEY_HEADER = "X-API-Key"
 API_KEY_PREFIX = "mc_"
-API_KEY_HASH_DISPLAY_LENGTH = 12
 
 # ── Fleet heartbeat ──
-HEARTBEAT_INTERVAL_SECONDS = 60
 NODE_STALE_SECONDS = 90
 NODE_OFFLINE_SECONDS = 300
 
@@ -1019,7 +979,6 @@ INTERVIEW_TEMPERATURE = 0.2
 
 # ── Bulk write ──
 BULK_MAX_ITEMS = 100  # max memories per bulk request
-BULK_EMBEDDING_CONCURRENCY = 10  # max parallel embedding calls in bulk mode
 BULK_ENRICHMENT_CONCURRENCY = 10  # max parallel enrichment calls in bulk mode
 BULK_REEMBED_PATCH_CONCURRENCY = 8  # max parallel embedding PATCHes after a bulk re-embed (L-184)
 # Outer cap on the whole enrichment gather. One hung provider call would
@@ -1092,8 +1051,6 @@ BULK_STRONG_EMBED_TIMEOUT_SECONDS = read_float_env(
 )
 
 # ── Lifecycle automation ──
-LIFECYCLE_INTERVAL_HOURS = 24  # run lifecycle cycle every N hours
-LIFECYCLE_BATCH_SIZE = 500  # max memories per status transition batch
 # ``LIFECYCLE_STALE_ARCHIVE_WEIGHT`` is re-exported from
 # ``common.constants`` (see top of this file) — canonical location is
 # ``common`` so core-worker can read the same value without depending

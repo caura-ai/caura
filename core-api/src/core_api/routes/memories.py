@@ -1223,7 +1223,7 @@ async def get_memory(
         # Fleet/agent-scope authorization: a by-id read must honor the same
         # scope_agent + cross-fleet trust ladder the list/search paths enforce,
         # so a same-tenant agent credential can't read a peer's scoped row by id.
-        # 404 (not 403) mirrors ``enforce_memory_read`` — out-of-scope rows
+        # 404 (not 403), as on the list and search paths — out-of-scope rows
         # simply don't exist for the caller. ``authorize_memory_access`` no
         # longer issues a DB query (its agent lookup routes through the storage
         # client), so ``db`` is threaded through but unused here; the ``get_db``

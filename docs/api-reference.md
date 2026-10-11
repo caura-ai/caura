@@ -113,6 +113,7 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/admin/entity-extraction/rerun-lost` | POST | Re-run entity extraction for memories that lost it (a run that raised, was cancelled by a shutdown, or settled for the regex heuristic), oldest first, up to 50 per call and 3 per memory; answers with counts at once. core-operations calls it hourly (admin key) |
 | `/settings` | GET / PUT | Per-tenant configuration. `quarantine.below_trust` (0 to 4; unset or 0 holds nothing) holds every write from an agent below that trust level as `quarantined`, for a person to release or reject; `quarantine.below_trust_by_fleet` overrides it per fleet (`{fleet_id: level}`). A raised level applies to every write sent after the change is saved, on every instance; a write caught between two quick changes gets a 503 to retry |
 | `/audit-log` | GET | Audit log entries |
+| `/audit-log/verify` | GET | Verify the tenant's tamper-evident audit hash chain: `valid`, `verified_count`, and `next_seq` when the window is `truncated` (page with `start_seq`). Agent credentials and org members are refused. |
 | `/mcp` | POST | MCP Streamable HTTP endpoint (mounted at app root, NOT under `/api/v1`) |
 
 **Auth:** Most data endpoints require an `X-API-Key`; admin endpoints require

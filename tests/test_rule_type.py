@@ -11,18 +11,22 @@ Benchmark:
 - Enrichment heuristic latency unchanged with new keywords
 """
 
-import re
 import time
 
 import pytest
+from pydantic import TypeAdapter, ValidationError
 
 from core_api.constants import (
     FRESHNESS_DECAY_DAYS,
     FRESHNESS_FLOOR,
     MEMORY_TYPES,
-    MEMORY_TYPES_PATTERN,
     TYPE_DECAY_DAYS,
 )
+from core_api.schemas import MemoryCreate
+
+# What a write's ``memory_type`` is validated against (L-208: the regex
+# ``MEMORY_TYPES_PATTERN`` these tests used to check was read by nothing).
+_WRITE_TYPE = TypeAdapter(MemoryCreate.model_fields["memory_type"].annotation)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -49,12 +53,13 @@ class TestRuleConstants:
     def test_rule_in_memory_types(self):
         assert "rule" in MEMORY_TYPES
 
-    def test_rule_matches_pattern(self):
-        assert re.match(MEMORY_TYPES_PATTERN, "rule")
+    def test_the_write_schema_accepts_rule(self):
+        assert _WRITE_TYPE.validate_python("rule") == "rule"
 
-    def test_pattern_still_rejects_invalid(self):
-        assert not re.match(MEMORY_TYPES_PATTERN, "trigger")
-        assert not re.match(MEMORY_TYPES_PATTERN, "constraint")
+    def test_the_write_schema_still_rejects_invalid(self):
+        for invalid in ("trigger", "constraint"):
+            with pytest.raises(ValidationError):
+                _WRITE_TYPE.validate_python(invalid)
 
     def test_rule_in_type_decay_days(self):
         assert "rule" in TYPE_DECAY_DAYS

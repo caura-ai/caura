@@ -79,8 +79,6 @@ async def test_extraction_triggers_cross_links_when_enabled(
     # written to the graph of a row governance dropped mid-extraction. These
     # tests exercise a live row.
     sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None})
-    sc.find_entity_link = AsyncMock(return_value=None)
-    sc.create_entity_link = AsyncMock()
     mock_sc_factory.return_value = sc
 
     mock_embed.return_value = [0.1] * 10
@@ -158,8 +156,6 @@ async def test_extraction_skips_cross_links_when_disabled(
     # written to the graph of a row governance dropped mid-extraction. These
     # tests exercise a live row.
     sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None})
-    sc.find_entity_link = AsyncMock(return_value=None)
-    sc.create_entity_link = AsyncMock()
     mock_sc_factory.return_value = sc
 
     mock_embed.return_value = [0.1] * 10
@@ -237,8 +233,6 @@ async def test_extraction_cross_link_failure_is_nonfatal(
     # written to the graph of a row governance dropped mid-extraction. These
     # tests exercise a live row.
     sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None})
-    sc.find_entity_link = AsyncMock(return_value=None)
-    sc.create_entity_link = AsyncMock()
     mock_sc_factory.return_value = sc
 
     mock_embed.return_value = [0.1] * 10
@@ -320,8 +314,6 @@ def _graph_sc(*, deleted_at):
     sc.bulk_upsert_entity_links = AsyncMock(
         return_value=[{"input_idx": 0, "created": True}]
     )
-    sc.find_entity_link = AsyncMock(return_value=None)
-    sc.create_entity_link = AsyncMock()
     sc.purge_entity_artifacts = AsyncMock(
         return_value={"links": 1, "relations": 0, "entities": 1}
     )

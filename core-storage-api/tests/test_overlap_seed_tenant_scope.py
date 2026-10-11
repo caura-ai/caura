@@ -26,11 +26,10 @@ async def _linked_memory(client: AsyncClient, tenant: str, name: str, status: st
     )
     assert memory.status_code == 200, memory.text
     mid = memory.json()["id"]
-    link = await client.post(
-        f"{PREFIX}/entities/links",
-        json={"tenant_id": tenant, "memory_id": mid, "entity_id": entity.json()["id"], "role": "subject"},
-    )
+    item = {"input_idx": 0, "memory_id": mid, "entity_id": entity.json()["id"], "role": "subject"}
+    link = await client.post(f"{PREFIX}/entities/links/bulk", json={"tenant_id": tenant, "items": [item]})
     assert link.status_code == 200, link.text
+    assert link.json()[0].get("error") is None, link.text
     return mid
 
 

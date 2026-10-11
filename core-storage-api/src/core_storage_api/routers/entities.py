@@ -446,29 +446,6 @@ async def create_relation(request: Request) -> dict:
 # ------------------------------------------------------------------
 
 
-@router.post("/links")
-async def create_memory_entity_link(request: Request) -> dict:
-    body: dict = await request.json()
-    # Tenant guard, same shape as ``PATCH /entities/{entity_id}``: the body
-    # supplied only bare ``memory_id`` / ``entity_id`` / ``role``, so knowing two
-    # UUIDs was enough to create a graph edge across a tenant boundary (#1124).
-    # Removed from the body as well as read, because ``MemoryEntityLink`` has no
-    # ``tenant_id`` column — the join table is tenantless, which is the whole
-    # difficulty — and ``MemoryEntityLink(**data)`` would raise TypeError on it.
-    tenant_id = _require(body, "tenant_id")
-    del body["tenant_id"]
-    try:
-        link = await _svc.entity_add_entity_link(tenant_id, body)
-    except ValueError as e:
-        # H-05 follow-up: a caller-supplied memory_id/entity_id that does not
-        # exist, or a pair already linked, is a client error. It used to escape as
-        # an IntegrityError → 500, which core-api could not tell apart from
-        # storage being unreachable — so a bad id and an outage degraded
-        # identically. Same 409 mapping ``create_entity`` above already uses.
-        raise HTTPException(status_code=409, detail=str(e))
-    return orm_to_dict(link, MEMORY_ENTITY_LINK_FIELDS)
-
-
 @router.post("/links/bulk")
 async def bulk_upsert_memory_entity_links(request: Request) -> list[dict]:
     """Idempotently create many memory→entity links in one round-trip.

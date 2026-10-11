@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -19,7 +20,8 @@ from common.enrichment.constants import (
     MEMORY_TYPES,
     SERVER_RESERVED_MEMORY_TYPES,
 )
-from common.llm._credentials import _TENANT_KEY_ATTR
+from common.llm import _credentials
+from common.provider_names import ProviderName
 from core_api.heartbeat.payload import normalise_version
 from core_api.schemas import SearchResponse
 from core_api.services.organization_settings import DEFAULT_SETTINGS
@@ -76,11 +78,40 @@ def test_l81_env_example_names_real_flags_and_the_1024_dim_migration() -> None:
     assert "1024" in names[0]
 
 
-def test_l82_every_tenant_llm_provider_is_documented() -> None:
+def _tenant_key_vars(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """Each tenant LLM provider, and the env var ``_env_key`` reads its key from.
+
+    Recorded from the lookup itself, so a provider added there is held to the
+    docs with no list here to update. The map this read before,
+    ``_TENANT_KEY_ATTR``, was read by nothing in production and was deleted
+    (L-201).
+    """
+    asked: list[str] = []
+
+    class _Environ:
+        def get(self, name: str, default: str = "") -> str:
+            asked.append(name)
+            return default
+
+    monkeypatch.setattr(_credentials, "os", SimpleNamespace(environ=_Environ()))
+    found: dict[str, str] = {}
+    for provider in ProviderName:
+        asked.clear()
+        _credentials._env_key(provider)
+        if asked:
+            found[provider.value] = asked[0]
+    return found
+
+
+def test_l82_every_tenant_llm_provider_is_documented(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     env = _read(".env.example")
     matrix = _read("docs/self-hosting.md")
-    assert [p for p in _TENANT_KEY_ATTR if f"{p.upper()}_API_KEY=" not in env] == []
-    assert [p for p in _TENANT_KEY_ATTR if p not in matrix] == []
+    providers = _tenant_key_vars(monkeypatch)
+    assert ProviderName.OPENAI in providers, "the lookup recorded nothing"
+    assert [var for var in providers.values() if f"{var}=" not in env] == []
+    assert [p for p in providers if p not in matrix] == []
 
 
 def test_l83_db_pool_knobs_say_where_compose_takes_them() -> None:

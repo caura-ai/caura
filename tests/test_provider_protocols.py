@@ -12,6 +12,9 @@ from common.embedding import (
     get_embedding_provider,
 )
 from common.embedding.providers.openai import OpenAIEmbeddingProvider
+from common.llm.providers.fake import FakeLLMProvider
+from common.llm.providers.openai import OpenAILLMProvider
+from common.llm.providers.vertex import VertexLLMProvider
 from core_api.constants import VECTOR_DIM
 from core_api.protocols import (
     EmbeddingProvider,
@@ -23,9 +26,6 @@ from core_api.providers import (
     get_stm_backend,
 )
 from core_api.providers._retry import call_with_fallback, call_with_retry
-from core_api.providers.fake_provider import FakeLLMProvider
-from core_api.providers.openai_provider import OpenAILLMProvider
-from core_api.providers.vertex_provider import VertexLLMProvider
 
 # ---------------------------------------------------------------------------
 # Protocol conformance

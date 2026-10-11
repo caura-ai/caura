@@ -95,7 +95,6 @@ from common.models import (
     BackgroundTaskLog,
     Base,
     CrystallizationReport,
-    DedupReview,
     Document,
     Entity,
     FleetCommand,
@@ -1048,17 +1047,11 @@ _ALIAS_ILIKE = (
     ") AS a(alias) WHERE a.alias ILIKE :alias_pattern ESCAPE '\\')"
 )
 
-# The one answer ``entity_add_entity_link`` gives for every way a link can be
-# refused: either endpoint absent, either endpoint owned by another tenant, or
-# the pair already linked. A constant rather than the string repeated at each
-# raise, because the whole point is that the causes are indistinguishable on the
-# wire — two copies could drift apart and reintroduce the existence oracle one
-# word at a time. The true cause is logged, never returned.
-_LINK_REJECTED = "entity link rejected: memory_id or entity_id does not exist, or the link already exists"
-# M-64. One answer for "no such entity" and "that entity is another tenant's",
-# for the reason ``_LINK_REJECTED`` already carries: this service authenticates
-# no request, so a distinguishable refusal turns the route into an existence
-# oracle over the whole entity id space (GHSA-wgvw-28pq-jc36).
+# M-64. One answer for "no such entity" and "that entity is another tenant's":
+# this service authenticates no request, so a distinguishable refusal turns the
+# route into an existence oracle over the whole entity id space
+# (GHSA-wgvw-28pq-jc36). A constant rather than the string repeated at each
+# raise, so two copies cannot drift apart and reintroduce the oracle.
 _RELATION_REJECTED = "relation rejected: from_entity_id or to_entity_id does not exist"
 # M-84. One message for every cause, as ``_RELATION_REJECTED`` is: which end, the
 # evidence or the existing edge is not the caller's to know.
@@ -3545,50 +3538,6 @@ class PostgresService:
                 return None
             return row.Memory, float(row.similarity)
 
-    # ------------------------------------------------------------------
-    # A1 #18 — Dedup review queue
-    # ------------------------------------------------------------------
-
-    async def dedup_review_enqueue(self, payload: dict) -> DedupReview:
-        """Insert a new ``dedup_reviews`` row in ``pending`` status.
-
-        Caller-supplied fields:
-          - tenant_id, fleet_id, agent_id (scoping)
-          - new_memory_id (may be NULL — rejected writes never persist)
-          - candidate_memory_id (the matched memory)
-          - new_content, candidate_content (snapshots — preserved even
-            if either memory is later deleted)
-          - similarity, judge_verdict, judge_confidence
-          - decision_band (one of ``DEDUP_REVIEW_BANDS``)
-        """
-        from common.models.dedup_review import DEDUP_REVIEW_BANDS
-
-        band = payload.get("decision_band")
-        if band not in DEDUP_REVIEW_BANDS:
-            raise ValueError(f"unknown decision_band: {band!r}")
-
-        async with get_session() as session:
-            row = DedupReview(
-                tenant_id=payload["tenant_id"],
-                fleet_id=payload.get("fleet_id"),
-                agent_id=payload["agent_id"],
-                new_memory_id=UUID(payload["new_memory_id"]) if payload.get("new_memory_id") else None,
-                candidate_memory_id=UUID(payload["candidate_memory_id"]),
-                new_content=payload["new_content"],
-                candidate_content=payload["candidate_content"],
-                similarity=float(payload["similarity"]),
-                judge_verdict=payload.get("judge_verdict"),
-                judge_confidence=(
-                    float(payload["judge_confidence"])
-                    if payload.get("judge_confidence") is not None
-                    else None
-                ),
-                decision_band=band,
-            )
-            session.add(row)
-            await session.flush()
-            return row
-
     async def memory_conflicts_list(
         self,
         tenant_id: str,
@@ -3744,65 +3693,6 @@ class PostgresService:
                 metadata_=payload.get("metadata"),
             )
             session.add(row)
-            await session.flush()
-            return row
-
-    async def dedup_review_list(
-        self,
-        tenant_id: str,
-        status: str = "pending",
-        limit: int = 50,
-    ) -> list[DedupReview]:
-        """Return reviews for ``tenant_id`` filtered by ``status``,
-        newest-first. Default ``status='pending'`` keeps the busy-queue
-        case (decided rows piled up) from drowning the caller."""
-        async with get_session() as session:
-            stmt = (
-                select(DedupReview)
-                .where(
-                    DedupReview.tenant_id == tenant_id,
-                    DedupReview.status == status,
-                )
-                .order_by(DedupReview.created_at.desc())
-                .limit(limit)
-            )
-            result = await session.execute(stmt)
-            return list(result.scalars().all())
-
-    async def dedup_review_decide(
-        self,
-        review_id: UUID,
-        *,
-        tenant_id: str,
-        status: str,
-    ) -> DedupReview | None:
-        """Transition a review from ``pending`` to one of the terminal
-        statuses (``confirmed_duplicate`` / ``override_not_duplicate``
-        / ``dismissed``). Returns the updated row, or None if the row
-        does not belong to ``tenant_id``. Raises ``ValueError`` for unknown
-        statuses.
-
-        This storage seam has no end-user identity to derive a reviewer from,
-        so decisions remain explicitly unattributed instead of persisting a
-        caller-supplied identity claim.
-        """
-        from common.models.dedup_review import DEDUP_REVIEW_STATUSES
-
-        if status not in DEDUP_REVIEW_STATUSES or status == "pending":
-            raise ValueError(f"invalid terminal status: {status!r}")
-
-        async with get_session() as session:
-            row = await session.scalar(
-                select(DedupReview).where(
-                    DedupReview.id == review_id,
-                    DedupReview.tenant_id == tenant_id,
-                )
-            )
-            if row is None:
-                return None
-            row.status = status
-            row.decided_by = None
-            row.decided_at = datetime.now(UTC)
             await session.flush()
             return row
 
@@ -5721,40 +5611,6 @@ class PostgresService:
             result = await session.execute(stmt)
             return result.scalar() or 0
 
-    async def memory_count_missing_embeddings(
-        self,
-        tenant_id: str,
-        fleet_id: str | None = None,
-    ) -> int:
-        """Count live memories with no embedding — /embedding-coverage's numerator.
-
-        Deliberately adjacent to ``memory_count_active``: that one is the
-        denominator of the same ratio, and the two only produce a meaningful
-        percentage while their population predicates stay identical (live
-        statuses, not soft-deleted, same tenant/fleet scope). Keep them in
-        sync — a mismatch here is what previously let coverage_pct exceed
-        100% or go negative.
-
-        A COUNT rather than ``len(rows)``: the caller needs a number, and the
-        row-returning version it replaced was ``LIMIT``-ed, so it silently
-        capped the numerator (and fetched ``content`` it never read).
-        """
-        async with get_read_session() as session:
-            stmt = (
-                select(func.count())
-                .select_from(Memory)
-                .where(
-                    Memory.tenant_id == tenant_id,
-                    Memory.status.in_(LIVE_MEMORY_STATUSES),
-                    Memory.deleted_at.is_(None),
-                    Memory.embedding.is_(None),
-                )
-            )
-            if fleet_id:
-                stmt = stmt.where(Memory.fleet_id == fleet_id)
-            result = await session.execute(stmt)
-            return result.scalar() or 0
-
     async def memory_embedding_coverage_for_tenant(
         self,
         tenant_id: str,
@@ -5815,7 +5671,7 @@ class PostgresService:
         services are internal-ingress, and no metric carried the number.
 
         Deliberately ONE statement with a FILTER'd count rather than a loop over
-        ``memory_count_missing_embeddings`` per tenant: the loop is N round-trips
+        a per-tenant count: the loop is N round-trips
         against the same pool that serves live traffic, and it cannot produce a
         consistent snapshot — tenants counted early and late see different
         states, so the totals need not add up.
@@ -6473,29 +6329,6 @@ class PostgresService:
                 "avg_recall_count": avg_recall,
             }
 
-    async def memory_list_recent(
-        self,
-        tenant_id: str,
-        fleet_id: str | None,
-        *,
-        limit: int = 20,
-    ) -> list[Memory]:
-        async with get_read_session() as session:
-            stmt = (
-                select(Memory)
-                .where(
-                    Memory.tenant_id == tenant_id,
-                    Memory.deleted_at.is_(None),
-                    Memory.status == "active",
-                )
-                .order_by(Memory.created_at.desc())
-                .limit(limit)
-            )
-            if fleet_id is not None:
-                stmt = stmt.where(Memory.fleet_id == fleet_id)
-            result = await session.execute(stmt)
-            return list(result.scalars().all())
-
     # ------------------------------------------------------------------
     # G) Recall tracking
     # ------------------------------------------------------------------
@@ -6785,9 +6618,9 @@ class PostgresService:
         on entities (#1081) and ``_MEMORY_IMMUTABLE_FIELDS`` names it on
         memories (#1118) — so a row cannot change hands between the two.
 
-        Shares ``_owned_link_endpoints`` with the two ``POST /entities/links``
-        paths (#1124), so all three writers to this join table resolve ownership
-        the same way and a fix to one cannot miss the others.
+        Shares ``_owned_link_endpoints`` with ``POST /entities/links/bulk``
+        (#1124), so both writers to this join table resolve ownership the same
+        way and a fix to one cannot miss the other.
         """
         # Bulk-insert with ``ON CONFLICT (memory_id, entity_id) DO NOTHING``
         # so a pair another writer already committed is skipped instead of
@@ -9783,70 +9616,6 @@ class PostgresService:
             ).all()
         )
 
-    async def entity_add_entity_link(self, tenant_id: str, data: dict) -> MemoryEntityLink:
-        """Create one memory→entity link, both ends scoped to ``tenant_id``.
-
-        Raises ``ValueError`` — which the router maps to 409 — when either end
-        is absent or belongs to another tenant. Deliberately the same exception,
-        with the same message, that a genuine FK violation already raised: a
-        distinguishable answer would make the route an existence oracle for both
-        id spaces, on a service that authenticates no request
-        (GHSA-wgvw-28pq-jc36).
-        """
-        async with get_session() as session:
-            memory_id, entity_id = data["memory_id"], data["entity_id"]
-            if not isinstance(memory_id, UUID):
-                memory_id = UUID(memory_id)
-            if not isinstance(entity_id, UUID):
-                entity_id = UUID(entity_id)
-            owned_memories, owned_entities = await self._owned_link_endpoints(
-                session, tenant_id, {memory_id}, {entity_id}
-            )
-            if memory_id not in owned_memories or entity_id not in owned_entities:
-                logger.info(
-                    "Entity link rejected for memory %s → entity %s: not in tenant %s",
-                    memory_id,
-                    entity_id,
-                    tenant_id,
-                )
-                # Same message as the IntegrityError branch below, so the two
-                # causes are one answer on the wire. The distinct log line above
-                # is what keeps the real cause available to an operator.
-                raise ValueError(_LINK_REJECTED)
-            # Explicit rather than left to the column default: this is a
-            # caller-facing endpoint, and which provenance it writes decides
-            # whether a content edit may delete the row.
-            link = MemoryEntityLink(**{**data, "source": LINK_SOURCE_CALLER})
-            session.add(link)
-            try:
-                await session.flush()
-            except IntegrityError as exc:
-                # H-05 follow-up: ``memory_id`` and ``entity_id`` are both
-                # caller-supplied and both carry an FK, so pointing at a row that
-                # does not exist is a CLIENT error. It used to escape as a bare
-                # IntegrityError → 500, which made the fault indistinguishable
-                # from storage being down: core-api saw HTTPStatusError(500) for
-                # both and could only treat them the same.
-                #
-                # ``ValueError`` because the router already maps it to 409 for
-                # ``entity_add`` (routers/entities.py) — same shape, one
-                # convention. The composite PK ``(memory_id, entity_id)`` lands
-                # here too: re-linking an existing pair is a conflict, not a
-                # server fault.
-                #
-                # The raw ``exc.orig`` is logged, never interpolated into the
-                # message: that message becomes the 409 ``detail`` the caller
-                # reads, and the driver text carries constraint names and the
-                # offending values. ``entity_add`` above draws the same line.
-                logger.info(
-                    "Entity link rejected for memory %s → entity %s: %s",
-                    data.get("memory_id"),
-                    data.get("entity_id"),
-                    exc.orig,
-                )
-                raise ValueError(_LINK_REJECTED) from exc
-            return link
-
     async def entity_bulk_upsert_links(self, tenant_id: str, items: list[dict]) -> list[dict]:
         """Idempotently create many memory→entity links in one statement.
 
@@ -9854,8 +9623,7 @@ class PostgresService:
         Returns aligned list with ``{"input_idx", "memory_id", "entity_id",
         "role", "created": bool}``. ``created=False`` means a row with the
         same composite PK ``(memory_id, entity_id)`` already existed;
-        its ``role`` is preserved (mirrors today's ``find_entity_link``
-        → ``create_entity_link`` flow which skips on a hit).
+        its ``role`` is preserved.
 
         Every item is scoped to ``tenant_id`` on **both** ends. One binding
         tenant for the request rather than one per item: a per-item tenant would
@@ -13738,35 +13506,6 @@ class PostgresService:
             versions = [row[0] for row in rows.all() if row[0]]
             return int(count or 0), versions
 
-    async def fleet_delete_node(
-        self,
-        *,
-        tenant_id: str,
-        node_id: UUID,
-    ) -> bool:
-        """Delete one node and its commands. True when the node existed.
-
-        Commands first: ``fleet_commands.node_id`` carries an FK to
-        ``fleet_nodes.id``, so the reverse order fails on the constraint.
-        Same ordering ``fleet_delete`` uses for the whole-fleet case, and one
-        session so a crash between the two cannot leave commands orphaned
-        against a node that is gone.
-        """
-        async with get_session() as session:
-            await session.execute(_table(FleetCommand).delete().where(FleetCommand.node_id == node_id))
-            result = await session.execute(
-                _table(FleetNode)
-                .delete()
-                .where(
-                    FleetNode.tenant_id == tenant_id,
-                    FleetNode.id == node_id,
-                )
-            )
-            # rowcount lives on CursorResult; the async execute is typed
-            # as returning the base Result. Same ignore as the other
-            # delete/update paths in this file.
-            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
-
     # -- Commands --
 
     async def fleet_get_pending_commands(
@@ -14023,24 +13762,6 @@ class PostgresService:
                 stmt = stmt.where(FleetCommand.node_id.in_(_node_ids_bound_to(owner_principal, tenant_id)))
             result = await session.execute(stmt)
             return result.scalars().all()
-
-    async def fleet_delete_commands_for_nodes(
-        self,
-        *,
-        tenant_id: str,
-        node_ids: list[UUID],
-    ) -> None:
-        if not node_ids:
-            return
-        async with get_session() as session:
-            await session.execute(
-                _table(FleetCommand)
-                .delete()
-                .where(
-                    FleetCommand.tenant_id == tenant_id,
-                    FleetCommand.node_id.in_(node_ids),
-                )
-            )
 
     # ══════════════════════════════════════════════════════════════════════
     #  AUDIT

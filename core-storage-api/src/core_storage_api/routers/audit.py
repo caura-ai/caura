@@ -184,9 +184,9 @@ async def verify_audit_chain(
 
     Walks the chain in ``seq`` order, recomputes each ``event_hash``, and
     checks linkage + genesis + tail-against-head. Returns
-    ``{valid: true, verified_count, head_seq, truncated}`` when intact — plus
-    ``next_seq`` when ``truncated`` — else
-    ``{valid: false, verified_count, first_broken: {seq, id, reason}}``
+    ``{tenant_id, valid: true, verified_count, head_seq, truncated}`` when
+    intact — plus ``next_seq`` when ``truncated`` — else
+    ``{tenant_id, valid: false, verified_count, first_broken: {seq, id, reason}}``
     where ``reason`` ∈ {seq_gap, prev_hash_mismatch, event_hash_mismatch,
     tail_truncated, missing_predecessor}. Declared before the ``GET ""`` list
     route so ``/audit-logs/verify`` matches here, not the list handler.

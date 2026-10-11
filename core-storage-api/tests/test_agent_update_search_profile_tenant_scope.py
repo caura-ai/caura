@@ -36,10 +36,9 @@ async def _agent(client: AsyncClient, tenant_id: str, profile: dict) -> tuple[st
 
 
 async def _profile(client: AsyncClient, tenant_id: str, agent_id: str) -> dict | None:
-    response = await client.get(
-        f"{PREFIX}/agents/{agent_id}/search-profile",
-        params={"tenant_id": tenant_id},
-    )
+    """Read back from the agent row: the ``GET .../search-profile`` route this
+    used had no production caller and was deleted (L-206)."""
+    response = await client.get(f"{PREFIX}/agents/{agent_id}", params={"tenant_id": tenant_id})
     assert response.status_code == 200, response.text
     return response.json()["search_profile"]
 

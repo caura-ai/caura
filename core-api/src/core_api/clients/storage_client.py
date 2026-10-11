@@ -1135,38 +1135,11 @@ class CoreStorageClient:
         # through. See bulk_find_by_content_hashes for the same reasoning.
         return await self._post_optional("/memories/semantic-duplicate", data, read=False)
 
-    # ------------------------------------------------------------------
-    # A1 #18 — Dedup review queue
-    # ------------------------------------------------------------------
-
-    async def enqueue_dedup_review(self, payload: dict) -> dict:
-        """Append a row to the ambiguous-dedup review queue. Caller-side
-        wraps this in ``track_task`` to keep the write path off the
-        queue's failure modes."""
-        return await self._post("/memories/dedup-reviews", payload, read=False)  # type: ignore[return-value]
-
     async def record_memory_conflict(self, payload: dict) -> dict:
         """A55 — persist a ``memory_conflicts`` classification record. Additive:
         the memory-row status/supersedes effect is applied separately, so this
         never changes retrieval behaviour."""
         return await self._post("/memories/conflicts", payload, read=False)  # type: ignore[return-value]
-
-    async def list_dedup_reviews(self, params: dict) -> list[dict]:
-        """List reviews for a tenant, default ``status='pending'``."""
-        return await self._get(  # type: ignore[return-value]
-            "/memories/dedup-reviews",
-            read=True,
-            **{k: v for k, v in params.items() if v is not None},
-        )
-
-    async def decide_dedup_review(self, review_id, status: str, *, tenant_id: str) -> dict:
-        """Record a terminal decision (confirmed_duplicate /
-        override_not_duplicate / dismissed) on a review row."""
-        return await self._post(  # type: ignore[return-value]
-            f"/memories/dedup-reviews/{review_id}/decision",
-            {"status": status, "tenant_id": tenant_id},
-            read=False,
-        )
 
     async def find_entity_overlap_candidates(self, data: dict) -> list[dict]:
         # Called from contradiction_detector.py as a *post-commit* async
@@ -1562,17 +1535,6 @@ class CoreStorageClient:
             read=False,
         )
         return result.get("rows", []) if isinstance(result, dict) else []
-
-    async def get_recent_memories(
-        self,
-        tenant_id: str,
-        fleet_id: str | None = None,
-        limit: int = 10,
-    ) -> list[dict]:
-        params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit}
-        if fleet_id is not None:
-            params["fleet_id"] = fleet_id
-        return await self._get_list("/memories/recent", **params)
 
     async def get_lifecycle_candidates(self, tenant_id: str, fleet_id: str | None = None) -> dict:
         params: dict[str, Any] = {"tenant_id": tenant_id}
@@ -2068,12 +2030,6 @@ class CoreStorageClient:
     async def create_relation(self, data: dict) -> dict:
         return await self._post("/entities/relations", data)  # type: ignore[return-value]
 
-    async def create_entity_link(self, tenant_id: str, data: dict) -> dict:
-        # The link is addressed by two bare UUIDs, so the tenant has to travel
-        # with them: storage scopes both ends to it. The explicit arg wins over
-        # any ``tenant_id`` in ``data``.
-        return await self._post("/entities/links", {**data, "tenant_id": tenant_id})  # type: ignore[return-value]
-
     async def bulk_upsert_entity_links(self, tenant_id: str, items: list[dict]) -> list[dict]:
         """Idempotently create many memory→entity links in one round-trip.
 
@@ -2299,16 +2255,6 @@ class CoreStorageClient:
         return await self._post_optional(
             f"{_agent_path(agent_id)}/search-profile/reset",
             {"tenant_id": tenant_id},
-        )
-
-    async def get_search_profile(
-        self,
-        agent_id: str,
-        tenant_id: str,
-    ) -> dict | None:
-        return await self._get(
-            f"{_agent_path(agent_id)}/search-profile",
-            tenant_id=tenant_id,
         )
 
     async def backfill_from_memories(self, tenant_id: str) -> dict:
@@ -3054,12 +3000,6 @@ class CoreStorageClient:
             params["fleet_id"] = fleet_id
         return await self._get("/fleet/stats", **params) or {}
 
-    async def get_node(self, tenant_id: str, node_name: str) -> dict | None:
-        return await self._get(f"/fleet/nodes/{node_name}", tenant_id=tenant_id)
-
-    async def delete_node(self, tenant_id: str, node_name: str) -> bool:
-        return await self._delete(f"/fleet/nodes/{node_name}", tenant_id=tenant_id)
-
     async def release_node(
         self, tenant_id: str, node_id: str, owner_principal: str | None = None
     ) -> dict | None:
@@ -3388,9 +3328,9 @@ class CoreStorageClient:
     async def verify_audit_chain(self, tenant_id: str, limit: int = 100_000, start_seq: int = 1) -> dict:
         """Verify a tenant's tamper-evident audit hash chain.
 
-        Returns ``{valid, verified_count, head_seq, truncated}`` (or
-        ``first_broken`` on a detected break). Used by the enterprise
-        governance UI's "chain intact" check.
+        Returns ``{tenant_id, valid, verified_count, head_seq, truncated}``
+        (or ``first_broken`` on a detected break). Backs ``GET
+        /api/v1/audit-log/verify`` (L-207).
 
         **``valid: true`` alone does not mean the chain is intact.** A result
         with ``truncated: true`` covers only ``limit`` rows starting at

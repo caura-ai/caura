@@ -48,7 +48,11 @@ class OpSpec:
 @dataclass(frozen=True)
 class ToolSpec:
     """Declarative spec for a single MCP tool. Drives MCP registration,
-    `/tool-descriptions` output, plugin `tools.json`, and per-tool trust gating.
+    `/tool-descriptions` output and plugin `tools.json`.
+
+    ``trust_required`` is published metadata, not the gate: the MCP handlers
+    take their thresholds from scope, and ``test_mcp_authz_gate_inventory``
+    holds every published level to a gate that can refuse (L-215).
 
     Param schemas are derived from `handler`'s signature at runtime — do NOT
     restate them here.

@@ -30,7 +30,6 @@ depending on ``core-api``.
 from __future__ import annotations
 
 from common.llm._credentials import (
-    has_credentials,
     resolve_gemini_config,
     resolve_openai_compatible,
 )
@@ -54,7 +53,6 @@ __all__ = [
     "get_platform_embedding",
     "get_platform_init_errors",
     "get_platform_llm",
-    "has_credentials",
     "init_platform_providers",
     "resolve_gemini_config",
     "resolve_openai_compatible",

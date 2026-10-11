@@ -1,7 +1,7 @@
 /**
  * Validation helpers for Caura plugin security.
  *
- * Covers: UUID format, HTTPS enforcement, path containment,
+ * Covers: safe-ID path segments, HTTPS enforcement, path containment,
  * HMAC command signature verification, and prompt length caps.
  */
 
@@ -9,14 +9,12 @@ import { createHmac, timingSafeEqual } from "crypto";
 import { isAbsolute, relative, resolve, sep } from "path";
 import { realpathSync, existsSync } from "fs";
 
-// --- UUID validation ---
+// --- Path-segment validation ---
+//
+// Ids interpolated into a path are checked against a safe-ID charset, not a
+// UUID shape: nothing here enforces UUIDs (L-219).
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SAFE_ID_RE = /^[\w-]{1,128}$/;
-
-export function isValidUUID(value: unknown): value is string {
-  return typeof value === "string" && UUID_RE.test(value);
-}
 
 export function isValidSafeId(value: unknown): value is string {
   return typeof value === "string" && SAFE_ID_RE.test(value);

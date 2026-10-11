@@ -16,7 +16,6 @@ import pytest
 
 from common.embedding import _service as embedding_service
 from core_api.constants import (
-    EMBEDDING_REEMBED_BATCH_SIZE,
     EMBEDDING_REEMBED_DELAY_S,
     EMBEDDING_RETRY_ATTEMPTS,
     EMBEDDING_RETRY_DELAY_S,
@@ -50,9 +49,6 @@ class TestEmbeddingRetryConstants:
 
     def test_reembed_delay_positive(self):
         assert EMBEDDING_REEMBED_DELAY_S > 0
-
-    def test_reembed_batch_size_positive(self):
-        assert EMBEDDING_REEMBED_BATCH_SIZE >= 1
 
 
 # ---------------------------------------------------------------------------

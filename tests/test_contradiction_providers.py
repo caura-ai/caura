@@ -53,58 +53,6 @@ class TestProviderConstants:
 
 
 # ---------------------------------------------------------------------------
-# API key resolution
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestHasApiKey:
-    """Verify _has_api_key checks credentials correctly."""
-
-    def test_vertex_rejected_as_tenant_provider(self):
-        """Vertex is platform-tier only — tenant-facing has_credentials returns False."""
-        from core_api.services.contradiction_detector import _has_api_key
-
-        config = MagicMock()
-        # Any attr pattern — vertex branch is removed, result is always False.
-        assert _has_api_key("vertex", config) is False
-
-    def test_openai_with_key(self):
-        from core_api.services.contradiction_detector import _has_api_key
-
-        config = MagicMock()
-        config.openai_api_key = "sk-test"
-        assert _has_api_key("openai", config) is True
-
-    def test_openai_without_key(self, monkeypatch):
-        from core_api.services.contradiction_detector import _has_api_key
-
-        config = MagicMock()
-        config.openai_api_key = None
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        assert _has_api_key("openai", config) is False
-
-    def test_anthropic_with_key(self):
-        from core_api.services.contradiction_detector import _has_api_key
-
-        config = MagicMock()
-        config.anthropic_api_key = "sk-ant-test"
-        assert _has_api_key("anthropic", config) is True
-
-    def test_openrouter_with_key(self):
-        from core_api.services.contradiction_detector import _has_api_key
-
-        config = MagicMock()
-        config.openrouter_api_key = "sk-or-test"
-        assert _has_api_key("openrouter", config) is True
-
-    def test_unknown_provider(self):
-        from core_api.services.contradiction_detector import _has_api_key
-
-        assert _has_api_key("unknown", None) is False
-
-
-# ---------------------------------------------------------------------------
 # Provider dispatch
 # ---------------------------------------------------------------------------
 
