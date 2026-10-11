@@ -82,7 +82,10 @@ class Relation(Base):
     to_entity_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("entities.id", ondelete="CASCADE"), nullable=False
     )
-    weight: Mapped[float] = mapped_column(Float, server_default=text("1.0"))
+    # Nullable: migration 001 created it so and no migration tightened it (L-97).
+    weight: Mapped[float] = mapped_column(
+        Float, nullable=True, server_default=text("1.0")
+    )
     # Current visibility anchor. RelationEvidence records all memory
     # assertions so deleting this one can select another real asserter.
     evidence_memory_id: Mapped[uuid.UUID | None] = mapped_column(

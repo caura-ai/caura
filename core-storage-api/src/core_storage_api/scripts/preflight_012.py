@@ -27,7 +27,7 @@ Usage:
 
 Exit codes:
     0  Migration is safe to run (DB empty, no rows to NULL, or already
-       past 012).
+       past 012: the head is 012 or later, and no row is counted).
     1  Migration would destroy data; opt-in env var required.
     2  Connection failed or query errored.
 """
@@ -40,6 +40,7 @@ import dataclasses
 import json
 import logging
 import sys
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,9 @@ class PreflightReport:
     total_rows_to_null: int
     total_estimated_seconds: float
     safety_gate_would_trip: bool
+    # The database's head is 012 or a migration after it, so ``alembic upgrade``
+    # will not run 012 there; the report counts nothing (L-145).
+    migration_applied: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -108,6 +112,32 @@ def _tls_connect_args(dsn: str) -> dict[str, object]:
         from core_storage_api.db_tls import tls_connect_args, tls_required_from_env
 
         return tls_connect_args(dsn, require=tls_required_from_env())
+
+
+def _is_past_012(head: str | None) -> bool:
+    """Whether ``head`` is 012 or a migration after it on this checkout's chain.
+
+    The head was read and printed, but the verdict came from the row count
+    alone, and a database that applied 012 and re-embedded has a vector in
+    every row. So every such database was reported destructive, exit 1, with
+    the opt-in command printed (L-145). A head this chain does not know, such
+    as one written by a newer release, is not placed, and the rows are counted
+    as before.
+    """
+    if head is None:
+        return False
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    from alembic.util import CommandError
+
+    migrations = Path(__file__).resolve().parents[1] / "database" / "migrations"
+    config = Config()
+    config.set_main_option("script_location", str(migrations))
+    script = ScriptDirectory.from_config(config)
+    try:
+        return any(rev.revision == "012" for rev in script.walk_revisions("base", head))
+    except CommandError:
+        return False
 
 
 async def _gather(dsn: str, rows_per_sec: int) -> PreflightReport:
@@ -142,6 +172,16 @@ async def _gather(dsn: str, rows_per_sec: int) -> PreflightReport:
                     head = row[0]
             except Exception:
                 head = None
+
+            if _is_past_012(head):
+                return PreflightReport(
+                    head_revision=head,
+                    tables=[],
+                    total_rows_to_null=0,
+                    total_estimated_seconds=0.0,
+                    safety_gate_would_trip=False,
+                    migration_applied=True,
+                )
 
             tables: list[TableReport] = []
             total_to_null = 0
@@ -198,6 +238,9 @@ def _format_human(report: PreflightReport) -> str:
     out: list[str] = []
     out.append(f"Alembic head:           {report.head_revision or '(none — fresh DB)'}")
     out.append("")
+    if report.migration_applied:
+        out.append("✓ Migration 012 is already applied on this DB; an upgrade will not run it again.")
+        return "\n".join(out)
     out.append(f"{'Table':<12} {'Column':<18} {'Rows to NULL':>14} {'Est. UPDATE':>14}")
     out.append("-" * 62)
     for t in report.tables:

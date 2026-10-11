@@ -35,7 +35,7 @@ configure_logging(
 
 from sqlalchemy import text
 
-from core_storage_api.database.init import get_engine, init_database
+from core_storage_api.database.init import dispose_engines, get_engine, init_database
 from core_storage_api.database.migration_postconditions import MIGRATION_POSTCONDITIONS
 from core_storage_api.middleware import (
     RejectWritesOnReaderMiddleware,
@@ -68,6 +68,17 @@ from core_storage_api.routers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _raised_parsing_the_body(exc: BaseException) -> bool:
+    """Whether ``exc`` was raised inside ``Request.json``, parsing the request body."""
+    tb = exc.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_code is Request.json.__code__:
+            return True
+        tb = tb.tb_next
+    return False
+
 
 _INVALID_INDEXES = text(
     """
@@ -165,11 +176,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await report_schema_drift()
     yield
     logger.info("Shutting down core-storage-api")
-    # Don't spin up a writer engine just to tear it down — reader-role
-    # services never touch the primary DB URL, and the read-pool engine
-    # lives in postgres_service.py's own factory.
-    if settings.core_storage_role != "reader":
-        await get_engine().dispose()
+    await dispose_engines()
 
 
 def create_app() -> FastAPI:
@@ -274,6 +281,17 @@ def create_app() -> FastAPI:
         # malformed JSON would otherwise surface as an unhandled 500. Convert it
         # to a fail-closed 422 app-wide so the body-validation contract holds at
         # the transport layer too (rather than guarding 100+ call sites).
+        return JSONResponse(status_code=422, content={"detail": "request body must be valid JSON"})
+
+    @app.exception_handler(UnicodeDecodeError)
+    async def _undecodable_body_handler(request: Request, exc: UnicodeDecodeError) -> JSONResponse:
+        # A body that is not valid UTF-8 fails before JSON parsing, with
+        # ``UnicodeDecodeError``, which is not a ``JSONDecodeError``, so every
+        # router parsing inline answered 500 (L-37). Only that decode is the
+        # caller's: one raised anywhere else is the server's, and is re-raised to
+        # stay the 500 it was rather than a 422 core-api would not retry.
+        if not _raised_parsing_the_body(exc):
+            raise exc
         return JSONResponse(status_code=422, content={"detail": "request body must be valid JSON"})
 
     # Order matters: Starlette executes middlewares in reverse registration

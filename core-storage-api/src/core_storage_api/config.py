@@ -44,7 +44,8 @@ class Settings(BaseSettings):
     # standalone — a single box with no replica). The split offloads
     # search / GET traffic from the primary. Replication lag on a
     # streaming replica is typically <5s, acceptable for the read paths
-    # we route.
+    # we route. A reader (``core_storage_role``) given ``read_database_url``
+    # opens every session there and never connects to ``database_url`` (L-139).
     database_url: SecretStr = Field(default=SecretStr(LOCAL_DATABASE_URL), repr=False, exclude=True)
     # SaaS can bind only ALLOYDB_PASSWORD from Secret Manager. These remain
     # ordinary settings fields so constructor and .env sources work too.

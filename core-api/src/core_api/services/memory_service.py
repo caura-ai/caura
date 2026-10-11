@@ -177,7 +177,9 @@ class BlankQuery(ValueError):
 
 
 # ``MemoryUpdate`` fields whose backing column on ``Memory`` is NOT NULL, so an
-# explicit ``null`` in a PATCH body has no way to be honoured. Kept as a literal
+# explicit ``null`` in a PATCH body has no way to be honoured. ``weight`` too: its
+# column is nullable only because migration 001 created it so (L-97), and a row
+# without a weight has nothing to rank by. Kept as a literal
 # rather than derived from ``Memory.__table__`` at import time: the schema field
 # names and column names coincide for these five but not in general (``metadata``
 # maps to ``metadata_``), so a derivation would need its own mapping table and

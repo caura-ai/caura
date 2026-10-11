@@ -201,13 +201,13 @@ async def test_startup_survives_probe_failure(caplog) -> None:
     connection_manager.__aenter__.return_value = connection
     engine = Mock()
     engine.connect.return_value = connection_manager
-    engine.dispose = AsyncMock()
 
     caplog.clear()
     with (
         patch.object(settings, "core_storage_role", "writer"),
         patch.object(app_module, "init_database", side_effect=record_init_database),
         patch.object(app_module, "get_engine", return_value=engine),
+        patch.object(app_module, "dispose_engines", new=AsyncMock()) as dispose_engines,
         caplog.at_level(logging.ERROR, logger=app_module.__name__),
     ):
         async with app_module.lifespan(FastAPI()):
@@ -215,7 +215,9 @@ async def test_startup_survives_probe_failure(caplog) -> None:
 
     assert any("schema drift" in record.getMessage().lower() for record in caplog.records)
     assert events == ["init_database", "schema_drift_probe"]
-    engine.dispose.assert_awaited_once()
+    # Shutdown disposes every engine the process built (L-139), not the one
+    # ``get_engine`` returns.
+    dispose_engines.assert_awaited_once()
 
 
 def _mock_engine(scalar_results: list[object]) -> Mock:
