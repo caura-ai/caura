@@ -52,7 +52,7 @@ import {
   existsSync, mkdirSync, readdirSync, readFileSync,
   rmSync, statSync, writeFileSync,
 } from "fs";
-import { join, resolve } from "path";
+import path, { join, resolve } from "path";
 
 import { apiCall } from "./transport.js";
 import { CAURA_TENANT_ID, CAURA_FLEET_ID, readEnv } from "./env.js";
@@ -179,6 +179,23 @@ function ownedSkillsDir(): string {
 }
 
 /**
+ * Path segments below the root of an absolute ``dir``: 3 for
+ * ``/home/me/skills`` and for ``C:\Users\me\skills``, 0 for ``/`` or ``C:\``.
+ *
+ * Counted with the platform's own separator (L-57). Splitting on "/" counted
+ * every resolved Windows path as one segment, so the depth guard below
+ * skipped every CAURA_SKILL_TARGETS entry on Windows as too shallow.
+ * ``pathImpl`` exists for tests, which run on one platform.
+ */
+export function skillTargetDepth(
+  dir: string,
+  pathImpl: Pick<typeof path, "parse" | "sep"> = path,
+): number {
+  const { root } = pathImpl.parse(dir);
+  return dir.slice(root.length).split(pathImpl.sep).filter(Boolean).length;
+}
+
+/**
  * Resolve the target dirs to reconcile this tick.
  *
  * Always includes the plugin's owned dir (``owned`` mode). Additional
@@ -234,10 +251,9 @@ export function resolveSkillTargets(): SkillTarget[] {
     }
     const normalized = resolve(dir);
     // Safety: owned-mode reconcile rmSync's orphans under the target, so a
-    // too-shallow path (``/``, ``/tmp``) would be catastrophic if
+    // too-shallow path (``/``, ``/tmp``, ``C:\``) would be catastrophic if
     // misconfigured. Require at least two path segments.
-    const parts = normalized.split("/").filter(Boolean);
-    if (parts.length < 2) {
+    if (skillTargetDepth(normalized) < 2) {
       console.warn(
         `[caura] CAURA_SKILL_TARGETS: entry dir ${normalized} is too shallow; skipping`,
       );
@@ -290,13 +306,14 @@ function readDirSlugs(root: string, caller: string): Set<string> | null {
 
 /**
  * Reconcile ONE ``owned`` target dir against the desired catalog set:
- * prune orphans (anything on disk not in ``desired``, except
+ * prune orphans (anything on disk not in ``desired`` or ``held``, except
  * {@link PROTECTED_SKILLS}), then write/update the desired skills.
  * Returns this dir's contribution to the summary; never throws.
  */
 function reconcileOwnedDir(
   skillsRoot: string,
   desired: Map<string, string>,
+  held: ReadonlySet<string>,
 ): DirReconcileResult {
   const result: DirReconcileResult = {
     added: [],
@@ -318,7 +335,7 @@ function reconcileOwnedDir(
   // (slug A → slug B) lands cleanly even if the operator does both in
   // the same heartbeat window.
   for (const slug of onDisk) {
-    if (desired.has(slug)) continue;
+    if (desired.has(slug) || held.has(slug)) continue;
     if (PROTECTED_SKILLS.has(slug)) {
       result.protected.push(slug);
       continue;
@@ -398,6 +415,7 @@ function reconcileOwnedDir(
 function reconcileAdditiveDir(
   skillsRoot: string,
   desired: Map<string, string>,
+  held: ReadonlySet<string>,
 ): DirReconcileResult {
   const result: DirReconcileResult = {
     added: [],
@@ -416,7 +434,7 @@ function reconcileAdditiveDir(
   // Removals first — but ONLY for Caura-owned (marker-bearing) orphans.
   // Anything without the marker is foreign and is never touched.
   for (const slug of onDisk) {
-    if (desired.has(slug)) continue;
+    if (desired.has(slug) || held.has(slug)) continue;
     // Ownership gates everything in an additive dir: a foreign slug is left
     // alone even if its name collides with a PROTECTED one. A foreign
     // "memclaw" dir (no marker) is the client's, not ours — ignore it // legacy-name-floor: bundled protected skill slug
@@ -593,6 +611,13 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   //    synthesises frontmatter from ``data.name`` and ``data.description``
   //    before writing, unless the content already starts with a ``---``
   //    fence (in which case the author's own frontmatter is preserved).
+  //
+  //    Two catalog rows that resolve to one slug (``forge/X``, ``agent/X``
+  //    and ``X``) leave it ambiguous: neither is written, and the slug is
+  //    HELD, so a copy already on disk is kept rather than pruned as an
+  //    orphan (L-223). Pruning it would take a working skill off the node
+  //    because a second one with the same name appeared; the server refuses
+  //    to approve such a second skill, and this covers any it never saw.
   const desired = new Map<string, string>();
   const catalogSourceBySlug = new Map<string, string>();
   const ambiguousSlugs = new Set<string>();
@@ -648,8 +673,8 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   for (const target of targets) {
     const dirResult =
       target.mode === "additive"
-        ? reconcileAdditiveDir(target.dir, desired)
-        : reconcileOwnedDir(target.dir, desired);
+        ? reconcileAdditiveDir(target.dir, desired, ambiguousSlugs)
+        : reconcileOwnedDir(target.dir, desired, ambiguousSlugs);
     addedAll.push(...dirResult.added);
     removedAll.push(...dirResult.removed);
     protectedAll.push(...dirResult.protected);

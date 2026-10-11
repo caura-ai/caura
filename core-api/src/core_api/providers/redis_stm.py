@@ -20,11 +20,37 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from core_api.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _unexpired(raw_items: list, ttl: int) -> list[dict[str, Any]]:
+    """The entries posted within ``ttl`` seconds, newest first (L-118).
+
+    The key's own TTL belongs to the whole list and every write renews it, so an
+    agent that keeps posting kept every entry until the list was trimmed. The
+    write receipt quotes ``ttl`` per entry, as the in-memory backend enforces it,
+    so reads drop what is older. An entry without a readable ``posted_at`` is
+    kept: the key TTL still bounds it.
+    """
+    cutoff = datetime.now(UTC) - timedelta(seconds=ttl)
+    kept = []
+    for item in raw_items:
+        entry = json.loads(item)
+        try:
+            posted = datetime.fromisoformat(entry["posted_at"])
+        except (KeyError, TypeError, ValueError):
+            kept.append(entry)
+            continue
+        if posted.tzinfo is None:
+            posted = posted.replace(tzinfo=UTC)
+        if posted >= cutoff:
+            kept.append(entry)
+    return kept
 
 
 class RedisSTM:
@@ -57,7 +83,7 @@ class RedisSTM:
         key = f"stm:notes:{tenant_id}:{agent_id}"
         try:
             raw_items = await r.lrange(key, 0, limit - 1)
-            return [json.loads(item) for item in raw_items]
+            return _unexpired(raw_items, self._notes_ttl)
         except Exception:
             logger.debug("RedisSTM.get_notes failed", exc_info=True)
             return []
@@ -106,7 +132,7 @@ class RedisSTM:
         key = f"stm:bul:{tenant_id}:{fleet_id}"
         try:
             raw_items = await r.lrange(key, 0, limit - 1)
-            return [json.loads(item) for item in raw_items]
+            return _unexpired(raw_items, self._bulletin_ttl)
         except Exception:
             logger.debug("RedisSTM.get_bulletin failed", exc_info=True)
             return []

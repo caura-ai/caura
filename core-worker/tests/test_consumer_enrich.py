@@ -80,7 +80,7 @@ def stub_enriched_publish(monkeypatch):
 @pytest.mark.asyncio
 async def test_happy_path_runs_enricher_and_patches(monkeypatch, mock_storage_client, stub_enrich):
     consumer.configure(mock_storage_client)
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "update_memory_enrichment", patch_call)
 
     memory_id = uuid4()
@@ -195,7 +195,7 @@ async def test_tags_are_not_cleared_on_redelivery(monkeypatch, mock_storage_clie
     routing the field at all.
     """
     consumer.configure(mock_storage_client)
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "update_memory_enrichment", patch_call)
 
     async def _enrich(content, tenant_config=None, *, reference_datetime=None):
@@ -225,7 +225,7 @@ async def test_ts_valid_can_be_null_cleared_on_real_llm_redelivery(monkeypatch, 
     columns. Distinguished from the heuristic-fallback case below by
     the ``llm_ms`` proxy."""
     consumer.configure(mock_storage_client)
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "update_memory_enrichment", patch_call)
 
     async def _enrich(content, tenant_config=None, *, reference_datetime=None):
@@ -253,7 +253,7 @@ async def test_always_write_metadata_NOT_cleared_on_heuristic_redelivery(monkeyp
     write logic would silently downgrade prior good values to
     heuristic-quality defaults."""
     consumer.configure(mock_storage_client)
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "update_memory_enrichment", patch_call)
 
     async def _enrich(content, tenant_config=None, *, reference_datetime=None):
@@ -291,7 +291,7 @@ async def test_ts_valid_NOT_cleared_on_heuristic_fallback_redelivery(monkeypatch
     infers dates so its absence-of-ts_valid is ambiguous — preserve
     whatever's in storage."""
     consumer.configure(mock_storage_client)
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "update_memory_enrichment", patch_call)
 
     async def _enrich(content, tenant_config=None, *, reference_datetime=None):
@@ -313,7 +313,7 @@ async def test_ts_valid_skipped_when_agent_provided(monkeypatch, mock_storage_cl
     """``agent_provided_fields`` still wins — agent-set ts_valid_* must
     survive re-enrichment regardless of the null-clearing behaviour."""
     consumer.configure(mock_storage_client)
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "update_memory_enrichment", patch_call)
 
     async def _enrich(content, tenant_config=None, *, reference_datetime=None):
@@ -348,7 +348,7 @@ async def test_agent_provided_fields_skip_orm_overwrite(monkeypatch, mock_storag
     to the schema default on every redelivery.
     """
     consumer.configure(mock_storage_client)
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "update_memory_enrichment", patch_call)
 
     async def _enrich(content, tenant_config=None, *, reference_datetime=None):
@@ -390,7 +390,7 @@ async def test_agent_provided_fields_skip_orm_overwrite(monkeypatch, mock_storag
 async def test_agent_provided_metadata_field_skipped(monkeypatch, mock_storage_client):
     """``agent_provided_fields`` excludes metadata-side fields too."""
     consumer.configure(mock_storage_client)
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "update_memory_enrichment", patch_call)
 
     async def _enrich(content, tenant_config=None, *, reference_datetime=None):
@@ -435,7 +435,7 @@ async def test_enrichment_pending_cleared_even_with_heuristic_fallback(monkeypat
     from common.enrichment.schema import EnrichmentResult
 
     consumer.configure(mock_storage_client)
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "update_memory_enrichment", patch_call)
 
     # Heuristic fallback shape: zero llm_ms so the always-write metadata
@@ -593,7 +593,7 @@ async def test_publishes_enriched_after_patch_succeeds(monkeypatch, mock_storage
     schedule a hint-driven re-embed when the LLM produced one.
     """
     consumer.configure(mock_storage_client)
-    monkeypatch.setattr(consumer, "update_memory_enrichment", AsyncMock(return_value=None))
+    monkeypatch.setattr(consumer, "update_memory_enrichment", AsyncMock(return_value=True))
 
     publish_spy = AsyncMock(return_value=None)
     monkeypatch.setattr(consumer, "publish_memory_enriched", publish_spy)
@@ -632,7 +632,7 @@ async def test_publishes_enriched_with_empty_hint_when_none_produced(monkeypatch
     ``retrieval_hint`` — back-channel still fires (subscribers may
     care about the bare event), with the hint as an empty string."""
     consumer.configure(mock_storage_client)
-    monkeypatch.setattr(consumer, "update_memory_enrichment", AsyncMock(return_value=None))
+    monkeypatch.setattr(consumer, "update_memory_enrichment", AsyncMock(return_value=True))
 
     publish_spy = AsyncMock(return_value=None)
     monkeypatch.setattr(consumer, "publish_memory_enriched", publish_spy)
@@ -656,7 +656,7 @@ async def test_back_channel_publish_failure_does_not_nack(monkeypatch, mock_stor
     redeliver the input event and re-PATCH the same fields wastefully.
     """
     consumer.configure(mock_storage_client)
-    monkeypatch.setattr(consumer, "update_memory_enrichment", AsyncMock(return_value=None))
+    monkeypatch.setattr(consumer, "update_memory_enrichment", AsyncMock(return_value=True))
 
     monkeypatch.setattr(
         consumer,
@@ -822,7 +822,7 @@ async def test_a_valid_reference_datetime_still_reaches_the_enricher(monkeypatch
     to prevent, and invisible in output.
     """
     consumer.configure(mock_storage_client)
-    monkeypatch.setattr(consumer, "update_memory_enrichment", AsyncMock(return_value=None))
+    monkeypatch.setattr(consumer, "update_memory_enrichment", AsyncMock(return_value=True))
     captured: dict = {}
 
     async def _capture(content, tenant_config=None, *, reference_datetime=None):
@@ -955,7 +955,7 @@ async def test_the_handler_forwards_the_caller_keys_from_the_event(monkeypatch, 
     """End-to-end: the gate is useless if the payload's list never reaches
     ``_build_patch``."""
     consumer.configure(mock_storage_client)
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "update_memory_enrichment", patch_call)
 
     async def _enrich(content, tenant_config=None, *, reference_datetime=None):

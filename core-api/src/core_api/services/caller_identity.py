@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import HTTPException
+from fastapi.exceptions import RequestValidationError
 
 from core_api.agent_ids import DEFAULT_AGENT_ID, AgentIdentity, canonical_service_agent_id
 from core_api.auth import AuthContext
@@ -34,6 +35,40 @@ from core_api.services.trust_service import parse_trust_error, require_trust
 logger = logging.getLogger(__name__)
 
 
+def missing_agent_id_error() -> RequestValidationError:
+    """Build the 422 raised when a write omits ``agent_id`` and nothing can
+    supply one: not standalone, and a credential that authenticates no agent.
+
+    Raised by ``POST /memories`` (and its bulk twin) and by
+    ``resolve_caller_and_gate`` below for evolve and insights (L-128).
+
+    Mirrors the shape FastAPI produces for a missing required field, so the
+    app's validation-envelope handler renders it as a 422 INVALID_ARGUMENTS.
+    RequestValidationError stores errors verbatim and ``.errors()`` returns
+    them as-is, so a pre-rendered dict is the supported input; the handler
+    only reads ``msg`` and runs the list through ``jsonable_encoder``.
+    """
+    return RequestValidationError(
+        errors=[
+            {
+                "type": "missing",
+                "loc": ("body", "agent_id"),
+                # Names both ways out, because the caller that hits this has
+                # exactly one real question — "what do I send instead?" — and
+                # provisioning an agent-scoped credential is the answer that
+                # makes the field go away rather than one more value to repeat.
+                "msg": (
+                    "agent_id is required for a credential that authenticates no agent. "
+                    "Send it in the body, or use an agent-scoped credential "
+                    "(kind=agent_key), whose own identity is used when the field is "
+                    "omitted; the standalone single-tenant deployment may also omit it."
+                ),
+                "input": None,
+            }
+        ]
+    )
+
+
 async def resolve_caller_and_gate(
     auth: AuthContext,
     *,
@@ -46,6 +81,11 @@ async def resolve_caller_and_gate(
 
     Precedence: gateway-verified ``auth.agent_id`` > ``body_agent_id`` >
     ``DEFAULT_AGENT_ID`` (so standalone callers still show up in audit logs).
+    The default is for admins and standalone only. Anywhere else a request
+    that names no agent is a 422 (L-128), as on ``POST /memories`` and MCP.
+    Such a request used to run as the shared ``mcp-agent``, attributing its
+    outcome or insights to a placeholder, or got a 403 naming an agent the
+    caller never mentioned.
     Returns the resolved ``caller_agent_id``; raises 403 when the resolved agent
     isn't registered or lacks the required trust (``min_level`` is 1 for
     ``scope=agent``, else 2).
@@ -80,8 +120,10 @@ async def resolve_caller_and_gate(
 
     if auth.is_admin:
         return caller_agent_id
-    if app_settings.is_standalone and not auth.agent_id and not body_agent_id:
-        return caller_agent_id
+    if not auth.agent_id and not body_agent_id:
+        if app_settings.is_standalone:
+            return caller_agent_id
+        raise missing_agent_id_error()
 
     # Broker ownership boundary: an install-credential caller may only attribute
     # a write to an agent it owns. Degrade a foreign / reserved-namespace agent

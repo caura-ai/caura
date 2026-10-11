@@ -186,18 +186,21 @@ async def test_no_filter_at_all_warns_about_nothing(client, pipeline_search):
 
 
 # ---------------------------------------------------------------------------
-# The gate: authenticated identity is already protected, so stay off it
+# The gate: an agent key's own id stays unprobed; a peer it filters by does not
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-async def test_an_agent_scoped_credential_still_gets_its_403(
+async def test_an_agent_scoped_credentials_typod_peer_is_explained(
     client, pipeline_search, tenant_scoped
 ):
-    """Unchanged behaviour, asserted so the probe can't be seen to soften it.
+    """An agent key's peer filter gets the tenant key's warning; its own id none.
 
-    An agent-scoped credential naming any id but its own is refused by
-    ``enforce_self_agent`` before the probe is reached. Agent identity arrives
+    This pinned a 403: ``enforce_self_agent`` refused any ``filter_agent_id``
+    but the credential's own before the probe was reached. Since L-124 that
+    field only filters for an agent credential (it still reads as itself, as
+    MCP ``caura_recall`` does), so a typo'd peer empties the page as it does
+    for a tenant key and must be explained the same way. Agent identity arrives
     only via ``X-Agent-ID`` on auth Path 2 — Paths 1 (admin) and 3 (standalone)
     deliberately never plumb it, which is why this builds Path 2 rather than
     adding the header to ``get_test_auth``'s admin headers.
@@ -207,8 +210,10 @@ async def test_an_agent_scoped_credential_still_gets_its_403(
 
     agent_headers = {**tenant_scoped(tenant_id), "X-Agent-ID": REAL}
 
-    refused = await _search(client, agent_headers, tenant_id, TYPO)
-    assert refused.status_code == 403, refused.text
+    typo = await _search(client, agent_headers, tenant_id, TYPO)
+    assert typo.status_code == 200, typo.text
+    assert typo.json()["items"] == []
+    assert FILTER_AGENT_UNKNOWN in _codes(typo.json())
 
     allowed = await _search(client, agent_headers, tenant_id, REAL)
     assert allowed.status_code == 200, allowed.text

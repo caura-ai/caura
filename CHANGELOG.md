@@ -10,6 +10,77 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.30.6](https://github.com/caura-ai/caura/compare/backend-v3.30.5...backend-v3.30.6) (2026-10-11)
+
+
+### Bug Fixes
+
+* idempotency keys replay what they promise (B31) ([#2031](https://github.com/caura-ai/caura/issues/2031)) ([0d2a7a1](https://github.com/caura-ai/caura/commit/0d2a7a17e0506072796d82b4d91403bbf605b91f))
+
+## [3.30.5](https://github.com/caura-ai/caura/compare/backend-v3.30.4...backend-v3.30.5) (2026-10-11)
+
+
+### Bug Fixes
+
+* memory writes keep their own record straight (B37/B40) ([#2029](https://github.com/caura-ai/caura/issues/2029)) ([f43a79a](https://github.com/caura-ai/caura/commit/f43a79adf595f399d6c58a5a244a66e86b3290a6))
+
+## [3.30.4](https://github.com/caura-ai/caura/compare/backend-v3.30.3...backend-v3.30.4) (2026-10-11)
+
+
+### Bug Fixes
+
+* B26 REST reads answer as their MCP twins ([#2023](https://github.com/caura-ai/caura/issues/2023)) ([eac35f2](https://github.com/caura-ai/caura/commit/eac35f2998a49ba463cbaa0810b59199c254cc3b))
+* B26 REST writes answer as their MCP twins ([#2024](https://github.com/caura-ai/caura/issues/2024)) ([750cc4d](https://github.com/caura-ai/caura/commit/750cc4d3111d6a6d49246749d53215693c85103e))
+* MCP manifests list the codes tools pass through (L-138) ([#2028](https://github.com/caura-ai/caura/issues/2028)) ([85e21a5](https://github.com/caura-ai/caura/commit/85e21a5820204235cc450c1f0f2aeea601f216d6))
+
+
+### Dependencies
+
+* **clients:** bump @types/node from 26.6.2 to 26.6.4 in /clients/typescript in the clients-npm-minor-patch group across 1 directory ([#1848](https://github.com/caura-ai/caura/issues/1848)) ([63e0ed8](https://github.com/caura-ai/caura/commit/63e0ed82723218693730415426abb491dd3cf4a0))
+* update cryptography requirement from &gt;=50.0.1 to &gt;=50.0.2 ([#1844](https://github.com/caura-ai/caura/issues/1844)) ([cfc29e7](https://github.com/caura-ai/caura/commit/cfc29e7e8f7d352709bf6858c3fdcb2f8a1de4e3))
+
+## [3.30.3](https://github.com/caura-ai/caura/compare/backend-v3.30.2...backend-v3.30.3) (2026-10-10)
+
+
+### Dependencies
+
+* **docker:** bump datadog/serverless-init from `f494334` to `161423d` in /core-api ([#1849](https://github.com/caura-ai/caura/issues/1849)) ([1cd552b](https://github.com/caura-ai/caura/commit/1cd552b5cc98bd07763bdd5b447d3921c7e0770d))
+
+## [3.30.2](https://github.com/caura-ai/caura/compare/backend-v3.30.1...backend-v3.30.2) (2026-10-10)
+
+
+### Bug Fixes
+
+* B27 configuration and provider failure handling ([#2019](https://github.com/caura-ai/caura/issues/2019)) ([cecb5ca](https://github.com/caura-ai/caura/commit/cecb5cae439fa59656ca31c645b46a20b47ac455))
+
+## [3.30.1](https://github.com/caura-ai/caura/compare/backend-v3.30.0...backend-v3.30.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* B41 recheck defects (L-229, L-224, L-223) ([#2017](https://github.com/caura-ai/caura/issues/2017)) ([0779ad3](https://github.com/caura-ai/caura/commit/0779ad30a2f58beed1af7fe8b013646bb936176e))
+* **plugin:** plugin batch (B36, L-163, L-199) ([#2018](https://github.com/caura-ai/caura/issues/2018)) ([07e8b0d](https://github.com/caura-ai/caura/commit/07e8b0deabcbaf4ac943993c36a02133e1f40750))
+
+
+### Dependencies
+
+* update google-genai requirement from &gt;=2.23.0 to &gt;=2.28.0 ([#1981](https://github.com/caura-ai/caura/issues/1981)) ([24bd278](https://github.com/caura-ai/caura/commit/24bd278990471bbad788ef31a22e5d2a6ff1d35c))
+* update httpx2 requirement from &lt;3,&gt;=2 to &gt;=2.13.1,&lt;3 ([#1750](https://github.com/caura-ai/caura/issues/1750)) ([018a3e5](https://github.com/caura-ai/caura/commit/018a3e52f653b855a94253162000716d16059b8c))
+* update openai requirement from &lt;4,&gt;=3 to &gt;=3.24.0,&lt;4 ([#1982](https://github.com/caura-ai/caura/issues/1982)) ([c7e688f](https://github.com/caura-ai/caura/commit/c7e688f35f220873af3b41db9ff598c0467a0700))
+
+## [3.30.0](https://github.com/caura-ai/caura/compare/backend-v3.29.1...backend-v3.30.0) (2026-10-09)
+
+
+### Features
+
+* **clients:** keep the search envelope and read as an agent ([#2012](https://github.com/caura-ai/caura/issues/2012)) ([f147f61](https://github.com/caura-ai/caura/commit/f147f61722ca7aae046e8eea73c42a887f8b86c1))
+
+
+### Performance
+
+* **storage:** index the contradiction window and expiry sweep ([#2009](https://github.com/caura-ai/caura/issues/2009)) ([f0818c0](https://github.com/caura-ai/caura/commit/f0818c089aed077d5b66a9cfbc51be770a4307c5))
+* **storage:** write a batch of entity links in one transaction ([#2015](https://github.com/caura-ai/caura/issues/2015)) ([419c3bc](https://github.com/caura-ai/caura/commit/419c3bc29f7e3168f3872d57d30c0cbdc92e9ca2))
+
 ## [3.29.1](https://github.com/caura-ai/caura/compare/backend-v3.29.0...backend-v3.29.1) (2026-10-08)
 
 

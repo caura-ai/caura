@@ -73,6 +73,7 @@ def test_force_is_threaded_end_to_end():
 
     api = Path(api_docs.__file__).read_text()
     assert "force: bool = False" in api  # request model accepts it
-    assert api.count('"force": body.force') == 2  # both upsert payloads carry it
+    # One upsert payload since L-121: every REST write goes through the xmax upsert.
+    assert api.count('"force": body.force') == 1
     st = Path(st_docs.__file__).read_text()
     assert st.count('force=bool(body.get("force"))') == 2  # both storage routes

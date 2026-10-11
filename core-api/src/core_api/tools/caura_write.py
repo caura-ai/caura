@@ -28,13 +28,21 @@ _SPEC = ToolSpec(
     trust_required=0,
     error_codes=(
         "AGENT_NOT_APPROVED",
+        "BAD_REQUEST",
         "BATCH_TOO_LARGE",
+        "CONFLICT",
+        "DUPLICATE_MEMORY",
+        "FLEET_SCOPE_FORBIDDEN",
         "FORBIDDEN",
+        "INTERNAL_ERROR",
         "INVALID_ARGUMENTS",
         "INVALID_BATCH_ITEM",
         "MISSING_AGENT_ID",
         "PLAN_LIMIT_READ_ONLY",
+        "REQUEST_BUDGET_EXCEEDED",
         "UNAUTHORIZED",
+        "UNAVAILABLE",
+        "UPSTREAM_TIMEOUT",
     ),
 )
 register(_SPEC)

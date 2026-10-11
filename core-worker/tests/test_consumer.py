@@ -73,7 +73,7 @@ async def test_happy_path_calls_provider_and_patches(
     consumer.configure(mock_storage_client)
 
     cache_lookup = AsyncMock(return_value=None)
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "find_embedding_by_content_hash", cache_lookup)
     monkeypatch.setattr(consumer, "update_memory_embedding", patch_call)
 
@@ -106,7 +106,7 @@ async def test_cache_hit_skips_provider_call(monkeypatch, settings, mock_provide
 
     cached = [0.7] * 768
     cache_lookup = AsyncMock(return_value=cached)
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "find_embedding_by_content_hash", cache_lookup)
     monkeypatch.setattr(consumer, "update_memory_embedding", patch_call)
 
@@ -132,7 +132,7 @@ async def test_no_content_hash_skips_cache_lookup(monkeypatch, settings, mock_pr
     consumer.configure(mock_storage_client)
 
     cache_lookup = AsyncMock(return_value=None)
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "find_embedding_by_content_hash", cache_lookup)
     monkeypatch.setattr(consumer, "update_memory_embedding", patch_call)
 
@@ -189,7 +189,7 @@ async def test_provider_error_propagates(monkeypatch, settings, mock_provider, m
     consumer.configure(mock_storage_client)
     mock_provider.embed.side_effect = RuntimeError("provider down")
     cache_lookup = AsyncMock(return_value=None)
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "find_embedding_by_content_hash", cache_lookup)
     monkeypatch.setattr(consumer, "update_memory_embedding", patch_call)
 
@@ -317,7 +317,7 @@ async def test_embed_request_forwards_content_hash_as_provenance(
     """
     consumer.configure(mock_storage_client)
     monkeypatch.setattr(consumer, "find_embedding_by_content_hash", AsyncMock(return_value=None))
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "update_memory_embedding", patch_call)
 
     event = _make_event(
@@ -341,7 +341,7 @@ async def test_embed_request_forwards_provenance_on_cache_hit_too(
     to it — the cache branch must stamp provenance just like a fresh embed."""
     consumer.configure(mock_storage_client)
     monkeypatch.setattr(consumer, "find_embedding_by_content_hash", AsyncMock(return_value=[0.5] * 768))
-    patch_call = AsyncMock(return_value=None)
+    patch_call = AsyncMock(return_value=True)
     monkeypatch.setattr(consumer, "update_memory_embedding", patch_call)
 
     event = _make_event(
@@ -437,7 +437,7 @@ async def test_embed_request_is_held_to_the_embedding_concurrency_gate(
 
     consumer.configure(mock_storage_client)
     monkeypatch.setattr(consumer, "find_embedding_by_content_hash", AsyncMock(return_value=None))
-    monkeypatch.setattr(consumer, "update_memory_embedding", AsyncMock(return_value=None))
+    monkeypatch.setattr(consumer, "update_memory_embedding", AsyncMock(return_value=True))
 
     await asyncio.gather(
         *(

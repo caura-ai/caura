@@ -172,9 +172,11 @@ async def explain_agent_scope(
 ) -> list[dict]:
     """Warnings explaining an asserted agent scope. ``[]`` when there is nothing to say.
 
-    Both ids are the ones a TENANT-SCOPED caller asserted; pass ``None`` for
-    both under an authenticated agent identity, where a wrong id is already a
-    403 and there is nothing to add.
+    Both ids are ones the caller asserted. Under an authenticated agent
+    identity pass ``None`` for ``caller_agent_id``, where a wrong id is already
+    a 403, and for a ``filter_agent_id`` naming the agent itself. A peer
+    ``filter_agent_id`` is explained for an agent credential too: since L-124
+    it is only a filter, so a typo'd peer empties the page as for a tenant key.
 
     ``filter_agent_id`` wins when both are set: it is the one that restricts
     rows, so it is the one that can empty a result.

@@ -6,9 +6,9 @@ point of the file: if someone changes the rule for one surface only, these fail.
 
 Covers:
 - Both surfaces produce an IDENTICAL ``DocMemorySpec`` for identical input.
-- Minting fires on BOTH REST upsert branches — the indexed branch
-  (``upsert_document_xmax`` + re-fetch) and the unindexed branch
-  (``upsert_document``).
+- Minting fires on both REST writes — indexed and unindexed. Since L-121 both
+  go through ``upsert_document_xmax`` + re-fetch, the unindexed one with
+  ``embedding=None`` so a stale vector is cleared.
 - A raising mint cannot fail the document write.
 """
 
@@ -71,8 +71,8 @@ def test_rule_lives_in_one_module_only():
 def rest_env(monkeypatch):
     """Stub the REST handler's collaborators.
 
-    ``upsert_document`` returns a doc dict for the *unindexed* branch;
-    ``upsert_document_xmax`` + ``get_document`` serve the *indexed* branch.
+    ``upsert_document_xmax`` + ``get_document`` serve every write since L-121;
+    ``upsert_document`` stays stubbed so a test can say it was not called.
     """
     from core_api.routes import documents as mod
 
@@ -165,7 +165,12 @@ async def test_unindexed_branch_mints(rest_env):
         idempotency_key=None,
     )
 
-    rest_env["sc"].upsert_document.assert_awaited_once()
+    sc = rest_env["sc"]
+    # L-121: written through the upsert that sets the vector, as None, so one
+    # left by an earlier version with a summary is cleared rather than kept.
+    sc.upsert_document_xmax.assert_awaited_once()
+    assert sc.upsert_document_xmax.await_args.args[0]["embedding"] is None
+    sc.upsert_document.assert_not_awaited()
     rest_env["spy"].assert_awaited_once()
     spec = rest_env["spy"].call_args.args[0]
     assert _BODY in spec.content

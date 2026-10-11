@@ -341,7 +341,7 @@ curl -X POST "$BASE/api/v1/skills-inbox/forge/abc-123/reject" \
 | `401` | Missing/invalid credentials: the context has neither a tenant nor admin rights. An admin key that simply omitted `tenant_id` gets `400`, not this. |
 | `403` | `SKILLS_FACTORY_DISABLED` (feature flag off for the tenant), `SKILLS_INBOX_FORBIDDEN` (action attempted by a non-admin), or `TENANT_MISMATCH` (a tenant-scoped credential named a different tenant in `?tenant_id=`). |
 | `404` | No skill doc with that slug in the tenant's `skills` collection. Check slug encoding first — an over-encoded `%2F` routes to a nonexistent path. |
-| `409` | Action not permitted from the doc's current status (see matrix), or the doc was concurrently transitioned/edited while your call was in flight — reload the inbox and retry. |
+| `409` | Action not permitted from the doc's current status (see matrix), or the doc was concurrently transitioned/edited while your call was in flight — reload the inbox and retry. On approve, also `SKILL_FOLDER_TAKEN`: another active skill installs as the same folder (`forge/X`, `agent/X` and `X` all install as `X`), and a plugin node cannot install both. `error.details` names the folder and the skill; move that skill out of `active` first, or reject the candidate. |
 | `422` | Missing/invalid body field (e.g. `reject` or `quarantine` without `reason`, `edit` with no fields), an approve whose pre-apply rescan refused (a critical verdict without `override_quarantine`, or a fatal finding), an override without a `reason`, a list `status` other than `staged` or `quarantined`, or a malformed doc (no `content_hash`, or a Forge candidate whose cluster fingerprint disappeared during the reject). |
 
 ## Related

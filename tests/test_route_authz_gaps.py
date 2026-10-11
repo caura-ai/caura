@@ -1190,14 +1190,28 @@ async def test_stm_notes_of_own_agent_are_still_readable(client, as_auth, _stm_e
 
 
 async def test_search_cannot_borrow_a_peer_identity_via_filter_agent_id(
-    client, as_auth
+    client, as_auth, monkeypatch
 ):
     """H-14: ``filter_agent_id`` fed the visibility identity AND the trust gate.
 
     Naming a peer both exposed that peer's scope_agent rows (with content, so a
     direct disclosure) and skipped the trust<2 fleet forcing when the named peer
     was trust>=2 — the same escalation /memories/redistribute was fixed for.
+
+    H-14 answered 403. Since L-124 the search runs as the credential's own agent
+    whatever the body names, so the filter is let through as an author filter,
+    as on MCP ``caura_recall``: what must hold is that the peer never becomes
+    the identity.
     """
+    from core_api.routes import memories as memories_route
+
+    seen: dict = {}
+
+    async def _capture(*args, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(memories_route, "search_memories", _capture)
     tenant = f"tenant-{_uid()}"
     as_auth(tenant, agent_id="agent-a")
     resp = await client.post(
@@ -1209,7 +1223,9 @@ async def test_search_cannot_borrow_a_peer_identity_via_filter_agent_id(
             "filter_agent_id": "agent-b",
         },
     )
-    assert resp.status_code == 403, resp.text
+    assert resp.status_code == 200, resp.text
+    assert seen.get("caller_agent_id") == "agent-a"
+    assert seen.get("filter_agent_id") == "agent-b"
 
 
 async def test_search_filtering_to_own_agent_id_is_allowed(client, as_auth):

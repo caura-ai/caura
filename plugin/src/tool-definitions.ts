@@ -448,6 +448,26 @@ function searchBody(params: Record<string, unknown>): Record<string, unknown> {
   return body;
 }
 
+// Fields of a /search or /recall response that ride along with the rows.
+const RECALL_PASSTHROUGH_FIELDS = ["recall_tracked", "warnings", "diagnostic", "_latency_ms", "_server_ms"];
+
+/**
+ * ``caura_recall``'s result: the rows once, as ``results``, with ``count``
+ * (L-163, decided 2026-10-09). The plugin used to return the whole response
+ * object, an object where MCP returns a list, and with a brief the same rows
+ * reached the agent three times. No ``items`` copy, unlike MCP: every key here
+ * is text in the agent's context. A field the server sends as null is left out.
+ */
+function rowsOnce(response: unknown, rowsKey: "items" | "memories"): Record<string, unknown> {
+  const body = (response ?? {}) as Record<string, unknown>;
+  const rows = Array.isArray(body[rowsKey]) ? (body[rowsKey] as unknown[]) : [];
+  const envelope: Record<string, unknown> = { results: rows, count: rows.length };
+  for (const key of RECALL_PASSTHROUGH_FIELDS) {
+    if (body[key] !== undefined && body[key] !== null) envelope[key] = body[key];
+  }
+  return envelope;
+}
+
 // ``caura_write`` params the SINGLE-write body accepts and the BULK envelope
 // does not — the per-item spellings live inside each ``items[]`` object, not at
 // the top level. Kept next to the dispatch that strips them so the two can't
@@ -498,11 +518,16 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     // principal and may narrow standard-trust reads to that agent's fleet.
     // An explicitly supplied agent_id remains present and is translated.
     const body = searchBody(await enrichBody(params, { skipAgentDefault: true }));
-    const includeBrief = Boolean(params.include_brief);
-    const results = await apiCall("POST", "/search", body, undefined, signal);
-    if (!includeBrief) return { results };
-    const brief = await apiCall("POST", "/recall", body, undefined, signal);
-    return { results, brief };
+    if (!params.include_brief) {
+      return rowsOnce(await apiCall("POST", "/search", body, undefined, signal), "items");
+    }
+    // /recall runs the search itself, so a brief is this one call (L-199),
+    // without the ``items`` copy of its rows.
+    const recalled = await apiCall("POST", "/recall", { ...body, items_alias: false }, undefined, signal);
+    const envelope = rowsOnce(recalled, "memories");
+    const { summary, memory_count, recall_ms } = (recalled ?? {}) as Record<string, unknown>;
+    envelope.brief = { summary, memory_count, recall_ms };
+    return envelope;
   },
 
   caura_write: async (params, signal) => {
@@ -589,6 +614,13 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     if (["write", "read", "query", "delete"].includes(op) &&
         (typeof params.collection !== "string" || !params.collection.trim())) {
       throw new Error(`[caura] caura_doc op=${op} requires a non-empty collection`);
+    }
+    // read and delete put doc_id in the path, where an omitted one became
+    // ``/documents/undefined``: a 404 that says the document does not exist,
+    // and a delete of a document named "undefined" (L-58).
+    if ((op === "read" || op === "delete") &&
+        (typeof params.doc_id !== "string" || !params.doc_id.trim())) {
+      throw new Error(`[caura] caura_doc op=${op} requires a non-empty doc_id`);
     }
     const enriched = await enrichBody(params, { resolveIdentity: op === "write" });
     const collection = enriched.collection as string | undefined;

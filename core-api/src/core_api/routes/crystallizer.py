@@ -185,8 +185,12 @@ async def list_reports(
     declared and validated here but never passed on, so the storage service ran
     its own default window: every request returned the same first 10 reports,
     ``offset`` did nothing, and a caller paging through got page 1 forever.
+
+    L-120 — gated as a read, like ``get_report``: a cross-tenant read key may
+    list a tenant it may read. The write gate it used admitted only the key's
+    home tenant, so such a key could fetch a report by id but not find the ids.
     """
-    auth.enforce_tenant(tenant_id)
+    auth.enforce_readable_tenant(tenant_id)
     sc = get_storage_client()
     reports = await sc.list_reports(tenant_id, limit=limit, offset=offset)
     return [
@@ -308,8 +312,10 @@ async def get_latest_report(
     client to special-case it as "actually empty"; see CAURA-646. The
     sibling ``/crystallize/reports/{report_id}`` keeps its 404 because
     *that* endpoint genuinely points at an opaque id that may not exist.
+
+    Gated as a read, like the list above (L-120).
     """
-    auth.enforce_tenant(tenant_id)
+    auth.enforce_readable_tenant(tenant_id)
     sc = get_storage_client()
     report = await sc.get_latest_report(tenant_id)
     # Identity check, not truthiness — the storage client's contract is
