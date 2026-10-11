@@ -53,6 +53,13 @@ The script installs `uv` when it is missing, installs this CLI, and runs
 An MCP server added while a session runs is loaded only after a restart, so
 restart Claude Code (or run `/mcp`) or Codex afterwards, as `join` prints.
 
+When the Caura broker (`caura`) is on PATH, `join` first prints the equivalent
+`caura agent connect` command, which signs in through the browser and keeps the
+agent key in the OS keychain. In a terminal, `join` offers to run that command
+instead. Without a terminal, `join` prints it and continues as above.
+`--broker` runs it without asking, and `--no-broker` skips the offer. Options
+the broker does not take (`--tenant`, `--no-hooks`) are listed as notes.
+
 ## Connect your agent with an existing key
 
 Get an agent key from your Caura admin (the dashboard's API Credentials page),

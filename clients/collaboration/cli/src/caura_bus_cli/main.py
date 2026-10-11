@@ -4,6 +4,8 @@ import asyncio
 import getpass
 import json
 import os
+import shlex
+import subprocess
 from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Literal
@@ -13,6 +15,7 @@ import typer
 from caura_bus_core import RESYNC_EVENT, Bus, PlatformError, ResponseCollector, SendMessage, load_config
 from caura_bus_core.config import CONFIG_ENV_VAR, DEFAULT_CONFIG_PATH
 
+from . import broker as broker_mod
 from .hooks import DEFAULT_LISTEN_SECONDS, install_hooks
 from .join import JoinError, JoinOptions, run_join
 from .runtime import CodexQueue, WakeState, listen, load_key, receive, state_path, supervise
@@ -243,12 +246,21 @@ def join(
     description: str | None = typer.Option(None, help="Register this agent's expertise for discovery"),
     tenant: str | None = typer.Option(None, help="Workspace (default: your landing workspace)"),
     no_hooks: bool = typer.Option(False, "--no-hooks", help="Skip wake-up hooks / the Codex waker"),
+    broker: bool | None = typer.Option(
+        None,
+        "--broker/--no-broker",
+        help="Use the installed Caura broker (`caura agent connect`) without asking, or never",
+    ),
 ):
     """Sign in as yourself, mint an agent key and connect this runtime: no dashboard step needed.
 
     The password is read from CAURA_PASSWORD or prompted on the terminal. It is
-    used for this one sign-in only and never stored.
+    used for this one sign-in only and never stored. When the Caura broker
+    (`caura`) is installed, join prints the equivalent `caura agent connect`
+    command and offers to run it instead.
     """
+    if broker is not False:
+        prefer_broker(url, name, runtime, directory, description, tenant, not no_hooks, broker)
     try:
         # Take the secrets out of the environment so no child process (claude mcp add) inherits them.
         password = os.environ.pop("CAURA_PASSWORD", "")
@@ -280,6 +292,55 @@ def join(
         raise typer.Exit(1) from None
     except (SetupError, ValueError, OSError) as exc:
         typer.echo(f"caura-bus join: {exc}", err=True)
+        raise typer.Exit(1) from None
+    raise typer.Exit(code)
+
+
+def prefer_broker(url, name, runtime, directory, description, tenant, hooks, required):
+    """Offer `caura agent connect` when the broker is installed; return to continue with join."""
+    found = broker_mod.find_broker()
+    if found is None:
+        if required:
+            typer.echo("caura-bus join: --broker needs the Caura broker (`caura`) on PATH", err=True)
+            raise typer.Exit(1)
+        return
+    try:
+        plan = broker_mod.connect_plan(
+            found,
+            url=url,
+            runtime=runtime,
+            directory=directory,
+            name=name,
+            description=description,
+            tenant=tenant,
+            hooks=hooks,
+        )
+    except JoinError as exc:
+        if required:
+            typer.echo(f"caura-bus join: {exc}", err=True)
+            raise typer.Exit(1) from None
+        return  # join reports the same problem with its own wording
+    typer.echo("The Caura broker is installed. It connects this runtime with a browser sign-in and keeps")
+    typer.echo("the agent key in the OS keychain. The equivalent command is:")
+    typer.echo(f"  {shlex.join(plan.argv)}")
+    for note in plan.notes:
+        typer.echo(f"  note: {note}")
+    if required and not plan.runnable:
+        typer.echo("caura-bus join: --broker cannot run the command as shown", err=True)
+        raise typer.Exit(1)
+    run_it = bool(required)
+    if not run_it and plan.runnable and broker_mod.interactive():
+        run_it = typer.confirm("Run it now instead of signing in here?", default=True)
+    if not run_it:
+        typer.echo(
+            "Continuing with caura-bus join (pass --broker to use the broker, --no-broker to skip this)."
+        )
+        typer.echo("")
+        return
+    try:
+        code = subprocess.run(plan.argv, check=False).returncode
+    except OSError as exc:
+        typer.echo(f"caura-bus join: could not start the broker: {exc}", err=True)
         raise typer.Exit(1) from None
     raise typer.Exit(code)
 
