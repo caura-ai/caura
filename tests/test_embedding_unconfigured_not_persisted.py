@@ -15,6 +15,7 @@ query path keeps working so a keyless deployment can still search by keyword.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -28,7 +29,10 @@ from common.embedding import (
     get_embeddings_batch,
     get_query_embedding,
 )
-from tests.conftest import get_test_auth, uid
+from core_api import mcp_server
+from core_api.routes import documents as documents_routes
+from tests._mcp_test_helpers import is_error_envelope, parse_envelope
+from tests.conftest import get_test_auth, new_tenant_id, uid
 
 
 @pytest.fixture
@@ -180,3 +184,70 @@ async def test_the_inline_re_embed_does_not_retry_an_unconfigured_provider(
     embed.assert_not_awaited()
     stranded.assert_awaited_once()
     assert "no embedding provider is configured" in stranded.await_args.args[2]
+
+
+# ── L-224 (audit 2026-10-01, B41) ─────────────────────────────────────────
+#
+# A keyless row stays ``embedding=NULL`` for good, so ``GET /memories/stats``
+# counted it as pending embedding forever and ``settled`` never flipped, while
+# docs/api-reference.md tells callers to poll until it does. Document search
+# answered every keyless call with the 503 meant for a provider that failed
+# once, which invites a retry that can never succeed.
+
+
+@pytest.mark.asyncio
+async def test_l224_a_keyless_store_settles(client, keyless_openai):
+    tenant_id = new_tenant_id()
+    _, headers = get_test_auth(tenant_id)
+    body = {
+        "tenant_id": tenant_id,
+        "agent_id": f"keyless-stats-{uid()}",
+        "write_mode": "strong",
+        "content": f"Our auth service uses JWT with 15-minute expiry {uid()}.",
+    }
+    resp = await client.post("/api/v1/memories", json=body, headers=headers)
+    assert resp.status_code == 201, resp.text
+
+    resp = await client.get(
+        "/api/v1/memories/stats", params={"tenant_id": tenant_id}, headers=headers
+    )
+
+    assert resp.status_code == 200, resp.text
+    stats = resp.json()
+    # The row is still counted, and the response says why it will stay so.
+    assert stats["pending"] == {"embedding": 1, "enrichment": 0, "fanout": 0}
+    assert stats["embedding_configured"] is False
+    assert stats["settled"] is True
+
+
+@pytest.mark.asyncio
+async def test_l224_keyless_document_search_names_the_cause(
+    client, monkeypatch, keyless_openai
+):
+    tenant_id, headers = get_test_auth()
+    body = {"tenant_id": tenant_id, "query": "a document with a summary"}
+
+    resp = await client.post("/api/v1/documents/search", json=body, headers=headers)
+
+    assert resp.status_code == 501, resp.text
+    assert resp.json()["error"]["code"] == "EMBEDDING_NOT_CONFIGURED"
+
+    # A configured provider that returned no vector is still a 503: that one
+    # can pass, so a caller may retry it.
+    monkeypatch.setattr(documents_routes, "embedding_configured", lambda *_a: True)
+    resp = await client.post("/api/v1/documents/search", json=body, headers=headers)
+    assert resp.status_code == 503, resp.text
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_l224_keyless_mcp_document_search_names_the_cause(
+    mcp_env, monkeypatch, keyless_openai
+):
+    # No tenant override: the process-level provider, which has no key.
+    monkeypatch.setattr(mcp_server, "resolve_config", AsyncMock(return_value=None))
+
+    out = await mcp_server.caura_doc(op="search", query="onboarding")
+
+    assert is_error_envelope(out)
+    assert parse_envelope(out)["error"]["code"] == "EMBEDDING_NOT_CONFIGURED"

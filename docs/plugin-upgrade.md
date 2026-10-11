@@ -12,7 +12,7 @@ After the manifest-aware deploy work (CAURA-444 / #113), the server tracks per-n
 4. Plugin fetches current source via `/api/v1/plugin-manifest` + `/api/v1/plugin-source?file=...`, writes new files, rebuilds `dist/`.
 5. New code takes effect at the next OpenClaw restart.
 
-`.env` is **preserved** across auto-upgrade — `deployPlugin` reads the existing values into a Map and merges any new keys the server pushed.
+`.env` is **left untouched** by auto-upgrade: the manifest deploy writes the new source files and rebuilds `dist/`, and it neither reads nor merges `.env`. It does not reinstall `node_modules/` either.
 
 ## When auto-upgrade does *not* run
 
@@ -130,9 +130,9 @@ That returns the stale-plugin set the auto-deploy gate is currently skipping. Th
 
 | Resource | Auto-upgrade (heartbeat) | Manual install (with creds) | Manual install (default creds) |
 |---|---|---|---|
-| `.env` (`CAURA_API_KEY` etc.) | Preserved + merged | Preserved (you pass them back) | Overwritten with defaults |
+| `.env` (`CAURA_API_KEY` etc.) | Preserved (untouched) | Preserved (you pass them back) | Overwritten with defaults |
 | `dist/*.js`, `src/*.ts` | Replaced | Replaced | Replaced |
-| `node_modules/` | Replaced | Replaced | Replaced |
+| `node_modules/` | Kept (not reinstalled) | Replaced | Replaced |
 | `.agent-keys.json`, `.educated`, `.allowlist-applied` | Preserved | Preserved | Preserved |
 | Custom skills in `skills/` (operator-added) | Preserved | Preserved | Preserved |
 | `install.json` (`install_id` and `default_agent_id`, the agent identity) | Preserved | Preserved | Preserved |

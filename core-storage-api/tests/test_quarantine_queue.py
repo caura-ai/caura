@@ -16,13 +16,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select, text
-from sqlalchemy.dialects import postgresql
 
 from common.constants import QUARANTINED_MEMORY_STATUS
 from common.models import Memory
-from core_storage_api.database.init import get_engine
 from core_storage_api.services import postgres_service
 from core_storage_api.services.postgres_service import get_session
+from tests.conftest import plan_with_only_index
 
 pytestmark = pytest.mark.asyncio
 
@@ -299,17 +298,9 @@ async def test_a_rollback_names_a_tenant_and_a_session(client) -> None:
 # ── The indexes, on the migrated schema ──
 
 
-async def _plan(stmt) -> str:
-    sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
-    async with get_engine().connect() as conn:
-        # On a near-empty table a sequential scan is legitimately cheaper; the
-        # question is whether migration 062's index CAN serve the predicate.
-        await conn.execute(text("SET LOCAL enable_seqscan = off"))
-        return "\n".join(row[0] for row in (await conn.execute(text(f"EXPLAIN {sql}"))).all())
-
-
 async def test_a_sessions_rows_are_found_by_index(_ensure_schema) -> None:
-    plan = await _plan(select(Memory.id).where(*postgres_service.session_rows_where("t-plan", "s-plan")))
+    stmt = select(Memory.id).where(*postgres_service.session_rows_where("t-plan", "s-plan"))
+    plan = await plan_with_only_index(stmt, "ix_memories_session")
     assert "ix_memories_session" in plan, plan
 
 
@@ -320,5 +311,5 @@ async def test_the_queue_is_read_by_index(_ensure_schema) -> None:
         .order_by(Memory.created_at.desc(), Memory.id.desc())
         .limit(51)
     )
-    plan = await _plan(stmt)
+    plan = await plan_with_only_index(stmt, "ix_memories_held")
     assert "ix_memories_held" in plan, plan

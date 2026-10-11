@@ -2,6 +2,7 @@
 
 import importlib.metadata
 import os
+import re
 from pathlib import Path
 
 # Re-export DB-query constants from common (shared with core-storage-api).
@@ -1020,6 +1021,7 @@ INTERVIEW_TEMPERATURE = 0.2
 BULK_MAX_ITEMS = 100  # max memories per bulk request
 BULK_EMBEDDING_CONCURRENCY = 10  # max parallel embedding calls in bulk mode
 BULK_ENRICHMENT_CONCURRENCY = 10  # max parallel enrichment calls in bulk mode
+BULK_REEMBED_PATCH_CONCURRENCY = 8  # max parallel embedding PATCHes after a bulk re-embed (L-184)
 # Outer cap on the whole enrichment gather. One hung provider call would
 # otherwise stall the batch; on timeout, completed slots keep their values
 # and pending ones stay None (same as a per-item provider error). Should
@@ -1096,6 +1098,14 @@ LIFECYCLE_BATCH_SIZE = 500  # max memories per status transition batch
 # ``common.constants`` (see top of this file) — canonical location is
 # ``common`` so core-worker can read the same value without depending
 # on core-api.
+
+# ── Entity extraction: asking again after every provider failed ──
+# Seconds to wait before each further run of the whole provider chain, when every
+# provider was reached and failed on something asking again may fix (a 429, a
+# 5xx, a timeout), before extraction settles for the regex heuristic. A per-minute
+# quota like Vertex's clears in about a minute; the second wait covers a longer
+# burst. Extraction runs in a background task, so no request waits on these.
+ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S: tuple[float, ...] = (60.0, 300.0)
 
 # ── Entity extraction quality filter ──
 MIN_ENTITY_NAME_LENGTH = 2  # single-char "entities" are never meaningful
@@ -1184,3 +1194,12 @@ KEYSTONES_EMPTY_HINT = (
     "call failed. Until rules exist, standing constraints have to travel in "
     "recall instead of being pinned here."
 )
+
+
+# A ``skills`` doc_id, on REST ``POST /documents`` and MCP ``caura_doc`` alike
+# (L-105: MCP kept its own copy without the prefix). Slugs become directory
+# names on plugin-side reconciliation, so the shape is filesystem-safe. The
+# optional ``forge/`` or ``agent/`` prefix is the Skill Factory's doc_id
+# namespacing: Forge candidates land as ``forge/<slug>`` and agent-direct
+# writes as ``agent/<slug>``; ``manual``/``imported`` rows keep plain ``<slug>``.
+SKILL_SLUG_RE = re.compile(r"^(?:forge/|agent/)?[a-z0-9][a-z0-9._-]{0,99}$")

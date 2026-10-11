@@ -40,7 +40,7 @@ All paths are prefixed with `/api/v1` unless noted. Request and response shapes 
 | Documents | `POST /documents`, `GET /documents`, `GET /documents/{id}`, `POST /documents/query`, `DELETE /documents/{id}` |
 | Keystones | `GET /keystones`, `POST /keystones`, `DELETE /keystones/{doc_id}` (supported legacy route: `/memclaw/keystones`) | <!-- legacy-name-floor: documents the compatibility route -->
 | Fleet | `POST /fleet/heartbeat`, `GET /fleet/nodes`, `POST /fleet/commands`, `GET /fleet/commands` |
-| Agents | `GET /agents`, `GET /agents/{id}`, `PATCH /agents/{id}/trust`, `POST /admin/agent-keys/provision` (atomic key + row + trust + fleet), `GET /whoami` (identity probe) |
+| Agents | `GET /agents`, `GET /agents/{id}`, `PATCH /agents/{id}/trust`, `POST /admin/agent-keys/provision` (managed platform only: atomic key + row + trust + fleet; a self-hosted core-api has no such route), `GET /whoami` (identity probe) |
 | Insights | `POST /insights/generate` |
 | Evolve | `POST /evolve/report` |
 | Crystallizer | `POST /crystallize`, `POST /crystallize/all`, `GET /crystallize/reports`, `GET /crystallize/latest` |
@@ -109,7 +109,7 @@ Anything not listed above is internal and may change in any release without a ma
 - Python module layout (`core_api.middleware.*`, `core_api.providers.*`, `core_api.pipeline.*`, `core_api.services.*`, `common/*`)
 - Database schema, table names, migration paths
 - Gateway-injected HTTP headers (`X-Gateway-Secret`, `X-Tenant-ID`, `X-Agent-ID`, `X-Org-Read-Only`, `X-User-ID`)
-- Most `/api/v1/admin/*` and all `/api/v1/testing/*` routes (the documented exception is `POST /admin/agent-keys/provision`, which is part of the stable identity-bootstrap surface — see the Agents row above)
+- Most `/api/v1/admin/*` and all `/api/v1/testing/*` routes (the documented exception is `POST /admin/agent-keys/provision`, part of the managed platform's stable identity-bootstrap surface — see the Agents row above)
 - The `core-storage-api` microservice (internal, not user-facing)
 - The plugin's TypeScript module structure
 - API-key prefix formats — currently unified on `mc_…` (with legacy `mca_…` / `mci_…` aliases still accepted via back-compat); formats may continue to evolve

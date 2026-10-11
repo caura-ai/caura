@@ -235,11 +235,11 @@ async def test_consumers_still_get_every_field_they_read(
 
 
 def test_single_get_field_list_still_carries_the_vector() -> None:
-    """The trim is scoped to scored-search, not to the field catalogue.
+    """The trim is scoped to the routes, not to the field catalogue.
 
     ``consumer.py``'s contradiction deferral reads ``memory.get("embedding")``
-    from the single-get response, so ``MEMORY_FIELDS`` (GET /memories/{id},
-    load-by-ids, find-successors) must keep both columns.
+    from the single-get response, so ``MEMORY_FIELDS`` (GET /memories/{id})
+    must keep both columns.
     """
     assert "embedding" in MEMORY_FIELDS
     assert "search_vector" in MEMORY_FIELDS

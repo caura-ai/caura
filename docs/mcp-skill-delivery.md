@@ -31,12 +31,11 @@ skills are discoverable**:
 | op | behavior on `collection='skills'` |
 |---|---|
 | `read` | non-active doc → `Not found` (no existence leak) |
-| `query` | `status='active'` forced (overrides any caller-supplied status) |
+| `query` | no `status` (or `status='active'`) → scoped to `'active'`; an explicit non-active `status` → `INVALID_ARGUMENTS` (inspect those via the Skills Inbox API). A tenant that has not opted in to the Skill Factory gets the status it asked for |
 | `search` (scoped) | `status='active'` pushed into the SQL (exact top_k) |
 | `search` (broad, no collection) | non-active skill rows dropped from results |
 | `write` | runs the SF-002 lifecycle validator → defaults to `staged` (see below) |
 | `delete` | non-active doc → `Not found` (atomic status guard in the DELETE WHERE) |
-| `query` | `status='active'` scoped in; an explicit non-active `status` → 422 (use the Inbox) |
 | `list_collections` | the `skills` count is corrected to active-only |
 
 ### The filter follows the *owning* tenant, not just the caller

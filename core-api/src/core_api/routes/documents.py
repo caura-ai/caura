@@ -1,7 +1,6 @@
 """Document Store — structured JSONB records for agents."""
 
 import logging
-import re
 from datetime import datetime
 
 import httpx
@@ -14,8 +13,13 @@ from core_api import openapi_responses as _oar
 from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
-from core_api.constants import DEFAULT_DOC_SEARCH_TOP_K, MAX_DOC_SEARCH_TOP_K
-from core_api.errors import AUTH_AGENT_TRUST_TOO_LOW, coded_detail
+from core_api.constants import DEFAULT_DOC_SEARCH_TOP_K, MAX_DOC_SEARCH_TOP_K, SKILL_SLUG_RE
+from core_api.errors import (
+    AUTH_AGENT_TRUST_TOO_LOW,
+    EMBEDDING_NOT_CONFIGURED,
+    EMBEDDING_NOT_CONFIGURED_MESSAGE,
+    coded_detail,
+)
 from core_api.middleware.idempotency import (
     IDEMPOTENCY_HEADER,
     IdempotencyGuard,
@@ -61,13 +65,10 @@ router = APIRouter(tags=["Document Store"])
 # data["description"] for the skills collection only — see
 # core_api.services.doc_indexing).
 SKILLS_COLLECTION = "skills"
-# Optional ``forge/`` or ``agent/`` prefix supports the Skill Factory's
-# doc_id namespacing (plan §3): Forge candidates land as ``forge/<slug>``
-# and synchronous agent-direct writes via ``caura_doc`` land as
-# ``agent/<slug>``. Without this, Forge's own writes 422 themselves at
-# the route boundary. ``manual``/``imported`` rows keep the plain
-# ``<slug>`` shape — the prefix is opt-in, not required.
-_SKILL_SLUG_RE = re.compile(r"^(?:forge/|agent/)?[a-z0-9][a-z0-9._-]{0,99}$")
+# Shared with MCP ``caura_doc``; see ``core_api.constants.SKILL_SLUG_RE`` for
+# the ``forge/`` / ``agent/`` namespacing. Without the prefix, Forge's own
+# writes would 422 themselves at the route boundary.
+_SKILL_SLUG_RE = SKILL_SLUG_RE
 
 # Skill Factory SF-005 — Rollback metadata for applied skills.
 #
@@ -495,7 +496,7 @@ async def upsert_document(
             doc_id=body.doc_id,
             force=body.force,
         )
-    _idem = await idempotency_for(request, body.tenant_id, idempotency_key)
+    _idem = await idempotency_for(request, body.tenant_id, idempotency_key, agent_id=author)
     if _idem and (_replay := _idem.cached_replay):
         _body, _status = _replay
         return JSONResponse(content=_body, status_code=_status)
@@ -679,56 +680,46 @@ async def _upsert_document_claimed(
             )
 
     sc = get_storage_client()
-    if embedding is not None:
-        try:
-            await sc.upsert_document_xmax(
-                {
-                    "tenant_id": body.tenant_id,
-                    "fleet_id": body.fleet_id,
-                    "collection": body.collection,
-                    "doc_id": body.doc_id,
-                    "data": body.data,
-                    "agent_id": author,
-                    # C34 — explicit opt-out of the catastrophic-shrink guard.
-                    "force": body.force,
-                    "embedding": embedding,
-                }
-            )
-        except httpx.HTTPStatusError as exc:
-            raise _surface_storage_error(exc) from exc
-        # Storage-api commits in its own session, so no intermediate
-        # ``db.commit()`` is needed. Re-fetch from the PRIMARY (read=False):
-        # this is a read-after-write, so a replica read under replication lag
-        # could miss the just-committed row and yield a false 500. The
-        # upsert-xmax endpoint returns id/timestamps/xmax, not a full doc dict.
-        doc = await sc.get_document(
-            tenant_id=body.tenant_id,
-            collection=body.collection,
-            doc_id=body.doc_id,
-            read=False,
+    # L-121 — always the upsert that writes ``embedding``, even as None, so the
+    # stored vector is the one THIS version resolved, as MCP ``caura_doc`` does.
+    # The other upsert keeps the old vector on conflict: a re-write that dropped
+    # the summary answered ``indexed: false`` while the document kept matching
+    # searches for the summary it no longer had. That upsert stays right for its
+    # other callers (skills-inbox transitions, ingest, interviews), which write
+    # no embedding and rely on the one already stored.
+    try:
+        await sc.upsert_document_xmax(
+            {
+                "tenant_id": body.tenant_id,
+                "fleet_id": body.fleet_id,
+                "collection": body.collection,
+                "doc_id": body.doc_id,
+                "data": body.data,
+                "agent_id": author,
+                # C34 — explicit opt-out of the catastrophic-shrink guard.
+                "force": body.force,
+                "embedding": embedding,
+            }
         )
-    else:
-        try:
-            doc = await sc.upsert_document(
-                {
-                    "tenant_id": body.tenant_id,
-                    "fleet_id": body.fleet_id,
-                    "collection": body.collection,
-                    "doc_id": body.doc_id,
-                    "data": body.data,
-                    "agent_id": author,
-                    # C34 — explicit opt-out of the catastrophic-shrink guard.
-                    "force": body.force,
-                }
-            )
-        except httpx.HTTPStatusError as exc:
-            raise _surface_storage_error(exc) from exc
+    except httpx.HTTPStatusError as exc:
+        raise _surface_storage_error(exc) from exc
+    # Storage-api commits in its own session, so no intermediate
+    # ``db.commit()`` is needed. Re-fetch from the PRIMARY (read=False):
+    # this is a read-after-write, so a replica read under replication lag
+    # could miss the just-committed row and yield a false 500. The
+    # upsert-xmax endpoint returns id/timestamps/xmax, not a full doc dict.
+    doc = await sc.get_document(
+        tenant_id=body.tenant_id,
+        collection=body.collection,
+        doc_id=body.doc_id,
+        read=False,
+    )
     if doc is None:
         raise HTTPException(status_code=500, detail="Document upsert returned no rows")
     # Mint a memory carrying the document body so the BODY becomes reachable by
     # meaning (only data["summary"] is embedded on the doc row, and
-    # ``caura_recall`` never returns documents). Both upsert branches above
-    # converge here, so this one call covers indexed and unindexed writes.
+    # ``caura_recall`` never returns documents). Indexed and unindexed writes
+    # both reach here, so this one call covers them.
     # Never raises: the doc is already committed and is the source of truth.
     try:
         doc_memory_spec = resolve_doc_memory(
@@ -767,9 +758,9 @@ async def _upsert_document_claimed(
     return out
 
 
-# NOTE: /documents/collections must be registered BEFORE /documents/{doc_id}
+# NOTE: /documents/collections must be registered BEFORE /documents/{doc_id:path}
 # because FastAPI matches in declaration order — without this ordering,
-# `GET /documents/collections` would match `/documents/{doc_id}` with
+# `GET /documents/collections` would match `/documents/{doc_id:path}` with
 # doc_id="collections" and require the `collection=` query param, returning 422.
 @router.get(
     "/documents/collections",
@@ -804,14 +795,20 @@ async def list_collections(
     )
 
 
-@router.get("/documents/{doc_id}", responses={200: {"model": DocOut}})
+# ``{doc_id:path}`` on the two by-id routes because a doc_id may contain "/":
+# ``forge/<slug>`` and ``agent/<slug>`` skills, and hierarchical ids such as
+# ``runbooks/db/failover``, which the write path accepts and storage serves.
+# The single-segment form could write those rows but never read or delete them
+# here (M-30). A guess of ``/documents/{collection}/{doc_id}`` now lands on this
+# route and is told the query parameter it is missing, instead of a 404.
+@router.get("/documents/{doc_id:path}", responses={200: {"model": DocOut}})
 async def get_document(
     doc_id: str,
     tenant_id: str = Query(...),
     collection: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Get a single document by collection + doc_id.
+    """Get a single document by collection + doc_id. ``doc_id`` may contain "/".
 
     Cross-tenant credentials may pass any ``tenant_id`` in their readable
     set; the gate widens via ``enforce_readable_tenant``. Single-tenant
@@ -941,14 +938,14 @@ async def list_documents(
     return [_dict_to_out(d) for d in docs]
 
 
-@router.delete("/documents/{doc_id}", status_code=204)
+@router.delete("/documents/{doc_id:path}", status_code=204)
 async def delete_document(
     doc_id: str,
     tenant_id: str = Query(...),
     collection: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Delete a document by collection + doc_id.
+    """Delete a document by collection + doc_id. ``doc_id`` may contain "/".
 
     Also un-mints the memory the write minted — see ``POST /documents``.
     """
@@ -1025,6 +1022,13 @@ async def search_documents(
     # so a bulk-ingest flood can't throttle it into the 503 below.
     query_embedding = await get_embedding(body.query, tenant_config, background=False)
     if query_embedding is None:
+        if not embedding_configured(tenant_config):
+            # No provider at all (L-224): permanent until an operator sets one,
+            # so not the 503 below, which invites a retry.
+            raise HTTPException(
+                status_code=501,
+                detail=coded_detail(EMBEDDING_NOT_CONFIGURED, EMBEDDING_NOT_CONFIGURED_MESSAGE),
+            )
         raise HTTPException(
             status_code=503,
             detail=("embedding provider returned no vector (check provider config / quota); search aborted"),

@@ -284,7 +284,7 @@ async def test_conflict_resolve(monkeypatch, log):
     await conflicts.resolve_conflict(
         "c1",
         ConflictResolveRequest(tenant_id="t1", review_status="resolved"),
-        auth=_ctx(),
+        auth=_ctx(is_person=True),
     )
     _assert_actor(_detail(log, "conflict.review"))
 
@@ -395,7 +395,8 @@ async def test_trust(monkeypatch, log):
 
 
 async def test_keystone_set(monkeypatch, log):
-    monkeypatch.setattr(keystones, "_enforce_author_trust", AsyncMock())
+    # The caller's trust, which the route holds to the rule's floor.
+    monkeypatch.setattr(keystones, "_enforce_author_trust", AsyncMock(return_value=3))
     sc = _storage(
         monkeypatch, keystones, get_document=None, upsert_keystone={"id": str(uuid4())}
     )

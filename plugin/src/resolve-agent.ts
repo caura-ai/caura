@@ -6,7 +6,7 @@
  *   2. Session key parsing — "agent:AGENT_NAME:CHANNEL:TARGET". With no
  *      ``agents.list``, ``main`` is the install's default agent (5).
  *   3. Config agent name (config.agentName, config.agent?.name)
- *   4. CAURA_AGENT_ID env var
+ *   4. CAURA_AGENT_ID, from the plugin's OpenClaw config or the env var
  *   5. The install's default agent id, the one its heartbeat registers
  *      (``getDefaultAgentId``): ``main-${installId}`` for a new install,
  *      so two OpenClaw installs sharing one tenant don't merge their
@@ -60,7 +60,7 @@ function resolveAgentIdInner(
   if (CAURA_AGENT_ID) {
     if (!quiet) {
       console.warn(
-        "[caura] Agent ID resolved from the CAURA_AGENT_ID (legacy: MEMCLAW_AGENT_ID) env var — consider passing agent_id explicitly", // legacy-name-ok: taught as legacy alias
+        "[caura] Agent ID resolved from the CAURA_AGENT_ID (legacy: MEMCLAW_AGENT_ID) setting — consider passing agent_id explicitly", // legacy-name-ok: taught as legacy alias
       );
     }
     return CAURA_AGENT_ID;

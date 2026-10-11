@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from common.constants import QUARANTINED_MEMORY_STATUS
+from common.constants import HOLD_KEY, QUARANTINED_MEMORY_STATUS
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
 from core_api.services.system_metadata import SYSTEM_NAMESPACE
-from core_api.services.write_hold import HOLD_KEY, hold_for
+from core_api.services.write_hold import hold_for
 
 
 class HoldLowTrustWrite:

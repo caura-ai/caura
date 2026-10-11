@@ -80,7 +80,7 @@ Add this to your MCP client configuration:
 | Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
 | Claude Code | `~/.claude.json` (user scope) — preferred; register via `claude mcp add --scope user --transport http caura https://your-caura-instance.example.com/mcp --header "X-API-Key: mc_your_key"` |
-| Cursor | Settings -> MCP Servers -> Add Server (type: `sse`, URL: `https://your-caura-instance.example.com/mcp`) |
+| Cursor | Settings -> MCP Servers -> Add Server by URL (`https://your-caura-instance.example.com/mcp`); `/mcp` serves the Streamable HTTP transport, not SSE |
 
 > The Claude Code MCP-server registry lives in `~/.claude.json` — NOT `~/.claude/settings.json`. The latter's schema rejects an `mcpServers` block. Prefer the `claude mcp add` CLI over hand-editing so the correct file is written.
 
@@ -126,7 +126,7 @@ The MCP server exposes 12 tools that clients discover automatically. Description
 
 | Tool | Purpose |
 |---|---|
-| `caura_write` | Store a memory. Single write (`content`) or batch (`items` ≤100). LLM auto-infers type, title, summary, embedding. Long content auto-chunked |
+| `caura_write` | Store a memory. Single write (`content`) or batch (`items` ≤100). LLM auto-infers type, title, summary, embedding. Long content is auto-chunked where the tenant turned it on |
 | `caura_recall` | Hybrid semantic + keyword search with graph-enhanced retrieval. `include_brief=true` returns an LLM-summarized context paragraph. Supports `fleet_ids` |
 | `caura_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete`, `bulk_delete`, `lineage`. Re-embeds on content updates |
 | `caura_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) and own-fleet `scope=fleet` need trust ≥ 1; another fleet or `scope=all` needs trust ≥ 2 |
@@ -395,7 +395,7 @@ AFTER completing work:
   `active`; tags are caller-supplied)
 - Dates auto-extracted: "deadline March 30" → ts_valid_end
 - Contradictions auto-detected: conflicting older memories marked outdated
-- Long content (>2000 chars) is auto-chunked into atomic facts
+- Long content (>2000 chars) is auto-chunked into atomic facts when the tenant turns auto-chunking on (off by default)
 - Set visibility: "scope_agent" (you only), "scope_team" (default), "scope_org" (all fleets)
 - Optionally override `memory_type` with a caller-writeable type (`fact`,
   `episode`, `decision`, `preference`, `task`, `plan`, or `action`), plus
@@ -657,15 +657,12 @@ Search respects visibility automatically. Agents see: all `scope_org` memories +
 
 ### Auto-chunking
 
-Content exceeding 2,000 characters is automatically split into atomic facts via LLM:
+Auto-chunking is opt-in, off by default: set the tenant setting `chunking.auto_chunk_enabled` to `true` to turn it on. Then content exceeding 2,000 characters is split into atomic facts via LLM:
 
 - Creates a **parent memory** with the full content (tagged `auto_chunked: true`)
 - Creates **child memories** for each extracted fact (tagged `source: "auto_chunk"`, linked to parent)
 - Both parent and children inherit type, weight, status, visibility
-- Togglable per tenant via `auto_chunk_enabled` setting
 - Falls back to single-memory write if chunking fails
-
-> **Note:** This is a behavior change — integrations sending long content will now get multiple memories instead of one. Disable per tenant if needed.
 
 ### Lifecycle automation
 
@@ -745,7 +742,7 @@ detection run the same as single writes.
 
 ### Deduplication
 
-Content-hash rejects exact duplicates within a tenant+fleet scope (HTTP 409). Same content can exist in different fleets.
+Content-hash rejects exact duplicates within a tenant + fleet + agent scope (HTTP 409). The same content can exist in different fleets, and two agents in one fleet can each write it.
 
 ### Troubleshooting
 

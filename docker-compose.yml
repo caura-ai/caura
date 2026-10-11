@@ -73,7 +73,8 @@ services:
   # without one every nightly tick would 403. Same pattern, and the same
   # already-published image, as storage-secret-init above, so nothing new is
   # pulled for it. core-api and core-operations read the file only when their
-  # own key is blank: an ADMIN_API_KEY set in .env still wins for both.
+  # own key is blank: an ADMIN_API_KEY set in .env still wins for both, and so
+  # does a legacy API_KEY when ADMIN_API_KEY is blank (L-229).
   admin-key-init:
     image: ghcr.io/caura-ai/caura-memclaw-core-storage-api:${CAURA_VERSION:-${MEMCLAW_VERSION:-latest}}  # legacy-name-ok: rule 3 dual-read alias
     pull_policy: missing
@@ -180,7 +181,8 @@ services:
       CORE_STORAGE_API_URL: http://core-storage-api:8002
       CORE_STORAGE_SHARED_SECRET: "${CORE_STORAGE_SHARED_SECRET:-}"
       CORE_STORAGE_SHARED_SECRET_FILE: /run/caura-storage/shared-secret
-      # Used only while ADMIN_API_KEY is blank — see admin-key-init.
+      # Used only while ADMIN_API_KEY and the legacy API_KEY are both blank — see
+      # admin-key-init.
       ADMIN_API_KEY_FILE: /run/caura-admin/admin-key
       REDIS_URL: redis://redis:6379/0
       # Anonymous daily heartbeat (docs/telemetry.md). Uncomment to disable.
@@ -241,10 +243,11 @@ services:
   # here or stop the service.
   #
   # The admin key: an ADMIN_API_KEY in .env reaches this service through the
-  # interpolation below (core-api reads the same .env), and otherwise both read
-  # the key admin-key-init generated. One caveat from the core-api block above
-  # applies: a value exported in your shell outranks .env here but not in
-  # core-api, so set it in .env, not in the shell.
+  # interpolation below (core-api reads the same .env). With ADMIN_API_KEY
+  # blank, a legacy API_KEY does, since core-api's admin key is then that one
+  # (L-229). Otherwise both read the key admin-key-init generated. One caveat
+  # from the core-api block above applies: a value exported in your shell
+  # outranks .env here but not in core-api, so set it in .env, not in the shell.
   core-operations:
     image: ghcr.io/caura-ai/caura-core-operations:${CAURA_VERSION:-${MEMCLAW_VERSION:-latest}}  # legacy-name-ok: rule 3 dual-read alias
     pull_policy: missing
@@ -253,7 +256,7 @@ services:
       dockerfile: core-operations/Dockerfile
     environment:
       CORE_API_URL: http://core-api:8000
-      CORE_API_ADMIN_API_KEY: "${ADMIN_API_KEY:-}"
+      CORE_API_ADMIN_API_KEY: "${ADMIN_API_KEY:-${API_KEY:-}}"
       CORE_API_ADMIN_API_KEY_FILE: /run/caura-admin/admin-key
     volumes:
       - admin_key:/run/caura-admin:ro
