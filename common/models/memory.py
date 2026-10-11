@@ -50,6 +50,22 @@ PENDING_FANOUT_SQL = "(metadata ->> 'atomic_facts') IS NOT NULL"
 PENDING_WORK_SQL = (
     f"({PENDING_EMBEDDING_SQL} OR {PENDING_ENRICHMENT_SQL} OR {PENDING_FANOUT_SQL})"
 )
+#: L-96. A row still unembedded an hour after it was written is stranded, not in
+#: flight: an embed that exhausted its retries, died with its process or
+#: dead-lettered leaves the row at NULL with nothing coming back for it short of
+#: a backfill (``core_storage_api.scripts.backfill_embeddings``). Counted apart
+#: so ``settled`` stops waiting on it; it is still counted as pending.
+#:
+#: The hour is a judgement, not a guarantee (Eldad, 2026-10-09): past the point
+#: where a retry already in flight should have landed, short of making a
+#: measurement after ingest wait a day. A deferred deployment draining a longer
+#: backlog reports its tail as stranded too, and ``stranded.embedding`` says so.
+#: ``created_at`` is the clock because only a new row is unembedded (or every
+#: row, after a vector-dimension migration): an edit keeps the old vector until
+#: the new one lands.
+STRANDED_EMBEDDING_SQL = (
+    f"({PENDING_EMBEDDING_SQL} AND created_at < now() - interval '1 hour')"
+)
 
 
 class Memory(Base):
@@ -155,6 +171,12 @@ class Memory(Base):
     # Distinct from supersession, which needs no such field: there the event IS
     # the creation of the superseding memory, so ``new_mem.created_at`` is
     # already the right timestamp.
+    #
+    # Every statement that sets ``status`` stamps it (L-142), with ONE exception:
+    # the expiry sweep's flip to ``outdated`` leaves it alone (Eldad,
+    # 2026-10-11). The contradiction signal counts ``outdated`` rows by this
+    # column, and an expired row is not a contradiction. So for a row the sweep
+    # outdated, it holds the time of the change before that one, or NULL.
     status_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # Contradiction tracking

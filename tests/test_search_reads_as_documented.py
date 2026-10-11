@@ -273,16 +273,14 @@ async def test_l113_the_legacy_path_answers_the_same():
 # ── L-115: a reranked row says what ordered it ──────────────────────────────
 
 
-async def test_l115_a_reranked_row_carries_the_rerankers_score():
+async def test_l115_a_reranked_row_carries_the_rerankers_score(monkeypatch):
+    monkeypatch.setattr(
+        "core_api.pipeline.steps.search.rerank_results.RANK_ENABLED", True
+    )
+    monkeypatch.setenv("RANK_PROVIDER", "fake")
     first = _scored_row(0.9, score=1.2, content="totally unrelated")
     match = _scored_row(0.1, score=0.3, content="alpha alpha alpha")
-    ctx = PipelineContext(
-        data={
-            "raw_rows": [first, match],
-            "query": "alpha",
-            "tenant_config": SimpleNamespace(rank_enabled=True, rank_provider="fake"),
-        }
-    )
+    ctx = PipelineContext(data={"raw_rows": [first, match], "query": "alpha"})
     await RerankResults().execute(ctx)
 
     assert ctx.data["raw_rows"] == [match, first]

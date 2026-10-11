@@ -777,10 +777,11 @@ async def process_entity_extraction(
                     # rather than silently corrupting the entity row.
                     existing_name = match.get("canonical_name") or ""
                     if not existing_name:
+                        # The matched id, not the name (L-77).
                         logger.warning(
-                            "bulk_resolve_entities match for '%s' has no canonical_name; "
+                            "bulk_resolve_entities match %s has no canonical_name; "
                             "falling back to incoming name",
-                            name,
+                            match.get("entity_id"),
                         )
                         existing_name = name
                     added_attrs = {"_aliases": list(dict.fromkeys((existing_name, name)))}
@@ -793,9 +794,10 @@ async def process_entity_extraction(
                     match_entity_id = match.get("entity_id")
                     if not match_entity_id:
                         logger.warning(
-                            "bulk_resolve_entities match for '%s' has no entity_id; "
+                            "bulk_resolve_entities match for a %s entity of tenant %s has no entity_id; "
                             "falling back to create path",
-                            name,
+                            entity_type,
+                            tenant_id,
                         )
                         item["action"] = "create"
                         item["canonical_name"] = name

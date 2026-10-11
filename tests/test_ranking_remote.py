@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -65,7 +64,12 @@ async def test_tei_bare_list_response_reprojected_to_input_order():
         captured["body"] = json.loads(request.content)
         # TEI-native: bare list, ranked (best first), index into input texts.
         return httpx.Response(
-            200, json=[{"index": 2, "score": 0.9}, {"index": 0, "score": 0.1}]
+            200,
+            json=[
+                {"index": 2, "score": 0.9},
+                {"index": 1, "score": 0.5},
+                {"index": 0, "score": 0.1},
+            ],
         )
 
     r = _client_with(handler)
@@ -73,8 +77,8 @@ async def test_tei_bare_list_response_reprojected_to_input_order():
     # request shape
     assert captured["path"] == "/rerank"
     assert captured["body"] == {"query": "q", "texts": ["a", "b", "c"]}
-    # scores re-projected to INPUT order: idx0=0.1, idx1=missing→0.0, idx2=0.9
-    assert scores == [0.1, 0.0, 0.9]
+    # scores re-projected to INPUT order
+    assert scores == [0.1, 0.5, 0.9]
 
 
 @pytest.mark.asyncio
@@ -101,20 +105,21 @@ async def test_empty_candidates_short_circuits():
     assert await r.rank("q", []) == []
 
 
-def test_registry_remote_requires_base_url():
+def test_registry_remote_requires_base_url(monkeypatch):
     from common.ranking._registry import get_rank_provider
 
-    # No RANK_BASE_URL and no tenant override → ValueError (→ service degrades).
+    # No RANK_BASE_URL → ValueError (→ service degrades).
+    monkeypatch.setattr("common.ranking._registry.RANK_BASE_URL", "")
     with pytest.raises(ValueError, match="requires a base URL"):
-        get_rank_provider("remote", SimpleNamespace(rank_base_url=None))
+        get_rank_provider("remote")
 
 
-def test_registry_remote_builds_with_tenant_base_url():
+def test_registry_remote_builds_from_rank_base_url(monkeypatch):
     from common.ranking._registry import get_rank_provider
 
-    p = get_rank_provider(
-        "remote", SimpleNamespace(rank_base_url="http://tei:80", rank_model="m")
-    )
+    monkeypatch.setattr("common.ranking._registry.RANK_BASE_URL", "http://tei:80")
+    monkeypatch.setattr("common.ranking._registry.RANK_MODEL", "m")
+    p = get_rank_provider("remote")
     assert isinstance(p, RemoteRanker)
     assert p.model == "m"
 
@@ -154,6 +159,14 @@ def _counting_handler(status, text="", json_body=None):
     return handler, calls
 
 
+def _scores_every_text(request):
+    """A healthy sidecar: one score for every text sent, as L-06 requires."""
+    texts = json.loads(request.content)["texts"]
+    return httpx.Response(
+        200, json=[{"index": i, "score": 1.0} for i in range(len(texts))]
+    )
+
+
 async def _run_service(ranker, monkeypatch, attempts=3, candidates=None):
     """Drive get_ranking against `ranker` with a known retry budget."""
     # RANK_RETRY_ATTEMPTS defaults to 1 (no retry), which makes "permanent vs
@@ -163,12 +176,11 @@ async def _run_service(ranker, monkeypatch, attempts=3, candidates=None):
     monkeypatch.setattr("common.ranking._service.RANK_RETRY_ATTEMPTS", attempts)
     monkeypatch.setattr("common.ranking._service.RANK_RETRY_DELAY_S", 0.0)
     monkeypatch.setattr(
-        "common.ranking._service.get_rank_provider", lambda name, tc=None: ranker
+        "common.ranking._service.get_rank_provider", lambda name: ranker
     )
     return await get_ranking(
         "q",
         candidates if candidates is not None else _cands("a", "b"),
-        SimpleNamespace(rank_provider="remote"),
     )
 
 
@@ -320,7 +332,7 @@ async def test_success_re_arms_the_permanent_error(monkeypatch, caplog):
 
     def flipping(request):
         if state["ok"]:
-            return httpx.Response(200, json=[{"index": 0, "score": 1.0}])
+            return _scores_every_text(request)
         return httpx.Response(413, text="too big")
 
     r = _client_with(flipping)
@@ -346,14 +358,14 @@ async def test_success_re_arms_the_permanent_error(monkeypatch, caplog):
 
 @pytest.mark.asyncio
 async def test_dedup_is_scoped_per_backend_not_process_wide(monkeypatch, caplog):
-    """Two tenants on two broken sidecars must each get their own ERROR.
+    """Two rankers on two broken sidecars must each get their own ERROR.
 
-    The registry caches a ranker per (base_url, api_key, model), so one
-    process can hold several. A process-wide dedup key would let the first
-    tenant's 413 silently suppress the second tenant's unrelated 413.
+    The registry caches a ranker per (base_url, api_key, model), so dedup is
+    per ranker. A process-wide dedup key would let the first ranker's 413
+    silently suppress the second's unrelated 413.
     """
-    a_handler, _ = _counting_handler(413, text="tenant A sidecar too small")
-    b_handler, _ = _counting_handler(413, text="tenant B sidecar too small")
+    a_handler, _ = _counting_handler(413, text="sidecar A too small")
+    b_handler, _ = _counting_handler(413, text="sidecar B too small")
     a = _client_with(a_handler, base_url="http://sidecar-a:80")
     b = _client_with(b_handler, base_url="http://sidecar-b:80")
 
@@ -374,17 +386,14 @@ async def test_dedup_is_scoped_per_backend_not_process_wide(monkeypatch, caplog)
 
 @pytest.mark.asyncio
 async def test_one_backend_recovering_does_not_re_arm_another(monkeypatch, caplog):
-    """A healthy tenant's success must not re-arm a still-broken tenant.
+    """A healthy backend's success must not re-arm a still-broken one.
 
     Guards the failure mode where a global clear() puts ERROR volume back on a
-    traffic curve — driven by *unrelated* tenants succeeding.
+    traffic curve — driven by *unrelated* backends succeeding.
     """
     broken_handler, _ = _counting_handler(413, text="still broken")
     broken = _client_with(broken_handler, base_url="http://sidecar-broken:80")
-    healthy = _client_with(
-        lambda req: httpx.Response(200, json=[{"index": 0, "score": 1.0}]),
-        base_url="http://sidecar-healthy:80",
-    )
+    healthy = _client_with(_scores_every_text, base_url="http://sidecar-healthy:80")
 
     with caplog.at_level("ERROR"):
         await _run_service(broken, monkeypatch, attempts=1)
@@ -404,18 +413,18 @@ async def test_one_backend_recovering_does_not_re_arm_another(monkeypatch, caplo
 
 @pytest.mark.asyncio
 async def test_dedup_scope_separates_same_url_different_model(monkeypatch, caplog):
-    """Same base_url, different rank_model = two backends, two ERRORs.
+    """Same base_url, different model = two backends, two ERRORs.
 
-    The registry caches per (base_url, api_key, model), so a per-tenant
-    rank_model override yields a distinct instance. A URL-only dedup scope
-    would collide these and hide one tenant's fault.
+    The registry caches per (base_url, api_key, model), so a different model
+    is a distinct instance. A URL-only dedup scope would collide these and
+    hide one backend's fault.
     """
     h1, _ = _counting_handler(413, text="model-a too big")
     h2, _ = _counting_handler(413, text="model-b too big")
     a = _client_with(h1)
     b = _client_with(h2)
     # Same URL, distinct instances (what the registry hands out for distinct
-    # rank_model / rank_api_key) → distinct dedup scopes.
+    # models or API keys) → distinct dedup scopes.
     assert a.dedup_scope != b.dedup_scope
 
     with caplog.at_level("ERROR"):
@@ -440,6 +449,28 @@ def test_dedup_scope_carries_no_credential_but_still_separates_keys():
     assert "super-secret-token" not in a.dedup_scope
     assert "a-different-token" not in b.dedup_scope
     assert a.dedup_scope != b.dedup_scope
+
+
+@pytest.mark.asyncio
+async def test_l06_a_partial_response_fails_the_rank(monkeypatch):
+    # A sidecar that drops candidates (a Cohere-style server-side top_n) used to
+    # have its missing ones scored 0.0 and the rank reported as a success, which
+    # buries real first-stage hits below every scored one. It fails instead, as
+    # a failed chunk does, and as permanent: such an endpoint truncates the
+    # same way on every retry.
+    handler, calls = _counting_handler(
+        200, json_body=[{"index": 2, "score": 0.9}, {"index": 0, "score": 0.1}]
+    )
+    r = _client_with(handler)
+    with pytest.raises(PermanentRankError, match="2 of 3"):
+        await r.rank("q", _cands("a", "b", "c"))
+
+    out = await _run_service(
+        r, monkeypatch, attempts=3, candidates=_cands("a", "b", "c")
+    )
+    assert out is None, "the search keeps first-stage order"
+    assert len(calls) == 2, "the service did not retry a permanent fault"
+    await r._client.aclose()
 
 
 @pytest.mark.asyncio

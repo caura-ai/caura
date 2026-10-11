@@ -47,6 +47,7 @@ from core_api.errors import (
     AUTH_SKILLS_INBOX_FORBIDDEN,
     AUTH_TENANT_MISMATCH,
     AUTH_UNAUTHENTICATED,
+    SKILL_FOLDER_TAKEN,
     coded_detail,
 )
 from core_api.schemas import STRICT_WRITE_BODY
@@ -554,6 +555,51 @@ async def _load_doc_or_404(*, tenant_id: str, slug: str) -> dict:
     return doc
 
 
+# The Skill Factory namespaces a skills doc_id may carry (``SKILL_SLUG_RE``).
+_SKILL_NAMESPACES = ("forge/", "agent/")
+
+
+def _install_folder(doc_id: str) -> str:
+    """The folder ``doc_id`` installs as on a plugin node: the slug without its
+    namespace, as the plugin's reconciler strips it."""
+    for namespace in _SKILL_NAMESPACES:
+        if doc_id.startswith(namespace):
+            return doc_id[len(namespace) :]
+    return doc_id
+
+
+async def _refuse_a_taken_folder(*, tenant_id: str, doc_id: str) -> None:
+    """Refuse to activate ``doc_id`` while another active skill has its folder (L-223).
+
+    ``forge/X``, ``agent/X`` and ``X`` all install as ``X``. A node that sees two
+    of them cannot tell which to install: the plugin writes neither, keeping a
+    copy it already has. Only active skills are installed, so only an active
+    one blocks. Checked across the tenant, not per fleet: a node with no fleet
+    installs every skill in the tenant. Read from the writer, like every load
+    on this route.
+    """
+    folder = _install_folder(doc_id)
+    sc = get_storage_client()
+    for other in (folder, *(namespace + folder for namespace in _SKILL_NAMESPACES)):
+        if other == doc_id:
+            continue
+        row = await sc.get_document(
+            tenant_id=tenant_id, collection=SKILLS_COLLECTION, doc_id=other, read=False
+        )
+        if row is not None and (row.get("data") or {}).get("status") == "active":
+            raise HTTPException(
+                status_code=409,
+                detail=coded_detail(
+                    SKILL_FOLDER_TAKEN,
+                    f"skill {doc_id!r} would install as folder {folder!r}, which active skill {other!r} "
+                    f"already uses, and a plugin node cannot install both. Move {other!r} out of "
+                    "'active' first, or reject this candidate.",
+                    folder=folder,
+                    skill=other,
+                ),
+            )
+
+
 async def _reload_and_assert_status(
     *,
     tenant_id: str,
@@ -882,6 +928,9 @@ async def approve(
                 f"{[(f.code, f.message) for f in scan_result.findings]}"
             ),
         )
+    # Last, just before the write, so the window in which another skill could
+    # take the folder is as short as it can be.
+    await _refuse_a_taken_folder(tenant_id=tenant_id, doc_id=doc.get("doc_id") or slug)
     rescan_payload = scan_result.as_doc_field()
     # The rescan's verdict is persisted either way, so an overridden skill keeps
     # the findings it was approved over, next to who approved it and why.

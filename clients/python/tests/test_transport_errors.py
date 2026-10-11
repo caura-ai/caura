@@ -3,7 +3,7 @@
 import httpx
 import pytest
 
-from caura_client import Caura, CauraError, TransportError
+from caura_client import Caura, CauraAPIError, CauraError, TransportError
 
 
 @pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ReadError, httpx.ReadTimeout])
@@ -57,8 +57,10 @@ def test_transport_mapping_does_not_wrap_invalid_json():
     def handler(request):
         return httpx.Response(200, content=b"not json")
 
+    # Invalid JSON is an API error (#1899), not a transport failure.
     with (
         Caura("test-key", tenant_id="t1", transport=httpx.MockTransport(handler)) as client,
-        pytest.raises(ValueError),
+        pytest.raises(CauraAPIError) as caught,
     ):
         client.health()
+    assert not isinstance(caught.value, TransportError)

@@ -115,6 +115,7 @@ from common.models.memory import (
     PENDING_ENRICHMENT_SQL,
     PENDING_FANOUT_SQL,
     PENDING_WORK_SQL,
+    STRANDED_EMBEDDING_SQL,
 )
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.models.recall_log import RecallCandidate, RecallEvent
@@ -286,18 +287,20 @@ def _normalized_object_sql(column):
 
 
 def pending_work_count_stmt(filters: list[ColumnElement[bool]]) -> Select:
-    """``(embedding, enrichment, fanout)`` pending counts over ``filters``.
+    """``(embedding, enrichment, fanout, stranded embedding)`` counts over ``filters``.
 
     lme-0929-m-03. ``PENDING_WORK_SQL`` is ANDed in verbatim so the query
     implies the predicate of the partial index ``ix_memories_pending_work``
     (built from the same constant) and the planner can serve it from that
     index, which holds only pending rows. Module-level so the plan can be
-    checked against the exact statement the service runs.
+    checked against the exact statement the service runs. The stranded count
+    (L-96) is a subset of the embedding one, so it needs no other rows.
     """
     return select(
         func.count().filter(text(PENDING_EMBEDDING_SQL)),
         func.count().filter(text(PENDING_ENRICHMENT_SQL)),
         func.count().filter(text(PENDING_FANOUT_SQL)),
+        func.count().filter(text(STRANDED_EMBEDDING_SQL)),
     ).where(*filters, text(PENDING_WORK_SQL))
 
 
@@ -380,7 +383,8 @@ async def _change_derived_rows(
     children = derived_rows_where(tenant_id, [parent_id])
     deleted: list[dict] = []
     if derived.get("soft_delete_children"):
-        gone = {"deleted_at": datetime.now(UTC), "status": "deleted"}
+        now = datetime.now(UTC)
+        gone = {"deleted_at": now, "status": "deleted", "status_changed_at": now}
         taken = await session.execute(
             sql_update(Memory).where(*children).values(**gone).returning(Memory.id, Memory.agent_id)
         )
@@ -582,6 +586,15 @@ def _entity_compatible_groups(cluster_ids: list[UUID], names: dict[UUID, str]) -
 # ``memory_find_near_duplicate_pairs``). ``scope_agent`` is private to its
 # author and never becomes part of a shared crystal.
 _CRYSTALLIZER_SHARED_VISIBILITIES = ("scope_team", "scope_org")
+
+
+# The rows the expiry sweep archives: either column ends a row's life, and every
+# live status is a candidate. ``memory_find_expired_still_active`` reports
+# exactly these (L-148), so the hygiene report and the sweep cannot disagree.
+# Binds ``:live_statuses``.
+_EXPIRED_LIVE_ROWS = (
+    "(ts_valid_end < NOW() OR expires_at < NOW()) AND status = ANY(:live_statuses) AND deleted_at IS NULL"
+)
 
 
 def _scope_sql(
@@ -3201,7 +3214,6 @@ class PostgresService:
         memory_id: UUID,
         tenant_id: str,
         embedding: list[float],
-        metadata: dict | None = None,
         embedded_content_hash: str | None = None,
     ) -> bool:
         # ``tenant_id`` scopes the write to the row's home tenant: a
@@ -3210,6 +3222,11 @@ class PostgresService:
         # Returns whether a row matched so the route can surface a 404 on
         # a no-op (mirrors memory_update / memory_update_status) instead of
         # a silent 200 that lets callers over-count successful writes.
+        #
+        # ``deleted_at IS NULL`` as on those two (L-42): a re-embed that reads
+        # the content, embeds it, and writes back can lose a race with a
+        # delete, and the vector must not land on the tombstone while the
+        # caller counts a success.
         #
         # ``embedded_content_hash`` is the hash of the text the CALLER
         # embedded, and is deliberately a parameter rather than being read
@@ -3227,11 +3244,9 @@ class PostgresService:
             values: dict = {"embedding": embedding}
             if embedded_content_hash is not None:
                 values["embedded_content_hash"] = embedded_content_hash
-            if metadata is not None:
-                values["metadata_"] = metadata
             result = await session.execute(
                 sql_update(Memory)
-                .where(Memory.id == memory_id, Memory.tenant_id == tenant_id)
+                .where(Memory.id == memory_id, Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None))
                 .values(**values)
             )
             return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
@@ -5275,6 +5290,11 @@ class PostgresService:
         past their expiry forever — the same literal-``active`` mistake
         ``memory_count_active`` documents. ``archived`` and the contradiction
         outcomes are not live, so a second tick still finds nothing to do.
+
+        The one status writer that leaves ``status_changed_at`` alone (L-142,
+        Eldad 2026-10-11). The contradiction signal counts ``outdated`` rows by
+        that column, and an expired row is not a contradiction: stamped, every
+        expiry would read as a fresh contradiction on the row's run.
         """
         async with get_session() as session:
             params: dict = {
@@ -5294,9 +5314,7 @@ class PostgresService:
                     SELECT id FROM memories
                     WHERE tenant_id = :tenant_id
                       {fleet_clause}
-                      AND (ts_valid_end < NOW() OR expires_at < NOW())
-                      AND status = ANY(:live_statuses)
-                      AND deleted_at IS NULL
+                      AND {_EXPIRED_LIVE_ROWS}
                     LIMIT :batch_size
                 )
                 RETURNING id
@@ -5327,7 +5345,7 @@ class PostgresService:
 
             result = await session.execute(
                 text(f"""
-                UPDATE memories SET status = 'archived'
+                UPDATE memories SET status = 'archived', status_changed_at = NOW()
                 WHERE id IN (
                     SELECT id FROM memories
                     WHERE tenant_id = :tenant_id
@@ -6250,16 +6268,22 @@ class PostgresService:
         tenant_id: str,
         fleet_id: str | None,
     ) -> list[tuple]:
+        """Up to 100 rows the next expiry sweep archives, longest-expired first.
+
+        The sweep's own predicate (L-148). This tested ``ts_valid_end`` and
+        ``status = 'active'`` alone, so a row ending on ``expires_at``, or live
+        as ``confirmed``/``pending``, was archived without ever being reported.
+        """
         async with get_session() as session:
             scope, params = _scope_sql(tenant_id, fleet_id)
+            params["live_statuses"] = list(LIVE_MEMORY_STATUSES)
             result = await session.execute(
                 text(f"""
                 SELECT m.id
                 FROM memories m
                 WHERE {scope}
-                  AND m.ts_valid_end < NOW()
-                  AND m.status = 'active'
-                  AND m.deleted_at IS NULL
+                  AND {_EXPIRED_LIVE_ROWS}
+                ORDER BY LEAST(m.ts_valid_end, m.expires_at), m.id
                 LIMIT 100
             """),
                 params,
@@ -7118,11 +7142,15 @@ class PostgresService:
                 if exclude_ids:
                     children.append(Memory.id.notin_(exclude_ids))
                 result = await session.execute(
-                    sql_update(Memory).where(*children).values(deleted_at=now, status="deleted")
+                    sql_update(Memory)
+                    .where(*children)
+                    .values(deleted_at=now, status="deleted", status_changed_at=now)
                 )
                 deleted += result.rowcount or 0  # type: ignore[attr-defined]
             result = await session.execute(
-                sql_update(Memory).where(*selected(Memory)).values(deleted_at=now, status="deleted")
+                sql_update(Memory)
+                .where(*selected(Memory))
+                .values(deleted_at=now, status="deleted", status_changed_at=now)
             )
             return deleted + (result.rowcount or 0)  # type: ignore[attr-defined]
 
@@ -7556,13 +7584,15 @@ class PostgresService:
     ) -> dict:
         """Return ``{total, by_type, by_agent, by_status}`` (+ optional
         ``by_tenant`` / ``deleted`` / ``total_including_deleted`` /
-        ``pending`` + ``settled``).
+        ``pending`` + ``stranded`` + ``settled``).
 
         ``include_pending`` (lme-0929-m-03) adds ``pending: {embedding,
         enrichment, fanout}`` — live rows in the same scope that still have
         background work outstanding, read from durable row markers (see
-        ``common.models.memory.PENDING_WORK_SQL``) — and ``settled`` (all
-        three zero). One extra query served by the partial index
+        ``common.models.memory.PENDING_WORK_SQL``) — ``stranded: {embedding}``
+        (L-96: the pending-embedding rows over an hour old, see
+        ``STRANDED_EMBEDDING_SQL``), and ``settled`` (all three zero once the
+        stranded rows are set aside). One extra query served by the partial index
         ``ix_memories_pending_work``, which holds only pending rows, so its
         cost is O(pending) rather than O(tenant). Off by default so the MCP
         ``caura_stats`` and report callers keep their exact shape and cost.
@@ -7790,12 +7820,19 @@ class PostgresService:
             result["deleted"] = deleted
             result["total_including_deleted"] = total + deleted
         if include_pending:
-            pending = await self._memory_pending_work_counts(filters)
+            pending, stranded = await self._memory_pending_work_counts(filters)
             result["pending"] = pending
-            result["settled"] = not any(pending.values())
+            # L-96: a stranded row is still pending, but nothing is coming back
+            # for it, so ``settled`` does not wait on it.
+            result["stranded"] = stranded
+            result["settled"] = not (
+                pending["embedding"] - stranded["embedding"] or pending["enrichment"] or pending["fanout"]
+            )
         return result
 
-    async def _memory_pending_work_counts(self, filters: list[ColumnElement[bool]]) -> dict[str, int]:
+    async def _memory_pending_work_counts(
+        self, filters: list[ColumnElement[bool]]
+    ) -> tuple[dict[str, int], dict[str, int]]:
         """Count live rows under ``filters`` that still owe background work.
 
         ``filters`` must already carry ``deleted_at IS NULL`` plus the caller's
@@ -7803,14 +7840,17 @@ class PostgresService:
         ``ix_memories_pending_work`` is keyed on exactly that text, and the
         planner only uses a partial index whose predicate the query implies.
         A row can be pending on several axes at once and is counted in each.
+        Returns ``(pending, stranded)``; ``stranded`` (L-96) has only an
+        ``embedding`` count, of rows also counted in ``pending``.
         """
         async with get_read_session() as session:
             row = (await session.execute(pending_work_count_stmt(filters))).one()
-        return {
+        pending = {
             "embedding": int(row[0] or 0),
             "enrichment": int(row[1] or 0),
             "fanout": int(row[2] or 0),
         }
+        return pending, {"embedding": int(row[3] or 0)}
 
     async def memory_daily_durable_counts(
         self,
@@ -8346,19 +8386,21 @@ class PostgresService:
         if not items:
             return []
 
-        # Partition by action; updates and creates each use a per-item
-        # session (for FK-error isolation — a constraint error on item
-        # N must not roll back items 0..N-1). Per-row sessions for both
-        # paths cost connection pool checkouts but stay within one HTTP
-        # — same big win.
+        # One transaction per item, deliberately, unlike
+        # ``entity_bulk_upsert_links`` (L-196; Eldad, 2026-10-09). Each costs a
+        # commit, which waits for a WAL flush. But an update, or a create that
+        # merges into a row already there, locks that row (``entity_merge``),
+        # and one transaction for the batch would hold every such lock until the
+        # batch commits: concurrent extractions naming the same entity would
+        # queue behind one another, and two batches locking overlapping
+        # entities in different orders could deadlock. Per item, a lock lasts
+        # only that item's short transaction, and a constraint error on item N
+        # leaves items 0..N-1 written.
         results: list[dict | None] = [None] * len(items)
 
         updates = [it for it in items if it["action"] == "update"]
         creates = [it for it in items if it["action"] == "create"]
 
-        # Per-item sessions so a constraint error on item N doesn't roll
-        # back items 0..N-1. The HTTP-roundtrip win is what matters; per-
-        # item session checkout cost is negligible.
         for item in updates:
             eid = item["entity_id"]
             if not isinstance(eid, UUID):
@@ -8440,9 +8482,13 @@ class PostgresService:
                 }
             except IntegrityError:
                 # TOCTOU recovery — SELECT + merge in one writer session.
+                # By type and tenant, not by name (L-77): a canonical name is
+                # tenant content, often a person's, and log sinks have no tenant
+                # access control and outlive a purge.
                 logger.info(
-                    "Entity bulk-upsert race: '%s' created concurrently, re-selecting",
-                    item["canonical_name"],
+                    "Entity bulk-upsert race: a %s entity of tenant %s was created concurrently, re-selecting",
+                    item["entity_type"],
+                    item["tenant_id"],
                 )
                 async with get_session() as session:
                     sel = select(Entity).where(
@@ -8606,9 +8652,11 @@ class PostgresService:
                     )
                 return entity
 
+            # By type and tenant, not by name (L-77), as the bulk race above.
             logger.info(
-                "Entity dedup race: '%s' already exists, re-selecting",
-                data.get("canonical_name"),
+                "Entity dedup race: a %s entity of tenant %s already exists, re-selecting",
+                data.get("entity_type"),
+                data.get("tenant_id"),
             )
             # ``_fleet_scope`` rather than a NULL branch: the index groups
             # ``COALESCE(fleet_id, '')``, so the row that just won the conflict
@@ -9796,36 +9844,15 @@ class PostgresService:
         reported exactly like one whose endpoint does not exist — see
         ``error="fk_violation"`` below.
 
+        One transaction (L-196): the ownership read, then every link in one
+        INSERT, and one commit. Each link used to open its own session and
+        commit, so a 500-link batch waited on 500 WAL flushes in turn.
+
         Cap enforced at the router level.
         """
         if not items:
             return []
 
-        # Composite PK is (memory_id, entity_id); ``role`` is not part of
-        # the unique key. INSERT ... ON CONFLICT DO UPDATE with the
-        # no-op SET (``role = memory_entity_links.role``) is the standard
-        # trick that lets RETURNING fire on both branches so we can
-        # detect insert-vs-existed via the ``xmax`` system column.
-        #
-        # Per-item sessions: an FK violation (memory_id or entity_id
-        # pointing at a deleted/nonexistent row) on item N would
-        # otherwise roll back items 0..N-1 in a shared transaction.
-        # Keyed by ``input_idx`` rather than (mid, eid) so a caller
-        # accidentally sending the same pair twice doesn't lose the
-        # second slot's result to map overwrite.
-        idx_to_result: dict[int, dict[str, Any]] = {}
-
-        # Ownership resolved once for the whole batch, in its own session, then
-        # tested per item below. Two queries rather than two per item — and the
-        # sets are what the per-item test needs anyway, since a batch may name
-        # one memory many times.
-        #
-        # A separate session from the inserts is deliberate and safe: neither
-        # parent's ``tenant_id`` is caller-writable (``_MEMORY_IMMUTABLE_FIELDS``
-        # names it on memories, ``_ENTITY_UPDATABLE_FIELDS`` omits it on
-        # entities), so a row cannot change hands between this read and the
-        # write. Sharing one session instead would undo the per-item isolation
-        # the comment above describes.
         pair_ids = [
             (
                 mid if isinstance(mid, UUID) else UUID(mid),
@@ -9834,98 +9861,135 @@ class PostgresService:
             for mid, eid in ((it["memory_id"], it["entity_id"]) for it in items)
         ]
         async with get_session() as session:
+            # Ownership resolved once for the whole batch, then tested per item
+            # below. Two queries rather than two per item — and the sets are what
+            # the per-item test needs anyway, since a batch may name one memory
+            # many times.
             owned_memories, owned_entities = await self._owned_link_endpoints(
                 session,
                 tenant_id,
                 {mid for mid, _ in pair_ids},
                 {eid for _, eid in pair_ids},
             )
+            owned = [mid in owned_memories and eid in owned_entities for mid, eid in pair_ids]
+            # Each pair is written with its first item's role: a later item
+            # naming the same pair finds the row the first one wrote.
+            roles: dict[tuple[UUID, UUID], str] = {}
+            for it, pair, is_owned in zip(items, pair_ids, owned, strict=True):
+                if is_owned:
+                    roles.setdefault(pair, it["role"])
+            # One row per pair, in pair order, so two batches that share pairs
+            # lock those rows in the same order.
+            pairs = sorted(roles)
 
-        for it, (mid, eid) in zip(items, pair_ids, strict=True):
-            if mid not in owned_memories or eid not in owned_entities:
-                # Same ``error`` value as the FK branch below, because the two
-                # are one answer to the caller: a row outside your tenant is
-                # not distinguishable from a row that is not there, and making
-                # it distinguishable would turn a batch endpoint into a
-                # bulk existence oracle. The log line carries the real cause.
-                logger.warning(
-                    "Entity link bulk-upsert refused: memory_id=%s entity_id=%s not in tenant %s",
-                    mid,
-                    eid,
-                    tenant_id,
-                )
-                idx_to_result[it["input_idx"]] = {
-                    "input_idx": it["input_idx"],
-                    "memory_id": str(mid),
-                    "entity_id": str(eid),
-                    "role": it["role"],
-                    "created": False,
-                    "error": "fk_violation",
-                }
-                continue
-            # Annotated because ``literal_column("xmax")`` types as ``Any``, and
-            # mypy will not infer a variable whose type is partly ``Any``.
-            ins_stmt: ReturningInsert[tuple[UUID, UUID, str, Any]] = (
-                pg_insert(MemoryEntityLink)
-                .values(
-                    memory_id=mid,
-                    entity_id=eid,
-                    role=it["role"],
-                    source=LINK_SOURCE_EXTRACTION,
-                )
-                .on_conflict_do_update(
-                    index_elements=[
+            def upsert(batch: list[tuple[UUID, UUID]]) -> ReturningInsert[tuple[UUID, UUID, str, Any]]:
+                # Composite PK is (memory_id, entity_id); ``role`` is not part
+                # of the unique key. The no-op SET (``role =
+                # memory_entity_links.role``) is the standard trick that lets
+                # RETURNING fire on both branches, so an insert is told from an
+                # existing row by the ``xmax`` system column.
+                return (
+                    pg_insert(MemoryEntityLink)
+                    .values(
+                        [
+                            {
+                                "memory_id": mid,
+                                "entity_id": eid,
+                                "role": roles[(mid, eid)],
+                                "source": LINK_SOURCE_EXTRACTION,
+                            }
+                            for mid, eid in batch
+                        ]
+                    )
+                    .on_conflict_do_update(
+                        index_elements=[MemoryEntityLink.memory_id, MemoryEntityLink.entity_id],
+                        # ``source`` is deliberately NOT in the SET, so an
+                        # existing row keeps the provenance it has. Extraction
+                        # re-mining an entity a caller curated does not take the
+                        # row over: the caller asked for that link to be there,
+                        # and a later edit dropping the mention must not delete
+                        # it. The cost is that a row which predates the column
+                        # keeps its conservative ``caller`` default forever —
+                        # under-deleting, which is the recoverable direction.
+                        set_={"role": MemoryEntityLink.role},
+                    )
+                    .returning(
                         MemoryEntityLink.memory_id,
                         MemoryEntityLink.entity_id,
-                    ],
-                    # ``source`` is deliberately NOT in the SET, so an existing
-                    # row keeps the provenance it has. Extraction re-mining an
-                    # entity a caller curated does not take the row over: the
-                    # caller asked for that link to be there, and a later edit
-                    # dropping the mention must not delete it. The cost is that
-                    # a row which predates the column keeps its conservative
-                    # ``caller`` default forever — under-deleting, which is the
-                    # recoverable direction.
-                    set_={"role": MemoryEntityLink.role},
+                        MemoryEntityLink.role,
+                        literal_column("xmax"),
+                    )
                 )
-                .returning(
-                    MemoryEntityLink.memory_id,
-                    MemoryEntityLink.entity_id,
-                    MemoryEntityLink.role,
-                    literal_column("xmax"),
-                )
-            )
-            try:
-                async with get_session() as session:
-                    row = (await session.execute(ins_stmt)).one()
-                # xmax=0 ⇒ INSERT inserted; non-zero ⇒ existing row hit
-                # by the DO UPDATE no-op.
-                idx_to_result[it["input_idx"]] = {
-                    "input_idx": it["input_idx"],
-                    "memory_id": str(mid),
-                    "entity_id": str(eid),
-                    "role": row[2],
-                    "created": int(row[3]) == 0,
-                }
-            except IntegrityError:
-                # FK violation on memory_id or entity_id — report per-row
-                # so the caller can continue processing the other links
-                # rather than losing the whole batch.
-                logger.warning(
-                    "Entity link bulk-upsert FK violation: memory_id=%s entity_id=%s",
-                    mid,
-                    eid,
-                )
-                idx_to_result[it["input_idx"]] = {
-                    "input_idx": it["input_idx"],
-                    "memory_id": str(mid),
-                    "entity_id": str(eid),
-                    "role": it["role"],
-                    "created": False,
-                    "error": "fk_violation",
-                }
 
-        return [idx_to_result[it["input_idx"]] for it in items]
+            # ``(stored role, inserted)`` per pair that landed. xmax=0 ⇒ the
+            # INSERT inserted; non-zero ⇒ an existing row hit by the no-op.
+            landed: dict[tuple[UUID, UUID], tuple[str, bool]] = {}
+            if pairs:
+                try:
+                    async with session.begin_nested():
+                        result = await session.execute(upsert(pairs))
+                        for mid, eid, role, xmax in result:
+                            landed[(mid, eid)] = (role, int(xmax) == 0)
+                except IntegrityError:
+                    # An endpoint hard-deleted since the ownership read fails
+                    # the statement's FK check as a whole. Write each pair in
+                    # its own savepoint instead, so only a pair that fails is
+                    # lost, and reported below as ``fk_violation``.
+                    for pair in pairs:
+                        try:
+                            async with session.begin_nested():
+                                result = await session.execute(upsert([pair]))
+                                _mid, _eid, role, xmax = result.one()
+                            landed[pair] = (role, int(xmax) == 0)
+                        except IntegrityError:
+                            logger.warning(
+                                "Entity link bulk-upsert FK violation: memory_id=%s entity_id=%s",
+                                pair[0],
+                                pair[1],
+                            )
+
+        results: list[dict] = []
+        written: set[tuple[UUID, UUID]] = set()
+        for it, (mid, eid), is_owned in zip(items, pair_ids, owned, strict=True):
+            row = landed.get((mid, eid))
+            if row is None:
+                # Not in the tenant, or gone by the insert. The same ``error``
+                # value for both, because the two are one answer to the caller:
+                # a row outside your tenant is not distinguishable from a row
+                # that is not there, and making it distinguishable would turn a
+                # batch endpoint into a bulk existence oracle. The log line
+                # carries the real cause.
+                if not is_owned:
+                    logger.warning(
+                        "Entity link bulk-upsert refused: memory_id=%s entity_id=%s not in tenant %s",
+                        mid,
+                        eid,
+                        tenant_id,
+                    )
+                results.append(
+                    {
+                        "input_idx": it["input_idx"],
+                        "memory_id": str(mid),
+                        "entity_id": str(eid),
+                        "role": it["role"],
+                        "created": False,
+                        "error": "fk_violation",
+                    }
+                )
+                continue
+            role, inserted = row
+            results.append(
+                {
+                    "input_idx": it["input_idx"],
+                    "memory_id": str(mid),
+                    "entity_id": str(eid),
+                    "role": role,
+                    # Only the first item naming a pair can have created it.
+                    "created": inserted and (mid, eid) not in written,
+                }
+            )
+            written.add((mid, eid))
+        return results
 
     # ------------------------------------------------------------------
     # Crystallizer helpers (entity)
@@ -12770,7 +12834,7 @@ class PostgresService:
                 text(
                     """
                     UPDATE memories
-                    SET status = 'outdated'
+                    SET status = 'outdated', status_changed_at = NOW()
                     WHERE tenant_id = :tenant_id
                       AND agent_id = :agent_id
                       AND memory_type = 'insight'
@@ -12808,7 +12872,7 @@ class PostgresService:
                 text(
                     """
                     UPDATE memories
-                    SET status = 'active'
+                    SET status = 'active', status_changed_at = NOW()
                     WHERE id = ANY(CAST(:prior_ids AS uuid[]))
                       AND status = 'outdated'
                       AND tenant_id = :tenant_id

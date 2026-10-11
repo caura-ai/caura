@@ -7,6 +7,7 @@ nothing is lost.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,6 +39,48 @@ class Memory:
             weight=data.get("weight"),
             similarity=data.get("similarity"),
             metadata=data.get("metadata"),
+            raw=data,
+        )
+
+
+class SearchResult(list[Memory]):
+    """The memories ``search`` ranked, plus the response envelope around them.
+
+    A ``list`` of ``Memory``, so code that iterates, indexes or compares the
+    result works as before. The envelope rides along on attributes (L-94):
+
+    - ``recall_tracked``: whether this search reinforced the memories it
+      returned (``None`` when the server did not say).
+    - ``diagnostic``: the retrieval trace a ``diagnostic=True`` search returns,
+      else ``None``.
+    - ``warnings``: coded caveats about the result set, such as a parameter the
+      server ignored, else ``None``.
+    - ``raw``: the whole response body.
+    """
+
+    def __init__(
+        self,
+        memories: Iterable[Memory] = (),
+        *,
+        recall_tracked: bool | None = None,
+        diagnostic: dict[str, Any] | None = None,
+        warnings: list[dict[str, Any]] | None = None,
+        raw: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(memories)
+        self.recall_tracked = recall_tracked
+        self.diagnostic = diagnostic
+        self.warnings = warnings
+        self.raw = raw if raw is not None else {}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SearchResult:
+        """Build from a ``POST /api/v1/search`` body."""
+        return cls(
+            (Memory.from_dict(m) for m in data.get("items") or []),
+            recall_tracked=data.get("recall_tracked"),
+            diagnostic=data.get("diagnostic"),
+            warnings=data.get("warnings"),
             raw=data,
         )
 

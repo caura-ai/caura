@@ -233,6 +233,19 @@
           "default": null,
           "description": "Required when scope='fleet'.",
           "title": "Fleet Id"
+        },
+        "idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A retry with the same key replays the first answer.",
+          "title": "Idempotency Key"
         }
       },
       "required": [
@@ -1122,6 +1135,22 @@
           "description": "Clear every tuned knob.",
           "title": "Reset",
           "type": "boolean"
+        },
+        "reset_knobs": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Clear only these knobs; others are kept.",
+          "title": "Reset Knobs"
         }
       },
       "title": "caura_tuneArguments",
