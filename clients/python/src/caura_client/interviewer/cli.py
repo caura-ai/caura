@@ -39,7 +39,7 @@ from .discovery import (
 )
 from .machine import machine_id_short
 from .parser import count_lines
-from .runner import RunConfig, node_id_for, read_watermark, run_all
+from .runner import RunConfig, RunSummary, node_id_for, read_watermark, run_all
 
 DEFAULT_BASE_URL = "https://caura.ai"
 
@@ -323,18 +323,33 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if hasattr(lock, "close"):
             lock.close()
 
-    submitted = sum(f.windows_submitted for f in summary.files)
-    memories = sum(f.memories_written for f in summary.files)
-    print(
-        f"[interviewer] {len(summary.files)} file(s): {submitted} window(s) submitted, "
-        f"{memories} memories written"
-        + (" [dry-run]" if args.dry_run else "")
-    )
+    print(_run_summary_line(summary, dry_run=args.dry_run))
     if summary.aborted:
         return 2
     if summary.failed_all:
         return 1
     return 0
+
+
+def _run_summary_line(summary: RunSummary, *, dry_run: bool) -> str:
+    """The run's one-line result.
+
+    An async server (the default) answers each window ``accepted`` with
+    ``memories_written=0`` and writes the memories in the background, so this
+    used to report "0 memories written" on every default deployment (L-93).
+    Accepted windows are reported as such; "memories written" counts what a
+    synchronous server wrote in-line, and is left out when every window was
+    accepted.
+    """
+    submitted = sum(f.windows_submitted for f in summary.files)
+    accepted = sum(f.windows_accepted for f in summary.files)
+    memories = sum(f.memories_written for f in summary.files)
+    line = f"[interviewer] {len(summary.files)} file(s): {submitted} window(s) submitted"
+    if accepted:
+        line += f", {accepted} accepted for synthesis in the background"
+    if accepted < submitted or not accepted:
+        line += f", {memories} memories written"
+    return line + (" [dry-run]" if dry_run else "")
 
 
 def _cmd_status(args: argparse.Namespace) -> int:

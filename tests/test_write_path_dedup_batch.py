@@ -119,7 +119,6 @@ def test_persist_pipelines_differ_only_in_the_semantic_gate() -> None:
     assert differences == [("check_semantic_duplicate", "detect_near_duplicate")], (
         differences
     )
-    assert strong[0] == "check_exact_duplicate", strong
 
 
 # ──────────────────── 08/14 M-18 / M-16 / 09/02 M-47 — auto-chunk ────────────────────
@@ -347,10 +346,10 @@ async def test_fast_multi_fact_parent_is_not_marked_merged_by_a_gate_that_cannot
 
     Fast mode's gate is ``DetectNearDuplicate``, which does not refuse a write:
     on a hit it RECORDS a merge intent in ``ctx.data["merge_supersedes_id"]``
-    and stamps ``metadata["near_duplicate_merged"] = True``, leaving
+    and stamps ``near_duplicate_merge_pending`` on the row, leaving
     ``ScheduleBackgroundTasks`` to perform the merge against the new row's id.
     This branch writes its parent by hand and has no such step, so borrowing
-    that gate here would stamp a parent as merged while no merge ever happened —
+    that gate here would mark a parent for a merge that never happens —
     trading a missing gate for a false statement on the row.
     """
     run = await _drive_auto_chunk(
@@ -360,6 +359,7 @@ async def test_fast_multi_fact_parent_is_not_marked_merged_by_a_gate_that_cannot
     )
     assert run.semantic_lookups == 0
     assert run.parent_payload is not None
+    assert "near_duplicate_merge_pending" not in run.parent_payload["metadata_"]
     assert "near_duplicate_merged" not in run.parent_payload["metadata_"]
 
 

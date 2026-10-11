@@ -64,6 +64,9 @@ cron_ticks:
   - name: embedding-coverage
     cadence: hourly (top of UTC hour) — read-only sample; logs unembedded row counts per tenant
     module: core_operations.app
+  - name: entity-extraction-rerun
+    cadence: hourly at :45 — re-runs extraction for memories whose run failed, was cancelled or degraded
+    module: core_operations.app
 
 # The str-enum families in common/events/topics.py. Topic strings follow
 # ``<brand>.<domain>.<verb>`` — the brand segment flips per family; see FLIPPED_FAMILIES.

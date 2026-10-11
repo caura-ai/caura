@@ -42,9 +42,8 @@ class PermanentRankError(Exception):
     * **Scoped to the failing backend**, via the provider's
       :attr:`dedup_scope`. One process can hold several remote rankers at once
       (``common/ranking/_registry.py`` caches them per
-      ``(base_url, api_key, model)`` so per-tenant ``rank_base_url`` overrides
-      each get their own). A bare ``"remote:413"`` would let one tenant's
-      logged fault suppress a different tenant's unrelated one.
+      ``(base_url, api_key, model)``). A bare ``"remote:413"`` would let one
+      backend's logged fault suppress another's unrelated one.
 
     Build it as ``f"{provider.dedup_scope}|{condition}"`` — see
     :class:`~common.ranking.providers.remote.RemoteRanker`.

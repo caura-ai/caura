@@ -724,3 +724,114 @@ async def test_reconcile_tick_still_reports_what_it_swept(monkeypatch, caplog):
     swept = _records(caplog, "lifecycle reconcile swept stranded rows")
     assert len(swept) == 1 and swept[0].stranded == 2
     assert _records(caplog, _UNREADABLE_RECONCILE) == []
+
+
+# ---------------------------------------------------------------------------
+# Entity extraction re-run: core-api answers with counts and runs the re-runs
+# in the background
+# ---------------------------------------------------------------------------
+
+_RERUN_SWEPT = "entity extraction re-run swept lost extractions"
+
+
+async def test_extraction_rerun_tick_posts_to_the_sweep(monkeypatch):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    body = {"tenants": 3, "unreadable_tenants": 0, "memories": 0, "scheduled": 0, "skipped": 0}
+    async with _patch_client(monkeypatch, response=_StubResponse(200, body)) as stub:
+        await tasks.run_entity_extraction_rerun_tick()
+
+    assert stub.calls == [
+        ("http://core-api/api/v1/admin/entity-extraction/rerun-lost", {"X-API-Key": "admin-key-xyz"})
+    ]
+
+
+@pytest.mark.parametrize(
+    ("body", "level"),
+    [
+        (
+            {
+                "tenants": 3,
+                "unreadable_tenants": 0,
+                "memories": 2,
+                "scheduled": 1,
+                "skipped": 1,
+                "failed_memories": 0,
+            },
+            "WARNING",
+        ),
+        (
+            {
+                "tenants": 3,
+                "unreadable_tenants": 1,
+                "memories": 0,
+                "scheduled": 0,
+                "skipped": 0,
+                "failed_memories": 0,
+            },
+            "ERROR",
+        ),
+        (
+            {
+                "tenants": 3,
+                "unreadable_tenants": 0,
+                "memories": 2,
+                "scheduled": 1,
+                "skipped": 0,
+                "failed_memories": 1,
+            },
+            "ERROR",
+        ),
+    ],
+    ids=["swept", "a-tenant-unreadable", "a-memory-failed"],
+)
+async def test_extraction_rerun_tick_reports_what_it_swept(monkeypatch, caplog, body, level):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    caplog.set_level("DEBUG", logger=tasks.logger.name)
+    async with _patch_client(monkeypatch, response=_StubResponse(200, body)):
+        await tasks.run_entity_extraction_rerun_tick()
+
+    [record] = _records(caplog, _RERUN_SWEPT)
+    assert record.levelname == level
+    assert (record.memories, record.unreadable_tenants, record.failed_memories) == (
+        body["memories"],
+        body["unreadable_tenants"],
+        body["failed_memories"],
+    )
+
+
+async def test_extraction_rerun_tick_is_quiet_when_nothing_was_lost(monkeypatch, caplog):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    caplog.set_level("INFO", logger=tasks.logger.name)
+    body = {"tenants": 3, "unreadable_tenants": 0, "memories": 0, "scheduled": 0, "skipped": 0}
+    async with _patch_client(monkeypatch, response=_StubResponse(200, body)):
+        await tasks.run_entity_extraction_rerun_tick()
+
+    assert _records(caplog, _RERUN_SWEPT) == []
+
+
+@pytest.mark.parametrize(
+    ("response", "message"),
+    [
+        (_StubResponse(500, "boom"), "entity extraction re-run returned non-2xx; will retry next tick"),
+        (
+            _StubResponse(200, "<html>200 OK</html>"),
+            "entity extraction re-run returned an unreadable 2xx; the sweep ran, its counts are lost",
+        ),
+    ],
+    ids=["non-2xx", "unreadable-2xx"],
+)
+async def test_extraction_rerun_tick_survives_a_bad_answer(monkeypatch, caplog, response, message):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    caplog.set_level("INFO", logger=tasks.logger.name)
+    async with _patch_client(monkeypatch, response=response):
+        await tasks.run_entity_extraction_rerun_tick()
+
+    assert len(_records(caplog, message)) == 1

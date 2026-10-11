@@ -23,10 +23,17 @@ _SPEC = ToolSpec(
     plugin_exposed=True,
     trust_required=0,
     error_codes=(
+        "BAD_REQUEST",
+        "FLEET_SCOPE_FORBIDDEN",
         "FORBIDDEN",
+        "INTERNAL_ERROR",
         "INVALID_ARGUMENTS",
         "MISSING_AGENT_ID",
+        "RATE_LIMITED",
+        "REQUEST_BUDGET_EXCEEDED",
         "UNAUTHORIZED",
+        "UNAVAILABLE",
+        "UPSTREAM_TIMEOUT",
     ),
 )
 register(_SPEC)

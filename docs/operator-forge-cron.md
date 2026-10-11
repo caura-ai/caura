@@ -16,8 +16,10 @@ fanout pattern:
    tenant.
 3. **The in-process consumer** in `core-api` (or `core-worker` in
    SaaS deployments) invokes `run_forge_cron_tick` for the tenant.
-4. **One lifecycle_audit row per tenant per tick** captures the work
-   done — candidates produced, promoted, and the 5 skip-bucket counts.
+4. **One lifecycle_audit row per tenant per tick** records the work done
+   as one number, `stats.candidates_produced` (candidates written plus
+   promoted). The per-tick breakdown — scanned, held, auto-approved and the
+   skip buckets — is in the structured `forge cron tick:` log line.
 
 ## Operator dial: `forge.cron_interval_hours`
 
@@ -86,8 +88,9 @@ After the schedule lands, every tick produces:
 
 - **Per-tenant audit rows** under `lifecycle_audit`
   (`action='forge-distill'`, `status='success' | 'failure'`,
-  `stats={candidates_written, promoted, scanned, held,
-  skipped_poisoned, skipped_sentinel, ...}`).
+  `stats.candidates_produced` = candidates written + promoted). The full
+  breakdown (`candidates_written`, `promoted`, `scanned`, `held`, the
+  `skipped_*` buckets, ...) is in the `forge cron tick:` log line.
 - **Fresh candidate docs** at `documents.collection='skills'`,
   `data.status='candidate'`, `data.source='forge'`.
 - **Inbox cards** for any candidate that the 6 auto-gates promoted to
@@ -141,10 +144,10 @@ What it does **not** bypass:
   auto-promotion); links to paste or webhook-capture hosts are a warn,
   so they do **not** stop auto-promotion on their own.
 
-Audit visibility: the lifecycle-audit row's `stats.auto_approved`
+Audit visibility: the `forge cron tick:` log line's `auto_approved`
 counts how many of that tick's promotions skipped the inbox; `promoted
-- auto_approved` is the count that landed in `staged`. The structured
-promoter log line breaks both out per tick.
+- auto_approved` is the count that landed in `staged`. The lifecycle-audit
+row keeps only the total, `stats.candidates_produced`.
 
 **To pause:** flip back to `false`. The next tick's clean candidates
 route to `staged` again — already-active skills are unaffected (no
@@ -191,7 +194,7 @@ invocations bypass the lifecycle path entirely and are not affected.
 | Audit rows stuck in `pending` | Pub/Sub publish failed but `audit_begin` succeeded | Operator-visible; either re-publish (idempotent — same dedup window) or mark `failure` manually |
 | Audit row `failure: common.llm not importable` | LLM provider chain not installed in deploy image | Install the provider chain (`pip install ...` per `core-api/pyproject.toml`); the cron path **does not** fall back to a fake LLM (intentional — see `_wire_llm_fn`) |
 | Audit row `failure: forge tick wrote no candidates: all N attempted cluster(s) failed on I/O or LLM errors` | LLM provider or storage outage during the tick | Retried automatically (redelivery, then the next scheduled tick); check the provider and the `skipped_io_error` tracebacks if it persists |
-| No candidates produced for a tenant | Either no labeled session traces in the freshness window, or `min_cluster_size`/`min_distinct_agents` thresholds set too high | Inspect `stats.scanned` + the 5 skip counters on the audit row; lower thresholds via `org_settings.skills_factory.forge.*` |
+| No candidates produced for a tenant | Either no labeled session traces in the freshness window, or `min_cluster_size`/`min_distinct_agents` thresholds set too high | Inspect `scanned` and the `skipped_*` counters in that tenant's `forge cron tick:` log line; lower thresholds via `org_settings.skills_factory.forge.*` |
 | Same fingerprint keeps being re-proposed despite reject | Cooloff window already elapsed, or fleet/tenant scope mismatch | Inspect `forge_rejected_fingerprints` row; bump `rejection_cooloff_days` if too short |
 
 ## Related

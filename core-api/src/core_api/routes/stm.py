@@ -457,7 +457,7 @@ async def promote_stm(
     # on ``auth.tenant_id`` and not on the resolved ``tenant_id``, which is now
     # set for admins too.
     if auth.tenant_id:
-        await enforce_fleet_write(tenant_id, body.agent_id, body.fleet_id)
+        await enforce_fleet_write(tenant_id, body.agent_id, body.fleet_id, agent=agent)
         # Metering, distinct from ``enforce_usage_limits`` above: that one
         # refuses a write when the org is ALREADY over its plan cap, this one is
         # what makes the write count toward the cap. Without it a tenant could

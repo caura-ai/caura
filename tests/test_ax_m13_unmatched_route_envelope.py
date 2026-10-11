@@ -14,11 +14,19 @@ guess.
 Two things change. The envelope arrives, with a code that says *route*, not
 *row*. And since the server knows every route it serves, the response names the
 nearest ones.
+
+That particular guess now reaches a route: the by-id document routes take a
+doc_id containing "/" (M-30), so ``/documents/skills/my-doc`` is read as that
+id and told the ``collection`` query parameter it lacks. The cases below use a
+path no route serves, under ``/agents``.
 """
 
 import pytest
 
 pytestmark = pytest.mark.asyncio
+
+# A path under a real resource that no route serves.
+_UNMATCHED = "/api/v1/agents/a1/memories"
 
 
 async def _get(client, path, method="GET"):
@@ -31,12 +39,12 @@ async def _get(client, path, method="GET"):
 
 
 async def test_an_unmatched_path_returns_the_canonical_envelope(client):
-    resp = await _get(client, "/api/v1/documents/skills/my-doc")
+    resp = await _get(client, _UNMATCHED)
 
     assert resp.status_code == 404
     err = resp.json()["error"]
     assert err["code"] == "NO_SUCH_ROUTE"
-    assert err["details"]["path"] == "/api/v1/documents/skills/my-doc"
+    assert err["details"]["path"] == _UNMATCHED
     assert err["details"]["method"] == "GET"
 
 
@@ -47,7 +55,7 @@ async def test_the_code_distinguishes_a_missing_route_from_a_missing_row(client)
     only its URL was wrong."""
     from core_api.errors import code_for_status
 
-    resp = await _get(client, "/api/v1/documents/skills/my-doc")
+    resp = await _get(client, _UNMATCHED)
 
     assert resp.json()["error"]["code"] != code_for_status(404)
 
@@ -64,12 +72,12 @@ async def test_the_old_bare_shape_is_preserved(client):
 # ── the suggestions ──────────────────────────────────────────────────────
 
 
-async def test_a_guessed_document_path_names_the_real_one(client):
-    """The exact guess from the audit."""
-    resp = await _get(client, "/api/v1/documents/skills/my-doc")
+async def test_a_guessed_path_names_the_real_ones(client):
+    """A guess under a real resource is pointed at that resource's routes."""
+    resp = await _get(client, _UNMATCHED)
 
     suggestions = resp.json()["error"]["details"]["did_you_mean"]
-    assert any("/api/v1/documents/{doc_id}" in s for s in suggestions)
+    assert any("/api/v1/agents/{agent_id}" in s for s in suggestions)
 
 
 async def test_suggestions_carry_the_method(client):

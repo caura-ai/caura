@@ -41,6 +41,18 @@ QUARANTINED_MEMORY_STATUS = "quarantined"
 QUARANTINE_REJECTED = "cancelled"
 # What a held memory may become: released (``active``) or rejected.
 QUARANTINE_EXITS = ("active", QUARANTINE_REJECTED)
+# Why a memory was held, under ``metadata["_system"]``, where the platform's own
+# keys live: caller input is stripped of that namespace, so a write can't claim
+# to be held, or released, by setting it. It stays after a release or reject, so
+# it also says the memory was held once. core-api writes it and core-storage-api
+# counts holds by its ``reason`` for the pilot report (g4.3).
+HOLD_KEY = "hold"
+# The audit actions that take a held memory out of quarantine: a person's
+# release or reject, and a session rollback, which rejects the session's held
+# memories (its row's ``detail.new_status`` is ``cancelled`` for those).
+QUARANTINE_RELEASE_ACTION = "quarantine.release"
+QUARANTINE_REJECT_ACTION = "quarantine.reject"
+SESSION_ROLLBACK_ACTION = "session.rollback"
 
 # The two statuses contradiction detection writes on a losing row — and the only
 # two any retraction path may revert FROM. Anything else on a contradicted row

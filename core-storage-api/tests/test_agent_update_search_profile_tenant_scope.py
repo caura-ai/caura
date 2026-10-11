@@ -1,4 +1,7 @@
-"""Tenant scoping for search-profile updates addressed by agent primary key."""
+"""Tenant scoping for search-profile updates.
+
+The service updates by primary key; the route takes the agent's own id (L-140).
+"""
 
 from __future__ import annotations
 
@@ -61,11 +64,11 @@ class TestAgentUpdateSearchProfileTenantScope:
 
     async def test_route_passes_tenant_to_profile_update(self, client: AsyncClient) -> None:
         tenant = _new_tenant_id()
-        agent_pk, agent_id = await _agent(client, tenant, {"min_similarity": 0.58})
+        _agent_pk, agent_id = await _agent(client, tenant, {"min_similarity": 0.58})
         updated = {"min_similarity": 0.73}
 
         response = await client.patch(
-            f"{PREFIX}/agents/{agent_pk}/search-profile",
+            f"{PREFIX}/agents/{agent_id}/search-profile",
             json={"tenant_id": tenant, "search_profile": updated},
         )
 

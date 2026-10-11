@@ -37,9 +37,13 @@ class ResolveSearchProfile:
         # An actual lexical hit may relax only the untuned global fallback.
         # Keep this provenance outside search_params: it is core filtering state,
         # not a storage scoring knob.
-        ctx.data["allow_fts_global_floor_bypass"] = _uses_global_min_similarity(
+        untuned = _uses_global_min_similarity(
             ctx.data.get("search_profile"),
             ctx.tenant_config,
             override,
         )
+        ctx.data["allow_fts_global_floor_bypass"] = untuned
+        # L-112 — the same provenance, read by ClassifyQuery: a floor someone
+        # named declines the entity-lookup route, which cannot apply one.
+        ctx.data["min_similarity_tuned"] = not untuned
         return None

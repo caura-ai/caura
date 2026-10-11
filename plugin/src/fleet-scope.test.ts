@@ -134,6 +134,13 @@ describe("configured-fleet default vs an explicit scope", () => {
     }
   });
 
+  // L-109: the schema says 1-50 and MCP caps there, but this forwards to REST,
+  // which accepts up to 500, so a plugin page could be ten times an MCP one.
+  test("caura_list caps limit at 50, as its schema and MCP do", async () => {
+    const { query } = await callAndCaptureRequest("caura_list", { limit: 200 });
+    assert.equal(query.get("limit"), "50");
+  });
+
   test("caura_stats keeps the configured fleet when scope is omitted", async () => {
     const { query } = await callAndCaptureRequest("caura_stats", {});
     assert.equal(query.get("fleet_id"), CONFIGURED_FLEET);

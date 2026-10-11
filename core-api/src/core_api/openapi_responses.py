@@ -34,12 +34,29 @@ from core_api.schemas import MemoryOut, SearchWarning
 
 
 class MemoryPendingWork(BaseModel):
-    embedding: int = Field(description="Live rows whose vector has not landed yet (`embedding IS NULL`).")
+    embedding: int = Field(
+        description=(
+            "Live rows whose vector has not landed yet (`embedding IS NULL`), stranded ones included "
+            "(see `stranded`). With no embedding provider configured (`embedding_configured` false) "
+            "these rows stay unembedded, and `settled` ignores them."
+        )
+    )
     enrichment: int = Field(
         description="Live rows still marked `enrichment_pending` — the deferred LLM enrichment has not written back."
     )
     fanout: int = Field(
         description="Live rows whose persisted atomic facts have not been fanned out into child memories yet."
+    )
+
+
+class MemoryStrandedWork(BaseModel):
+    embedding: int = Field(
+        description=(
+            "The `pending.embedding` rows written over an hour ago. Nothing is coming back for them: "
+            "the embed exhausted its retries, died with its process or dead-lettered (or, on a "
+            "deferred deployment, a backlog longer than an hour is still draining). Re-embed them "
+            "with `python -m core_storage_api.scripts.backfill_embeddings`."
+        )
     )
 
 
@@ -64,7 +81,24 @@ class MemoryStatsResponse(BaseModel):
     )
     settled: bool | None = Field(
         default=None,
-        description="True when every `pending` count is zero. Wait for this before measuring a freshly ingested store.",
+        description=(
+            "True when every `pending` count is zero once the `stranded` rows are set aside, or every "
+            "count but `embedding` when `embedding_configured` is false. Wait for this before measuring a "
+            "freshly ingested store, and check `stranded`: rows counted there are unembedded, so search "
+            "finds them by keyword only."
+        ),
+    )
+    stranded: MemoryStrandedWork | None = Field(
+        default=None,
+        description="Pending rows nothing will come back for, which `settled` does not wait on.",
+    )
+    embedding_configured: bool | None = Field(
+        default=None,
+        description=(
+            "False when no embedding provider is configured for the tenant: rows are stored without "
+            "embeddings and searched by keyword only, so `pending.embedding` counts rows that will stay "
+            "unembedded until a provider is set and they are re-embedded."
+        ),
     )
 
 
@@ -126,7 +160,10 @@ class RecallDiagnostic(BaseModel):
     recall_model: str | None
     recall_provider: str | None
     all_candidates: list
-    top_k_used: int | None
+    top_k_used: int | None = Field(
+        description="Row budget the search ran with, after the agent and tenant search profiles and any "
+        "strategy cap (what /search's diagnostic reports as top_k_requested), not the request's own top_k."
+    )
     retrieval_strategy: str | None
     search_params: dict
     # CAURA-722 — documented on ``SearchDiagnostic``. ``None`` on the count
@@ -139,7 +176,9 @@ class RecallResponse(BaseModel):
     query: str
     summary: str
     memory_count: int
-    memories: list[MemoryOut]
+    memories: list[MemoryOut] = Field(
+        description="The matched rows in rank order, as /search returns them; the summary reads them by date."
+    )
     # ax-0917-h-03 — DEPRECATED, and deliberately still emitted by default here.
     #
     # ``POST /recall`` is a SemVer-stable REST surface (docs/public-api-stability.md,
@@ -679,6 +718,14 @@ class InsightsResponse(BaseModel):
     insight_memory_ids: list[str]
     gate_rejected: int
     insights_ms: int
+    skipped_reason: str | None = Field(
+        default=None,
+        description=(
+            "Present when the analysis did not run: `llm_unavailable` means no LLM provider answered, "
+            "so `findings` is empty because nothing was analysed, not because nothing was found. "
+            "Prior insights are left as they were."
+        ),
+    )
 
 
 class HealthResponse(BaseModel):

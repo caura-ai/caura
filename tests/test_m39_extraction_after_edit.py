@@ -96,7 +96,7 @@ async def _extract(
     """Run the worker on ``OLD``; returns the texts the extractor was given."""
     seen: list[str] = []
 
-    async def extract(content, memory_type, tenant_config=None):
+    async def extract(content, memory_type, tenant_config=None, **_kw):
         seen.append(content)
         if on_extract is not None and len(seen) == 1:
             await on_extract()

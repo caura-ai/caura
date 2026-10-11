@@ -31,16 +31,12 @@ class RerankResults:
         return "rerank_results"
 
     async def execute(self, ctx: PipelineContext) -> StepResult | None:
-        # Master kill-switch. Tenant override (``rank_enabled``) wins over the
-        # ``RANK_ENABLED`` env default. Skipping here — rather than relying on
-        # ``RANK_PROVIDER=noop`` — is a true zero-cost bypass: no candidates
-        # built, no service call, no sort. This is the switch to flip reranking
-        # off in an incident without touching provider config.
-        tenant_config = ctx.data.get("tenant_config")
-        enabled = getattr(tenant_config, "rank_enabled", None)
-        if enabled is None:
-            enabled = RANK_ENABLED
-        if not enabled:
+        # Master kill-switch, ``RANK_ENABLED``. Skipping here — rather than
+        # relying on ``RANK_PROVIDER=noop`` — is a true zero-cost bypass: no
+        # candidates built, no service call, no sort. This is the switch to flip
+        # reranking off in an incident without touching provider config.
+        # Environment only: the tenant config is not consulted (L-98).
+        if not RANK_ENABLED:
             return StepResult(outcome=StepOutcome.SKIPPED)
 
         plan = ctx.data.get("retrieval_plan")
@@ -73,11 +69,17 @@ class RerankResults:
             for r in head
         ]
 
-        scores = await get_ranking(ctx.data["query"], candidates, tenant_config)
+        scores = await get_ranking(ctx.data["query"], candidates)
         if scores is None:
             # Degraded / noop-with-nothing-to-do: keep first-stage order.
             return None
 
         order = sorted(range(len(head)), key=lambda i: scores[i], reverse=True)
+        # L-115 — the score that ordered the row, serialized as
+        # ``score_parts.rerank``. ``score`` stays the first-stage composite, so
+        # a reranked page reads non-monotonic there and this says why; the tail
+        # past the cap was not reranked and carries none.
+        for row, score in zip(head, scores, strict=True):
+            row.rerank = float(score)
         ctx.data["raw_rows"] = [head[i] for i in order] + tail
         return None

@@ -63,7 +63,9 @@ class Settings(BaseSettings):
 
     # CAURA-655: core-operations doesn't talk to the DB directly — its
     # cron ticks POST to core-api's ``/admin/lifecycle/fanout/<action>``
-    # endpoints, which do the org enumeration and Pub/Sub publish.
+    # endpoints, which do the org enumeration and Pub/Sub publish. The default
+    # is the service name caura-enterprise's docker-compose gives the OSS
+    # core-api; this repo's docker-compose.yml sets CORE_API_URL itself.
     core_api_url: str = "http://oss-core-api:8000"
     core_api_admin_api_key: str = ""
     # Read only when ``core_api_admin_api_key`` is blank (M-109). The compose

@@ -54,7 +54,7 @@ curl -fsS -X POST http://localhost:8000/api/v1/search \
 ```
 
 You should see two `POST /v1/embeddings` lines in the TEI log (one for the
-write's content, one for the search's query) and a non-empty `memories`
+write's content, one for the search's query) and a non-empty `items`
 array in the search response. If the TEI log stays silent during your
 calls, double-check the four envs were picked up — `core-api` is silently
 hitting OpenAI.

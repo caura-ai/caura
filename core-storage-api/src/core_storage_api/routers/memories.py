@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import re as _re
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from common.constants import (
     CONTRADICTION_CANDIDATE_WINDOW,
@@ -22,7 +22,7 @@ from common.events.lifecycle_purge_request import (
     MEMORY_RETENTION_MIN_DAYS,
 )
 from core_storage_api.observability import bind_timer, log_request
-from core_storage_api.routers._validation import _require, _require_dict, _require_uuid
+from core_storage_api.routers._validation import _int_at_least, _require, _require_dict, _require_uuid
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import (
     MISSING_PROVENANCE_PREDICATE_SQL,
@@ -98,7 +98,9 @@ async def create_memory(request: Request) -> dict:
     # this call opens a session, and a broad catch would relabel a server fault
     # as a client error.
     memory = await _svc.memory_add(body)
-    return orm_to_dict(memory, MEMORY_FIELDS)
+    # No vectors (L-187): the embedding is the one core-api just sent, and no
+    # caller reads the row's vectors back from here.
+    return orm_to_dict(memory, MEMORY_LIST_FIELDS)
 
 
 @router.post("/bulk")
@@ -352,7 +354,9 @@ async def load_by_ids(request: Request) -> list[dict]:
                 readable_tenant_ids=body.get("readable_tenant_ids") or None,
                 strict_fleet_scoping=body.get("strict_fleet_scoping", False),
             )
-        out = [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+        # No vectors (L-188): ClassifyQuery builds result rows from these, and
+        # a result carries no vector.
+        out = [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
     except Exception:
         success = False
         raise
@@ -433,7 +437,8 @@ async def find_entity_overlap_candidates(request: Request) -> list[dict]:
         # A54 — owner identity, applied only for the scope_agent tier.
         agent_id=body.get("agent_id"),
     )
-    return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+    # No vectors (L-189): contradiction detection never reads a candidate's.
+    return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 
 
 @router.get("/by-supersedes-id")
@@ -511,10 +516,16 @@ async def find_successors(request: Request) -> list[dict]:
         memory_type_filter=body.get("memory_type_filter"),
         valid_at=valid_at,
         strict_fleet_scoping=body.get("strict_fleet_scoping", False),
+        # Where the search read, so its stale rows' corrections are found
+        # there too (L-43); absent reads the home tenant, as before.
+        readable_tenant_ids=body.get("readable_tenant_ids") or None,
     )
     # ``successor_of`` names the row each one replaced: its ``supersedes_id``,
     # or for a contradiction's further loser the one its record names (M-34).
-    return [{**orm_to_dict(m, MEMORY_FIELDS), "successor_of": str(replaced)} for m, replaced in successors]
+    # No vectors (L-188): a successor joins search results, which carry none.
+    return [
+        {**orm_to_dict(m, MEMORY_LIST_FIELDS), "successor_of": str(replaced)} for m, replaced in successors
+    ]
 
 
 @router.post("/similar-candidates")
@@ -539,7 +550,8 @@ async def find_similar_candidates(request: Request) -> list[dict]:
         # A54 — owner identity, applied only for the scope_agent tier.
         agent_id=body.get("agent_id"),
     )
-    return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+    # No vectors (L-189): up to 20 per write, and the detector reads none.
+    return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 
 
 @router.get("/by-content-hash")
@@ -606,7 +618,8 @@ async def find_duplicate_hash(
 async def bulk_get_memories(request: Request) -> list[dict | None]:
     """Fetch many memories by id in a single round-trip.
 
-    Body: ``{"ids": ["uuid", ...], "tenant_id": "..."}``.
+    Body: ``{"ids": ["uuid", ...], "tenant_id": "...", "with_embedding": false}``.
+    The rows carry no vectors unless ``with_embedding`` asks for the embedding.
 
     Returns a list of memory dicts in the **same order** as the input ids,
     with ``null`` for ids that don't exist, are soft-deleted, or belong to a
@@ -640,7 +653,11 @@ async def bulk_get_memories(request: Request) -> list[dict | None]:
     except (ValueError, TypeError) as e:
         raise HTTPException(status_code=422, detail=f"invalid UUID in ids: {e}")
 
-    by_id = await _svc.memory_get_memories_by_ids(uids, tenant_id=tenant_id)
+    # No vectors unless asked (L-189): the crystallizer and the graph's evidence
+    # filter read none, and the bulk re-embed asks for the embedding.
+    with_embedding = bool(body.get("with_embedding", False))
+    fields = [*MEMORY_LIST_FIELDS, "embedding"] if with_embedding else MEMORY_LIST_FIELDS
+    by_id = await _svc.memory_get_memories_by_ids(uids, tenant_id=tenant_id, with_embedding=with_embedding)
 
     # No tenant comparison here any more: the query is scoped, so a row from
     # another tenant is never fetched rather than being fetched and discarded.
@@ -650,7 +667,7 @@ async def bulk_get_memories(request: Request) -> list[dict | None]:
     out: list[dict | None] = []
     for uid in uids:
         mem = by_id.get(uid)
-        out.append(orm_to_dict(mem, MEMORY_FIELDS) if mem is not None else None)
+        out.append(orm_to_dict(mem, fields) if mem is not None else None)
     return out
 
 
@@ -692,6 +709,23 @@ async def set_subject_entity_if_null(memory_id: UUID, request: Request) -> dict:
         subject_entity_id=UUID(body["subject_entity_id"]),
         content=body.get("content"),
     )
+    return {"updated": updated}
+
+
+@router.post("/{memory_id}/supersedes")
+async def set_supersedes_if_null(memory_id: UUID, request: Request) -> dict:
+    """Point a live row at the memory it supersedes, if it points nowhere yet.
+
+    The near-duplicate merge's link (L-19): the compare-and-set that
+    ``PATCH /memories/{id}/status`` runs after writing a status, without the
+    status, which the merge has no business changing. Returns
+    ``{"updated": bool}``; ``false`` covers a row that is absent, deleted,
+    held, foreign or already points somewhere, and a target outside the tenant.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    supersedes_id = _require_uuid(body, "supersedes_id")
+    updated = await _svc.memory_set_supersedes_if_null(memory_id, supersedes_id, tenant_id=tenant_id)
     return {"updated": updated}
 
 
@@ -747,7 +781,8 @@ async def find_rdf_conflicts(
         visibility=visibility,
         agent_id=agent_id,
     )
-    return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+    # No vectors (L-189), as for the other contradiction candidates.
+    return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 
 
 @router.post("/near-duplicates")
@@ -773,8 +808,8 @@ async def check_near_duplicates(request: Request) -> dict:
     rows = await _svc.memory_find_near_duplicate_pairs(
         tenant_id=body["tenant_id"],
         fleet_id=body.get("fleet_id"),
-        batch_size=body.get("batch_size", 100),
-        offset=body.get("offset", 0),
+        batch_size=_int_at_least(body, "batch_size", 100, 1),
+        offset=_int_at_least(body, "offset", 0, 0),
         threshold=body.get("threshold", 0.95),
         neighbor_limit=body.get("neighbor_limit", 5),
     )
@@ -977,7 +1012,7 @@ async def archive_expired(request: Request) -> dict:
     count = await _svc.memory_archive_expired(
         tenant_id=body["tenant_id"],
         fleet_id=body.get("fleet_id"),
-        batch_size=body.get("batch_size", 500),
+        batch_size=_int_at_least(body, "batch_size", 500, 1),
     )
     return {"count": count}
 
@@ -990,7 +1025,7 @@ async def archive_stale_low_weight(request: Request) -> dict:
         fleet_id=body.get("fleet_id"),
         stale_days=body.get("stale_days", 90),
         max_weight=body.get("max_weight", 0.3),
-        batch_size=body.get("batch_size", 500),
+        batch_size=_int_at_least(body, "batch_size", 500, 1),
     )
     return {"count": count}
 
@@ -1167,7 +1202,7 @@ async def get_audit_usage(tenant_id: str) -> dict:
 async def get_recent_memories(
     tenant_id: str,
     fleet_id: str | None = None,
-    limit: int = 20,
+    limit: int = Query(default=20, ge=1),
 ) -> list[dict]:
     memories = await _svc.memory_list_recent(tenant_id, fleet_id, limit=limit)
     return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
@@ -1273,6 +1308,25 @@ async def list_held_memories(
         tenant_id, session_id=session_id, limit=limit, cursor_ts=cursor_ts, cursor_id=cursor_id
     )
     return {"items": [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories], "total": total}
+
+
+@router.get("/held/counts")
+async def count_held_memories(tenant_id: str, since: datetime, until: datetime) -> dict:
+    """What was held in ``[since, until)``, and what people decided in it (g4.3).
+
+    ``{"held": {reason: n}, "released": n, "rejected": n, "rolled_back": n}``:
+    the write gate's part of a tenant's weekly pilot report, read by the
+    enterprise report builder. ``held`` counts the memories written in the
+    window that were held, by why; the rest count the decisions made in it
+    (``memory_hold_counts``). Both times need an offset.
+    """
+    if since.tzinfo is None or until.tzinfo is None:
+        raise HTTPException(
+            status_code=422, detail="since and until must be timezone-aware (e.g. include +00:00)"
+        )
+    if since >= until:
+        raise HTTPException(status_code=422, detail="since must be before until")
+    return await _svc.memory_hold_counts(tenant_id, since=since, until=until)
 
 
 @router.post("/rollback-session")
@@ -1550,7 +1604,7 @@ async def enqueue_dedup_review(request: Request) -> dict:
 async def list_dedup_reviews(
     tenant_id: str,
     status: str = "pending",
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1),
 ) -> list[dict]:
     reviews = await _svc.dedup_review_list(tenant_id, status=status, limit=limit)
     return [orm_to_dict(r, _DEDUP_REVIEW_FIELDS) for r in reviews]
@@ -1624,6 +1678,21 @@ async def admin_stats(
     return await _svc.memory_admin_stats(tenant_id, fleet_id)
 
 
+def _refuse_cursor_off_created_at(body: dict, cursor_ts: object, cursor_id: object) -> None:
+    """422 for a cursor on any sort but ``created_at``.
+
+    A cursor is a ``(created_at, id)`` position, so under another ORDER BY it
+    skips and repeats rows across pages (L-45). core-api mints one only for
+    ``sort=created_at`` (``pagination.cursor_sortable``); this holds a direct
+    caller to the same.
+    """
+    sort = body.get("sort") or "created_at"
+    if cursor_ts is not None and cursor_id is not None and sort != "created_at":
+        raise HTTPException(
+            status_code=422, detail="a cursor pages by created_at; use offset for another sort"
+        )
+
+
 @router.post("/admin-list")
 async def admin_list(request: Request) -> list[dict]:
     """Admin cross-tenant memory list (NO visibility scoping).
@@ -1645,6 +1714,7 @@ async def admin_list(request: Request) -> list[dict]:
         cursor_id = UUID(cursor_id_raw) if cursor_id_raw else None
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=f"invalid cursor fields: {exc}") from exc
+    _refuse_cursor_off_created_at(body, cursor_ts, cursor_id)
     memories = await _svc.memory_admin_list(
         tenant_id=body.get("tenant_id"),
         fleet_id=body.get("fleet_id"),
@@ -1654,8 +1724,8 @@ async def admin_list(request: Request) -> list[dict]:
         include_deleted=bool(body.get("include_deleted", False)),
         sort=body.get("sort", "created_at"),
         order=body.get("order", "desc"),
-        offset=body.get("offset", 0),
-        limit=body.get("limit", 50),
+        offset=_int_at_least(body, "offset", 0, 0),
+        limit=_int_at_least(body, "limit", 50, 1),
         cursor_ts=cursor_ts,
         cursor_id=cursor_id,
     )
@@ -1713,6 +1783,7 @@ async def list_by_filters(request: Request) -> list[dict]:
         )
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=422, detail=f"invalid datetime fields: {exc}") from exc
+    _refuse_cursor_off_created_at(body, cursor_ts, cursor_id)
     memory_type = body.get("memory_type")
     exclude_memory_types = body.get("exclude_memory_types")
     if memory_type and exclude_memory_types and memory_type in exclude_memory_types:
@@ -1738,7 +1809,7 @@ async def list_by_filters(request: Request) -> list[dict]:
         sort=body.get("sort", "created_at"),
         order=body.get("order", "desc"),
         limit=limit,
-        offset=body.get("offset", 0),
+        offset=_int_at_least(body, "offset", 0, 0),
         cursor_ts=cursor_ts,
         cursor_id=cursor_id,
         readable_tenant_ids=body.get("readable_tenant_ids"),
@@ -2198,7 +2269,11 @@ async def update_memory(memory_id: UUID, request: Request) -> dict:
 @router.patch("/{memory_id}/status")
 async def update_memory_status(memory_id: UUID, request: Request) -> dict:
     body: dict = await request.json()
-    status = body["status"]
+    # A missing status was a KeyError, so a 500 that core-api retries as a 503,
+    # where batch-update-status answers 422 (L-41).
+    status = body.get("status")
+    if not isinstance(status, str) or not status:
+        raise HTTPException(status_code=422, detail="'status' is required and must be a non-empty string")
     supersedes_id = body.get("supersedes_id")
     unset_supersedes = bool(body.get("unset_supersedes", False))
     expected_supersedes_id = body.get("expected_supersedes_id")
@@ -2247,13 +2322,16 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
         # Status + pointer update must be atomic — a partial update
         # (status advances but pointer clear is rejected) would leave
         # the row in an invalid state. Caught wet-testing 2026-05-19.
-        from sqlalchemy import or_, select
+        from sqlalchemy import case, or_, select
         from sqlalchemy import update as sql_update
 
         from common.models import Memory
         from core_storage_api.services.postgres_service import get_session
 
-        expected_uuid = UUID(expected_supersedes_id)
+        try:
+            expected_uuid = UUID(str(expected_supersedes_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="expected_supersedes_id must be a UUID") from exc
         async with get_session() as session:
             result = await session.execute(
                 sql_update(Memory)
@@ -2271,7 +2349,18 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                         Memory.supersedes_id.is_(None),
                     ),
                 )
-                .values(supersedes_id=None, status=status)
+                .values(
+                    supersedes_id=None,
+                    status=status,
+                    # Stamped only when the status moves (L-142). core-api
+                    # retracts by re-writing the winner's current status, and
+                    # stamping that would put a contradicted winner back in the
+                    # contradiction window with no new contradiction.
+                    status_changed_at=case(
+                        (Memory.status.is_distinct_from(status), datetime.now(UTC)),
+                        else_=Memory.status_changed_at,
+                    ),
+                )
             )
             if result.rowcount == 0:  # type: ignore[attr-defined]
                 # Three different situations reach zero rows, and answering
@@ -2356,11 +2445,19 @@ async def update_embedding(memory_id: UUID, request: Request) -> dict:
     tenant_id = body.get("tenant_id")
     if not tenant_id:
         raise HTTPException(status_code=422, detail="tenant_id is required")
+    if "metadata" in body:
+        # L-42: this route wrote ``metadata`` over the stored document
+        # wholesale, discarding every enrichment and ``_system`` key, and
+        # nothing sent it. Refused rather than ignored, so a caller learns
+        # where the merge lives.
+        raise HTTPException(
+            status_code=422,
+            detail="metadata is not accepted here; send metadata_patch to PATCH /memories/{id} to merge it",
+        )
     updated = await _svc.memory_update_embedding(
         memory_id,
         tenant_id=tenant_id,
         embedding=body["embedding"],
-        metadata=body.get("metadata"),
         # Optional: the hash of the text the caller actually embedded. Absent
         # leaves provenance NULL ("unknown"), which is honest — the service
         # deliberately does not infer it from the row, since the row may have
@@ -2368,7 +2465,7 @@ async def update_embedding(memory_id: UUID, request: Request) -> dict:
         embedded_content_hash=body.get("embedded_content_hash"),
     )
     if not updated:
-        # No row for this (id, tenant) — surface 404 rather than a silent
+        # No live row for this (id, tenant) — surface 404 rather than a silent
         # 200 (consistent with PATCH /memories/{id}); the client returns
         # None so callers don't count a no-op as a successful write.
         raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found")

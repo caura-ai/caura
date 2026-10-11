@@ -181,6 +181,69 @@ async def run_lifecycle_reconcile_tick() -> None:
     )
 
 
+async def run_entity_extraction_rerun_tick() -> None:
+    """POST ``/admin/entity-extraction/rerun-lost``.
+
+    Re-runs entity extraction for memories whose extraction raised, was cancelled
+    by a shutdown, or settled for the regex heuristic (core-api
+    ``services.extraction_rerun``). core-api marks the rows, schedules the
+    re-runs in the background and answers with counts at once, so this tick
+    never waits on an extraction.
+    """
+    url = f"{settings.core_api_url.rstrip('/')}/api/v1/admin/entity-extraction/rerun-lost"
+    headers: dict[str, str] = {}
+    if settings.core_api_admin_api_key:
+        headers["X-API-Key"] = settings.core_api_admin_api_key
+    else:
+        logger.warning(
+            "core-operations: CORE_API_ADMIN_API_KEY unset; the entity extraction re-run will be unauthorised",
+        )
+
+    timeout = httpx.Timeout(settings.core_api_http_timeout_s)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            resp = await client.post(url, headers=headers)
+        except httpx.HTTPError:
+            logger.exception("entity extraction re-run POST failed", extra={"url": url})
+            return
+    if resp.status_code >= 400:
+        logger.error(
+            "entity extraction re-run returned non-2xx; will retry next tick",
+            extra={"status_code": resp.status_code, "body": resp.text[:500]},
+        )
+        return
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        # A 2xx: core-api already ran the sweep, as for the reconcile tick.
+        logger.error(
+            "entity extraction re-run returned an unreadable 2xx; the sweep ran, its counts are lost",
+            extra={"status_code": resp.status_code, "body": resp.text[:500]},
+        )
+        return
+    if not body.get("memories") and not body.get("unreadable_tenants"):
+        logger.debug("entity extraction re-run: nothing lost")
+        return
+    # Each picked memory had lost its extraction, so this is worth a WARNING;
+    # a tenant whose rows could not be read, or a memory an error stopped, is
+    # an ERROR, because those memories stay lost until a later sweep gets them.
+    failed = body.get("unreadable_tenants") or body.get("failed_memories")
+    level = logger.error if failed else logger.warning
+    level(
+        "entity extraction re-run swept lost extractions",
+        extra={
+            "tenants": body.get("tenants"),
+            "unreadable_tenants": body.get("unreadable_tenants"),
+            "memories": body.get("memories"),
+            "scheduled": body.get("scheduled"),
+            "skipped": body.get("skipped"),
+            "failed_memories": body.get("failed_memories"),
+        },
+    )
+
+
 async def run_archive_expired_tick() -> None:
     await _fire_fanout("archive-expired")
 

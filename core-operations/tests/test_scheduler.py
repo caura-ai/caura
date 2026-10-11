@@ -11,6 +11,7 @@ from core_operations.scheduler import (
     Scheduler,
     seconds_until_next_utc_half_past,
     seconds_until_next_utc_hour,
+    seconds_until_next_utc_minute_past,
     seconds_until_next_utc_top_of_hour,
     seconds_until_next_utc_weekday_hour,
 )
@@ -409,3 +410,29 @@ def test_seconds_until_next_utc_hour_multiple_validates_range():
         seconds_until_next_utc_hour_multiple(25)
     with pytest.raises(ValueError):
         seconds_until_next_utc_hour_multiple(6, anchor_hour=24)
+
+
+class TestSecondsUntilNextUtcMinutePast:
+    def test_before_the_mark_waits_until_this_hours_mark(self) -> None:
+        now = datetime(2026, 10, 7, 10, 5, tzinfo=UTC)
+        assert seconds_until_next_utc_minute_past(45, now=now) == 40 * 60
+
+    def test_after_the_mark_rolls_to_the_next_hour(self) -> None:
+        now = datetime(2026, 10, 7, 10, 50, tzinfo=UTC)
+        assert seconds_until_next_utc_minute_past(45, now=now) == 55 * 60
+
+    def test_exactly_on_the_mark_is_strictly_future(self) -> None:
+        now = datetime(2026, 10, 7, 10, 45, tzinfo=UTC)
+        assert seconds_until_next_utc_minute_past(45, now=now) == 3600
+
+    def test_agrees_with_half_past(self) -> None:
+        for minute in range(0, 60, 7):
+            now = datetime(2026, 10, 7, 10, minute, 13, tzinfo=UTC)
+            assert seconds_until_next_utc_minute_past(30, now=now) == seconds_until_next_utc_half_past(
+                now=now
+            )
+
+    @pytest.mark.parametrize("minute", [-1, 60])
+    def test_a_minute_outside_the_hour_is_refused(self, minute: int) -> None:
+        with pytest.raises(ValueError):
+            seconds_until_next_utc_minute_past(minute)

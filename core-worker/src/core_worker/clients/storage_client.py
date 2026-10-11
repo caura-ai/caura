@@ -186,8 +186,8 @@ async def update_memory_embedding(
     tenant_id: str,
     embedding: list[float],
     embedded_content_hash: str | None = None,
-) -> None:
-    """PATCH the embedding onto the memory row.
+) -> bool:
+    """PATCH the embedding onto the memory row; return whether it landed.
 
     Raises on transient (5xx / 429) responses so the consumer nacks
     → Pub/Sub redelivers. Permanent 4xx errors (404, 422) are logged
@@ -195,6 +195,10 @@ async def update_memory_embedding(
     max-delivery-attempts budget against an event that will never
     succeed (row deleted between event publish and processing, or a
     schema mismatch the storage layer rejects either way).
+
+    Those two answer False, so the consumer does not announce a write that
+    did not happen (L-54): ``EMBEDDED`` is defined as emitted after a
+    successful PATCH, and core-api reads the row back on it.
 
     ``tenant_id`` is included in the body so the storage layer can
     guard against cross-tenant updates.
@@ -245,7 +249,7 @@ async def update_memory_embedding(
             "(row deleted between publish and processing)",
             memory_id,
         )
-        return
+        return False
     if resp.status_code == 422:
         # Storage rejected the payload shape. Won't pass on a redelivery
         # either — log loudly so the schema mismatch is visible and ack.
@@ -253,9 +257,10 @@ async def update_memory_embedding(
             "storage rejected embedding PATCH for memory %s with 422; ack-dropping",
             memory_id,
         )
-        return
+        return False
     # 5xx / 429 / network → raise → consumer nacks → Pub/Sub redelivers.
     resp.raise_for_status()
+    return True
 
 
 @dataclass(frozen=True)
@@ -524,8 +529,8 @@ async def update_memory_enrichment(
     memory_id: UUID,
     tenant_id: str,
     fields: dict,
-) -> None:
-    """PATCH enrichment-output fields onto the memory row.
+) -> bool:
+    """PATCH enrichment-output fields onto the memory row; return whether it landed.
 
     Mirrors :func:`update_memory_embedding` for the
     ``Topics.Memory.ENRICH_REQUESTED`` worker path. ``fields`` is the
@@ -541,13 +546,15 @@ async def update_memory_enrichment(
     re-PATCHes with the (deterministic up to LLM noise) same fields.
     Safe — the storage update is a write-after-write.
 
-    Same 404/422 short-circuits as :func:`update_memory_embedding`.
+    Same 404/422 short-circuits as :func:`update_memory_embedding`, which
+    answer False. No fields answers True: nothing was refused, and the row is
+    as enriched as this result makes it.
     """
     if not fields:
         # Defensive — heuristic fallback may produce an all-defaults
         # result; an empty PATCH is wasted work and noisy in storage logs.
         logger.debug("skipping empty enrichment PATCH for memory %s", memory_id)
-        return
+        return True
     resp = await _signed_call(
         client.patch,
         f"{_PREFIX}/memories/{memory_id}",
@@ -559,11 +566,12 @@ async def update_memory_enrichment(
             "(row deleted between publish and processing)",
             memory_id,
         )
-        return
+        return False
     if resp.status_code == 422:
         logger.warning(
             "storage rejected enrichment PATCH for memory %s with 422; ack-dropping",
             memory_id,
         )
-        return
+        return False
     resp.raise_for_status()
+    return True

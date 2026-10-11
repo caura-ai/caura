@@ -17,6 +17,12 @@ both. The image is published as ``caura-core-operations``: rule 7 of the rebrand
 plan mints nothing new under the old name.
 
 Expiry moves a row to ``outdated``, not ``archived``; the description says so.
+
+L-229 (audit 2026-10-01, B41): the generated key also shadowed a legacy
+``API_KEY``. core-api read the file whenever ``ADMIN_API_KEY`` was blank, and
+the admin key wins over ``API_KEY``, so a stock-compose ``.env`` carrying only
+the legacy key lost admin access with it. The file is now read only when both
+are blank, and the scheduler presents the legacy key in that case too.
 """
 
 from __future__ import annotations
@@ -80,9 +86,11 @@ def test_core_api_and_the_scheduler_share_one_generated_admin_key():
 
 def test_an_operator_admin_key_reaches_the_scheduler_too():
     """core-api reads ``.env`` through ``env_file``; Compose interpolates the same
-    file, so an ``ADMIN_API_KEY`` set there is what both services present."""
+    file, so an ``ADMIN_API_KEY`` set there is what both services present. With
+    only the legacy ``API_KEY`` set, core-api's admin key is that one (L-229), so
+    the scheduler presents it too rather than the generated file's."""
     env = _env(_compose()["services"]["core-operations"])
-    assert env["CORE_API_ADMIN_API_KEY"] == "${ADMIN_API_KEY:-}"
+    assert env["CORE_API_ADMIN_API_KEY"] == "${ADMIN_API_KEY:-${API_KEY:-}}"
 
 
 def test_the_scheduler_image_is_published_under_the_new_name():
@@ -104,6 +112,7 @@ def test_the_scheduler_image_is_published_under_the_new_name():
 @pytest.fixture
 def key_file(tmp_path, monkeypatch) -> Path:
     for name in (
+        "API_KEY",
         "ADMIN_API_KEY",
         "ADMIN_API_KEY_FILE",
         "CORE_API_ADMIN_API_KEY",
@@ -144,6 +153,15 @@ def test_an_operator_admin_key_wins_over_the_file(key_file):
         core_api_admin_api_key_file=str(key_file),
     )
     assert (api.admin_api_key, ops.core_api_admin_api_key) == ("operator-key",) * 2
+
+
+def test_l229_a_legacy_api_key_wins_over_the_file(key_file):
+    """A stock-compose ``.env`` with only the legacy ``API_KEY``: that key stays
+    the admin key (``get_admin_key`` is ``admin_api_key or api_key``)."""
+    api = CoreApiSettings(
+        _env_file=None, api_key="legacy-key", admin_api_key_file=str(key_file)
+    )
+    assert (api.admin_api_key or api.api_key) == "legacy-key"
 
 
 # ── L-99 ──────────────────────────────────────────────────────────────────
