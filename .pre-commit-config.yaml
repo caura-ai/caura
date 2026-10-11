@@ -20,6 +20,10 @@ repos:
         name: ruff-format (vendored common/ files, ruff defaults)
         args: [--isolated]
         files: '^common/(__init__|structlog_config|serve)\.py$'
+      - id: ruff
+        name: ruff (clients/python)
+        args: [--fix]
+        files: '^clients/python/(src|tests)/'
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0
