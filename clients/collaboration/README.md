@@ -235,7 +235,11 @@ While it runs, the stdio MCP server advertises the agent as `ready` so
 `discover` lists it: a presence heartbeat at a third of Caura's presence TTL,
 and `offline` on shutdown (a crash expires with the TTL). Disable it with
 `CAURA_BUS_MCP_PRESENCE=0` or `caura-bus-mcp --no-presence`; advertise skills
-with `capabilities = [...]` under `[agent]` in the TOML.
+with `capabilities = [...]` under `[agent]` in the TOML. Presence also reports
+where the session runs, which the dashboard shows as the agent's host: the
+machine's hostname (override with `CAURA_BUS_MCP_HOSTNAME`, or set it empty to
+leave it out) and the runtime, detected from the Claude Code and Codex markers
+`caura-bus join` uses (override with `CAURA_BUS_RUNTIME`).
 
 Responses returned by `peer wait` carry `correlation.reply_to` and
 `correlation.matches_sent_request`; use `peer collect` with the request ID to

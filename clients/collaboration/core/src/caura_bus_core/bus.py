@@ -318,7 +318,11 @@ class Bus:
         return await self.request("GET", "memory-context", params=params.model_dump(exclude_none=True))
 
     async def advertise(self, profile: Presence):
-        return await self.request("PUT", "presence", json=profile.model_dump(), retry_safe=True)
+        # Unset optional fields (host, runtime) stay off the wire: servers that
+        # predate them reject unknown keys.
+        return await self.request(
+            "PUT", "presence", json=profile.model_dump(exclude_none=True), retry_safe=True
+        )
 
     async def description(self):
         """This agent's registered description (``description`` may be null)."""

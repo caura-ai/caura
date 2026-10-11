@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import pydantic
 import pytest
 from caura_bus_core import IDEMPOTENCY_KEY_REUSED, AgentConfig, Bus, PlatformError, SendMessage
 from caura_bus_core.collaboration import Presence
@@ -23,6 +24,8 @@ from caura_bus_mcp import server
 from caura_bus_mcp.delivery import UNMATCHED_RESPONSE
 from caura_bus_mcp.presence import (
     PresenceHeartbeat,
+    detect_host,
+    detect_runtime,
     heartbeat_interval,
     presence_enabled,
     presence_profile,
@@ -121,6 +124,93 @@ def test_presence_profile_comes_from_agent_config():
     assert presence_profile(config()).capabilities == []
 
 
+def no_ancestor():
+    return None
+
+
+def test_presence_profile_reports_host_and_runtime():
+    profile = presence_profile(
+        config(), {"CLAUDECODE": "1", "CAURA_BUS_MCP_HOSTNAME": "dev-box"}, no_ancestor
+    )
+    assert profile.host == "dev-box" and profile.runtime == "claude-code"
+    unknown = presence_profile(config(), {"CAURA_BUS_MCP_HOSTNAME": ""}, no_ancestor)
+    assert unknown.host is None and unknown.runtime is None
+
+
+@pytest.mark.parametrize(
+    ("environ", "ancestor", "expected"),
+    [
+        ({"CLAUDECODE": "1"}, None, "claude-code"),
+        ({"CODEX_THREAD_ID": "t"}, None, "codex"),
+        ({"CODEX_SANDBOX": "seatbelt"}, None, "codex"),
+        # Both markers, or none (Codex trims the MCP environment): the parent process decides.
+        ({"CLAUDECODE": "1", "CODEX_THREAD_ID": "t"}, "codex", "codex"),
+        ({}, "claude-code", "claude-code"),
+        ({}, None, None),
+        # An explicit runtime wins over every marker.
+        ({"CAURA_BUS_RUNTIME": "Codex", "CLAUDECODE": "1"}, None, "codex"),
+        ({"CAURA_BUS_RUNTIME": "claude"}, None, "claude-code"),
+        ({"CAURA_BUS_RUNTIME": "cursor"}, None, "cursor"),
+    ],
+)
+def test_runtime_detection_uses_the_join_markers(environ, ancestor, expected):
+    assert detect_runtime(environ, lambda: ancestor) == expected
+
+
+def test_host_detection_defaults_to_the_hostname(monkeypatch):
+    monkeypatch.setattr(presence_module.socket, "gethostname", lambda: "  laptop.local\n")
+    assert detect_host({}) == "laptop.local"
+    assert detect_host({"CAURA_BUS_MCP_HOSTNAME": "ci-runner-7"}) == "ci-runner-7"
+    assert detect_host({"CAURA_BUS_MCP_HOSTNAME": "  "}) is None
+    assert detect_host({"CAURA_BUS_MCP_HOSTNAME": "x" * 400}) == "x" * 255
+
+
+def test_presence_host_fields_are_optional_and_validated():
+    bare = Presence(session_id="s", display_name="a")
+    assert bare.host is None and bare.runtime is None
+    assert Presence(session_id="s", display_name="a", host=" box ", runtime="").host == "box"
+    with pytest.raises(pydantic.ValidationError):
+        Presence(session_id="s", display_name="a", host="a\nb")
+    with pytest.raises(pydantic.ValidationError):
+        Presence(session_id="s", display_name="a", runtime="r" * 65)
+
+
+async def test_unset_host_fields_stay_off_the_wire():
+    sent = []
+
+    async def handle(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"ttl_seconds": 45})
+
+    bus = Bus(config(), api_key="k", transport=httpx.MockTransport(handle))
+    await bus.advertise(Presence(session_id="s", display_name="a"))
+    await bus.advertise(Presence(session_id="s", display_name="a", host="box", runtime="codex"))
+    assert "host" not in sent[0] and "runtime" not in sent[0]
+    assert sent[1]["host"] == "box" and sent[1]["runtime"] == "codex"
+
+
+async def test_older_server_rejecting_host_keeps_presence_without_it():
+    seen = []
+
+    class OldServerBus:
+        async def advertise(self, profile):
+            seen.append((profile.status, profile.host, profile.runtime))
+            if profile.host or profile.runtime:
+                raise PlatformError(422, "extra fields not permitted")
+            return {"ttl_seconds": 45}
+
+    heartbeat = PresenceHeartbeat(
+        OldServerBus(), Presence(session_id="mcp-1", display_name="a", host="box", runtime="codex")
+    )
+    heartbeat.start()
+    while len(seen) < 2:
+        await asyncio.sleep(0)
+    await heartbeat.stop()
+    assert seen[0] == ("ready", "box", "codex")
+    assert seen[1:] == [("ready", None, None)] * (len(seen) - 2) + [("offline", None, None)]
+    assert not heartbeat.revoked
+
+
 def test_heartbeat_follows_the_server_ttl():
     assert heartbeat_interval({"ttl_seconds": 45}) == 15
     assert heartbeat_interval({"ttl_seconds": 90}) == 30
@@ -208,6 +298,8 @@ async def test_stdio_server_advertises_presence_while_running(monkeypatch, enabl
     monkeypatch.setattr(server, "load_config", lambda: cfg)
     monkeypatch.setattr(server, "Bus", lambda c: Bus(c, api_key="k", transport=httpx.MockTransport(handle)))
     monkeypatch.setenv("CAURA_BUS_MCP_PRESENCE", "1" if enabled else "0")
+    monkeypatch.setenv("CAURA_BUS_MCP_HOSTNAME", "build-host")
+    monkeypatch.setenv("CAURA_BUS_RUNTIME", "codex")
     async with server.lifespan(mcp):
         for _ in range(50):
             if adverts:
@@ -222,6 +314,7 @@ async def test_stdio_server_advertises_presence_while_running(monkeypatch, enabl
     assert statuses == ["ready", "offline"]
     assert adverts[0]["capabilities"] == ["review"] and adverts[0]["session_id"].startswith("mcp-")
     assert adverts[0]["session_id"] == adverts[1]["session_id"]
+    assert adverts[0]["host"] == "build-host" and adverts[0]["runtime"] == "codex"
 
 
 def test_no_presence_flag_disables_presence(monkeypatch):

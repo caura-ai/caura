@@ -7,6 +7,8 @@ from pydantic import Field, field_validator
 from .protocol import StrictModel
 
 AGENT_DESCRIPTION_MAX_LENGTH = 1000
+PRESENCE_HOST_MAX_LENGTH = 255
+PRESENCE_RUNTIME_MAX_LENGTH = 64
 
 
 class AgentDescription(StrictModel):
@@ -35,6 +37,11 @@ class Presence(StrictModel):
     capabilities: list[str] = Field(default_factory=list, max_length=50)
     status: Literal["ready", "busy", "offline"] = "ready"
     supports_interrupt: bool = False
+    # Where the session runs, for people reading the directory: the machine's
+    # hostname and the agent runtime (``claude-code``, ``codex``, ...). Optional
+    # and omitted from the wire when unset, so older servers keep accepting it.
+    host: str | None = Field(default=None, max_length=PRESENCE_HOST_MAX_LENGTH)
+    runtime: str | None = Field(default=None, max_length=PRESENCE_RUNTIME_MAX_LENGTH)
 
     @field_validator("capabilities")
     @classmethod
@@ -42,6 +49,15 @@ class Presence(StrictModel):
         if any(not v.strip() or len(v) > 80 for v in values):
             raise ValueError("capabilities must contain 1–80 characters")
         return sorted(set(values))
+
+    @field_validator("host", "runtime")
+    @classmethod
+    def single_line(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError("host and runtime must be a single line of text")
+        return value.strip() or None
 
 
 class Checkpoint(StrictModel):
