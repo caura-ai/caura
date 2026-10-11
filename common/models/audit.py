@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import BigInteger, DateTime, Index, LargeBinary, Text, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.models.base import Base
@@ -19,7 +19,9 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(Text, nullable=False)
     resource_type: Mapped[str] = mapped_column(Text, nullable=False)
     resource_id: Mapped[uuid.UUID | None] = mapped_column()
-    detail: Mapped[dict | None] = mapped_column(JSONB)
+    # ``json``, not JSONB: migration 001 creates it that way (CAURA-595), and
+    # ``test_models_match_the_migrated_schema`` holds the model to the schema.
+    detail: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

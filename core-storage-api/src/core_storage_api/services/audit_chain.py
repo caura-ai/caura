@@ -137,8 +137,8 @@ def compute_event_hash(canonical: bytes, prev_hash: bytes) -> bytes:
 # raw value.
 #
 # This is a deliberately CONSERVATIVE (precision-over-recall) backstop: a hit
-# rolls back the whole batch, which would leave a gap in the tamper-evident
-# chain, so a false positive is worse than a miss here — the authoritative
+# is scrubbed out of the stored detail (``scrub_pii`` below), which alters the
+# record, so a false positive is worse than a miss here — the authoritative
 # detector is the deterministic ``common.governance`` library on the write
 # path, not this guard. We therefore match only an UNAMBIGUOUSLY card-shaped
 # value (four groups of four digits, separated) rather than any 13-19 digit
@@ -173,6 +173,61 @@ def assert_pii_safe(detail: dict | None) -> None:
             raise PIIInAuditError(
                 "audit detail appears to contain raw PII; emit category/spans/hashes instead"
             )
+
+
+# What a scrubbed span becomes. Names the shape, never the value, so an operator
+# reading the log can tell a redaction from a field that was always empty.
+CARD_PLACEHOLDER = "[redacted:card]"
+SSN_PLACEHOLDER = "[redacted:ssn]"
+# Set at the top of a detail whose leaves were scrubbed, so the record says it
+# was altered on the way in rather than presenting the redacted text as what the
+# emitter wrote.
+SCRUBBED_MARKER_KEY = "_pii_scrubbed"
+
+
+def scrub_pii(detail: dict | None) -> dict | None:
+    """Return ``detail`` with every card- or SSN-shaped span replaced.
+
+    The backstop above used to be the only answer, and its answer was to RAISE,
+    inside the tenant's transaction — so one event whose ``detail`` echoed a
+    user-controlled string (a memory title, a fleet ``display_name``, a PATCH
+    diff's ``old``/``new``) rolled back every event of that tenant in the batch,
+    and core-api, seeing a 500, retried the identical batch and then dropped it.
+    A compliance record lost wholesale is worse than one with a redacted span,
+    so the offending spans are scrubbed and the event is chained: the audit
+    record survives and the chain still never attests the raw value.
+
+    Same shapes as ``assert_pii_safe`` (precision over recall, hash tokens
+    skipped), so whatever this leaves the assertion accepts. Spans, not leaves:
+    the rest of the string stays readable. Returns the SAME object when nothing
+    matched, so the common path allocates nothing; otherwise a scrubbed copy
+    carrying ``SCRUBBED_MARKER_KEY``.
+    """
+    if not detail:
+        return detail
+    changed = False
+
+    def _scrub(obj: object) -> object:
+        nonlocal changed
+        if isinstance(obj, str):
+            if _HASH_TOKEN.match(obj):
+                return obj
+            out = _SSN_SHAPE.sub(SSN_PLACEHOLDER, _CARD_SHAPE.sub(CARD_PLACEHOLDER, obj))
+            if out != obj:
+                changed = True
+            return out
+        if isinstance(obj, dict):
+            return {k: _scrub(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_scrub(v) for v in obj]
+        return obj
+
+    scrubbed = _scrub(detail)
+    if not changed:
+        return detail
+    assert isinstance(scrubbed, dict)
+    scrubbed[SCRUBBED_MARKER_KEY] = True
+    return scrubbed
 
 
 def _iter_str_leaves(obj: object) -> Iterator[str]:

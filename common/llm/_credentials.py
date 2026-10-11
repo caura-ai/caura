@@ -20,6 +20,8 @@ import os
 from common.llm.constants import (
     ANTHROPIC_CHAT_BASE_URL,
     ANTHROPIC_DEFAULT_MODEL,
+    ATLASCLOUD_CHAT_BASE_URL,
+    ATLASCLOUD_DEFAULT_MODEL,
     GEMINI_DEFAULT_MODEL,
     LLM_FALLBACK_MODEL_OPENAI,
     OPENAI_CHAT_BASE_URL,
@@ -38,6 +40,7 @@ _TENANT_KEY_ATTR: dict[str, str] = {
     ProviderName.OPENAI: "openai_api_key",
     ProviderName.ANTHROPIC: "anthropic_api_key",
     ProviderName.OPENROUTER: "openrouter_api_key",
+    ProviderName.ATLASCLOUD: "atlascloud_api_key",
     ProviderName.GEMINI: "gemini_api_key",
 }
 
@@ -50,6 +53,8 @@ def _env_key(provider: str) -> str:
         return os.environ.get("ANTHROPIC_API_KEY", "")
     if provider == ProviderName.OPENROUTER:
         return os.environ.get("OPENROUTER_API_KEY", "")
+    if provider == ProviderName.ATLASCLOUD:
+        return os.environ.get("ATLASCLOUD_API_KEY", "")
     if provider == ProviderName.GEMINI:
         return os.environ.get("GEMINI_API_KEY", "")
     return ""
@@ -135,6 +140,10 @@ def _model_for_provider(
     # harder to see.
     if not isinstance(configured, str) or not configured.strip():
         return default_model
+    # Atlas serves multiple model families and accepts some bare aliases.
+    # Let its API validate availability instead of replacing explicit choices.
+    if provider == ProviderName.ATLASCLOUD:
+        return configured
     family = _model_family(configured)
     if family is not None and family != provider:
         logger.warning(
@@ -150,6 +159,37 @@ def _model_for_provider(
         )
         return default_model
     return configured
+
+
+def model_override_for_provider(
+    provider: str, model_override: str | None, resolved_model: str
+) -> str:
+    """The model to send: ``model_override`` unless it belongs to another family.
+
+    Callers pass the SHARED per-service setting (``ResolvedConfig.*_model``) as
+    the override, and that falls back to the global
+    ``ENTITY_EXTRACTION_MODEL`` — an OpenAI id by default — whatever provider
+    the tenant resolved to. Unchecked, it bypassed ``_model_for_provider`` and
+    Gemini / OpenRouter / Anthropic were sent ``gpt-5.4-nano`` on every call.
+    Same conservative rule: only a confident foreign-family match is replaced
+    (with ``resolved_model``, the provider's own resolution), anything
+    unrecognised passes through, and Atlas — multi-family — is never touched.
+    """
+    if not isinstance(model_override, str) or not model_override.strip():
+        return resolved_model
+    if provider == ProviderName.ATLASCLOUD:
+        return model_override
+    family = _model_family(model_override)
+    if family is not None and family != provider:
+        logger.warning(
+            "LLM model_override %r is a %s model but the active provider is %s; using %r instead.",
+            model_override,
+            family,
+            provider,
+            resolved_model,
+        )
+        return resolved_model
+    return model_override
 
 
 def resolve_openai_compatible(
@@ -216,6 +256,21 @@ def resolve_openai_compatible(
         )
         return key, OPENROUTER_CHAT_BASE_URL, model
 
+    if provider == ProviderName.ATLASCLOUD:
+        key = (
+            (
+                getattr(tenant_config, "atlascloud_api_key", None)
+                if tenant_config is not None
+                else None
+            )
+            or _env_key(ProviderName.ATLASCLOUD)
+            or ""
+        )
+        model = _model_for_provider(
+            provider, tenant_config, model_attr, ATLASCLOUD_DEFAULT_MODEL
+        )
+        return key, ATLASCLOUD_CHAT_BASE_URL, model
+
     return "", "", ""
 
 
@@ -254,10 +309,20 @@ def resolve_gemini_config(
     # Gemini handed Gemini an OpenAI model id — a 404 on every call, which is
     # why the documented Gemini setup never worked. ``_model_for_provider``
     # discards a confidently-foreign id and logs what it substituted.
+    #
+    # The env value is only a usable DEFAULT when it is not another family's
+    # id: core-api bridges its ``entity_extraction_model`` (an OpenAI id unless
+    # set) into ``ENTITY_EXTRACTION_MODEL``, so taking it unguarded made the
+    # guard's own fallback the very OpenAI id it had just rejected.
+    env_model = os.environ.get("ENTITY_EXTRACTION_MODEL")
+    if env_model and _model_family(env_model) in (None, ProviderName.GEMINI):
+        default_model = env_model
+    else:
+        default_model = GEMINI_DEFAULT_MODEL
     model = _model_for_provider(
         ProviderName.GEMINI,
         tenant_config,
         model_attr,
-        os.environ.get("ENTITY_EXTRACTION_MODEL") or GEMINI_DEFAULT_MODEL,
+        default_model,
     )
     return key, model

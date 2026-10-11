@@ -36,6 +36,7 @@ from common.constants import (
 from core_api.clients.storage_client import get_storage_client
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
+from core_api.pipeline.steps.write.emit_memory_triple import PENDING_SUBJECT
 from core_api.services.dedup_identifier_filter import _content_is_identifier_bearing
 from core_api.services.dedup_judge import (
     DEDUP_JUDGE_CONFIDENCE_THRESHOLD,
@@ -106,8 +107,19 @@ class CheckSemanticDuplicate:
         fields = ctx.data["memory_fields"]
         metadata = fields["metadata"]
 
-        if not tenant_config.semantic_dedup_enabled or embedding is None:
+        if not tenant_config.semantic_dedup_enabled:
             return StepResult(outcome=StepOutcome.SKIPPED)
+        if embedding is None:
+            # L-116: the 409 contract needs a vector to compare, and there is
+            # none: the provider failed, no embedding credential is set, or the
+            # auto-chunk branch of a deferred deployment left the embedding to
+            # the worker. The write still lands, and the row says the gate did
+            # not run, as the identifier skip below does.
+            set_system_value(metadata, "dedup_skipped_reason", "embedding_unavailable")
+            return StepResult(
+                outcome=StepOutcome.SKIPPED,
+                detail={"reason": "embedding_unavailable"},
+            )
 
         # A1 identifier pre-filter — when content carries an
         # identifier-shaped token (UUID, PR ref, build number, semver,
@@ -191,7 +203,12 @@ class CheckSemanticDuplicate:
         # both subjects match.
         new_subject = getattr(data, "subject_entity_id", None)
         candidate_subject = sem_dup_dict.get("subject_entity_id") if sem_dup_dict else None
-        if _subjects_differ_with_certainty(new_subject, candidate_subject):
+        # L-18: a pending subject is an identifier no entity holds yet, created
+        # only after the write, so it differs from any subject a candidate has.
+        # That is what this preflight concluded when the entity was created
+        # before the gate and its fresh id was compared here.
+        pending_differs = bool(ctx.data.get(PENDING_SUBJECT)) and candidate_subject is not None
+        if pending_differs or _subjects_differ_with_certainty(new_subject, candidate_subject):
             metadata["dedup_subject_preflight"] = "skipped_judge_subjects_differ"
             metadata["dedup_candidate_similarity"] = similarity
             return None

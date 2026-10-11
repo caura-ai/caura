@@ -37,6 +37,10 @@ class LifecycleRequestBase(BaseModel):
     org_id: str
     triggered_by: str
     fleet_id: str | None = None
+    # Dedup window for the pipeline ops, in hours. ``None`` = the consumer's
+    # default (23h, sized for a daily cron). A sub-daily cadence sends a
+    # window just under its interval so every scheduled run is honoured.
+    dedup_window_hours: float | None = None
 
 
 class LifecycleArchiveRequest(LifecycleRequestBase):

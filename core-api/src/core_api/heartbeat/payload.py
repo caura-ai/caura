@@ -114,8 +114,12 @@ def process_uptime_seconds() -> float:
     return time.monotonic() - _PROCESS_STARTED_MONOTONIC
 
 
+# ``docs/telemetry-schema-v1.json`` caps ``version`` at this length.
+_VERSION_MAX_LENGTH = 64
+
+
 def normalise_version(version: str | None) -> str:
-    """``"v3.17.0"`` -> ``"3.17.0"``; empty -> ``"dev"``.
+    """``"v3.17.0"`` -> ``"3.17.0"``; empty, or longer than the schema allows, -> ``"dev"``.
 
     ``docs/self-hosting.md`` tells operators to pin with ``CAURA_VERSION=v3.17.0``
     in ``.env``, which core-api also reads, so the tag form must not reach the
@@ -124,6 +128,10 @@ def normalise_version(version: str | None) -> str:
     v = (version or "").strip()
     if len(v) > 1 and v[0] in "vV" and v[1].isdigit():
         v = v[1:]
+    if len(v) > _VERSION_MAX_LENGTH:
+        # CAURA_VERSION is sent as the operator typed it; past the schema's cap
+        # the payload would be rejected, so it reports as ``dev`` (L-100).
+        return "dev"
     return v or "dev"
 
 
@@ -258,7 +266,7 @@ async def collect_counts(sc: CoreStorageClient, *, standalone_tenant_id: str | N
 def build_payload(
     *,
     settings: Settings,
-    deployment_id: str,
+    deployment_id: str | None,
     counts: Counts,
     client_counts: dict[str, int] | None = None,
     sent_at: datetime | None = None,
@@ -266,7 +274,11 @@ def build_payload(
     uptime_seconds: float | None = None,
     env: os._Environ[str] | dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Assemble the schema-1 payload. Pure: no I/O, no clock beyond ``sent_at``."""
+    """Assemble the schema-1 payload. Pure: no I/O, no clock beyond ``sent_at``.
+
+    ``deployment_id`` is ``None`` only for a preview before the first send,
+    which creates the identity; a sent payload always carries one.
+    """
     environ = os.environ if env is None else env
     now = sent_at or datetime.now(UTC)
     up = process_uptime_seconds() if uptime_seconds is None else uptime_seconds

@@ -17,8 +17,10 @@ import asyncio
 import logging
 import os
 from collections import OrderedDict
+from collections.abc import Callable
 
 from common.llm._credentials import (
+    model_override_for_provider,
     resolve_gemini_config,
     resolve_openai_compatible,
 )
@@ -44,9 +46,11 @@ logger = logging.getLogger(__name__)
 # its own docstring names this exact failure ("a leak in long-lived processes
 # that rotate client instances"); it simply had no caller.
 #
-# Only the OpenAI-compatible branch is cached, because it is the only provider
-# that owns a client — Gemini and Fake hold none, so caching them would buy
-# nothing and add a lifetime to reason about.
+# The OpenAI-compatible and Gemini branches are cached, because those providers
+# own a client. Gemini was left out at first on the premise that it held none,
+# but ``GeminiLLMProvider.__init__`` builds a ``genai.Client``, which builds a
+# sync and an async httpx client: one per call, built on the event loop and
+# never closed (M-110). Fake holds no client, so caching it would buy nothing.
 #
 # THE KEY IS THE WHOLE CONFIGURATION, deliberately. ``request_timeout`` is read
 # from ``os.environ`` at construction time (see the comment at that call site,
@@ -102,6 +106,20 @@ def _close_evicted(provider: LLMProvider) -> None:
 _PENDING_CLOSES: set = set()
 
 
+def _cached_provider(key: tuple, build: Callable[[], LLMProvider]) -> LLMProvider:
+    """The provider cached under ``key``, built and cached on a miss (LRU)."""
+    cached = _PROVIDER_CACHE.get(key)
+    if cached is not None:
+        _PROVIDER_CACHE.move_to_end(key)
+        return cached
+    provider = build()
+    _PROVIDER_CACHE[key] = provider
+    while len(_PROVIDER_CACHE) > _PROVIDER_CACHE_MAX:
+        _, evicted = _PROVIDER_CACHE.popitem(last=False)
+        _close_evicted(evicted)
+    return provider
+
+
 def reset_provider_cache() -> None:
     """Drop every cached provider. For tests that swap credentials or env."""
     _PROVIDER_CACHE.clear()
@@ -109,7 +127,12 @@ def reset_provider_cache() -> None:
 
 _LLM_FAKE_SENTINELS = frozenset({ProviderName.FAKE, ProviderName.NONE})
 _OPENAI_COMPATIBLE = frozenset(
-    {ProviderName.OPENAI, ProviderName.ANTHROPIC, ProviderName.OPENROUTER}
+    {
+        ProviderName.OPENAI,
+        ProviderName.ANTHROPIC,
+        ProviderName.OPENROUTER,
+        ProviderName.ATLASCLOUD,
+    }
 )
 
 
@@ -229,30 +252,17 @@ def get_llm_provider(
             )
         except (TypeError, ValueError):
             request_timeout = _DEFAULT_OPENAI_TIMEOUT
-        cache_key = (
-            name,
-            base_url,
-            model_override or model,
-            api_key,
-            request_timeout,
+        model = model_override_for_provider(name, model_override, model)
+        return _cached_provider(
+            (name, base_url, model, api_key, request_timeout),
+            lambda: OpenAILLMProvider(
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+                provider_name=name,
+                request_timeout_seconds=request_timeout,
+            ),
         )
-        cached = _PROVIDER_CACHE.get(cache_key)
-        if cached is not None:
-            _PROVIDER_CACHE.move_to_end(cache_key)
-            return cached
-
-        provider = OpenAILLMProvider(
-            api_key=api_key,
-            model=model_override or model,
-            base_url=base_url,
-            provider_name=name,
-            request_timeout_seconds=request_timeout,
-        )
-        _PROVIDER_CACHE[cache_key] = provider
-        while len(_PROVIDER_CACHE) > _PROVIDER_CACHE_MAX:
-            _, evicted = _PROVIDER_CACHE.popitem(last=False)
-            _close_evicted(evicted)
-        return provider
 
     if name == ProviderName.GEMINI:
         api_key, model = resolve_gemini_config(tenant_config, model_attr=model_attr)
@@ -275,6 +285,13 @@ def get_llm_provider(
                 "No API key for Gemini LLM provider, returning FakeLLMProvider",
             )
             return FakeLLMProvider()
-        return GeminiLLMProvider(api_key=api_key, model=model_override or model)
+        model = model_override_for_provider(name, model_override, model)
+        # Gemini's request timeout is an import-time constant, not an env read
+        # at construction, so the key needs no timeout. It has no ``aclose``:
+        # an evicted provider is dropped, as every Gemini provider was before.
+        return _cached_provider(
+            (name, model, api_key),
+            lambda: GeminiLLMProvider(api_key=api_key, model=model),
+        )
 
     raise ValueError(f"Unknown LLM provider: {name}")

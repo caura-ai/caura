@@ -114,6 +114,46 @@ LEASE_REFRESH_INTERVAL_SECONDS = 15.0
 # non-empty pull including the fast majority that need none.
 LEASE_FIRST_REFRESH_SECONDS = 5.0
 
+# How long a nacked message stays invisible before Pub/Sub redelivers it.
+#
+# A nack used to be ``modify_ack_deadline`` of 0 — "redeliver now". Nothing
+# else spaces redeliveries out: no subscription this codebase creates carries a
+# ``RetryPolicy``, durable ones are provisioned elsewhere, and some handlers
+# raise on purpose to be retried LATER (a lifecycle message whose claim is held
+# by a run still in progress raises ``claim_conflict`` expecting the holder to
+# have finished by the next attempt). At deadline 0 that message comes straight
+# back at pull-loop speed for the holder's whole run, and under a
+# ``max_delivery_attempts`` dead-letter policy it is dead-lettered within
+# seconds.
+#
+# So a nack now asks for a delay that grows with ``delivery_attempt``:
+# ``NACK_BACKOFF_BASE_SECONDS * 2**(attempt - 1)``, capped at
+# ``NACK_BACKOFF_MAX_SECONDS`` (600 is the API's ceiling). Pub/Sub only fills
+# ``delivery_attempt`` on subscriptions with a dead-letter policy — exactly the
+# ones that can run out of attempts — and reports 0 elsewhere, where every
+# redelivery gets the base delay. Base 10 keeps a one-off failure cheap; it is
+# deliberately not ``LEASE_EXTENSION_SECONDS``, so a nack and a lease extension
+# are distinguishable on the wire. A subscription-level ``RetryPolicy`` with a
+# minimum backoff is still the recommended setting for durable subscriptions;
+# this makes the bus safe without one.
+NACK_BACKOFF_BASE_SECONDS = 10
+NACK_BACKOFF_MAX_SECONDS = 600
+
+
+def _nack_delay_seconds(delivery_attempt: object) -> int:
+    """Ack deadline to nack with, for a message on its ``delivery_attempt``-th
+    delivery. Anything that is not a positive ``int`` (0 = not tracked by the
+    subscription) gets the base delay.
+    """
+    attempt = delivery_attempt if isinstance(delivery_attempt, int) else 0
+    if attempt <= 1:
+        return NACK_BACKOFF_BASE_SECONDS
+    # ``min`` on the exponent first, so a huge attempt count can't build a
+    # huge int just to be capped.
+    exponent = min(attempt - 1, 16)
+    return min(NACK_BACKOFF_BASE_SECONDS * 2**exponent, NACK_BACKOFF_MAX_SECONDS)
+
+
 # Per-call ceiling on the delete RPC in ``release_broadcast_subscriptions()``.
 #
 # The SDK's generated default is 60s, with a retry deadline also 60s — six times
@@ -375,7 +415,8 @@ class PubSubEventBus(EventBus):
     The handler side spawns one async pull task per subscription when
     `start()` is called. Each pull task receives a message, runs the
     handler, and ack/nacks based on the outcome. Pub/Sub handles redelivery
-    on nack.
+    on nack, after a delay that grows with the delivery attempt (see
+    ``_nack_delay_seconds``).
 
     **At-least-once delivery**: handlers registered against this bus
     *must* be idempotent. Pub/Sub redelivers on ack failure and on
@@ -432,6 +473,10 @@ class PubSubEventBus(EventBus):
         # EVENT_BUS_DUAL_SUBSCRIBE per environment only after the expand apply
         # has landed there, and verify it per service.
         dual_subscribe: bool = False,
+        # How long ``stop()`` waits for handlers already running to finish before
+        # cancelling them. Sized to fit Cloud Run's 10s SIGTERM budget alongside
+        # the rest of shutdown; 0 restores cancel-immediately.
+        stop_grace_seconds: float = 5.0,
     ) -> None:
         # No SDK import at construction: the factory can return this
         # instance even in environments where google-cloud-pubsub isn't
@@ -478,7 +523,15 @@ class PubSubEventBus(EventBus):
         self._publisher: Any = None
         self._subscriber: Any = None
         self._pull_tasks: list[asyncio.Task[None]] = []
+        # Pull tasks currently holding a batch (dispatching or acking it), as
+        # opposed to blocked in ``pull``. ``stop()`` gives exactly these a grace
+        # period: an idle one has nothing to finish.
+        self._dispatching: set[asyncio.Task[Any]] = set()
+        self._stop_grace_seconds = stop_grace_seconds
         self._stopping = False
+        # Set by ``stop_consuming()``: the pull loops take nothing new, while
+        # publishing, which ``_stopping`` would refuse, carries on.
+        self._draining = False
         self._publish_concurrency = publish_concurrency
         # One-shot flag so the "subscribe without start()" warning fires
         # on the first publish only — otherwise we'd spam the log under
@@ -714,6 +767,8 @@ class PubSubEventBus(EventBus):
            cancelled its pull tasks and is actively tearing down.
            Checking this first means the graceful-shutdown window
            starts when ``stop()`` is *called*, not when it *completes*.
+           ``stop_consuming()``, which a shutdown can run before ``stop()``,
+           counts the same from when it is called.
         2. Handlers were registered via ``subscribe()`` but ``start()``
            was never awaited — the pull loops don't exist, so every
            inbound event is silently dropped. ``_failed_subscriptions``
@@ -735,7 +790,7 @@ class PubSubEventBus(EventBus):
         misconfigured pod is marked unhealthy instead of silently
         dropping events while the HTTP surface stays green.
         """
-        if self._stopped:
+        if self._stopped or self._draining:
             return False
         if self._handlers and not self._started:
             return False
@@ -1271,7 +1326,8 @@ class PubSubEventBus(EventBus):
                 "programming error in start()."
             )
 
-        while not self._stopping:
+        current = asyncio.current_task()
+        while not (self._stopping or self._draining):
             # Declared out here so the ``finally`` can always see them,
             # including when the pull itself raises before a batch exists.
             lease_keeper: asyncio.Task[Any] | None = None
@@ -1289,12 +1345,17 @@ class PubSubEventBus(EventBus):
                     ),
                 )
                 ack_ids: list[str] = []
-                nack_ids: list[str] = []
+                # Keyed by the redelivery delay each one asks for — see
+                # ``_nack_delay_seconds``. ``modify_ack_deadline`` takes one
+                # deadline per request, so each delay is its own request.
+                nack_ids: dict[int, list[str]] = {}
                 # Every id this pull returned, whatever its eventual outcome.
                 # The keeper holds ALL of them until the acks go out, because
                 # the point is precisely that a message which finished first
                 # stays unacked for the rest of the drain.
                 leased_ids = [r.ack_id for r in response.received_messages]
+                if leased_ids and current is not None:
+                    self._dispatching.add(current)
                 if leased_ids:
                     lease_keeper = self._spawn_background_task(
                         self._hold_leases(
@@ -1307,6 +1368,13 @@ class PubSubEventBus(EventBus):
                         )
                     )
                 for received in response.received_messages:
+                    if self._stopped or self._draining:
+                        # ``stop()`` or ``stop_consuming()`` has begun: hand the
+                        # rest of the batch straight back (deadline 0) for
+                        # another instance, rather than starting handlers the
+                        # stop grace would only cancel.
+                        nack_ids.setdefault(0, []).append(received.ack_id)
+                        continue
                     # Hoisted: proto-plus re-wraps the nested message on every
                     # ``.message`` access, so reading it three times costs
                     # three wrapper allocations per message on the hot path.
@@ -1345,7 +1413,13 @@ class PubSubEventBus(EventBus):
                         ack_ids.append(received.ack_id)
                         continue
                     success = await self._dispatch_all(handlers, event)
-                    (ack_ids if success else nack_ids).append(received.ack_id)
+                    if success:
+                        ack_ids.append(received.ack_id)
+                    else:
+                        delay = _nack_delay_seconds(
+                            getattr(received, "delivery_attempt", 0)
+                        )
+                        nack_ids.setdefault(delay, []).append(received.ack_id)
 
                 # DRAIN the keeper before the acks, and above all before the
                 # nack. Signalled and AWAITED, not cancelled: ``cancel()`` only
@@ -1355,10 +1429,10 @@ class PubSubEventBus(EventBus):
                 #
                 # On the ack path that leftover is harmless — it names ids the
                 # ack is retiring. On the nack path it is not. A nack is a
-                # ``modify_ack_deadline`` of 0, so an extension arriving behind
-                # it returns the FAILED message to ``LEASE_EXTENSION_SECONDS``
-                # of invisibility and silently inverts "redeliver now" into a
-                # minute of nothing. The original reasoning was sound for the
+                # ``modify_ack_deadline`` of a short, chosen delay (see
+                # ``_nack_delay_seconds``), so an extension arriving behind it
+                # overwrites that with ``LEASE_EXTENSION_SECONDS`` and silently
+                # replaces the backoff the nack asked for. The original reasoning was sound for the
                 # case it considered and simply did not reach this one.
                 #
                 # Awaiting is what closes it. ``stop`` is already set, so the
@@ -1410,11 +1484,11 @@ class PubSubEventBus(EventBus):
                         pull_executor,
                         functools.partial(subscriber.acknowledge, request=ack_request),
                     )
-                if nack_ids:
+                for delay, ids in nack_ids.items():
                     nack_request = {
                         "subscription": sub_path,
-                        "ack_ids": nack_ids,
-                        "ack_deadline_seconds": 0,
+                        "ack_ids": ids,
+                        "ack_deadline_seconds": delay,
                     }
                     await loop.run_in_executor(
                         pull_executor,
@@ -1485,7 +1559,7 @@ class PubSubEventBus(EventBus):
                 # the ``NotFound``/``PermissionDenied``/``InvalidArgument``
                 # branch above, since both classes of error are unsafe
                 # to retry without operator intervention.
-                if not self._stopping:
+                if not (self._stopping or self._draining):
                     self._failed_subscriptions.add(subscription_name)
                 raise
             except Exception:
@@ -1512,6 +1586,8 @@ class PubSubEventBus(EventBus):
                 stop_extending.set()
                 if lease_keeper is not None:
                     lease_keeper.cancel()
+                if current is not None:
+                    self._dispatching.discard(current)
 
     @staticmethod
     def _decode(data: bytes, *, subscription: str, message_id: str) -> Event | None:
@@ -1636,6 +1712,52 @@ class PubSubEventBus(EventBus):
         if cancelled is not None:
             raise cancelled
         return all_ok
+
+    async def _drain_in_flight(self) -> None:
+        """Wait, bounded by ``stop_grace_seconds``, for pull tasks holding a
+        batch to finish it.
+
+        Called by ``stop_consuming()`` after ``_draining`` is set and BEFORE the
+        subscriber is closed: a task finishing its batch still needs the client to ack
+        it, and then exits on its own because the loop condition is false. Cancelling
+        straight away, as ``stop()`` used to, raised ``CancelledError`` inside whatever
+        handler was running -- a lifecycle run, for one, left its audit row claimed
+        ``in_progress`` until the claim lease expired, and its message neither acked nor
+        nacked.
+        """
+        busy = {t for t in self._dispatching if not t.done()}
+        if not busy or self._stop_grace_seconds <= 0:
+            return
+        _done, pending = await asyncio.wait(busy, timeout=self._stop_grace_seconds)
+        if pending:
+            logger.warning(
+                "pubsub stop(): %d in-flight handler batch(es) still running after "
+                "%.1fs grace; cancelling",
+                len(pending),
+                self._stop_grace_seconds,
+            )
+
+    async def stop_consuming(self) -> None:
+        """Take no new deliveries, and settle the ones in flight (M-09).
+
+        Split out of ``stop()`` for the reason ``release_broadcast_subscriptions``
+        is: a shutdown path runs it FIRST. core-api reached ``stop()`` only after
+        its flushes, and until then its pull loops kept taking lifecycle runs. A
+        SIGKILL landing first cancels nothing, so such a run left its audit row
+        claimed for the lease.
+
+        Each pull loop ends after its current batch, handing back what it has not
+        started. A batch still running after ``stop_grace_seconds`` is cancelled
+        and awaited, so a lifecycle handler releases its claim on the way out.
+        The subscriber stays open for ``stop()``, and publishing is untouched, so
+        work that drains after this can still publish. Idempotent.
+        """
+        self._draining = True
+        await self._drain_in_flight()
+        busy = [t for t in self._dispatching if not t.done()]
+        for t in busy:
+            t.cancel()
+        await asyncio.gather(*busy, return_exceptions=True)
 
     async def release_broadcast_subscriptions(self) -> None:
         """Delete this process's ephemeral broadcast subscriptions.
@@ -1782,6 +1904,11 @@ class PubSubEventBus(EventBus):
             # they exit through the ``if self._stopping: return`` path rather
             # than logging NotFound.
             await self.release_broadcast_subscriptions()
+            # Let handlers already running finish (bounded) while the subscriber
+            # can still ack for them, then cancel the rest; see
+            # ``stop_consuming``, a no-op here if a shutdown already ran it.
+            # ``_stopping`` is already set, so nothing new is started meanwhile.
+            await self.stop_consuming()
             # Close the subscriber BEFORE cancelling/awaiting the pull
             # tasks. Pull threads are blocked inside a synchronous
             # `subscriber.pull(timeout=pull_timeout)` — asyncio
@@ -1908,6 +2035,7 @@ class PubSubEventBus(EventBus):
             self._background_tasks.clear()
             self._failed_subscriptions.clear()
             self._stopping = False
+            self._draining = False
             self._warned_missing_start = False
             if teardown_complete:
                 # Per-step Exception guards above log-and-continue, so

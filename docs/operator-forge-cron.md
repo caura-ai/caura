@@ -16,8 +16,10 @@ fanout pattern:
    tenant.
 3. **The in-process consumer** in `core-api` (or `core-worker` in
    SaaS deployments) invokes `run_forge_cron_tick` for the tenant.
-4. **One lifecycle_audit row per tenant per tick** captures the work
-   done — candidates produced, promoted, and the 5 skip-bucket counts.
+4. **One lifecycle_audit row per tenant per tick** records the work done
+   as one number, `stats.candidates_produced` (candidates written plus
+   promoted). The per-tick breakdown — scanned, held, auto-approved and the
+   skip buckets — is in the structured `forge cron tick:` log line.
 
 ## Operator dial: `forge.cron_interval_hours`
 
@@ -30,6 +32,11 @@ was minted by the 06:00 UTC tick."
 
 ## Required external schedule entry
 
+Pass `dedup_window_hours` with a value just under the schedule's interval
+(`5.5` for every 6 hours). The consumer skips an org that already ran within
+its dedup window, which defaults to 23 hours for daily schedules; without the
+parameter a 6-hourly schedule runs once a day.
+
 ### Google Cloud Scheduler
 
 ```yaml
@@ -38,7 +45,7 @@ schedule: "0 */6 * * *"   # every 6 hours
 time_zone: "UTC"
 http_target:
   http_method: POST
-  uri: https://<core-api-host>/api/v1/admin/lifecycle/fanout/forge-distill
+  uri: https://<core-api-host>/api/v1/admin/lifecycle/fanout/forge-distill?dedup_window_hours=5.5
   oidc_token:
     service_account_email: <core-operations-sa>@<project>.iam.gserviceaccount.com
   headers:
@@ -68,7 +75,7 @@ spec:
                   curl -fsS \
                     -X POST \
                     -H "X-API-Key: $ADMIN_API_KEY" \
-                    "$CORE_API_BASE_URL/api/v1/admin/lifecycle/fanout/forge-distill"
+                    "$CORE_API_BASE_URL/api/v1/admin/lifecycle/fanout/forge-distill?dedup_window_hours=5.5"
               envFrom:
                 # whichever secret you use, it must expose ADMIN_API_KEY
                 - secretRef: { name: caura-admin }
@@ -81,8 +88,9 @@ After the schedule lands, every tick produces:
 
 - **Per-tenant audit rows** under `lifecycle_audit`
   (`action='forge-distill'`, `status='success' | 'failure'`,
-  `stats={candidates_written, promoted, scanned, held,
-  skipped_poisoned, skipped_sentinel, ...}`).
+  `stats.candidates_produced` = candidates written + promoted). The full
+  breakdown (`candidates_written`, `promoted`, `scanned`, `held`, the
+  `skipped_*` buckets, ...) is in the `forge cron tick:` log line.
 - **Fresh candidate docs** at `documents.collection='skills'`,
   `data.status='candidate'`, `data.source='forge'`.
 - **Inbox cards** for any candidate that the 6 auto-gates promoted to
@@ -110,8 +118,8 @@ skill goes live to agents. Use it only for fleets where:
 
 - the Sentinel rule-set is tuned for the tenant's content, and
 - the cost of a bad skill reaching agents is low / quickly reversible
-  (a human can still Reject an active skill, which poisons its
-  fingerprint and stops re-derivation).
+  (an inbox admin can still Reject an active skill: agents drop it on
+  their next sync, and its poisoned fingerprint stops re-derivation).
 
 What it does **not** bypass:
 
@@ -130,31 +138,42 @@ What it does **not** bypass:
   warns are surfaced on the operator card but do not block activation
   (matching the inbox approve semantics; see
   `test_flag_on_but_warn_scan_still_auto_activates`).
+  The scan reads the skill body (`content`) — the file agents load —
+  plus `summary` and `description`: prompt-injection markers and shell
+  patterns such as a download piped into a shell are critical (no
+  auto-promotion); links to paste or webhook-capture hosts are a warn,
+  so they do **not** stop auto-promotion on their own.
 
-Audit visibility: the lifecycle-audit row's `stats.auto_approved`
+Audit visibility: the `forge cron tick:` log line's `auto_approved`
 counts how many of that tick's promotions skipped the inbox; `promoted
-- auto_approved` is the count that landed in `staged`. The structured
-promoter log line breaks both out per tick.
+- auto_approved` is the count that landed in `staged`. The lifecycle-audit
+row keeps only the total, `stats.candidates_produced`.
 
 **To pause:** flip back to `false`. The next tick's clean candidates
 route to `staged` again — already-active skills are unaffected (no
-rollback), and the inbox resumes as the gate.
+automatic rollback; Reject any you want gone), and the inbox resumes
+as the gate.
 
 ## Dedup safety
 
-The shared lifecycle handler uses
-`_PIPELINE_DEDUP_WINDOW_HOURS` (currently **23 hours** —
-`common/events/lifecycle_handlers.py`) — re-curling the fanout endpoint
-within the window is a no-op for any tenant whose prior tick succeeded.
+Each delivery skips an org that already ran successfully within its dedup
+window, measured from each run's tick. The window is the request's
+`dedup_window_hours`, or 23 hours without it. With the schedule above
+(`dedup_window_hours=5.5`, every 6 hours), every tick runs a full distill.
+Re-curling the fanout endpoint within 5.5 hours of a tenant's successful tick
+is a no-op for that tenant.
 
-**This is why the 6-hourly schedule above is deliberate, not arbitrary.**
-With a 23-hour dedup window, ticks 2, 3 and 4 of each day are expected
-no-ops; the schedule is oversampling so that a single failed or missed
-tick does not cost a whole day. If you shorten the cron interval hoping
-for more frequent distillation, nothing changes — the window, not the
-schedule, sets the real cadence. Change `_PIPELINE_DEDUP_WINDOW_HOURS`
-instead. Manual `python scripts/forge_dry_run.py` invocations
-bypass the lifecycle path entirely and are not affected.
+The window, not the schedule, sets the real cadence, so keep
+`dedup_window_hours` just under the schedule's interval. Leave it out and a
+6-hourly schedule distills once a day, with its other three ticks no-ops. Set
+the cadence through the request, not by changing the 23-hour default
+(`_PIPELINE_DEDUP_WINDOW_HOURS` in `common/events/lifecycle_handlers.py`).
+The crystallize, entity-link and insights runs share that constant.
+
+Only a successful tick counts. A tick in which every attempted cluster failed
+on I/O (an LLM or storage outage) is finalised as `failure` and redelivered,
+so the next tick still runs. Manual `python scripts/forge_dry_run.py`
+invocations bypass the lifecycle path entirely and are not affected.
 
 ## Opt-in / opt-out
 
@@ -174,7 +193,8 @@ bypass the lifecycle path entirely and are not affected.
 |---|---|---|
 | Audit rows stuck in `pending` | Pub/Sub publish failed but `audit_begin` succeeded | Operator-visible; either re-publish (idempotent — same dedup window) or mark `failure` manually |
 | Audit row `failure: common.llm not importable` | LLM provider chain not installed in deploy image | Install the provider chain (`pip install ...` per `core-api/pyproject.toml`); the cron path **does not** fall back to a fake LLM (intentional — see `_wire_llm_fn`) |
-| No candidates produced for a tenant | Either no labeled session traces in the freshness window, or `min_cluster_size`/`min_distinct_agents` thresholds set too high | Inspect `stats.scanned` + the 5 skip counters on the audit row; lower thresholds via `org_settings.skills_factory.forge.*` |
+| Audit row `failure: forge tick wrote no candidates: all N attempted cluster(s) failed on I/O or LLM errors` | LLM provider or storage outage during the tick | Retried automatically (redelivery, then the next scheduled tick); check the provider and the `skipped_io_error` tracebacks if it persists |
+| No candidates produced for a tenant | Either no labeled session traces in the freshness window, or `min_cluster_size`/`min_distinct_agents` thresholds set too high | Inspect `scanned` and the `skipped_*` counters in that tenant's `forge cron tick:` log line; lower thresholds via `org_settings.skills_factory.forge.*` |
 | Same fingerprint keeps being re-proposed despite reject | Cooloff window already elapsed, or fleet/tenant scope mismatch | Inspect `forge_rejected_fingerprints` row; bump `rejection_cooloff_days` if too short |
 
 ## Related

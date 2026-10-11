@@ -23,27 +23,42 @@ class InjectSTMContext:
         if not settings.use_stm:
             return StepResult(outcome=StepOutcome.SKIPPED)
 
+        # L-14 — an STM row has memory_type ``stm`` and no status, so a search
+        # filtered on either matches none of them. They were prepended anyway.
+        memory_type_filter = ctx.data.get("memory_type_filter")
+        if (memory_type_filter and memory_type_filter != "stm") or ctx.data.get("status_filter"):
+            return StepResult(outcome=StepOutcome.SKIPPED)
+
+        from core_api.constants import DEFAULT_SEARCH_TOP_K
         from core_api.schemas import MemoryOut
         from core_api.services.stm_service import get_stm_backend_instance
 
         tenant_id = ctx.data["tenant_id"]
         caller_agent_id = ctx.data.get("caller_agent_id")
         fleet_ids = ctx.data.get("fleet_ids")
+        # L-14 — at most the page the caller asked for, notes first. Up to 50
+        # notes and 100 bulletins per fleet were prepended to a top_k of 5,
+        # pushing every ranked row below them.
+        budget = (
+            ctx.data.get("final_top_k")
+            or (ctx.data.get("search_params") or {}).get("top_k")
+            or DEFAULT_SEARCH_TOP_K
+        )
 
         stm = get_stm_backend_instance()
         stm_results: list[MemoryOut] = []
 
         # Agent's private notes
         if caller_agent_id:
-            notes = await stm.get_notes(tenant_id, caller_agent_id, limit=50)
+            notes = await stm.get_notes(tenant_id, caller_agent_id, limit=budget)
             for entry in notes:
                 stm_results.append(_entry_to_memory_out(entry, tenant_id, "notes"))
 
         # Fleet bulletins (deduplicated by content across fleets)
-        if fleet_ids:
+        if fleet_ids and len(stm_results) < budget:
             bulletin_entries: list[dict] = []
             for fid in fleet_ids:
-                bulletin_entries.extend(await stm.get_bulletin(tenant_id, fid, limit=100))
+                bulletin_entries.extend(await stm.get_bulletin(tenant_id, fid, limit=budget))
             seen: set[str] = set()
             bulletin_entries = [
                 e
@@ -52,6 +67,7 @@ class InjectSTMContext:
             ]
             for entry in bulletin_entries:
                 stm_results.append(_entry_to_memory_out(entry, tenant_id, "bulletin"))
+        stm_results = stm_results[:budget]
 
         if stm_results:
             existing = ctx.data.get("results", [])
@@ -91,5 +107,7 @@ def _entry_to_memory_out(entry: dict, tenant_id: str, stm_target: str):
         metadata={"source": "stm", "stm_target": stm_target},
         created_at=created_at,
         expires_at=None,
-        similarity=1.0,
+        # No vector was compared, so no cosine (L-14); ``metadata.source``
+        # marks the row as STM. It was 1.0, above every row that was scored.
+        similarity=None,
     )

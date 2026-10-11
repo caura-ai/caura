@@ -21,13 +21,14 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 import httpx
 
 from common.constants import LIFECYCLE_STALE_ARCHIVE_WEIGHT
-from common.http_retry import with_connect_phase_retry
+from common.http_retry import with_connect_phase_retry, with_retry
 from common.storage_auth import is_storage_shared_secret_rejection
 from core_worker.clients.identity_token import evict as _evict_id_token
 from core_worker.clients.identity_token import fetch_auth_header
@@ -77,6 +78,7 @@ async def close_storage_client() -> None:
 async def _signed_call(
     fn: Callable[..., Awaitable[httpx.Response]],
     *args: Any,
+    retry: Callable[..., Awaitable[httpx.Response]] = with_connect_phase_retry,
     **kwargs: Any,
 ) -> httpx.Response:
     """Issue ``fn(*args, **kwargs)`` with storage and Cloud Run credentials.
@@ -107,6 +109,10 @@ async def _signed_call(
     failures are the exception because each one otherwise burns a
     Pub/Sub delivery attempt against the DLQ budget for a request
     that never even reached storage (the 2026-06-11 incident shape).
+
+    ``retry=with_retry`` opts one request into the full transient set. Only for
+    an endpoint whose replay storage recognises, where the nack is the costlier
+    path: see ``update_lifecycle_audit_row``.
     """
     global _storage_shared_secret
     headers = dict(kwargs.pop("headers", None) or {})
@@ -119,7 +125,7 @@ async def _signed_call(
     method = getattr(fn, "__name__", "?").upper()
     path = args[0] if args else ""
     label = f"{method} {path}".rstrip()
-    resp = await with_connect_phase_retry(lambda: fn(*args, headers=headers, **kwargs), label=label)
+    resp = await retry(lambda: fn(*args, headers=headers, **kwargs), label=label)
     if resp.status_code == 401 and _audience is not None and not is_storage_shared_secret_rejection(resp):
         _evict_id_token(_audience)
         # Rebind to a NEW dict rather than ``.update()`` in place — the
@@ -129,7 +135,7 @@ async def _signed_call(
         # otherwise see the rotated token retro-fitted into the first
         # call's record).
         fresh_headers = {**headers, **await fetch_auth_header(_audience)}
-        resp = await with_connect_phase_retry(lambda: fn(*args, headers=fresh_headers, **kwargs), label=label)
+        resp = await retry(lambda: fn(*args, headers=fresh_headers, **kwargs), label=label)
     return resp
 
 
@@ -180,8 +186,8 @@ async def update_memory_embedding(
     tenant_id: str,
     embedding: list[float],
     embedded_content_hash: str | None = None,
-) -> None:
-    """PATCH the embedding onto the memory row.
+) -> bool:
+    """PATCH the embedding onto the memory row; return whether it landed.
 
     Raises on transient (5xx / 429) responses so the consumer nacks
     → Pub/Sub redelivers. Permanent 4xx errors (404, 422) are logged
@@ -189,6 +195,10 @@ async def update_memory_embedding(
     max-delivery-attempts budget against an event that will never
     succeed (row deleted between event publish and processing, or a
     schema mismatch the storage layer rejects either way).
+
+    Those two answer False, so the consumer does not announce a write that
+    did not happen (L-54): ``EMBEDDED`` is defined as emitted after a
+    successful PATCH, and core-api reads the row back on it.
 
     ``tenant_id`` is included in the body so the storage layer can
     guard against cross-tenant updates.
@@ -239,7 +249,7 @@ async def update_memory_embedding(
             "(row deleted between publish and processing)",
             memory_id,
         )
-        return
+        return False
     if resp.status_code == 422:
         # Storage rejected the payload shape. Won't pass on a redelivery
         # either — log loudly so the schema mismatch is visible and ack.
@@ -247,9 +257,10 @@ async def update_memory_embedding(
             "storage rejected embedding PATCH for memory %s with 422; ack-dropping",
             memory_id,
         )
-        return
+        return False
     # 5xx / 429 / network → raise → consumer nacks → Pub/Sub redelivers.
     resp.raise_for_status()
+    return True
 
 
 @dataclass(frozen=True)
@@ -434,6 +445,7 @@ async def upsert_tenant_suppression(
     tenant_id: str,
     action: str,
     updated_by: str | None,
+    occurred_at: datetime | None = None,
 ) -> None:
     """POST one tenant_suppression upsert (CAURA-694).
 
@@ -441,10 +453,15 @@ async def upsert_tenant_suppression(
     validates the value and ours stays a pass-through so the wire shape
     has one source of truth. ``updated_by`` propagates the
     correlation id from the bus event for audit-trail use.
+    ``occurred_at`` is the event's time; storage ignores an upsert older
+    than the one it holds, so a redelivered stale event cannot undo a
+    newer one.
     """
     body: dict[str, Any] = {"tenant_id": tenant_id, "action": action}
     if updated_by is not None:
         body["updated_by"] = updated_by
+    if occurred_at is not None:
+        body["occurred_at"] = occurred_at.isoformat()
     resp = await _signed_call(
         client.post,
         f"{_PREFIX}/tenant-suppression",
@@ -469,6 +486,12 @@ async def update_lifecycle_audit_row(
     ``in_progress`` request lost the claim to a live consumer and the caller
     must not run the primitive. ``{}`` when the row is gone or the body is
     unreadable, so a caller reading one key cannot mistake either for a claim.
+
+    Retries ReadTimeout and 5xx in place, as core-api's client does (L-04).
+    Storage recognises a re-sent claim or terminal write by its ``claim_token``,
+    so a replay is never mistaken for a competitor; and the nack it replaces is
+    worse here: a failed claim nacks the delivery, and a failed success write
+    re-runs work that already finished.
     """
     body: dict[str, Any] = {"org_id": org_id, "status": status}
     if stats is not None:
@@ -480,6 +503,7 @@ async def update_lifecycle_audit_row(
     resp = await _signed_call(
         client.patch,
         f"{_PREFIX}/lifecycle-audit/{audit_id}",
+        retry=with_retry,
         json=body,
     )
     if resp.status_code == 404:
@@ -505,8 +529,8 @@ async def update_memory_enrichment(
     memory_id: UUID,
     tenant_id: str,
     fields: dict,
-) -> None:
-    """PATCH enrichment-output fields onto the memory row.
+) -> bool:
+    """PATCH enrichment-output fields onto the memory row; return whether it landed.
 
     Mirrors :func:`update_memory_embedding` for the
     ``Topics.Memory.ENRICH_REQUESTED`` worker path. ``fields`` is the
@@ -522,13 +546,15 @@ async def update_memory_enrichment(
     re-PATCHes with the (deterministic up to LLM noise) same fields.
     Safe — the storage update is a write-after-write.
 
-    Same 404/422 short-circuits as :func:`update_memory_embedding`.
+    Same 404/422 short-circuits as :func:`update_memory_embedding`, which
+    answer False. No fields answers True: nothing was refused, and the row is
+    as enriched as this result makes it.
     """
     if not fields:
         # Defensive — heuristic fallback may produce an all-defaults
         # result; an empty PATCH is wasted work and noisy in storage logs.
         logger.debug("skipping empty enrichment PATCH for memory %s", memory_id)
-        return
+        return True
     resp = await _signed_call(
         client.patch,
         f"{_PREFIX}/memories/{memory_id}",
@@ -540,11 +566,12 @@ async def update_memory_enrichment(
             "(row deleted between publish and processing)",
             memory_id,
         )
-        return
+        return False
     if resp.status_code == 422:
         logger.warning(
             "storage rejected enrichment PATCH for memory %s with 422; ack-dropping",
             memory_id,
         )
-        return
+        return False
     resp.raise_for_status()
+    return True

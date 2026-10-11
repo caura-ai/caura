@@ -658,8 +658,8 @@ async def test_the_auto_chunk_write_records_the_parent_child_link() -> None:
     here:
 
     * ``auto_chunked`` on the PARENT, which gates the lookup. Gating keeps a
-      JSON-key query with no supporting index off every ordinary drop, and a
-      compliance tenant configured ``drop`` remediates constantly. If this
+      storage round trip off every ordinary drop, and a compliance tenant
+      configured ``drop`` remediates constantly. If this
       marker ever stops being written, the cascade silently stops running and
       the leak returns with no test failing anywhere near it — which is why the
       assertion lives here, beside the write, rather than only in the

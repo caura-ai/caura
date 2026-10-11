@@ -168,11 +168,11 @@ async def _run_inline(
 
 
 def _patched_metadata(storage):
-    """The ``metadata_`` dict the enrichment PATCH actually sent to storage."""
+    """The ``metadata_patch`` the enrichment PATCH actually sent to storage."""
     for call in storage.update_memory.await_args_list:
         for arg in list(call.args) + list(call.kwargs.values()):
-            if isinstance(arg, dict) and "metadata_" in arg:
-                return arg["metadata_"]
+            if isinstance(arg, dict) and "metadata_patch" in arg:
+                return arg["metadata_patch"]
     return None
 
 

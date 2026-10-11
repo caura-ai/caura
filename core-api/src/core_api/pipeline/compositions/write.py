@@ -7,10 +7,12 @@ from core_api.pipeline.steps.write import (
     CheckExactDuplicate,
     CheckSemanticDuplicate,
     ComputeContentHash,
+    CreatePendingSubject,
     DetectNearDuplicate,
     EmitMemoryTriple,
     GovernanceDecision,
     GovernanceScanContent,
+    HoldLowTrustWrite,
     LoadTenantConfig,
     MergeEnrichmentFields,
     ParallelEmbedEnrich,
@@ -32,8 +34,14 @@ def build_enrichment_pipeline() -> Pipeline:
             # — and the hash/dedup see — the redacted content (eToro governance).
             GovernanceScanContent(),
             ComputeContentHash(),
+            # L-183: as on the inline pipelines (see
+            # ``build_strong_write_pipeline``), so a re-submitted long document
+            # is refused before the enrichment and chunking calls it would
+            # otherwise pay for. An extract-only preview has no hash and skips it.
+            CheckExactDuplicate(),
             ParallelEmbedEnrich(),
             MergeEnrichmentFields(),
+            HoldLowTrustWrite(),
         ],
     )
 
@@ -65,16 +73,18 @@ def _persist_steps(semantic_gate) -> list:
     difference once keeps them from drifting apart the way they can when each is
     written out in full.
 
-    ``CheckExactDuplicate`` leads, for the reason given at the same move in
-    ``build_strong_write_pipeline``.
+    No ``CheckExactDuplicate``: ``build_enrichment_pipeline``, which always
+    runs first on the same context, has already looked up this hash (L-183),
+    and nothing since changes it. A duplicate committed in between is the race
+    ``WriteMemoryRow`` answers with the same 409.
     """
     return [
-        CheckExactDuplicate(),
         # entity_links and content are expected to be fully enriched by the
         # upstream enrichment pipeline before this path runs.
         EmitMemoryTriple(),
         semantic_gate,
         WriteMemoryRow(),
+        CreatePendingSubject(),
         ScheduleBackgroundTasks(),
     ]
 
@@ -119,11 +129,11 @@ def build_auto_chunk_dedup_pipeline() -> Pipeline:
     reading as settled design. Fast mode's gate is ``DetectNearDuplicate``,
     which does not refuse the write: on a hit it RECORDS a merge intent in
     ``ctx.data["merge_supersedes_id"]`` and stamps
-    ``metadata["near_duplicate_merged"] = True``, and it is
-    ``ScheduleBackgroundTasks`` that later performs the merge against the new
-    row's id. The multi-fact branch has no ``ScheduleBackgroundTasks`` — it
-    writes the parent itself — so running that step here would stamp a parent
-    merged while no merge ever happened, which is worse than no gate.
+    ``near_duplicate_merge_pending``, and it is ``ScheduleBackgroundTasks``
+    that later performs the merge against the new row's id. The multi-fact
+    branch has no ``ScheduleBackgroundTasks`` — it writes the parent itself —
+    so running that step here would mark a parent for a merge that never
+    happens, which is worse than no gate.
 
     Doing it properly is not blocked on plumbing (``_merge_near_duplicate`` is
     importable and takes ids) but on semantics nobody has settled: superseding
@@ -169,9 +179,11 @@ def build_fast_write_pipeline() -> Pipeline:
             CheckExactDuplicate(),
             ParallelEmbedEnrich(),
             MergeEnrichmentFields(),
+            HoldLowTrustWrite(),
             EmitMemoryTriple(),
             DetectNearDuplicate(),
             WriteMemoryRow(),
+            CreatePendingSubject(),
             ScheduleBackgroundTasks(),
         ],
     )
@@ -226,6 +238,7 @@ def build_strong_write_pipeline() -> Pipeline:
             CheckExactDuplicate(),
             ParallelEmbedEnrich(),
             MergeEnrichmentFields(),
+            HoldLowTrustWrite(),
             # Strong mode runs enrichment inline, so the LLM's free-form PII +
             # business/personal signal is available pre-persist. Acts on it
             # before dedup/write (fast mode does this as post-write remediation).
@@ -233,6 +246,7 @@ def build_strong_write_pipeline() -> Pipeline:
             EmitMemoryTriple(),
             CheckSemanticDuplicate(),
             WriteMemoryRow(),
+            CreatePendingSubject(),
             ScheduleBackgroundTasks(),
         ],
     )

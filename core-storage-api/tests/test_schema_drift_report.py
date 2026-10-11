@@ -11,7 +11,10 @@ from sqlalchemy import text
 from core_storage_api import app as app_module
 from core_storage_api.config import settings
 from core_storage_api.database.init import get_engine
-from core_storage_api.database.migration_postconditions import MigrationPostcondition
+from core_storage_api.database.migration_postconditions import (
+    MIGRATION_POSTCONDITIONS,
+    MigrationPostcondition,
+)
 
 _TEST_INDEX = "test_schema_drift_report_invalid_idx"
 
@@ -213,3 +216,106 @@ async def test_startup_survives_probe_failure(caplog) -> None:
     assert any("schema drift" in record.getMessage().lower() for record in caplog.records)
     assert events == ["init_database", "schema_drift_probe"]
     engine.dispose.assert_awaited_once()
+
+
+def _mock_engine(scalar_results: list[object]) -> Mock:
+    execute_result = Mock()
+    execute_result.scalars.return_value.all.return_value = []
+    connection = AsyncMock()
+    connection.execute.return_value = execute_result
+    connection.scalar.side_effect = scalar_results
+    connection.begin_nested = Mock(return_value=AsyncMock())
+    connection_manager = AsyncMock()
+    connection_manager.__aenter__.return_value = connection
+    engine = Mock()
+    engine.connect.return_value = connection_manager
+    return engine
+
+
+async def _drift_with(condition: MigrationPostcondition, scalar_results: list[object], caplog):
+    caplog.clear()
+    with (
+        patch.object(settings, "core_storage_role", "writer"),
+        patch.object(app_module, "MIGRATION_POSTCONDITIONS", (condition,)),
+        patch.object(app_module, "get_engine", return_value=_mock_engine(scalar_results)),
+        caplog.at_level(logging.INFO, logger=app_module.__name__),
+    ):
+        await app_module.report_schema_drift()
+    return caplog.records
+
+
+async def test_a_postcondition_expected_here_logs_info_not_warning(caplog) -> None:
+    """A soft-failing migration this deployment could never apply is not a defect.
+
+    044 is unapplied on every managed-Postgres deployment, by design, and no
+    number of boots will change that. Warning each time buries the one case
+    that matters — and it did: the condition was read as a production incident
+    the day after it shipped.
+    """
+    condition = MigrationPostcondition(
+        "900", "expected_check", "SELECT false", "warning", "drift", expected_when="SELECT true"
+    )
+
+    records = await _drift_with(condition, [False, True], caplog)
+
+    assert [r for r in records if r.levelno >= logging.WARNING] == []
+    assert any(r.levelno == logging.INFO and "900/expected_check" in r.getMessage() for r in records)
+
+
+async def test_a_postcondition_not_expected_here_still_warns(caplog) -> None:
+    """The genuine case: the deployment COULD have applied it, and it is unapplied."""
+    condition = MigrationPostcondition(
+        "901", "genuine_check", "SELECT false", "warning", "drift", expected_when="SELECT false"
+    )
+
+    records = await _drift_with(condition, [False, False], caplog)
+
+    assert any(r.levelno == logging.WARNING and "901/genuine_check" in r.getMessage() for r in records)
+
+
+async def test_a_failing_expectation_probe_falls_back_to_the_warning(caplog) -> None:
+    """A probe that cannot answer must not be read as "expected".
+
+    Silence is the costly direction here: it would hide a real unapplied
+    migration behind a broken query, which is the failure the post-condition
+    exists to catch.
+    """
+    condition = MigrationPostcondition(
+        "902", "broken_expectation", "SELECT false", "warning", "drift", expected_when="SELECT nope"
+    )
+
+    records = await _drift_with(condition, [False, RuntimeError("expectation failed")], caplog)
+
+    assert any(r.levelno == logging.WARNING and "902/broken_expectation" in r.getMessage() for r in records)
+
+
+async def test_a_postcondition_without_an_expectation_is_unconditional(caplog) -> None:
+    """No expected_when means no second query, and the warning stands."""
+    condition = MigrationPostcondition("903", "plain_check", "SELECT false", "warning", "drift")
+
+    records = await _drift_with(condition, [False], caplog)
+
+    assert any(r.levelno == logging.WARNING and "903/plain_check" in r.getMessage() for r in records)
+
+
+async def test_the_044_expectation_holds_when_the_function_is_absent(_ensure_schema) -> None:
+    """044 tolerates undefined_function too, so its expectation must cover it.
+
+    ``to_regprocedure`` returns NULL rather than raising, so a missing function
+    makes the WHERE match zero rows. Without a COALESCE the probe returns no
+    row at all, which reads as "not expected" and fires a warning claiming this
+    role owns the pgvector extension — a claim nothing established.
+    """
+    condition = next(item for item in MIGRATION_POSTCONDITIONS if item.revision == "044")
+    assert condition.expected_when is not None
+    absent = condition.expected_when.replace(
+        "to_regprocedure('cosine_distance(vector, vector)')",
+        "to_regprocedure('no_such_function(integer)')",
+    )
+    assert absent != condition.expected_when
+
+    async with get_engine().connect() as connection:
+        assert await connection.scalar(text(absent)) is True
+        # And with the real function present, CI owns the extension, so the
+        # condition is NOT expected here and a failure would still warn.
+        assert await connection.scalar(text(condition.expected_when)) is False

@@ -21,6 +21,7 @@ the dispatch never branches on a string.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -95,11 +96,19 @@ class PipelineStorageAdapter(Protocol):
 
     async def insights(self, *, org_id: str, fleet_id: str | None) -> int: ...
 
-    # Skill Factory SF-007: Forge distillation run. Phase 0 ships a
-    # no-op adapter (returns 0, logs); Phase 1 swaps in the real
-    # cluster fingerprint + LLM distill pipeline. Method signature
-    # mirrors the other pipeline ops (org_id/fleet_id only) — extra
-    # run-knobs on :class:`LifecycleForgeDistillRequest` are
+    # Skill Factory SF-007: Forge distillation run. Signature mirrors
+    # the other pipeline ops (org_id/fleet_id) plus ``run_label``; the
+    # five per-run override fields on
+    # :class:`LifecycleForgeDistillRequest` are NOT plumbed through it.
+    # The tick resolves the bounds it applies from
+    # ``org_settings.skills_factory.forge.*`` instead, so the four
+    # value overrides are inert and ``dry_run`` is refused outright in
+    # ``forge_distill_op`` below. That is stated in three places on
+    # purpose (there, here, and at the declaration): this sentence used
+    # to carry the caveat alone, #311 truncated it mid-clause while
+    # wiring the real tick, and the fields then read as live for
+    # months (oss-0926-m-02).
+    #
     # Per-tick ``run_label`` IS plumbed through so the consumer-side
     # cron handler stamps ``origin.run_id`` on candidate docs with the
     # SAME label that was on the event payload + audit row. A
@@ -112,7 +121,7 @@ class PipelineStorageAdapter(Protocol):
     ) -> int: ...
 
     async def has_recent_lifecycle_success(
-        self, *, org_id: str, action: str, since_hours: int
+        self, *, org_id: str, action: str, since_hours: float
     ) -> bool: ...
 
     async def update_lifecycle_audit_row(
@@ -139,6 +148,11 @@ LifecycleStorageAdapter = ArchiveStorageAdapter
 # the legitimate next-day tick through.
 _PIPELINE_DEDUP_WINDOW_HOURS = 23
 
+# Bound on the claim-release write a cancelled run makes on its way out. It
+# runs inside the shutdown that cancelled it, so it must not eat the SIGTERM
+# budget; if it cannot finish in time the claim lapses with its lease instead.
+_CANCEL_RELEASE_TIMEOUT_SECONDS = 2.0
+
 
 # Callable parameters are contravariant: an op that accepts a
 # ``LifecycleArchiveRequest`` (subclass) is NOT assignable to a
@@ -150,6 +164,216 @@ _PIPELINE_DEDUP_WINDOW_HOURS = 23
 # carries no runtime risk.
 _OpFn = Callable[..., Awaitable[int]]
 
+#: Any adapter's ``update_lifecycle_audit_row``, or core-worker's module-level
+#: one with its client bound, so both handlers share the claim protocol below.
+_AuditWrite = Callable[..., Awaitable[dict | None]]
+
+#: Waits between in-place attempts at the terminal success write, after the
+#: storage client's own retries (L-05). The op has run and only its record is
+#: missing; a nack re-runs the op end to end once the claim lease lapses, which
+#: for crystallize or insights is a second LLM bill. Bounded, so a sustained
+#: outage still nacks as before.
+_SUCCESS_WRITE_RETRY_DELAYS_SECONDS = (1.0, 5.0, 15.0)
+
+
+async def claim_audit_row(
+    write: _AuditWrite,
+    audit_id: int,
+    *,
+    org_id: str,
+    action: str,
+    claim_token: str,
+) -> bool:
+    """Move the audit row to ``in_progress`` under ``claim_token``.
+
+    True: run the op. That includes a row that is gone: the adapters turn a 404
+    into ``{}``, and a row pruned between fanout and consume must not skip an op
+    the operator asked for. False: the row already succeeded, so ack without
+    running. Raises, so the bus nacks, when another consumer holds a live claim
+    or when the claim write itself failed (L-04).
+
+    ``claim_token`` is minted once per INVOCATION, not per HTTP request. The
+    storage clients retry this PATCH on ReadTimeout and 5xx, so a claim that
+    succeeded server-side but lost its response is re-sent with the same token
+    and the compare-and-swap recognises it rather than reporting a conflict
+    against ourselves. A genuine second delivery mints a different token, so it
+    still loses the race.
+    """
+    try:
+        claim = await write(
+            audit_id, org_id=org_id, status="in_progress", claim_token=claim_token
+        )
+    except Exception:
+        # Not "the row is missing" -- that arrives as ``{}``. This is storage
+        # failing after the client's retries, and running now would bypass the
+        # claim: a concurrent delivery could run the same op at the same time.
+        # A nack retries the claim once storage answers.
+        logger.warning(
+            "lifecycle audit claim write failed; nacking rather than running "
+            "unclaimed",
+            exc_info=True,
+            extra={"audit_id": audit_id, "action": action},
+        )
+        raise
+    if not isinstance(claim, dict):
+        claim = {}
+
+    if claim.get("noop"):
+        # The row is already at ``success``: this delivery is a redelivery of a
+        # message whose work completed. Running the primitive again is the
+        # duplicate this path exists to avoid, and it is also what would make
+        # the terminal write look like a lost claim -- the winner's token is on
+        # the row and ours is not -- turning a routine redelivery into a
+        # reported duplicate run. Ack and stop: there is nothing left to do and
+        # the sticky-success gate has already preserved the original result.
+        logger.info(
+            "lifecycle %s already succeeded; skipping redelivered work",
+            action,
+            extra={"audit_id": audit_id, "org_id": org_id, "action": action},
+        )
+        return False
+
+    if claim.get("claim_conflict"):
+        # Another consumer holds a live claim on this row. Two deliveries of
+        # one audit_id are reachable two ways: the reconcile sweep republished
+        # a message whose original was only slow (subscriptions here retain
+        # for seven days, so no age threshold separates "lost" from "queued"),
+        # or Pub/Sub redelivered while the first attempt is still running.
+        # Either way the primitive must not run twice — for crystallize or
+        # insights that is duplicate LLM spend and duplicate records.
+        #
+        # Raise rather than ack-and-skip. Acking drops this delivery for good,
+        # and if the holder then dies the row sits at in_progress, where the
+        # reconcile sweep deliberately does not look — trading a duplicate run
+        # for a silently stranded row, which is the failure this whole path
+        # exists to end. A nack retries: by then the holder has either
+        # finished, making the retry a sticky-success no-op, or its claim has
+        # gone stale and the retry takes the row legitimately. "By then"
+        # relies on the Pub/Sub bus nacking with a growing redelivery delay
+        # (``pubsub._nack_delay_seconds``), not with deadline 0 — at 0 this
+        # delivery would come straight back for the holder's whole run.
+        logger.info(
+            "lifecycle audit row is claimed by another consumer; nacking",
+            extra={"audit_id": audit_id, "action": action, "org_id": org_id},
+        )
+        raise RuntimeError(
+            f"lifecycle {action} audit row {audit_id} is claimed by another consumer"
+        )
+    return True
+
+
+async def release_cancelled_claim(
+    write: _AuditWrite,
+    audit_id: int,
+    *,
+    org_id: str,
+    action: str,
+    claim_token: str,
+    finished_stats: dict | None = None,
+) -> None:
+    """Close a cancelled run's claim, so its redelivery need not wait out the lease.
+
+    A cancel is in practice a shutdown that outlasted the bus's stop grace. Left
+    alone, the row stays ``in_progress`` under this run's claim, and since the
+    message was neither acked nor nacked, its redelivery nacks on
+    ``claim_conflict`` until the lease expires, an hour later. A run cancelled
+    mid-op records a failure, so the redelivery claims the row and runs the op.
+    One cancelled once the op had finished (``finished_stats``) records the
+    success, so the redelivery acks instead of running it again (M-09).
+
+    Bounded by ``_CANCEL_RELEASE_TIMEOUT_SECONDS``, since it runs inside the
+    shutdown that cancelled it; past that the claim lapses with its lease. Never
+    raises: the caller re-raises the cancellation, which is not ours to swallow.
+    """
+    outcome: dict[str, object]
+    if finished_stats is None:
+        outcome = {
+            "status": "failure",
+            "error_message": "interrupted: the consumer was cancelled mid-run",
+        }
+    else:
+        outcome = {"status": "success", "stats": finished_stats}
+    try:
+        await asyncio.wait_for(
+            write(audit_id, org_id=org_id, claim_token=claim_token, **outcome),
+            timeout=_CANCEL_RELEASE_TIMEOUT_SECONDS,
+        )
+    except BaseException:
+        logger.warning(
+            "lifecycle audit claim release after cancellation failed; "
+            "the claim lapses with its lease",
+            exc_info=True,
+            extra={"audit_id": audit_id, "action": action},
+        )
+
+
+async def write_success(
+    write: _AuditWrite,
+    audit_id: int,
+    *,
+    org_id: str,
+    action: str,
+    stats: dict,
+    claim_token: str,
+) -> None:
+    """Record the op's success under its claim, retrying in place (L-05).
+
+    The work is done; a nack here would re-run all of it once the claim lease
+    lapses. So a failed write is retried with the same token, which storage
+    accepts as the holder's own, before giving up to the nack. A cancel while it
+    retries still records the success, once and bounded.
+    """
+    delays = iter(_SUCCESS_WRITE_RETRY_DELAYS_SECONDS)
+    try:
+        while True:
+            try:
+                finalize = await write(
+                    audit_id,
+                    org_id=org_id,
+                    status="success",
+                    stats=stats,
+                    claim_token=claim_token,
+                )
+                break
+            except Exception:
+                delay = next(delays, None)
+                if delay is None:
+                    raise
+                logger.warning(
+                    "lifecycle audit success write failed; retrying in %ss",
+                    delay,
+                    exc_info=True,
+                    extra={"audit_id": audit_id, "action": action},
+                )
+                await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        await release_cancelled_claim(
+            write,
+            audit_id,
+            org_id=org_id,
+            action=action,
+            claim_token=claim_token,
+            finished_stats=stats,
+        )
+        raise
+
+    if isinstance(finalize, dict) and finalize.get("claim_lost"):
+        # Our claim was taken over by another delivery while this run was
+        # still going, so the primitive ran twice and the holder's result is
+        # what the row now records. Nothing to retry -- the work is done, and
+        # done more than once. Log at error: for crystallize or insights this
+        # is duplicate LLM spend, and it is otherwise invisible.
+        logger.error(
+            "lifecycle %s finished without its claim; the row was finalized by "
+            "another consumer and this run was a duplicate",
+            action,
+            extra={
+                "audit_id": audit_id,
+                "org_id": org_id,
+                "action": action,
+            },
+        )
+
 
 async def _run_action(
     event: Event,
@@ -159,7 +383,7 @@ async def _run_action(
     run_op: _OpFn,
     stats_key: str,
     action: str,
-    dedup_window_hours: int | None = None,
+    dedup_window_hours: float | None = None,
 ) -> None:
     """Shared body for every lifecycle action — bound to a specific
     primitive at registration time so this function never branches on
@@ -171,8 +395,11 @@ async def _run_action(
     if a successful run for the same org+action exists within the
     window, this delivery is a no-op (audit row marked success with
     ``stats.skipped`` so observers can distinguish "did the work" from
-    "skipped because already done"). Filtering on ``finished_at``
-    naturally excludes the in-progress row pre-published moments ago.
+    "skipped because already done"). Only ``success`` rows count, so the
+    in-progress row pre-published moments ago is naturally excluded, and the
+    window is measured from each row's tick (``started_at``) rather than
+    from when it finished, so a late-finishing run cannot push the next
+    scheduled tick into a skip.
     """
     try:
         # ``model_validate`` (not a kwargs-splat) so a non-dict payload
@@ -200,9 +427,13 @@ async def _run_action(
     # so the audit row's life cycle stays clean — pending → success
     # with skipped=true, no in_progress flicker.
     if dedup_window_hours is not None:
+        # A scheduler running this op more often than daily says so on the
+        # request; the registration default (23h) would otherwise swallow
+        # every run after the first of each day.
+        window = getattr(request, "dedup_window_hours", None) or dedup_window_hours
         try:
             already_done = await adapter.has_recent_lifecycle_success(  # type: ignore[union-attr]
-                org_id=org_id, action=action, since_hours=dedup_window_hours
+                org_id=org_id, action=action, since_hours=window
             )
         except Exception:
             # Failed dedup check shouldn't block the op — better to run
@@ -252,79 +483,30 @@ async def _run_action(
             )
             return
 
-    # Best-effort in_progress mark: 404 means the audit row was pruned
-    # between fanout and consume. Continue anyway so the primitive
-    # still runs — dropping would silently skip an op the operator
-    # asked for. That tolerance is for a MISSING row; a row held by
-    # another consumer is handled separately below, because "the row is
-    # gone" and "someone else is already doing this work" call for
-    # opposite responses.
-    # One token per INVOCATION, not per HTTP request. The storage client
-    # retries a PATCH on ReadTimeout and 5xx, so a claim that succeeded
-    # server-side but lost its response is re-sent with this same token and
-    # the compare-and-swap recognises it rather than reporting a conflict
-    # against ourselves. A genuine second delivery re-enters this function
-    # and mints a different token, so it still loses the race.
+    # One token per INVOCATION, not per HTTP request: see ``claim_audit_row``.
     claim_token = uuid.uuid4().hex
-    claim: dict = {}
-    try:
-        claim = (
-            await adapter.update_lifecycle_audit_row(
-                audit_id,
-                org_id=org_id,
-                status="in_progress",
-                claim_token=claim_token,
-            )
-            or {}
-        )
-    except Exception:
-        logger.warning(
-            "lifecycle audit in_progress update failed; continuing",
-            exc_info=True,
-            extra={"audit_id": audit_id, "action": action},
-        )
-
-    if claim.get("noop"):
-        # The row is already at ``success``: this delivery is a redelivery of a
-        # message whose work completed. Running the primitive again is the
-        # duplicate this path exists to avoid, and it is also what would make
-        # the terminal write below look like a lost claim -- the winner's token
-        # is on the row and ours is not -- turning a routine redelivery into a
-        # reported duplicate run. Ack and stop: there is nothing left to do and
-        # the sticky-success gate has already preserved the original result.
-        logger.info(
-            "lifecycle %s already succeeded; skipping redelivered work",
-            action,
-            extra={"audit_id": audit_id, "org_id": org_id, "action": action},
-        )
+    if not await claim_audit_row(
+        adapter.update_lifecycle_audit_row,
+        audit_id,
+        org_id=org_id,
+        action=action,
+        claim_token=claim_token,
+    ):
         return
-
-    if claim.get("claim_conflict"):
-        # Another consumer holds a live claim on this row. Two deliveries of
-        # one audit_id are reachable two ways: the reconcile sweep republished
-        # a message whose original was only slow (subscriptions here retain
-        # for seven days, so no age threshold separates "lost" from "queued"),
-        # or Pub/Sub redelivered while the first attempt is still running.
-        # Either way the primitive must not run twice — for crystallize or
-        # insights that is duplicate LLM spend and duplicate records.
-        #
-        # Raise rather than ack-and-skip. Acking drops this delivery for good,
-        # and if the holder then dies the row sits at in_progress, where the
-        # reconcile sweep deliberately does not look — trading a duplicate run
-        # for a silently stranded row, which is the failure this whole path
-        # exists to end. A nack retries: by then the holder has either
-        # finished, making the retry a sticky-success no-op, or its claim has
-        # gone stale and the retry takes the row legitimately.
-        logger.info(
-            "lifecycle audit row is claimed by another consumer; nacking",
-            extra={"audit_id": audit_id, "action": action, "org_id": org_id},
-        )
-        raise RuntimeError(
-            f"lifecycle {action} audit row {audit_id} is claimed by another consumer"
-        )
 
     try:
         count = await run_op(request)
+    except asyncio.CancelledError:
+        # ``except Exception`` does not see this, so the row used to stay
+        # ``in_progress`` under our claim for the lease.
+        await release_cancelled_claim(
+            adapter.update_lifecycle_audit_row,
+            audit_id,
+            org_id=org_id,
+            action=action,
+            claim_token=claim_token,
+        )
+        raise
     except Exception as exc:
         # ``PermanentOpError`` means the op has established that a retry cannot
         # help, so this handler acks instead of nacking. Both classes write the
@@ -401,32 +583,14 @@ async def _run_action(
         # the durable record (when the update succeeded).
         raise
 
-    finalize = (
-        await adapter.update_lifecycle_audit_row(
-            audit_id,
-            org_id=org_id,
-            status="success",
-            stats={stats_key: count},
-            claim_token=claim_token,
-        )
-        or {}
+    await write_success(
+        adapter.update_lifecycle_audit_row,
+        audit_id,
+        org_id=org_id,
+        action=action,
+        stats={stats_key: count},
+        claim_token=claim_token,
     )
-    if finalize.get("claim_lost"):
-        # Our claim was taken over by another delivery while this run was
-        # still going, so the primitive ran twice and the holder's result is
-        # what the row now records. Nothing to retry -- the work is done, and
-        # done more than once. Log at error: for crystallize or insights this
-        # is duplicate LLM spend, and it is otherwise invisible.
-        logger.error(
-            "lifecycle %s finished without its claim; the row was finalized by "
-            "another consumer and this run was a duplicate",
-            action,
-            extra={
-                "audit_id": audit_id,
-                "org_id": org_id,
-                "action": action,
-            },
-        )
 
     logger.info(
         "lifecycle %s processed",
@@ -515,11 +679,46 @@ def register_pipeline_consumers(adapter: PipelineStorageAdapter) -> None:
         return await adapter.insights(org_id=req.org_id, fleet_id=req.fleet_id)
 
     async def forge_distill_op(req: LifecycleForgeDistillRequest) -> int:
+        # Refuse a dry run rather than perform a real one. Nothing here
+        # can honour ``dry_run``: the tick takes no such parameter and
+        # runs ``promote_pending_candidates`` unconditionally after
+        # mining, so proceeding would write real candidates and promote
+        # them — under ``sentinel.auto_promote_clean``, all the way to
+        # ``active``. Every other field on this payload that the
+        # consumer ignores fails safe (the run falls through to the
+        # tenant's configured bounds); this one fails open, and it is
+        # the single field whose entire purpose is to prevent side
+        # effects. Ignoring it is therefore strictly worse than
+        # erroring, so it errors.
+        #
+        # ``PermanentOpError`` and not a plain raise: a dry-run request
+        # this consumer cannot satisfy is a wiring disagreement between
+        # publisher and consumer, and no number of redeliveries fixes
+        # it. The shared runner writes the ``failure`` row with
+        # ``stats={"terminal": True}`` and then ACKs, so the refusal is
+        # durable and queryable instead of looping to the DLQ.
+        #
+        # Reachable only past the shared runner's dedup gate: a
+        # ``dry_run=True`` delivery inside the 23h window is skipped
+        # before it gets here, and reports success rather than a
+        # refusal. Both outcomes are side-effect-free, which is the
+        # property that matters, so the gate is left alone.
+        if req.dry_run:
+            raise PermanentOpError(
+                "forge-distill received dry_run=True, which this consumer "
+                "cannot honour: the tick has no dry-run mode and would "
+                "mine and promote for real. Refusing the event. Use "
+                "scripts/forge_dry_run.py, which calls the Forge pipeline "
+                "directly and never promotes."
+            )
         # Thread ``run_label`` from the event payload — the publisher
         # stamped it with the dispatching cron tick's UTC minute, and
         # the consumer-side cron handler stamps the same value onto
         # every candidate doc's ``origin.run_id``. Regenerating from
         # the consumer clock would drift across queue boundaries.
+        #
+        # The four value overrides are deliberately not read here; the
+        # declaration says why.
         return await adapter.forge_distill(
             org_id=req.org_id, fleet_id=req.fleet_id, run_label=req.run_label
         )

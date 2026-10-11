@@ -124,6 +124,19 @@ def _stage(repo: Path, name: str, body: str) -> None:
     _git(repo, "add", name)
 
 
+def _existing(repo: Path, *names: str) -> None:
+    """Commit ``names`` to the base with an unbranded line.
+
+    A move into a file that already exists is a move between two existing files.
+    A move into a file the change creates is held to a stricter rule (see
+    ``test_a_move_into_a_new_file_from_a_file_that_stays_is_an_addition``), so a
+    test about the looser one needs its destination to exist first.
+    """
+    for name in names:
+        _stage(repo, name, "PLACEHOLDER = 1\n")
+    _git(repo, "commit", "-qm", "destinations exist")
+
+
 # ── the rule ─────────────────────────────────────────────────────────────────
 
 
@@ -236,6 +249,140 @@ def test_the_marker_exempts_only_its_own_line(repo: Path) -> None:
     offenders = result.stdout.split("adds the legacy name in", 1)[1]
     assert "OTHER" in offenders
     assert "ALIAS" not in offenders
+
+
+# ── JSON, which has no comments ──────────────────────────────────────────────
+#
+# There a key's marker lives in a "$comment" member of the object the key opens.
+# Formatters put that member on the line below the key, release-please among
+# them, so the two lines have to read as one.
+
+_KEY = f'"{LEGACY.upper()}_AGENT_ID": {{'
+_COMMENT = '"$comment": "legacy-name-ok: supported configuration alias",'
+
+
+def _manifest(*property_lines: str) -> str:
+    body = "".join(f"    {line}\n" for line in property_lines)
+    return f'{{\n  "properties": {{\n{body}      "type": "string"\n    }}\n  }}\n}}\n'
+
+
+def test_a_json_comment_below_its_key_exempts_the_key(repo: Path) -> None:
+    _stage(repo, "manifest.json", _manifest(_KEY, f"  {_COMMENT}"))
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+
+
+def test_moving_the_comment_below_its_key_is_not_minting(repo: Path) -> None:
+    """What release-please does to every manifest it bumps."""
+    (repo / "manifest.json").write_text(_manifest(f"{_KEY} {_COMMENT}"))
+    _git(repo, "add", "manifest.json")
+    _git(repo, "commit", "-qm", "marker on the key's line")
+    _stage(repo, "manifest.json", _manifest(_KEY, f"  {_COMMENT}"))
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "exempt line(s) removed" not in result.stdout, result.stdout
+
+
+def test_a_json_comment_further_down_does_not_exempt_the_key(repo: Path) -> None:
+    _stage(repo, "manifest.json", _manifest(_KEY, '  "type": "string",', _COMMENT))
+
+    assert _run(repo).returncode == 1
+
+
+def test_a_json_comment_below_still_needs_a_marker(repo: Path) -> None:
+    _stage(repo, "manifest.json", _manifest(_KEY, '  "$comment": "an alias",'))
+
+    assert _run(repo).returncode == 1
+
+
+def test_only_json_reads_a_comment_below_its_key(repo: Path) -> None:
+    _stage(repo, "manifest.yaml", _manifest(_KEY, f"  {_COMMENT}"))
+
+    assert _run(repo).returncode == 1
+
+
+def test_a_json_comment_that_also_names_the_brand_is_read_once(repo: Path) -> None:
+    """git grep returns that comment line on its own as well as below its key."""
+    comment = f'"$comment": "legacy-name-ok: alias older {LEGACY} installs set",'
+    _stage(repo, "manifest.json", _manifest(_KEY, f"  {comment}"))
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "1 exempt line(s) written by this change" in result.stdout, result.stdout
+
+
+def test_marking_an_existing_key_from_the_line_below_is_reported(repo: Path) -> None:
+    """git's diff calls only the comment line added, not the key it exempts."""
+    (repo / "manifest.json").write_text(_manifest(_KEY))
+    _git(repo, "add", "manifest.json")
+    _git(repo, "commit", "-qm", "an unmarked key")
+    _stage(repo, "manifest.json", _manifest(_KEY, f"  {_COMMENT}"))
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "1 exempt line(s) written by this change" in result.stdout, result.stdout
+
+
+def test_adding_an_unmarked_comment_below_a_key_mints_nothing(repo: Path) -> None:
+    """Only a marker joins a comment to its key. Any other is documentation."""
+    (repo / "manifest.json").write_text(_manifest(_KEY))
+    _git(repo, "add", "manifest.json")
+    _git(repo, "commit", "-qm", "an unmarked key")
+    _stage(repo, "manifest.json", _manifest(_KEY, '  "$comment": "set by installs",'))
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+
+
+def test_editing_an_unmarked_comment_below_a_key_mints_nothing(repo: Path) -> None:
+    (repo / "manifest.json").write_text(
+        _manifest(_KEY, '  "$comment": "set by installs",')
+    )
+    _git(repo, "add", "manifest.json")
+    _git(repo, "commit", "-qm", "an unmarked key with a comment")
+    _stage(repo, "manifest.json", _manifest(_KEY, '  "$comment": "set by old installs",'))
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+
+
+@pytest.mark.parametrize("below", [False, True], ids=["on-the-key", "below-the-key"])
+def test_a_reworded_reason_is_reported_in_either_layout(
+    repo: Path, below: bool
+) -> None:
+    """The reason is the marker's claim, so rewording it is named either way."""
+
+    def manifest(comment: str) -> str:
+        if below:
+            return _manifest(_KEY, f"  {comment}")
+        return _manifest(f"{_KEY} {comment}")
+
+    (repo / "manifest.json").write_text(manifest(_COMMENT))
+    _git(repo, "add", "manifest.json")
+    _git(repo, "commit", "-qm", "a marked key")
+    _stage(repo, "manifest.json", manifest(_COMMENT.replace("supported", "documented")))
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "1 exempt line(s) written by this change" in result.stdout, result.stdout
+    assert "1 exempt line(s) removed by this change" in result.stdout, result.stdout
+
+
+def test_a_branded_comment_below_an_unbranded_key_still_counts(repo: Path) -> None:
+    """Only a key that is itself a match reads the comment below it."""
+    comment = f'"$comment": "was {LEGACY}_agent_id",'
+    _stage(repo, "manifest.json", _manifest('"agentId": {', f"  {comment}"))
+
+    assert _run(repo).returncode == 1
 
 
 # ── the floor marker: same exemption, a different claim ──────────────────────
@@ -1366,6 +1513,7 @@ def test_a_move_between_two_existing_files_is_net_zero(repo: Path) -> None:
     only way past the gate was to write an exemption reason that was not true —
     in the one annotation whose whole value is that its reasons are true.
     """
+    _existing(repo, "moved-here.py")
     _stage(repo, "existing.py", "")
     _stage(repo, "moved-here.py", f'URL = "https://{LEGACY}.net"\n')
 
@@ -1407,6 +1555,7 @@ def test_a_renamed_file_whose_other_lines_changed_is_still_a_move(repo: Path) ->
 def test_a_reindented_move_is_still_a_move(repo: Path) -> None:
     """A line moving into a class body or a deeper block is re-indented on the
     way. Comparing text with its leading whitespace would call that new."""
+    _existing(repo, "moved-here.py")
     _stage(repo, "existing.py", "")
     _stage(repo, "moved-here.py", f'class C:\n    URL = "https://{LEGACY}.net"\n')
 
@@ -1417,6 +1566,7 @@ def test_a_move_does_not_launder_an_addition_beside_it(repo: Path) -> None:
     """The obvious way to abuse move detection, and the reason it compares text
     rather than merely totals: the moved line pairs with its own deletion, the
     new one has nothing to pair with, so only the new one is named."""
+    _existing(repo, "moved-here.py")
     _stage(repo, "existing.py", "")
     _stage(
         repo,
@@ -1451,9 +1601,10 @@ def test_identical_added_lines_are_all_named_with_the_split_stated(repo: Path) -
     """
     # Base holds two copies: the fixture's existing.py, plus a second file.
     _stage(repo, "second.py", f'URL = "https://{LEGACY}.net"\n')
+    _stage(repo, "gathered.py", "PLACEHOLDER = 1\n")
     _git(repo, "commit", "-qm", "a second copy in the base")
 
-    # Both are emptied and three copies appear in one new file: two moved, one new.
+    # Both are emptied and three copies land in one file: two moved, one new.
     _stage(repo, "existing.py", "")
     _stage(repo, "second.py", "")
     _stage(repo, "gathered.py", f'URL = "https://{LEGACY}.net"\n' * 3)
@@ -1478,6 +1629,7 @@ def test_one_deletion_pays_for_only_one_of_two_destinations(repo: Path) -> None:
     both the same budget and reports two additions for one — failing a legitimate
     multi-destination move, which is the shape a consolidation wave produces.
     """
+    _existing(repo, "one.py", "two.py")
     _stage(repo, "existing.py", "")
     _stage(repo, "one.py", f'URL = "https://{LEGACY}.net"\n')
     _stage(repo, "two.py", f'URL = "https://{LEGACY}.net"\n')
@@ -1531,7 +1683,12 @@ def test_an_excused_move_is_always_named(repo: Path) -> None:
     — it is reported rather than adjudicated, on the passing path, with the file
     whose deletion paid for it. That attribution is the only thing that makes a
     laundered mint visible to a reviewer.
+
+    The destination already exists. Into a file this change creates, the same
+    shape is charged rather than excused: see
+    ``test_a_move_into_a_new_file_from_a_file_that_stays_is_an_addition``.
     """
+    _existing(repo, "somewhere-unrelated.py")
     _stage(repo, "existing.py", "")
     _stage(repo, "somewhere-unrelated.py", f'URL = "https://{LEGACY}.net"\n')
 
@@ -1574,6 +1731,7 @@ def test_a_file_that_kept_its_copy_is_not_named_as_the_source(repo: Path) -> Non
     check then points at the wrong file, which is worse than printing nothing.
     """
     _stage(repo, "aaa-bystander.py", f'URL = "https://{LEGACY}.net"\n')
+    _stage(repo, "moved-here.py", "PLACEHOLDER = 1\n")
     _git(repo, "commit", "-qm", "a bystander holding the same text")
 
     _stage(repo, "existing.py", "")
@@ -1607,6 +1765,102 @@ def test_a_second_copy_of_an_existing_line_is_an_addition(repo: Path) -> None:
 
     assert result.returncode == 1
     assert "copy.py" in result.stdout
+
+
+# ── a new file is new prose ──────────────────────────────────────────────────
+
+
+def test_a_move_into_a_new_file_from_a_file_that_stays_is_an_addition(
+    repo: Path,
+) -> None:
+    """A new file can take over old-name lines only from a file this change deletes.
+
+    The line leaves ``existing.py``, which stays, and lands in a file this change
+    creates. The repo-wide count is flat, so the move check alone would excuse
+    it. It also cannot tell this from the coincidence it already warns about: a
+    new page that repeats a common branded line while an identical one is
+    deleted somewhere unrelated. A new file is new prose, so both are charged.
+    """
+    _stage(repo, "existing.py", "")
+    _stage(repo, "new.py", f'URL = "https://{LEGACY}.net"\n')
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "new.py  (0 -> 1, new file: inherits only from deleted files)" in (
+        result.stdout
+    )
+    assert "treated as moved rather than added" not in result.stdout
+
+
+def test_a_new_file_inherits_from_the_file_this_change_deletes(repo: Path) -> None:
+    """A rename is the move a new file may make, however the rest of it changed.
+
+    ``existing.py`` is deleted and its two branded lines are split across two new
+    files, each padded so that neither is similar enough for git to call it a
+    rename. Both lines are inherited from the deleted file, so nothing is minted.
+    """
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"\nKEY = "{LEGACY}-key"\n'
+    )
+    _git(repo, "commit", "-qam", "two branded lines")
+    _git(repo, "rm", "-q", "existing.py")
+    _stage(repo, "first.py", f'A = 1\nURL = "https://{LEGACY}.net"\nB = 2\n')
+    _stage(repo, "second.py", f'C = 3\nKEY = "{LEGACY}-key"\nD = 4\n')
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+
+
+def test_a_deleted_line_is_inherited_once(repo: Path) -> None:
+    """Two new files cannot both inherit the same deleted line.
+
+    ``existing.py`` is deleted and its one branded line appears in two new files.
+    One took it over; the other is a copy the repo did not have, so exactly one
+    is charged.
+    """
+    _git(repo, "rm", "-q", "existing.py")
+    _stage(repo, "one.py", f'URL = "https://{LEGACY}.net"\n')
+    _stage(repo, "two.py", f'URL = "https://{LEGACY}.net"\n')
+
+    result = _run(repo)
+    offenders = result.stdout.split("adds the legacy name in", 1)[1]
+
+    assert result.returncode == 1
+    assert "in 1 file(s)" in result.stdout
+    assert offenders.count("(0 -> 1") == 1
+
+
+@pytest.mark.parametrize(
+    ("destination", "new"),
+    [("aaa-dest.py", "zzz-new.py"), ("zzz-dest.py", "aaa-new.py")],
+    ids=["existing-sorts-first", "new-sorts-first"],
+)
+def test_a_new_file_takes_the_charge_not_an_existing_destination(
+    repo: Path, destination: str, new: str
+) -> None:
+    """One line leaves a file that stays, and its text lands in an existing file
+    and in a new one. The existing file's copy is the move; the new file's is the
+    one charged.
+
+    New files are visited first so that holds whichever name sorts first. An
+    existing destination reached first would spend the budget on what is really
+    the move, and both files would fail for one addition.
+    """
+    _existing(repo, destination)
+    _stage(repo, "existing.py", "")
+    _stage(repo, destination, f'URL = "https://{LEGACY}.net"\n')
+    _stage(repo, new, f'URL = "https://{LEGACY}.net"\n')
+
+    result = _run(repo)
+    offenders = result.stdout.split("adds the legacy name in", 1)[1]
+    listed = offenders.split("Rule 7", 1)[0]
+
+    assert result.returncode == 1
+    assert "in 1 file(s)" in result.stdout
+    assert new in listed
+    assert destination not in listed
 
 
 def test_an_unrelated_change_passes(repo: Path) -> None:
@@ -3404,6 +3658,8 @@ def test_a_floor_transition_survives_a_same_text_relocation_elsewhere(
 
     (repo / transitioned).write_text(floor)
     (repo / "source.py").write_text(deferred)
+    # The destination exists: this is a move between two existing files.
+    (repo / destination).write_text("PLACEHOLDER = 1\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "a floor line, and the same text deferred elsewhere")
 

@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import pytest
 
+from common.governance.ruleset_hash import rule_set_hash
+from core_api import mcp_server
 from core_api.agent_ids import INSIGHTER_AGENT_ID
 from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
+from tests._mcp_test_helpers import parse_envelope
 from tests.conftest import get_test_auth
 from tests.conftest import uid as _uid
 
@@ -237,6 +240,51 @@ async def test_set_then_list_round_trip(client):
     assert any(r["doc_id"] == doc_id for r in rules), rules
 
 
+async def test_the_envelope_names_the_rules_it_returns(client):
+    """g1.10: ``rule_set_hash`` is the hash of the envelope's items, on rows as
+    storage writes them (bucketed weights, its own timestamps), and an edit
+    moves it, so whoever holds the old set can tell it's stale."""
+    tenant_id, headers = get_test_auth(_ks_tenant())  # bare standalone admin
+    url = f"/api/v1/keystones?tenant_id={tenant_id}&envelope=true"
+
+    def expected(items: list[dict]) -> str:
+        # By hand from the hash's definition in common/governance/
+        # ruleset_hash.py, not through the row mapping the route itself uses.
+        return rule_set_hash(
+            [
+                {
+                    "doc_id": item["doc_id"],
+                    "content": item["data"]["content"],
+                    "scope": item["data"]["scope"],
+                    "weight": item["data"]["weight"],
+                    "updated_at": item["updated_at"],
+                }
+                for item in items
+            ]
+        )
+
+    empty = await client.get(url, headers=headers)
+    assert empty.status_code == 200, empty.text
+    assert empty.json()["rule_set_hash"] == expected([])
+
+    tag = _uid()
+    for doc_id in (f"ks-a-{tag}", f"ks-b-{tag}"):
+        resp = await _set_keystone(client, headers, tenant_id, doc_id=doc_id)
+        assert resp.status_code == 200, resp.text
+    before = (await client.get(url, headers=headers)).json()
+    assert before["count"] == 2
+    assert [item["data"]["weight"] for item in before["items"]] == [50, 50]  # "med"
+    assert before["rule_set_hash"] == expected(before["items"])
+
+    resp = await _set_keystone(
+        client, headers, tenant_id, doc_id=f"ks-a-{tag}", content="Changed."
+    )
+    assert resp.status_code == 200, resp.text
+    after = (await client.get(url, headers=headers)).json()
+    assert after["rule_set_hash"] == expected(after["items"])
+    assert after["rule_set_hash"] != before["rule_set_hash"]
+
+
 async def test_retired_service_input_targets_canonical_agent_rule(client):
     tenant_id, headers = get_test_auth(_ks_tenant())
     tag = _uid()
@@ -308,6 +356,46 @@ async def test_set_invalid_scope_surfaces_as_422(client):
     # ``_surface_storage_error`` translates storage's HTTPStatusError
     # into a 422 here (rather than letting it bubble as a 500).
     assert resp.status_code == 422, resp.text
+
+
+async def test_text_postgres_cannot_read_back_surfaces_as_422(client):
+    """Storage refuses a NUL in a rule's text: stored, it would fail the
+    tenant's whole list. The proxy surfaces that 422, and nothing is kept."""
+    tenant_id, headers = get_test_auth(_ks_tenant())
+    resp = await _set_keystone(client, headers, tenant_id, content="before\x00after")
+    assert resp.status_code == 422, resp.text
+    assert "content must not contain" in resp.text
+
+    listed = await client.get(
+        f"/api/v1/keystones?tenant_id={tenant_id}", headers=headers
+    )
+    assert (listed.status_code, listed.json()) == (200, [])
+
+
+async def test_mcp_set_with_text_postgres_cannot_read_back_is_refused(
+    client, mcp_env, monkeypatch
+):
+    """The MCP tool, where agents author their rules, against the same real
+    storage: the refusal comes back as INVALID_ARGUMENTS, and nothing is kept.
+    (``client`` brings up the schema the storage bridge writes to.)"""
+    tenant_id, headers = get_test_auth(_ks_tenant())
+    monkeypatch.setattr(mcp_server, "_get_tenant", lambda: tenant_id)
+    out = await mcp_server.caura_keystones_set(
+        op="set",
+        doc_id=f"ks-{_uid()}",
+        title="No secrets",
+        content="before\x00after",
+        scope="tenant",
+        weight="high",
+    )
+    error = parse_envelope(out)["error"]
+    assert error["code"] == "INVALID_ARGUMENTS"
+    assert "content must not contain" in error["message"]
+
+    listed = await client.get(
+        f"/api/v1/keystones?tenant_id={tenant_id}", headers=headers
+    )
+    assert (listed.status_code, listed.json()) == (200, [])
 
 
 # ---------------------------------------------------------------------------

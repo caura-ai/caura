@@ -48,6 +48,8 @@ def _config(**over):
         "enrichment_enabled": True,
         "enrichment_provider": "openai",
         "entity_extraction_enabled": True,
+        # Read by the write step's settings claim; None claims nothing.
+        "settings_version": None,
     }
     attrs.update(over)
     return type("C", (), attrs)()

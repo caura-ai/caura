@@ -27,9 +27,11 @@ import { getOpenClawBaseDir, getPluginEnvPath } from "./paths.js";
 import {
   CAURA_API_URL,
   CAURA_API_KEY,
+  CAURA_AUTO_WRITE_TURNS,
   CAURA_FLEET_ID,
   CAURA_TENANT_ID,
   CAURA_NODE_NAME,
+  applyPluginConfig,
   ensureTenantId,
   fetchToolDescriptions,
   HEARTBEAT_INTERVAL_MS,
@@ -133,13 +135,22 @@ const cauraPlugin = {
   name: "Caura",
   description:
     "Central persistent memory for OpenClaw agents with cross-fleet, multi-agent shared recall",
+  // The keys openclaw.plugin.json declares, which register() reads from
+  // api.pluginConfig (L-159). The manifest carries their descriptions.
   configSchema: {
     type: "object" as const,
-    properties: {},
+    properties: {
+      CAURA_AGENT_ID: { type: "string" },
+      MEMCLAW_AGENT_ID: { type: "string" },  // legacy-name-ok: supported configuration alias for existing installs
+    },
     required: [] as string[],
   },
 
   register(api: Record<string, any>) {
+    // Before anything resolves an agent id (L-159). Safe to repeat on each
+    // register() call, one per plugin slot.
+    applyPluginConfig(api.pluginConfig);
+
     // Resolve tenant_id (with retry) and use result to gate heartbeat loop.
     // Route through ensureTenantId() so the _tenantPromise cache is populated —
     // without this, a concurrent ensureTenantId() caller (context-engine
@@ -151,6 +162,8 @@ const cauraPlugin = {
         .then((tid) => {
           if (tid && CAURA_NODE_NAME) {
             setTimeout(() => {
+              // An interval that comes due while a tick still runs joins it
+              // rather than starting a second one (sendHeartbeat, L-56).
               sendHeartbeat();
               setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
             }, HEARTBEAT_INITIAL_DELAY_MS);
@@ -571,6 +584,10 @@ const cauraPlugin = {
       if (typeof api.registerMemoryFlushPlan === "function") {
         api.registerMemoryFlushPlan(
           (params?: { cfg?: unknown; nowMs?: number } | null) => {
+            // M-106: the flush turn asks the agent to caura_write a session
+            // summary, an automatic write like the three the context engine
+            // gates on this flag. OpenClaw runs no flush turn for a null plan.
+            if (!CAURA_AUTO_WRITE_TURNS) return null;
             try {
               const candidate = params?.nowMs;
               // Number.isFinite(-1) === true, so a negative nowMs

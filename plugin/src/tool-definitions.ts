@@ -30,6 +30,7 @@ import {
 import { assertSafePathSegment } from "./validation.js";
 import { resolveAgentIdQuiet } from "./resolve-agent.js";
 import { getSpec } from "./tool-specs.js";
+import { fetchKeystonesPayload } from "./keystones.js";
 
 interface ToolResult {
   content: Array<{ type: string; text: string }>;
@@ -206,6 +207,9 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       fleet_ids: { type: "array", items: { type: "string" }, description: "Restrict to fleets" },
       include_brief: { type: "boolean", description: "Append LLM-synthesized summary paragraph" },
       top_k: { type: "integer", description: "Max results (1-200)" },
+      valid_at: { type: "string", description: "As-of ISO 8601 date or timestamp for temporal retrieval" },
+      min_similarity: { type: "number", minimum: 0, maximum: 1, description: "Override the minimum semantic similarity for this recall" },
+      diagnostic: { type: "boolean", description: "Include retrieval diagnostics without incrementing recall counts" },
     },
   },
 
@@ -254,7 +258,8 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       memory_type: WRITABLE_MEMORY_TYPE_SCHEMA,
       weight: { type: "number", description: "For op=update (0-1)" },
       title: { type: "string", description: "For op=update" },
-      metadata: { type: "object", description: "For op=update (replaces dict)" },
+      metadata: { type: "object", description: "For op=update. Merges keys by default; use metadata_mode='replace' to replace the whole dict." },
+      metadata_mode: { type: "string", enum: ["merge", "replace"], description: "For op=update with metadata. Omitted: merge keys; replace: overwrite the whole dict." },
       source_uri: { type: "string", description: "For op=update" },
       agent_id: { type: "string", description: "Caller agent ID" },
     },
@@ -343,6 +348,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     type: "object",
     required: [],
     properties: {
+      agent_id: { type: "string", description: "Agent whose retrieval defaults to tune; defaults to the configured or install-scoped identity" },
       top_k: { type: "integer", description: "Max results per search (1-200)" },
       min_similarity: { type: "number", description: "Min similarity threshold (0.1-0.9)" },
       fts_weight: { type: "number", description: "Keyword vs semantic blend (0=semantic, 1=keyword)" },
@@ -397,6 +403,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       fleet_id: { type: "string", description: "Restrict aggregate to a fleet" },
       memory_type: MEMORY_TYPE_FILTER_SCHEMA,
       status: STATUS_SCHEMA,
+      include_deleted: { type: "boolean", description: "Include deleted counts (trust 3 required for agent credentials)" },
     },
   },
 
@@ -439,6 +446,26 @@ function searchBody(params: Record<string, unknown>): Record<string, unknown> {
   }
   delete body.include_brief;
   return body;
+}
+
+// Fields of a /search or /recall response that ride along with the rows.
+const RECALL_PASSTHROUGH_FIELDS = ["recall_tracked", "warnings", "diagnostic", "_latency_ms", "_server_ms"];
+
+/**
+ * ``caura_recall``'s result: the rows once, as ``results``, with ``count``
+ * (L-163, decided 2026-10-09). The plugin used to return the whole response
+ * object, an object where MCP returns a list, and with a brief the same rows
+ * reached the agent three times. No ``items`` copy, unlike MCP: every key here
+ * is text in the agent's context. A field the server sends as null is left out.
+ */
+function rowsOnce(response: unknown, rowsKey: "items" | "memories"): Record<string, unknown> {
+  const body = (response ?? {}) as Record<string, unknown>;
+  const rows = Array.isArray(body[rowsKey]) ? (body[rowsKey] as unknown[]) : [];
+  const envelope: Record<string, unknown> = { results: rows, count: rows.length };
+  for (const key of RECALL_PASSTHROUGH_FIELDS) {
+    if (body[key] !== undefined && body[key] !== null) envelope[key] = body[key];
+  }
+  return envelope;
 }
 
 // ``caura_write`` params the SINGLE-write body accepts and the BULK envelope
@@ -491,11 +518,16 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     // principal and may narrow standard-trust reads to that agent's fleet.
     // An explicitly supplied agent_id remains present and is translated.
     const body = searchBody(await enrichBody(params, { skipAgentDefault: true }));
-    const includeBrief = Boolean(params.include_brief);
-    const results = await apiCall("POST", "/search", body, undefined, signal);
-    if (!includeBrief) return { results };
-    const brief = await apiCall("POST", "/recall", body, undefined, signal);
-    return { results, brief };
+    if (!params.include_brief) {
+      return rowsOnce(await apiCall("POST", "/search", body, undefined, signal), "items");
+    }
+    // /recall runs the search itself, so a brief is this one call (L-199),
+    // without the ``items`` copy of its rows.
+    const recalled = await apiCall("POST", "/recall", { ...body, items_alias: false }, undefined, signal);
+    const envelope = rowsOnce(recalled, "memories");
+    const { summary, memory_count, recall_ms } = (recalled ?? {}) as Record<string, unknown>;
+    envelope.brief = { summary, memory_count, recall_ms };
+    return envelope;
   },
 
   caura_write: async (params, signal) => {
@@ -578,21 +610,31 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   },
 
   caura_doc: async (params, signal) => {
-    const enriched = await enrichBody(params);
-    const op = enriched.op as DocOp;
+    const op = params.op as DocOp;
+    if (["write", "read", "query", "delete"].includes(op) &&
+        (typeof params.collection !== "string" || !params.collection.trim())) {
+      throw new Error(`[caura] caura_doc op=${op} requires a non-empty collection`);
+    }
+    // read and delete put doc_id in the path, where an omitted one became
+    // ``/documents/undefined``: a 404 that says the document does not exist,
+    // and a delete of a document named "undefined" (L-58).
+    if ((op === "read" || op === "delete") &&
+        (typeof params.doc_id !== "string" || !params.doc_id.trim())) {
+      throw new Error(`[caura] caura_doc op=${op} requires a non-empty doc_id`);
+    }
+    const enriched = await enrichBody(params, { resolveIdentity: op === "write" });
     const collection = enriched.collection as string | undefined;
     const tenant_id = enriched.tenant_id as string;
     if (op === "write") {
-      // SAFE-01: no ``agent_id``. ``DocWriteRequest`` has never declared one —
-      // the document routes take the writer's identity from the authenticated
-      // credential, not the body — so this key was accepted and dropped on
-      // every plugin-routed doc write, and POST /documents now 422s on it.
+      // DocWriteRequest records the author. Passing the resolved identity also
+      // lets apiCall select that agent's credential, as it does for caura_write.
       return apiCall("POST", "/documents", {
         tenant_id,
         collection,
         doc_id: enriched.doc_id,
         data: enriched.data,
         fleet_id: enriched.fleet_id,
+        agent_id: enriched.agent_id,
       }, undefined, signal);
     }
     if (op === "read") {
@@ -650,6 +692,11 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     for (const [k, v] of Object.entries(enriched)) {
       if (v === undefined || v === null) continue;
       query[k] = String(v);
+    }
+    // The schema says 1-50 and MCP caps there, but REST accepts up to 500, so
+    // cap here too or a plugin page could be ten times an MCP one (L-109).
+    if (query.limit !== undefined) {
+      query.limit = String(Math.min(50, Math.max(1, Number(query.limit) || 1)));
     }
     return apiCall("GET", "/memories", undefined, query, signal);
   },
@@ -725,7 +772,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
       if (k === "agent_id" && !enriched.fleet_id) continue;
       query[k] = String(v);
     }
-    return apiCall("GET", "/memclaw/keystones", undefined, query, signal); // legacy-name-floor: live compatibility route
+    return fetchKeystonesPayload(query, signal);
   },
 
 };

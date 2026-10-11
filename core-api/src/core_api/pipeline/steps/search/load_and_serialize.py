@@ -52,6 +52,8 @@ _SCORE_FACTORS = (
     "recall_boost",
     "temporal_boost",
     "status_penalty",
+    # Set by RerankResults on the rows it reordered (L-115).
+    "rerank",
 )
 
 
@@ -105,9 +107,22 @@ def _score_parts(row) -> ScoreParts | None:
     keep the field absent instead of noisy.
     """
     values = {k: getattr(row, k, None) for k in _SCORE_FACTORS}
+    values["vec_sim"] = _vec_sim(row)
     if all(v is None for v in values.values()):
         return None
     return ScoreParts(**{k: (round(float(v), 4) if v is not None else None) for k, v in values.items()})
+
+
+def _vec_sim(row) -> float | None:
+    """The row's cosine, or None for a row with no embedding (L-113).
+
+    Storage scores a missing vector 0.0, a sentinel rather than a measurement,
+    and ``has_embedding`` says which one a row carries. Serialized as 0.0 it
+    read as "unrelated" to anyone holding ``similarity`` to a threshold.
+    """
+    if getattr(row, "has_embedding", True) is False:
+        return None
+    return getattr(row, "vec_sim", None)
 
 
 class LoadAndSerialize:
@@ -119,6 +134,9 @@ class LoadAndSerialize:
         rows = list(ctx.data["filtered_rows"])
 
         # Follow supersedes chain: inject successors for outdated/conflicted memories
+        # (loser id, successor id) for each successor storage found through the
+        # loser's ``memory_conflicts`` record, not an edge (M-34).
+        recorded: list[tuple[str, str]] = []
         outdated_ids = [
             row.Memory.id if hasattr(row.Memory, "id") else row.Memory.get("id")
             for row in rows
@@ -150,18 +168,28 @@ class LoadAndSerialize:
             data = ctx.data
             tenant_id = data["tenant_id"]
 
+            # L-43 — look where the search read. A cross-tenant key's stale rows
+            # come from every readable tenant, and so do their corrections;
+            # forwarded as ClassifyQuery forwards it to the by-id load.
+            readable_tenant_ids = data.get("readable_tenant_ids")
             sc = get_storage_client()
             try:
                 successors = await sc.find_successors(
                     {
                         "supersedes_ids": [str(oid) for oid in outdated_ids],
                         "tenant_id": tenant_id,
+                        "readable_tenant_ids": (
+                            readable_tenant_ids
+                            if readable_tenant_ids and readable_tenant_ids != [tenant_id]
+                            else None
+                        ),
                         "fleet_ids": data.get("fleet_ids"),
                         # C27 — a successor is injected straight into the result
                         # set, so an unscoped lookup here would reintroduce
                         # exactly what the scored query just excluded.
                         "strict_fleet_scoping": bool(data.get("strict_fleet_scoping")),
                         "caller_agent_id": data.get("caller_agent_id"),
+                        "caller_tenant_id": data.get("caller_tenant_id"),
                         "filter_agent_id": data.get("filter_agent_id"),
                         "memory_type_filter": data.get("memory_type_filter"),
                         "valid_at": str(data["valid_at"]) if data.get("valid_at") else None,
@@ -192,7 +220,12 @@ class LoadAndSerialize:
             # exists to prevent.
             newest_by_predecessor: dict[str, dict] = {}
             for successor in successors:
-                predecessor_id = str(successor.get("supersedes_id"))
+                # ``successor_of`` names the row it replaced: its
+                # ``supersedes_id``, or for a contradiction's further loser,
+                # which no edge names, the loser its record names (M-34).
+                predecessor_id = str(successor.get("successor_of") or successor.get("supersedes_id"))
+                if predecessor_id != str(successor.get("supersedes_id")):
+                    recorded.append((predecessor_id, str(successor.get("id"))))
                 incumbent = newest_by_predecessor.get(predecessor_id)
                 if incumbent is None or _successor_recency(successor) > _successor_recency(incumbent):
                     newest_by_predecessor[predecessor_id] = successor
@@ -237,12 +270,18 @@ class LoadAndSerialize:
         # earned position (it is reached first in the walk). Chains
         # (C supersedes B supersedes A) resolve newest-first via recursion.
         # No new wire fields: ``supersedes_id`` names the loser, its
-        # ``status`` says why it lost.
+        # ``status`` says why it lost. A loser no edge names (M-34) is paired
+        # with the successor storage found through its record, and the
+        # adjacency alone says so.
         succ_of: dict[str, list] = {}
         for row in rows:
             sup = _mem_field(row.Memory, "supersedes_id")
             if sup:
                 succ_of.setdefault(str(sup), []).append(row)
+        by_id = {str(_mem_field(row.Memory, "id")): row for row in rows}
+        for predecessor_id, successor_id in recorded:
+            if predecessor_id in by_id and successor_id in by_id:
+                succ_of.setdefault(predecessor_id, []).append(by_id[successor_id])
         if succ_of:
             placed: set[str] = set()
             reordered: list = []
@@ -276,8 +315,8 @@ class LoadAndSerialize:
                 # untuned global fallback; configured floors stay strict. Rank
                 # order is unchanged (rows are already ordered by ``score``
                 # upstream). None for FTS-only hits, which have no vector
-                # similarity.
-                similarity=(round(float(row.vec_sim), 4) if row.vec_sim is not None else None),
+                # similarity, and for rows with no embedding at all.
+                similarity=(round(float(sim), 4) if (sim := _vec_sim(row)) is not None else None),
                 # D12 — the composite that ordered this row, and its factors.
                 # The storage SQL has always computed these per row; this is the
                 # first place they survive serialization. None end-to-end for

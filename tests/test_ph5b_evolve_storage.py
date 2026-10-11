@@ -159,6 +159,40 @@ async def test_filter_scope_all_keeps_everything_in_tenant(sc):
     assert set(allowed) == {m1, m2}
 
 
+@pytest.mark.parametrize("scope", ["fleet", "all"])
+async def test_filter_wide_scopes_drop_other_agents_private_rows(sc, scope):
+    """fleet/all name no author, so the visibility rule is what keeps a peer's
+    ``scope_agent`` row out — its content would otherwise reach the rule
+    prompt and be summarised into a team/org-visible rule. The caller's own
+    private row and shared rows stay."""
+    tenant = _t()
+    shared = await _seed_memory(
+        tenant_id=tenant, agent_id="b", fleet_id="fx", content="shared"
+    )
+    own_private = await _seed_memory(
+        tenant_id=tenant,
+        agent_id="a",
+        fleet_id="fx",
+        content="mine",
+        visibility="scope_agent",
+    )
+    peer_private = await _seed_memory(
+        tenant_id=tenant,
+        agent_id="b",
+        fleet_id="fx",
+        content="peer secret",
+        visibility="scope_agent",
+    )
+    allowed = await sc.evolve_filter_by_scope(
+        tenant_id=tenant,
+        caller_agent_id="a",
+        fleet_id="fx" if scope == "fleet" else None,
+        scope=scope,
+        ids=[shared, own_private, peer_private],
+    )
+    assert set(allowed) == {shared, own_private}
+
+
 async def test_filter_drops_soft_deleted_and_missing(sc):
     tenant = _t()
     mine = await _seed_memory(tenant_id=tenant, agent_id="a", content="mine")

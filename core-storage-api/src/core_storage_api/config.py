@@ -151,6 +151,10 @@ class Settings(BaseSettings):
     # the middleware rejects every HTTP request until a value is configured.
     core_storage_shared_secret: SecretStr = Field(default=SecretStr(""), repr=False, exclude=True)
     core_storage_shared_secret_file: str = ""
+    # ``GET /_debug/pg_locks`` (contention triage) answers only when this is on
+    # (L-75). Off by default: it reads session state from pg_stat_activity, so
+    # turn it on for a load test or an incident and back off afterwards.
+    core_storage_debug_endpoints: bool = False
 
     @model_validator(mode="after")
     def resolve_core_storage_shared_secret(self) -> Settings:

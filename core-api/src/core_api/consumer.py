@@ -16,12 +16,15 @@ The detector is idempotent under repeated calls on the same row, so
 the rare case where both events trigger detection back-to-back doesn't
 double-write contradiction rows.
 
-Atomic-fact fan-out (parent → child memories) is intentionally not
-handled here. The worker drops ``EnrichmentResult.atomic_facts``
-entirely (see ``_ENRICHMENT_UNROUTED_FIELDS`` in
-``core-worker/src/core_worker/consumer.py``), so they never reach
-storage. Persisting them at the worker side and fanning out from a
-storage fetch is a separate piece of work.
+Atomic-fact fan-out (parent → child memories) IS handled here, by
+:func:`_fan_out_persisted_atomic_facts` under the ``ENRICHED`` handler.
+This paragraph used to say the opposite — that the worker dropped
+``EnrichmentResult.atomic_facts`` entirely so they never reached storage
+— which stopped being true at A70 (#1424 persisted them, #1430 wired up
+this consumer, both 2026-09-09) while the text stayed. The worker now
+routes the facts into the row's metadata and publishes ``ENRICHED``;
+this side reads them back off the row and creates the children through
+the same ``fan_out_atomic_facts`` the synchronous path uses.
 """
 
 from __future__ import annotations
@@ -43,8 +46,13 @@ from core_api.services.governance_remediation import (
     GovernanceCascadeError,
     remediate_after_enrichment,
 )
-from core_api.services.memory_service import _resolve_parent_weight, fan_out_atomic_facts
+from core_api.services.memory_service import (
+    _FANOUT_STRANDED_TASK,
+    _resolve_parent_weight,
+    fan_out_atomic_facts,
+)
 from core_api.services.organization_settings import invalidate_cache, resolve_config
+from core_api.services.task_tracker import record_task_failure
 
 logger = logging.getLogger(__name__)
 
@@ -100,15 +108,21 @@ async def _fan_out_persisted_atomic_facts(sc, memory: dict, payload, outcome) ->
                 parent_weight=_resolve_parent_weight(memory.get("weight")),
                 parent_ts_start=memory.get("ts_valid_start"),
                 tenant_config=await resolve_config(payload.tenant_id),
+                parent_expires_at=memory.get("expires_at"),
+                parent_run_id=memory.get("run_id"),
+                parent_source_uri=memory.get("source_uri"),
             )
-        except Exception:
+        except Exception as exc:
             # Marker deliberately left in place: the facts are still stored, so a
             # redelivery or a later re-enrichment can retry, and the fan-out's own
-            # live-hash dedup stops a retry duplicating whatever did land.
+            # live-hash dedup stops a retry duplicating whatever did land. Nothing
+            # schedules either, though: the handler goes on and acks. So the
+            # failure is recorded as the inline fan-out's is, under the same name.
             logger.exception(
                 "memory-enriched: atomic-fact fan-out failed; facts left in metadata for retry",
                 extra={"memory_id": str(payload.memory_id), "tenant_id": payload.tenant_id},
             )
+            await record_task_failure(_FANOUT_STRANDED_TASK, payload.memory_id, payload.tenant_id, exc)
             return
         logger.info(
             "memory-enriched: atomic-fact fan-out created=%d deduped=%d unembedded=%d",

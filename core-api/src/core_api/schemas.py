@@ -7,6 +7,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, create_model, m
 from common.constants import AGENT_TUNABLE_KEYS, SEARCH_KNOBS
 from core_api.constants import (
     BULK_MAX_ITEMS,
+    CALLER_METADATA_DESCRIPTION,
     DEFAULT_MEMORY_TYPE,
     DEFAULT_SEARCH_TOP_K,
     EXPIRES_AT_DESCRIPTION,
@@ -166,7 +167,7 @@ class MemoryCreate(TenantScopedBody):
     weight: float | None = Field(default=None, ge=0.0, le=1.0)
     source_uri: str | None = None
     run_id: str | None = None
-    metadata: dict | None = None
+    metadata: dict | None = Field(default=None, description=CALLER_METADATA_DESCRIPTION)
     entity_links: list[EntityLinkIn] = []
     expires_at: datetime | None = Field(default=None, description=EXPIRES_AT_DESCRIPTION)
     # RDF triple
@@ -400,7 +401,7 @@ class MemoryUpdate(BaseModel):
     title: str | None = None
     status: str | None = Field(default=None, pattern=MEMORY_STATUSES_PATTERN)
     visibility: str | None = Field(default=None, pattern=MEMORY_VISIBILITIES_PATTERN)
-    metadata: dict | None = None
+    metadata: dict | None = Field(default=None, description=CALLER_METADATA_DESCRIPTION)
     metadata_mode: str | None = Field(
         default=None,
         pattern="^(merge|replace)$",
@@ -475,6 +476,9 @@ class ScoreParts(BaseModel):
     returns per row; this model only surfaces them. All fields are nullable:
     FTS-only rows have no ``vec_sim``, entity-lookup short-circuit rows have no
     FTS rank, and successor-injected rows were never scored at all.
+
+    ``rerank`` is the second-stage reranker's score, set only on rows it
+    reordered. ``MemoryOut.score`` stays the first-stage composite.
     """
 
     vec_sim: float | None = None
@@ -484,6 +488,7 @@ class ScoreParts(BaseModel):
     recall_boost: float | None = None
     temporal_boost: float | None = None
     status_penalty: float | None = None
+    rerank: float | None = None
 
 
 class MemoryOut(BaseModel):
@@ -523,9 +528,12 @@ class MemoryOut(BaseModel):
     # `BulkMemoryItem.write_mode` is narrower: there 'strong' governs the
     # embedding only and enrichment defers either way. ax-0917-h-06: the bulk
     # path now DOES set `embedding_pending` on items written without a vector,
-    # so a bulk caller can read pendingness off its own write response. It
-    # still sets no `enrichment_pending`, because bulk enrichment defers
-    # unconditionally — there is no inline case for that flag to distinguish.
+    # so a bulk caller can read pendingness off its own write response.
+    # lme-0929-m-03: it now also sets `enrichment_pending` when the deployment
+    # defers enrichment (the case it publishes ENRICH_REQUESTED for), so the
+    # store-level `GET /memories/stats` `pending.enrichment` count can see bulk
+    # rows; an inline-enriching deployment enriches bulk items inline and sets
+    # neither.
     metadata: dict | None
     # C25 — platform-written telemetry/enrichment (llm_ms, write_latency_ms,
     # semantic_dedup_ms, summary, tags, pii flags, write-mode flags …) exposed
@@ -545,7 +553,9 @@ class MemoryOut(BaseModel):
     # cosine (the ``min_similarity``-comparable value); ``score`` routinely
     # exceeds 1.0 and is for explaining rank, not for threshold gating.
     # Populated only on scored-search hits; None on list/get reads and on
-    # successor-injected rows, which were never scored.
+    # successor-injected rows, which were never scored. With reranking on it
+    # is still the first-stage composite, and ``score_parts.rerank`` holds the
+    # score that ordered the row (L-115).
     score: float | None = None
     score_parts: ScoreParts | None = None
     # D16 — true when the row was not matched by the query but injected as the
@@ -685,6 +695,31 @@ class ContradictionInfo(BaseModel):
 class PaginatedMemoryResponse(BaseModel):
     items: list[MemoryOut]
     next_cursor: str | None = None
+
+
+class HeldMemoryPage(BaseModel):
+    """A page of the review queue of held memories (g2.9)."""
+
+    items: list[MemoryOut]
+    next_cursor: str | None = None
+    total: int = Field(
+        description="Held memories in the queue, or in the session asked for; not only this page."
+    )
+
+
+class SessionRollbackRequest(BaseModel):
+    session_id: str = Field(
+        min_length=1, max_length=200, description="The broker session whose writes to undo."
+    )
+
+
+class SessionRollbackResponse(BaseModel):
+    """What a session rollback changed (g2.9)."""
+
+    session_id: str
+    outdated: list[str] = Field(description="Live memories, and the rows derived from them, now outdated.")
+    restored: list[str] = Field(description="Memories those had superseded or contradicted, active again.")
+    cancelled: list[str] = Field(description="Held memories, now rejected.")
 
 
 class SearchDiagnostic(BaseModel):
@@ -867,8 +902,8 @@ class SearchResponse(BaseModel):
             "returned. False means they were not reinforced: the caller "
             "presented no agent identity (a tenant-scoped key that did not set "
             "filter_agent_id — recall_count stays 0 for that caller and "
-            "recall_boost never engages), the call set diagnostic=true, or "
-            "nothing matched."
+            "recall_boost never engages), the call set diagnostic=true or "
+            "recall_boost=false, or nothing matched."
         ),
     )
     # D12 — present only when the request set ``diagnostic=true``.
@@ -1035,6 +1070,79 @@ class SearchRequest(TenantScopedBody):
     # (full candidate set, score factors, exclusion reasons, applied knobs).
     # Results are unchanged and no recall_count is bumped on a diagnostic call.
     diagnostic: bool = False
+    # pm-0918-c-03. Inherited by ``RecallRequest`` below, deliberately: /recall
+    # summarises these rows into a brief, so a short fragment restating its
+    # parent costs brief tokens on exactly the surface where they are scarcest.
+    include_derived: bool | None = Field(
+        default=None,
+        description=(
+            "Whether to return atomic-fact fan-out children — short single-claim "
+            "rows the platform derives from a memory you wrote, which stay "
+            "retrievable alongside it. Omit to inherit the tenant's "
+            "search.include_derived setting, which in turn falls back to the "
+            "global default (currently true). Precedence: this field beats the "
+            "tenant setting beats the global default. Excluded rows are dropped "
+            "BEFORE the top_k trim, so top_k still returns top_k rows. Does not "
+            "affect auto-chunk children, which are the only sub-document vectors "
+            "a long document has. REST only: the MCP tools do not expose this "
+            "per request — an MCP caller sets the tenant's search.include_derived "
+            "instead, and an unknown argument sent to an MCP tool is dropped "
+            "silently rather than reported (oss-0923-h-01)."
+        ),
+    )
+    # ``bool | None``, not ``bool = True``. The tri-state is load-bearing: the
+    # tenant setting can turn derived rows off store-wide, and a caller that
+    # wants them back needs to be able to say ``true`` in a way that is
+    # distinguishable from not asking. A plain ``bool`` default would make every
+    # request an explicit vote and the tenant setting would never be consulted.
+    #
+    # NOTE for a caller on an older server: this model is ``extra="allow"``, so a
+    # server that predates this field does not reject the key — it lands in
+    # ``model_extra`` and comes back in ``SearchResponse.warnings`` as a name the
+    # endpoint does not read (ax-0917-h-05). A server older than THAT discards it
+    # silently. Check the warnings rather than assuming the filter applied.
+
+    # lme-0929-h-01 (SIDE-54) — per-request "plain hybrid ranking" knobs. Both
+    # are OPT-OUT only: ``None`` (and ``true``) leave the tenant/profile
+    # behaviour exactly as it was; ``false`` neutralises that factor for THIS
+    # call. A request cannot switch a factor ON over a tenant that disabled it
+    # — the tenant setting stays the ceiling, the request can only subtract.
+    #
+    # Why they exist: every returned row gets ``recall_count + 1`` and
+    # ``recall_boost`` then ranks it higher next time, and the entity boost
+    # reorders on top of that, so re-running the same query on the same store
+    # returns a different order each run. Before these, the only way out was a
+    # tenant setting or a search profile — store-wide, for a need that is
+    # per-call (a benchmark, an A/B, a reproducibility check).
+    #
+    # ``recall_boost=false`` ALSO skips the ``recall_count`` bump for this
+    # call: a plain read that still reinforced its rows would neutralise the
+    # boost for itself while feeding it for every later caller — the exact
+    # run-to-run drift the knob is meant to remove.
+    recall_boost: bool | None = Field(
+        default=None,
+        description=(
+            "Set false for this call only to neutralise the popularity "
+            "recall_boost factor (score multiplier fixed at 1.0) AND to skip "
+            "the recall_count bump for the returned rows, so the read neither "
+            "uses nor feeds the recall signal (the response reports "
+            "recall_tracked: false). Omit (or true) for the tenant's behaviour; "
+            "a request cannot enable the boost over a tenant that disabled it. "
+            "REST only: the MCP tools do not expose this per request."
+        ),
+    )
+    entity_boost: bool | None = Field(
+        default=None,
+        description=(
+            "Set false for this call only to rank by the plain hybrid "
+            "(vector + full-text) score: entity/graph retrieval is skipped, so "
+            "no entity boost multiplier is applied and the ENTITY_LOOKUP "
+            "short-circuit cannot fire. Omit (or true) for the tenant's "
+            "search.entity_retrieval behaviour; a request cannot enable entity "
+            "retrieval over a tenant that disabled it. REST only: the MCP tools "
+            "do not expose this per request."
+        ),
+    )
 
 
 class RecallRequest(SearchRequest):
@@ -1112,7 +1220,11 @@ class RelationUpsert(TenantScopedBody):
     from_entity_id: UUID
     relation_type: str
     to_entity_id: UUID
-    weight: float = Field(default=1.0, ge=0.0, le=1.0)
+    # L-49. Optional: omitted, a new relation starts at 1.0 and an existing one
+    # keeps the weight it has. A 1.0 default meant every re-upsert, including
+    # every extraction, overwrote the graded weight ``entity_infer_relations``
+    # had built up.
+    weight: float | None = Field(default=None, ge=0.0, le=1.0)
     evidence_memory_id: UUID | None = None
 
 
@@ -1206,6 +1318,15 @@ class AgentTrustUpdate(BaseModel):
 
     trust_level: int = Field(ge=MIN_TRUST_LEVEL, le=MAX_TRUST_LEVEL)
     fleet_id: str | None = None
+
+
+class AgentFleetUpdate(BaseModel):
+    """``PATCH /agents/{id}/fleet``. Typed so a non-string ``fleet_id`` is a 422
+    here, not a storage failure reported as a retryable 503 (L-20)."""
+
+    model_config = STRICT_WRITE_BODY
+
+    fleet_id: str = Field(min_length=1)
 
 
 # Derived from ``SEARCH_KNOBS`` rather than written out. The fields and their

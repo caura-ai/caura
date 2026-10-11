@@ -74,10 +74,11 @@ async def test_batch_write_bills_one_unit_per_item_when_enabled(
     assert tenant_id == mcp_env["tenant"]
 
 
-async def test_billing_happens_before_the_write(mcp_env, bulk_meter, monkeypatch):
-    """REST charges before the write, so a batch that fails partway still costs
-    what it attempted. Two orderings for one operation across two surfaces is
-    the drift this area keeps producing, so the ordering is pinned, not assumed.
+async def test_billing_happens_after_the_write(mcp_env, bulk_meter, monkeypatch):
+    """REST bulk charges after the write, so a batch that raised costs nothing
+    and a retried one is not billed per attempt. Two orderings for one
+    operation across two surfaces is the drift this area keeps producing, so the
+    ordering is pinned, not assumed.
     """
     monkeypatch.setattr(settings, "meter_mcp_bulk_writes", True)
     order: list[str] = []
@@ -91,7 +92,24 @@ async def test_billing_happens_before_the_write(mcp_env, bulk_meter, monkeypatch
 
     await mcp_server.caura_write(items=[{"content": "one"}])
 
-    assert order == ["meter", "write"]
+    assert order == ["write", "meter"]
+
+
+async def test_a_batch_that_raised_is_not_billed(mcp_env, bulk_meter, monkeypatch):
+    """Each MCP retry mints a fresh attempt id, so a batch that cannot be
+    written used to be charged once per retry while writing nothing."""
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(settings, "meter_mcp_bulk_writes", True)
+    mcp_env["service"]("create_memories_bulk").side_effect = HTTPException(
+        status_code=504, detail="storage timed out"
+    )
+
+    for _ in range(3):
+        out = await mcp_server.caura_write(items=[{"content": "one"}])
+        assert "error" in parse_envelope(out)
+
+    bulk_meter.assert_not_awaited()
 
 
 async def test_the_single_write_path_is_untouched(mcp_env, bulk_meter, monkeypatch):

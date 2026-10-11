@@ -89,8 +89,15 @@ def test_the_documented_contract_no_longer_says_bulk_is_exempt():
     assert "the bulk path sets neither" not in src
 
 
-def test_enrichment_pending_is_still_not_claimed_for_bulk():
-    """Bulk enrichment defers unconditionally, so there is no inline case for
-    that flag to distinguish — setting it would be noise, not signal."""
+def test_enrichment_pending_is_claimed_only_when_enrichment_is_deferred():
+    """lme-0929-m-03 reversed the earlier "never for bulk" rule. Its premise —
+    bulk enrichment always defers — was wrong: an inline deployment enriches
+    bulk items synchronously, so an absent key cannot distinguish "enriched" from
+    "still queued". The flag is now set on exactly the condition the publisher
+    fires on, via the same helper the auto-chunk parent uses, so it never marks
+    a row whose enrichment nobody will run (a marker that never clears)."""
     code = _bulk_code()
-    assert "enrichment_pending" not in code
+    idx = code.index("enrichment_pending")
+    window = code[max(0, idx - 200) : idx]
+    assert "_enrichment_backfill_needed(enrichment, tenant_config)" in window
+    assert "set_system_value" in code[max(0, idx - 100) : idx + 60]

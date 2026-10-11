@@ -11,14 +11,16 @@
 ARG DD_APM_ENABLED=false
 # Pinned by digest (tag :1 floats) so the embedded binary is reproducible.
 # datadog/serverless-init:1 as of 2026-06-30; bump deliberately.
-FROM datadog/serverless-init:1@sha256:f4943347f155505156ba5f594317ea64b59678b3a6522e8c0993581af20956ff AS dd-bin
-FROM python:3.12-slim AS dd-apm-true
+FROM datadog/serverless-init:1@sha256:161423dc6fc3d55e20902c3f5818cef104a4849277b4d84c236fef7ecae0619f AS dd-bin
+# python:3.12-slim (3.12.15 on 2026-10-07) and uv are pinned by digest, as their
+# tags move (L-67); Dependabot's docker updates propose each new digest.
+FROM python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f AS dd-apm-true
 COPY --from=dd-bin /datadog-init /dd/datadog-init
-FROM python:3.12-slim AS dd-apm-false
+FROM python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f AS dd-apm-false
 RUN mkdir -p /dd
 FROM dd-apm-${DD_APM_ENABLED} AS dd-apm-src
 
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f AS builder
 
 WORKDIR /app
 
@@ -35,7 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # when EVENT_BUS_BACKEND=pubsub; lazily imported otherwise). The export keeps the
 # per-package hashes from uv.lock, so `uv pip install` enters require-hashes mode
 # and verifies every downloaded wheel against the lock (supply-chain integrity).
-COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.9.18@sha256:5713fa8217f92b80223bc83aac7db36ec80a84437dbc0d04bbc659cae030d8c9 /uv /usr/local/bin/uv
 COPY core-api/pyproject.toml core-api/uv.lock core-api/README.md* ./core-api/
 # Dummy src so the project metadata resolves during export.
 RUN mkdir -p core-api/src/core_api && touch core-api/src/core_api/__init__.py
@@ -86,7 +88,7 @@ COPY static/ /app/static/
 
 
 # ── Production image ──
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
@@ -141,4 +143,11 @@ ENTRYPOINT ["/app/docker-entrypoint.sh"]
 # it. This is defence in depth, not the primary fix for the staging
 # crash-loop; that is the missing --no-cpu-throttling on the Cloud Run
 # service (caura-enterprise#1321).
-CMD ["python", "-m", "common.serve", "core_api.app:app", "--settings", "core_api.config:settings", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "65", "--timeout-worker-healthcheck", "30"]
+#
+# The worker count lives in WEB_CONCURRENCY rather than in the CMD (L-35):
+# core-api reads it (``Settings.web_concurrency``) to refuse in-memory STM
+# across workers, and nothing else tells a worker how many siblings it has.
+# Override it at deploy time to change the count. The CMD runs in a shell only
+# to expand it; ``exec`` then replaces the shell with python.
+ENV WEB_CONCURRENCY=2
+CMD ["/bin/sh", "-c", "exec python -m common.serve core_api.app:app --settings core_api.config:settings --host 0.0.0.0 --port 8000 --workers \"${WEB_CONCURRENCY}\" --timeout-keep-alive 65 --timeout-worker-healthcheck 30"]

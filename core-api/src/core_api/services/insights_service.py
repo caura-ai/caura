@@ -654,6 +654,24 @@ async def _run_llm_analysis(prompt: str, config) -> dict:
     )
 
 
+# L-134 — the ``skipped_reason`` an insights result carries when no LLM answered,
+# so a caller can tell an outage from "nothing found" without reading the prose
+# summary, and the nightly run can record a failure instead of a success.
+SKIPPED_LLM_UNAVAILABLE = "llm_unavailable"
+# Marks ``_skip_insights``' result. An object rather than a string so that a
+# model whose JSON happens to carry the same key cannot claim an outage.
+_LLM_UNAVAILABLE = object()
+
+
+def skipped_reason_of(synth: dict) -> dict:
+    """``{"skipped_reason": ...}`` for a skipped synthesis, else ``{}``.
+
+    Spread into the REST and MCP results so both say the same thing.
+    """
+    reason = synth.get("skipped_reason")
+    return {"skipped_reason": reason} if reason else {}
+
+
 def _skip_insights() -> dict:
     """No-LLM analysis: no findings, so priors are left standing.
 
@@ -667,7 +685,11 @@ def _skip_insights() -> dict:
     persist would leave the user with neither.
     """
     logger.warning("insights: no LLM — no findings, prior insights left intact")
-    return {"findings": [], "summary": "Analysis unavailable (no LLM provider answered)."}
+    return {
+        "findings": [],
+        "summary": "Analysis unavailable (no LLM provider answered).",
+        "llm_unavailable": _LLM_UNAVAILABLE,
+    }
 
 
 def _fake_insights() -> dict:
@@ -1144,6 +1166,8 @@ async def synthesize_insights(
       - ``findings``: list of sanitized finding dicts
       - ``summary``: LLM-emitted overall summary string
       - ``memories_analyzed``: count of memories that fed the prompt
+      - ``skipped_reason``: ``"llm_unavailable"`` when no LLM answered
+        (L-134); absent when the analysis ran
     """
     prompt_template = _PROMPT_DISPATCH[focus]
     if is_clustered:
@@ -1162,6 +1186,7 @@ async def synthesize_insights(
     prompt = prompt_template.format(memories=memories_text, count=count)
 
     analysis = await _run_llm_analysis(prompt, config)
+    llm_unavailable = analysis.get("llm_unavailable") is _LLM_UNAVAILABLE
     sanitized, summary = _sanitize_findings(analysis, shown_ids, focus=focus, scope=scope)
 
     # Sharpness gate + one self-repair retry: quote the violations back to
@@ -1273,6 +1298,7 @@ async def synthesize_insights(
         "summary": summary,
         "memories_analyzed": count,
         "gate_rejected": gate_rejected,
+        **({"skipped_reason": SKIPPED_LLM_UNAVAILABLE} if llm_unavailable else {}),
     }
 
 
@@ -1297,7 +1323,16 @@ def _sanitize_findings(
     for f in findings:
         if not isinstance(f, dict):
             continue
-        raw_related = [str(rid) for rid in f.get("related_memory_ids", []) if rid]
+        # Model output: the prompt shows a list, but a model may answer null for
+        # "none", or one bare id. Iterating null raised TypeError after the LLM
+        # call was paid for and failed the whole run, and a bare id was iterated
+        # character by character and dropped (M-49).
+        related = f.get("related_memory_ids")
+        if isinstance(related, str):
+            related = [related]
+        elif not isinstance(related, list):
+            related = []
+        raw_related = [str(rid) for rid in related if rid]
         kept_related = [rid for rid in raw_related if rid in shown_ids]
         dropped = len(raw_related) - len(kept_related)
         if dropped > 0:
@@ -1450,4 +1485,5 @@ async def generate_insights(
         "insight_memory_ids": [mid for mid in insight_ids if mid],
         "gate_rejected": synth.get("gate_rejected", 0),
         "insights_ms": int((time.perf_counter() - t0) * 1000),
+        **skipped_reason_of(synth),
     }

@@ -1,7 +1,7 @@
 """Agent trust-level enforcement for fleet-scoped access control."""
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -27,14 +27,28 @@ async def get_or_create_agent(
     agent_id: str,
     fleet_id: str | None = None,
     *,
-    require_approval: bool = False,
+    require_approval: bool | None = None,
     display_name: str | None = None,
     install_id: str | None = None,
     owner_install_uuid: str | None = None,
+    registration_ctx: dict | None = None,
+    known: dict | None = None,
 ) -> dict:
     """Return the agent dict, creating it on first encounter.
 
     The storage API handles upsert semantics and race-condition safety.
+
+    ``require_approval`` decides the trust level of a NEWLY created row (0 =
+    awaiting admin approval, else ``DEFAULT_TRUST_LEVEL``). ``None`` — the
+    default — reads the tenant's ``agents.require_agent_approval`` setting, so
+    every first-touch path (search / recall identity resolution, the fleet
+    heartbeat roster, ``caura_tune``, ``enforce_fleet_write``, the doc-memory
+    mint) registers an agent the way the tenant asked for. Registration is a
+    one-shot decision: a row created at trust 1 by a read path would otherwise
+    walk straight past the approval check on the next gated write. Pass an
+    explicit bool only where a caller has deliberately decided otherwise (REST
+    bulk — see ``_write_memories_bulk_inner``). An existing row is returned
+    unchanged either way; the setting is consulted on the create branch only.
 
     ``display_name`` and ``install_id`` (Task 6) are accepted optionally
     on every call. On creation they're persisted; on lookup of an
@@ -42,10 +56,36 @@ async def get_or_create_agent(
     differs (so a renamed machine propagates) and ``install_id`` is
     backfilled when previously NULL but never overwritten — the
     install identity is stable for the row's lifetime.
+
+    ``registration_ctx`` (CAURA-723): an out-dict, in the same shape as
+    ``diagnostic_ctx`` / ``warnings_ctx`` / ``recall_ctx`` elsewhere. Receives
+    ``{"preexisted": bool}`` — whether a row was already there before this
+    call. Free: the lookup below runs regardless, and this only stops the
+    answer being thrown away.
+
+    The read paths need it because they call this function and then, on an
+    empty result, want to say WHY. By that point the row exists whether or not
+    it did a moment ago, so asking afterwards would report every typo as a
+    registered agent. An out-dict rather than a changed return type so the
+    other seven callers stay untouched.
+
+    ``known`` is this agent's row as the caller read it from the replica
+    moments ago in the same request, used in place of the lookup below (L-178):
+    ``resolve_write_agent`` passes the one the broker ownership gate read. Only
+    a found row is passed, as a miss must still be confirmed on the primary.
     """
     sc = get_storage_client()
     agent_id = canonical_service_agent_id(agent_id)
-    agent = await sc.get_agent(agent_id, tenant_id)
+    if "/" in agent_id:
+        # Storage addresses an agent by one path segment, and the server
+        # decodes an escaped "/" before routing, so this id could never be
+        # looked up: every call would take the create path below, resetting
+        # trust and auditing a fresh registration each time (M-13).
+        raise HTTPException(
+            status_code=422,
+            detail=f"agent_id '{agent_id}' must not contain '/'; use '-' or '.' to group agents.",
+        )
+    agent = known if known is not None else await sc.get_agent(agent_id, tenant_id)
     if agent is None:
         # Confirm a MISS against the primary before creating. A miss is the
         # only dangerous answer here: it sends this call down the create path,
@@ -70,6 +110,14 @@ async def get_or_create_agent(
         # path would move that whole population off the replica to fix a case
         # that already ends in a write.
         agent = await sc.get_agent(agent_id, tenant_id, read=False)
+    if registration_ctx is not None:
+        # AFTER the primary re-check above, never before it. A replica miss is
+        # not authoritative — that is the whole point of the re-query — so
+        # reading the flag off the reader's answer would report an existing
+        # agent as new, which is the one way this signal can lie in the
+        # direction that matters (CAURA-723 uses it to decide whether an id is
+        # unknown or merely empty).
+        registration_ctx["preexisted"] = agent is not None
     if agent:
         # Backfill fleet_id if the agent was registered without one,
         # refresh display_name when it differs (hostname change), and
@@ -106,6 +154,12 @@ async def get_or_create_agent(
     #   - leaves the legacy row intact so its memories stay queryable
     #     under ``agent_id="main"`` for admin recovery; operators
     #     decide later whether to delete or keep as archive
+    if require_approval is None:
+        # Create branch only — a hit above never pays for the settings read,
+        # and ``resolve_config`` is TTL-cached per tenant besides.
+        from core_api.services.organization_settings import resolve_config
+
+        require_approval = (await resolve_config(tenant_id)).require_agent_approval
     inherited_trust: int | None = None
     inherited_search_profile: dict[str, Any] | None = None
     if not require_approval and install_id is not None and agent_id == f"main-{install_id}":
@@ -183,7 +237,13 @@ def _owned_by_other_install(owner_install_uuid: str | None, install_uuid: str | 
     return owner_install_uuid is not None and owner_install_uuid != install_uuid
 
 
-async def broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id: str) -> AgentIdentity:
+async def broker_owned_agent_id(
+    chosen: str,
+    install_uuid: str | None,
+    tenant_id: str,
+    *,
+    row_ctx: dict | None = None,
+) -> AgentIdentity:
     """Lenient ownership gate over a broker write's chosen agent id.
 
     A broker write may be attributed to an agent named by the caller (REST item
@@ -201,6 +261,11 @@ async def broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id
       - ``owner_install_uuid`` is NULL  -> keep (unclaimed; this write claims it)
       - owned by THIS install           -> keep
       - owned by a DIFFERENT install    -> degrade to ``broker:<install>``
+
+    ``row_ctx`` is an out-dict, as ``registration_ctx`` is for
+    ``get_or_create_agent``. When the gate keeps an existing agent it receives
+    ``{"row": <that agent's row>}``, so the write registering it need not read
+    it again (L-178).
     """
     # No install identity means there is nothing to enforce ownership against:
     # the gateway couples ``x-caura-credential-kind`` with ``x-install-uuid`` behind
@@ -236,6 +301,8 @@ async def broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id
         return AgentIdentity(chosen)
     if _owned_by_other_install(owner.get("owner_install_uuid"), install_uuid):
         return AgentIdentity(fallback)
+    if row_ctx is not None:
+        row_ctx["row"] = owner
     return AgentIdentity(chosen)
 
 
@@ -271,7 +338,7 @@ async def resolve_write_agent(
     *,
     is_install_credential: bool,
     install_uuid: str | None,
-    require_approval: bool = False,
+    require_approval: bool | None = None,
 ) -> tuple[dict, AgentIdentity]:
     """Resolve the agent a write is attributed to, enforcing the broker
     ownership boundary, and return ``(agent_row, safe_agent_id)``.
@@ -294,10 +361,17 @@ async def resolve_write_agent(
     ``get_or_create_agent`` unchanged — the stamp and gate are broker-only, keyed
     on ``is_install_credential`` (a stray ``install_uuid`` without the credential
     kind is ignored).
+
+    The returned row is what a write's ``enforce_fleet_write`` should be handed,
+    so the request reads the agent once (L-178). A broker write's gate already
+    read the row it keeps, and registration reuses that read.
     """
     chosen_agent_id = canonical_service_agent_id(chosen_agent_id)
+    gate_ctx: dict = {}
     if is_install_credential:
-        chosen_agent_id = await broker_owned_agent_id(chosen_agent_id, install_uuid, tenant_id)
+        chosen_agent_id = await broker_owned_agent_id(
+            chosen_agent_id, install_uuid, tenant_id, row_ctx=gate_ctx
+        )
     agent = await get_or_create_agent(
         tenant_id,
         chosen_agent_id,
@@ -306,6 +380,7 @@ async def resolve_write_agent(
         # Stamp ownership only for broker writes — never rely on the gateway
         # happening to omit x-install-uuid for non-broker callers.
         owner_install_uuid=install_uuid if is_install_credential else None,
+        known=gate_ctx.get("row"),
     )
     if (
         is_install_credential
@@ -327,9 +402,17 @@ async def enforce_fleet_write(
     tenant_id: str,
     agent_id: str,
     fleet_id: str | None,
+    *,
+    agent: dict | None = None,
 ) -> dict:
-    """Enforce write permissions. Returns the agent (auto-created if new)."""
-    agent = await get_or_create_agent(tenant_id, agent_id, fleet_id)
+    """Enforce write permissions. Returns the agent (auto-created if new).
+
+    ``agent`` is the row ``resolve_write_agent`` returned for ``agent_id`` in
+    the same request. The gate reads only its ``fleet_id`` and ``trust_level``,
+    so it is used rather than looked up a second time (L-178).
+    """
+    if agent is None:
+        agent = await get_or_create_agent(tenant_id, agent_id, fleet_id)
 
     # Agents can always write to their home fleet (or tenant-wide if no fleet specified)
     if fleet_id is None or fleet_id == agent.get("fleet_id"):
@@ -346,6 +429,58 @@ async def enforce_fleet_write(
             ),
         )
     return agent
+
+
+async def resolve_crystallize_fleet(
+    tenant_id: str,
+    agent_id: AgentIdentity,
+    fleet_id: str | None,
+) -> str | None:
+    """The fleet an agent credential may run crystallization over (L-70).
+
+    A run archives near-duplicate clusters, so it is a write to every row it
+    reaches, and ``fleet_id=None`` reaches every fleet in the tenant. Same ladder
+    as a by-id write (``memory_access_allowed_for_agent``): trust >= 3 may run
+    tenant-wide or for any fleet; below that a run stays in the agent's home
+    fleet, pinned there when ``fleet_id`` is omitted.
+
+    Not :func:`enforce_fleet_write`: that reads ``None`` as a fleet-less write,
+    which is always allowed, where here it means every fleet, and it creates the
+    agent row. An unregistered agent cannot prove any fleet is its own, so it is
+    refused, as ``require_trust`` asks of write paths. An agent awaiting approval
+    (trust 0) is refused too: the memory write routes refuse it a single write.
+    """
+    agent = await lookup_agent(tenant_id, agent_id)
+    if not agent:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_AGENT_NOT_REGISTERED,
+                "Agent is not registered and cannot start a crystallization run.",
+            ),
+        )
+    trust = agent.get("trust_level", 0)
+    if trust == 0:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW,
+                f"Agent '{agent_id}' is not approved and cannot start a crystallization run.",
+            ),
+        )
+    if trust >= 3:
+        return fleet_id
+    home_fleet = agent.get("fleet_id")
+    if home_fleet and fleet_id in (None, home_fleet):
+        return home_fleet
+    raise HTTPException(
+        status_code=403,
+        detail=coded_detail(
+            AUTH_FLEET_SCOPE_FORBIDDEN,
+            "fleet-scope policy: below trust level 3 a crystallization run covers only the "
+            f"agent's own fleet ('{home_fleet or 'none'}'), not '{fleet_id or 'every fleet'}'.",
+        ),
+    )
 
 
 async def enforce_fleet_read(
@@ -396,6 +531,8 @@ async def enforce_fleet_read_many(
     tenant_id: str,
     agent_id: AgentIdentity,
     fleet_ids: Sequence[str | None],
+    *,
+    agent: dict | None = None,
 ) -> None:
     """Enforce read permissions for EVERY requested fleet.
 
@@ -416,8 +553,13 @@ async def enforce_fleet_read_many(
     ``enforce_fleet_read`` delegates here so the single- and multi-fleet ladders
     cannot drift apart, the same reason ``resolve_read_fleet_gate`` is shared
     across its four surfaces. Semantics for a one-element list are unchanged.
+
+    ``agent`` is the caller's row as the route already read it in this request,
+    used in place of a second lookup (L-178). ``None`` means it was not read,
+    or found nothing, and the gate looks it up.
     """
-    agent = await lookup_agent(tenant_id, agent_id)
+    if agent is None:
+        agent = await lookup_agent(tenant_id, agent_id)
 
     # Unknown agent — allow the read (agent registration happens on writes)
     if not agent:
@@ -537,6 +679,7 @@ async def authorize_memory_access(
     owner_agent_id: str | None,
     fleet_id: str | None,
     write: bool = False,
+    caller_tenant_id: str | None = None,
 ) -> bool:
     """Authorize a *by-id* memory access against the fleet/scope contract.
 
@@ -554,7 +697,10 @@ async def authorize_memory_access(
     - ``caller_agent_id is None`` → a tenant-scoped user/dashboard credential
       (no gateway ``X-Agent-ID``) → full tenant access, unchanged. The agent
       isolation boundary only applies to agent-scoped credentials.
-    - ``scope_agent`` → author-only.
+    - ``scope_agent`` → author-only, and only in the caller's home tenant
+      (``caller_tenant_id``, when given). Agent ids are unique per tenant, so a
+      same-named agent in a sibling tenant the caller may read is a different
+      author, and its private rows are not the caller's.
     - ``scope_org`` → tenant-global (mirrors ``scored_search``'s rule that
       org-scoped rows escape fleet scoping).
     - ``scope_team`` / default → fleet-gated: own fleet (or fleet-less rows)
@@ -563,24 +709,19 @@ async def authorize_memory_access(
     """
     if not caller_agent_id:
         return True
-    if visibility in ("scope_agent", "scope_org"):
-        # No agent row needed for these branches.
-        return memory_access_allowed_for_agent(
-            None,
-            caller_agent_id,
-            visibility=visibility,
-            owner_agent_id=owner_agent_id,
-            fleet_id=fleet_id,
-            write=write,
-        )
-    # scope_team / unknown visibility: fleet-gated by the trust ladder.
-    agent = await lookup_agent(tenant_id, caller_agent_id)
+    # scope_team / unknown visibility is fleet-gated by the trust ladder, which
+    # needs the caller's agent row; the other two branches need none.
+    agent: dict | None = None
+    if visibility not in ("scope_agent", "scope_org"):
+        agent = await lookup_agent(tenant_id, caller_agent_id)
     return memory_access_allowed_for_agent(
         agent,
         caller_agent_id,
         visibility=visibility,
         owner_agent_id=owner_agent_id,
         fleet_id=fleet_id,
+        row_tenant_id=tenant_id,
+        caller_tenant_id=caller_tenant_id,
         write=write,
     )
 
@@ -592,6 +733,8 @@ def memory_access_allowed_for_agent(
     visibility: str | None,
     owner_agent_id: str | None,
     fleet_id: str | None,
+    row_tenant_id: str,
+    caller_tenant_id: str | None,
     write: bool = False,
 ) -> bool:
     """Pure predicate behind :func:`authorize_memory_access`.
@@ -603,8 +746,17 @@ def memory_access_allowed_for_agent(
     ``enforce_fleet_read``'s allow-on-unknown (registration happens on
     writes; reads of an unregistered identity are not the isolation
     boundary this helper guards).
+
+    ``scope_agent`` is the caller's own row only in its home tenant: the row's
+    tenant (``row_tenant_id``) must be ``caller_tenant_id``. Agent ids are
+    unique per tenant, so a same-named agent in a sibling tenant the caller may
+    read is a different author (M-94). Both are required, so no caller can
+    leave the pairing out; ``caller_tenant_id=None`` pairs nothing, for a caller
+    with no home tenant.
     """
     if visibility == "scope_agent":
+        if caller_tenant_id and row_tenant_id != caller_tenant_id:
+            return False
         return bool(owner_agent_id and owner_agent_id == canonical_service_agent_id(caller_agent_id))
     if visibility == "scope_org":
         return True
@@ -635,6 +787,38 @@ async def enforce_memory_read(
     )
     if not allowed:
         raise HTTPException(status_code=404, detail="Memory not found")
+
+
+async def memory_reader(
+    tenant_id: str,
+    caller_agent_id: AgentIdentity | None,
+    *,
+    caller_tenant_id: str | None = None,
+) -> Callable[[dict], bool]:
+    """:func:`authorize_memory_access` for many rows, with one agent lookup.
+
+    For a by-id read that returns OTHER memories too, as a contradiction's
+    linked rows (M-124). Each one owes the caller the check the requested
+    memory got: a link is not a grant, and one can join memories that different
+    callers may read (L-147 linked a fleet-less memory to other fleets' rows).
+    A tenant / user / admin credential (``caller_agent_id`` None) reads them all.
+    """
+    if not caller_agent_id:
+        return lambda _row: True
+    agent = await lookup_agent(tenant_id, caller_agent_id)
+
+    def can_read(row: dict) -> bool:
+        return memory_access_allowed_for_agent(
+            agent,
+            caller_agent_id,
+            visibility=row.get("visibility"),
+            owner_agent_id=row.get("agent_id"),
+            fleet_id=row.get("fleet_id"),
+            row_tenant_id=tenant_id,
+            caller_tenant_id=caller_tenant_id,
+        )
+
+    return can_read
 
 
 async def enforce_delete(
@@ -674,6 +858,81 @@ async def enforce_delete(
                 f"access policy: principals of fleet '{agent.get('fleet_id') or 'none'}' are not permitted to delete memories.",
             ),
         )
+
+
+async def enforce_document_overwrite(
+    tenant_id: str,
+    agent_id: str,
+    *,
+    collection: str,
+    doc_id: str,
+    force: bool,
+) -> None:
+    """Gate an AGENT credential's document upsert the way deletes are gated.
+
+    A document upsert REPLACES ``data`` wholesale, and the upsert key
+    ``(tenant_id, collection, doc_id)`` carries no fleet or author, so
+    overwriting a document someone else wrote is a delete by another verb —
+    and ``force=True`` (the opt-out of the catastrophic-shrink guard) is the
+    way to blank one outright. Both therefore need the bar ``enforce_delete``
+    sets (trust >= 3) unless the write is the caller's own:
+
+      - the document does not exist yet      -> allowed (a create)
+      - its stored author is the caller      -> allowed (an update of its own)
+      - no author recorded (NULL)            -> allowed (unowned: legacy rows,
+        MCP writes from before authors were recorded, system writes — shared
+        documents such as task checklists keep working as before)
+      - a different author in the caller's home fleet -> allowed (fleet peers
+        share documents; the fleet write gate already keeps the caller in
+        its own fleet)
+      - a different author in any other fleet -> trust >= 3
+      - ``force=True``                       -> trust >= 3, whoever wrote it
+
+    Same contract as ``enforce_delete``: invoke only for a credential that
+    carries an authenticated agent identity. A tenant key has no trust level
+    and keeps the tenant-wide authority it already holds.
+    """
+    existing = None
+    if not force:
+        existing = await get_storage_client().get_document(
+            tenant_id=tenant_id,
+            collection=collection,
+            doc_id=doc_id,
+            # PRIMARY: this read backs an authorization decision, and a replica
+            # that has not seen a just-written row would report "no such
+            # document" and wave the overwrite through as a create.
+            read=False,
+        )
+        # Storage falls back to a primary-key match on a natural-key miss; the
+        # upsert keys on ``doc_id`` only, so a pk hit is not the row this write
+        # would replace.
+        if existing is None or existing.get("doc_id") != doc_id:
+            return
+        author = existing.get("agent_id")
+        if author is None or canonical_service_agent_id(author) == agent_id:
+            return
+    agent = await lookup_agent(tenant_id, agent_id)
+    if agent and agent.get("trust_level", 0) >= 3:
+        return
+    if (
+        existing is not None
+        and agent
+        and agent.get("fleet_id") is not None
+        and existing.get("fleet_id") == agent.get("fleet_id")
+    ):
+        return
+    what = (
+        "force a document overwrite"
+        if force
+        else f"overwrite document '{collection}/{doc_id}', which it did not write"
+    )
+    raise HTTPException(
+        status_code=403,
+        detail=coded_detail(
+            AUTH_AGENT_TRUST_TOO_LOW,
+            f"access policy: agent '{agent_id}' needs trust level 3 to {what}.",
+        ),
+    )
 
 
 async def enforce_update(

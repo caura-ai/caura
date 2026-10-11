@@ -31,7 +31,8 @@ from __future__ import annotations
 
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from sqlalchemy import text
+from sqlalchemy import JSON, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 import common.models  # noqa: F401  — registers every model; the fix under test
@@ -52,10 +53,11 @@ _TABLES_WITHOUT_MODELS = {
 
 # Indexes the migrations create that the models do not express. Left undeclared
 # rather than back-filled: these are partial, GIN and HNSW indexes whose exact
-# predicates and operator classes are load-bearing, and transcribing seventeen
+# predicates and operator classes are load-bearing, and transcribing sixteen
 # of them into the models is a change with its own risk profile. Listed so that
-# an EIGHTEENTH — a genuinely new drift — fails this test instead of joining a
-# crowd nobody is counting.
+# a SEVENTEENTH — a genuinely new drift — fails this test instead of joining a
+# crowd nobody is counting. 045's ``ix_memories_status_changed_at`` left the list
+# when 065 dropped it (L-185).
 _INDEXES_ONLY_IN_MIGRATIONS = {
     "ix_audit_log_tenant_event_hash",
     "ix_audit_log_tenant_id",
@@ -71,7 +73,6 @@ _INDEXES_ONLY_IN_MIGRATIONS = {
     "ix_memories_search_vector",
     "ix_memories_stale_embedding",
     "ix_memories_status",
-    "ix_memories_status_changed_at",
     "ix_memories_tenant_id_active",
     "ix_memories_visibility",
 }
@@ -122,7 +123,7 @@ async def test_no_model_declares_an_index_the_schema_does_not_have() -> None:
 async def test_the_indexes_only_the_migrations_know_about_are_the_known_ones() -> None:
     """Guard on the residual, not a claim that the residual is fine.
 
-    These seventeen WOULD be dropped by an autogenerate-generated migration —
+    These sixteen WOULD be dropped by an autogenerate-generated migration —
     including three HNSW vector indexes and two GIN full-text indexes, whose
     loss would not fail a single test and would quietly change search from an
     index scan to a sequential one. Pinning the set means the next reader finds
@@ -134,6 +135,44 @@ async def test_the_indexes_only_the_migrations_know_about_are_the_known_ones() -
         f"appeared: {sorted(removed - _INDEXES_ONLY_IN_MIGRATIONS)}\n"
         f"disappeared: {sorted(_INDEXES_ONLY_IN_MIGRATIONS - removed)}"
     )
+
+
+async def test_every_json_column_is_the_json_type_its_model_declares() -> None:
+    """Seventeen columns from migration 001 were ``json`` in every migrated
+    database while their models declared ``JSONB`` (CAURA-595).
+
+    The models are what a reader writes SQL against, so the gap surfaced as
+    queries that only fail on a migrated database: ``jsonb_typeof`` and the
+    ``?`` operator both raised ``UndefinedFunctionError`` on these columns, and
+    ``COALESCE(metadata, '{}'::jsonb)`` raised ``CannotCoerceError``. Checked
+    against ``information_schema`` rather than through ``compare_metadata``,
+    whose type comparison the tests above never consulted, so the answer is
+    the database's own.
+    """
+    declared = {
+        (table.name, column.name): "jsonb" if isinstance(column.type, JSONB) else "json"
+        for table in Base.metadata.tables.values()
+        for column in table.columns
+        if isinstance(column.type, JSON)
+    }
+    async with get_engine().connect() as conn:
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT table_name, column_name, data_type FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND data_type IN ('json', 'jsonb')"
+                )
+            )
+        ).all()
+    migrated = {(table, column): data_type for table, column, data_type in rows}
+
+    wrong = sorted(
+        f"{table}.{column}: model {kind}, schema {migrated.get((table, column))}"
+        for (table, column), kind in declared.items()
+        if migrated.get((table, column)) != kind
+    )
+    assert len(declared) >= 25, f"only {len(declared)} JSON columns declared — the scan is broken"
+    assert not wrong, "model and migrated schema disagree on JSON type:\n" + "\n".join(wrong)
 
 
 async def test_the_schema_really_has_no_row_level_security() -> None:

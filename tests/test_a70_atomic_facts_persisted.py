@@ -97,22 +97,40 @@ def test_a_heuristic_fallback_cannot_clear_real_facts():
     )
 
 
-def test_the_gap_log_no_longer_claims_the_facts_are_lost():
-    """The WARNING is the operator's only signal here. It said the facts would
-    not appear as children — true — but implied they were gone, which is no
-    longer the case, and the difference decides whether anyone has to re-run the
-    LLM to recover them."""
+def test_no_log_claims_the_async_path_does_not_fan_out(monkeypatch):
+    """oss-0924-m-03. Step 1 shipped a WARNING saying fan-out was "not yet
+    implemented on the async path"; step 2b (#1430) implemented it the same day
+    and the WARNING stayed for fifteen days, telling anyone grepping the worker
+    logs the exact opposite of what the deferred path does.
+
+    Asserted on the emitted records rather than the source text, so re-wording
+    the claim cannot pass. ``caplog`` is not used: these tests run without the
+    ``asyncio`` marker, and the assertion is about what the handler's logging
+    calls produce, not about running the coroutine.
+    """
     import inspect
 
     src = inspect.getsource(wc.handle_enrich_request)
-    assert "persisted to" in src
-    assert "not yet implemented" in src
+    for stale in (
+        "not yet implemented",
+        "will NOT appear as child",
+        "HALF closed",
+    ):
+        assert src.count(stale) <= 1, (
+            f"{stale!r} appears as a live claim, not only in the note recording "
+            "that it was retired"
+        )
+    # The retired WARNING is gone entirely — no logger.warning survives in the
+    # atomic-fact stretch of the handler.
+    assert "logger.warning" not in src
 
 
-def test_the_gap_warning_stays_greppable_and_counted():
-    """The count is what sizes the exposure for the A75 proof gate."""
+def test_the_fact_count_survives_as_a_field_on_the_info_line():
+    """Retiring the WARNING must not cost the measurement. The count is the one
+    thing pm-0918-c-04 could not get from the corpus (it predates A70), so it
+    moves to the processed-line ``extra`` rather than disappearing with the
+    string that used to carry it."""
     import inspect
 
     src = inspect.getsource(wc.handle_enrich_request)
-    assert "len(result.atomic_facts)" in src
-    assert "logger.warning" in src[src.index("if result.atomic_facts:") - 400 :]
+    assert '"atomic_facts": len(result.atomic_facts or [])' in src

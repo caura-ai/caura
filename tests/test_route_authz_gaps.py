@@ -244,6 +244,129 @@ async def test_redistribute_user_credential_unchanged(client, as_auth, sc):
     assert resp.status_code == 200, resp.text
 
 
+# The route's own gates, through the route (L-172). test_redistribute.py's
+# "integration" tests re-implemented the move inline and asserted their own
+# assignments, so none of them could fail whatever the route did.
+
+
+async def _seed_owned_memory(sc, tenant_id: str, agent_id: str, visibility: str) -> str:
+    row = await sc.create_memory(
+        {
+            "tenant_id": tenant_id,
+            "fleet_id": "test-fleet",
+            "agent_id": agent_id,
+            "content": f"redistribute me {_uid()}",
+            "memory_type": "fact",
+            "visibility": visibility,
+        }
+    )
+    return str(row["id"])
+
+
+async def _redistribute(client, tenant_id: str, caller: str, ids: list, target: str):
+    return await client.post(
+        f"/api/v1/memories/redistribute?tenant_id={tenant_id}&agent_id={caller}",
+        json={"memory_ids": ids, "target_agent_id": target},
+    )
+
+
+async def _owner(sc, tenant_id: str, memory_id: str) -> str:
+    return (await sc.get_memory(memory_id, tenant_id))["agent_id"]
+
+
+async def test_redistribute_refuses_a_caller_below_trust_3(client, as_auth, sc):
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "lead-agent", 2)
+    await _seed_agent(sc, tenant, "target-agent", 1)
+    memory_id = await _seed_owned_memory(sc, tenant, "old-agent", "scope_team")
+
+    as_auth(tenant, agent_id="lead-agent")
+    resp = await _redistribute(
+        client, tenant, "lead-agent", [memory_id], "target-agent"
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == errors.AUTH_AGENT_TRUST_TOO_LOW
+    assert await _owner(sc, tenant, memory_id) == "old-agent"
+
+
+async def test_redistribute_refuses_a_target_that_does_not_exist(client, as_auth, sc):
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "admin-agent", 3)
+    memory_id = await _seed_owned_memory(sc, tenant, "old-agent", "scope_team")
+
+    as_auth(tenant, agent_id="admin-agent")
+    resp = await _redistribute(
+        client, tenant, "admin-agent", [memory_id], "no-such-agent"
+    )
+    assert resp.status_code == 404, resp.text
+    assert "no-such-agent" in resp.json()["detail"]
+    assert await _owner(sc, tenant, memory_id) == "old-agent"
+
+
+async def test_redistribute_refuses_a_restricted_target(client, as_auth, sc):
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "admin-agent", 3)
+    await _seed_agent(sc, tenant, "restricted-agent", 0)
+    memory_id = await _seed_owned_memory(sc, tenant, "old-agent", "scope_team")
+
+    as_auth(tenant, agent_id="admin-agent")
+    resp = await _redistribute(
+        client, tenant, "admin-agent", [memory_id], "restricted-agent"
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == errors.AUTH_TARGET_AGENT_RESTRICTED
+    assert await _owner(sc, tenant, memory_id) == "old-agent"
+
+
+async def test_redistribute_moves_the_rows_and_promotes_scope_agent(
+    client, as_auth, sc
+):
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "admin-agent", 3)
+    await _seed_agent(sc, tenant, "target-agent", 1)
+    private = await _seed_owned_memory(sc, tenant, "old-agent", "scope_agent")
+    team = await _seed_owned_memory(sc, tenant, "old-agent", "scope_team")
+    owned = await _seed_owned_memory(sc, tenant, "target-agent", "scope_team")
+    missing = str(uuid.uuid4())
+
+    as_auth(tenant, agent_id="admin-agent")
+    ids = [private, team, owned, missing]
+    resp = await _redistribute(client, tenant, "admin-agent", ids, "target-agent")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert (body["moved"], body["promoted"], body["skipped"]) == (2, 1, 1)
+    assert body["errors"] == [missing]
+    for memory_id in (private, team):
+        row = await sc.get_memory(memory_id, tenant)
+        assert (row["agent_id"], row["visibility"]) == ("target-agent", "scope_team")
+
+
+async def test_a_status_change_is_audited_as_its_caller_not_the_owner(
+    client, as_auth, sc, monkeypatch
+):
+    """L-09: the audit row named the memory's owner as the one who acted.
+
+    MCP's ``caura_manage op=transition`` had the same attribution; its test is
+    in tests/test_mcp_matches_rest.py.
+    """
+    from core_api.routes import memories as memories_route
+
+    tenant = f"tenant-{_uid()}"
+    memory_id = await _seed_owned_memory(sc, tenant, "bob", "scope_team")
+    audit = AsyncMock()
+    monkeypatch.setattr(memories_route, "log_action", audit)
+
+    as_auth(tenant, agent_id=None)
+    resp = await client.patch(
+        f"/api/v1/memories/{memory_id}/status?tenant_id={tenant}",
+        json={"status": "archived"},
+    )
+    assert resp.status_code == 200, resp.text
+    sent = audit.await_args.kwargs
+    assert sent["agent_id"] != "bob"
+    assert sent["detail"]["owner_agent_id"] == "bob"
+
+
 # ---------------------------------------------------------------------------
 # S4 — STM write endpoints honor read-only / agent binding
 # ---------------------------------------------------------------------------
@@ -716,6 +839,127 @@ async def test_a_write_capable_credential_can_still_crystallize(client, as_auth)
     assert resp.json()["report_id"], resp.text
 
 
+# ---------------------------------------------------------------------------
+# L-70: any agent credential could start a run over every fleet.
+#
+# A run archives near-duplicate clusters, so it writes every row it reaches,
+# and an omitted ``fleet_id`` reaches every fleet in the tenant. Agent
+# credentials now follow the by-id write ladder: trust >= 3 may run tenant-wide
+# or for any fleet; below that a run stays in the agent's home fleet, pinned
+# there when ``fleet_id`` is omitted. An agent awaiting approval (trust 0)
+# cannot start one at all. ``start_crystallization`` is stubbed so a test can
+# read the fleet the run was started for.
+# ---------------------------------------------------------------------------
+
+
+async def _crystallize_as(client, as_auth, monkeypatch, tenant, agent, **body):
+    from core_api.routes import crystallizer
+
+    start = AsyncMock(return_value=uuid.uuid4())
+    monkeypatch.setattr(crystallizer, "start_crystallization", start)
+    as_auth(tenant, agent_id=agent)
+    resp = await client.post("/api/v1/crystallize", json={"tenant_id": tenant, **body})
+    return resp, start
+
+
+def _refused(resp, start, code: str) -> None:
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == code, resp.text
+    start.assert_not_awaited()
+
+
+def _run_fleet(resp, start):
+    assert resp.status_code == 200, resp.text
+    start.assert_awaited_once()
+    return start.await_args.args[1]
+
+
+async def test_a_low_trust_agent_cannot_crystallize_a_peer_fleet(
+    client, as_auth, sc, monkeypatch
+):
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "agent-a", 1, fleet_id="fleet-a")
+    resp, start = await _crystallize_as(
+        client, as_auth, monkeypatch, tenant, "agent-a", fleet_id="fleet-b"
+    )
+    _refused(resp, start, errors.AUTH_FLEET_SCOPE_FORBIDDEN)
+
+
+async def test_a_low_trust_agent_run_is_pinned_to_its_home_fleet(
+    client, as_auth, sc, monkeypatch
+):
+    """Omitting ``fleet_id`` meant every fleet; for this caller it means its own."""
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "agent-a", 2, fleet_id="fleet-a")
+    resp, start = await _crystallize_as(client, as_auth, monkeypatch, tenant, "agent-a")
+    assert _run_fleet(resp, start) == "fleet-a"
+
+
+async def test_a_fleetless_low_trust_agent_cannot_start_a_tenant_wide_run(
+    client, as_auth, sc, monkeypatch
+):
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "agent-a", 2)
+    resp, start = await _crystallize_as(client, as_auth, monkeypatch, tenant, "agent-a")
+    _refused(resp, start, errors.AUTH_FLEET_SCOPE_FORBIDDEN)
+
+
+async def test_an_unregistered_agent_credential_cannot_start_a_run(
+    client, as_auth, monkeypatch
+):
+    """Fails closed: an unknown identity cannot prove any fleet is its own."""
+    tenant = f"tenant-{_uid()}"
+    resp, start = await _crystallize_as(client, as_auth, monkeypatch, tenant, "agent-a")
+    _refused(resp, start, errors.AUTH_AGENT_NOT_REGISTERED)
+
+
+@pytest.mark.parametrize("fleet_id", [None, "fleet-a"])
+async def test_an_agent_awaiting_approval_cannot_start_a_run(
+    client, as_auth, sc, monkeypatch, fleet_id
+):
+    """Trust 0 cannot write one memory, so it cannot archive its fleet's either."""
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "agent-a", 0, fleet_id="fleet-a")
+    body = {} if fleet_id is None else {"fleet_id": fleet_id}
+    resp, start = await _crystallize_as(
+        client, as_auth, monkeypatch, tenant, "agent-a", **body
+    )
+    _refused(resp, start, errors.AUTH_AGENT_TRUST_TOO_LOW)
+
+
+async def test_a_low_trust_agent_may_crystallize_its_own_fleet(
+    client, as_auth, sc, monkeypatch
+):
+    """OVER-REFUSAL GUARD."""
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "agent-a", 1, fleet_id="fleet-a")
+    resp, start = await _crystallize_as(
+        client, as_auth, monkeypatch, tenant, "agent-a", fleet_id="fleet-a"
+    )
+    assert _run_fleet(resp, start) == "fleet-a"
+
+
+@pytest.mark.parametrize("fleet_id", [None, "fleet-b"])
+async def test_a_trust_3_agent_may_crystallize_the_tenant_or_any_fleet(
+    client, as_auth, sc, monkeypatch, fleet_id
+):
+    """OVER-REFUSAL GUARD: trust 3 is the cross-fleet write level."""
+    tenant = f"tenant-{_uid()}"
+    await _seed_agent(sc, tenant, "agent-a", 3, fleet_id="fleet-a")
+    body = {} if fleet_id is None else {"fleet_id": fleet_id}
+    resp, start = await _crystallize_as(
+        client, as_auth, monkeypatch, tenant, "agent-a", **body
+    )
+    assert _run_fleet(resp, start) == fleet_id
+
+
+async def test_a_tenant_credential_still_runs_tenant_wide(client, as_auth, monkeypatch):
+    """OVER-REFUSAL GUARD: the ladder is for agent credentials only."""
+    tenant = f"tenant-{_uid()}"
+    resp, start = await _crystallize_as(client, as_auth, monkeypatch, tenant, None)
+    assert _run_fleet(resp, start) is None
+
+
 async def test_settings_rejects_a_read_only_credential(client, as_auth):
     """H-15: the hand-rolled ``is_demo`` check missed read-only credentials.
 
@@ -946,14 +1190,28 @@ async def test_stm_notes_of_own_agent_are_still_readable(client, as_auth, _stm_e
 
 
 async def test_search_cannot_borrow_a_peer_identity_via_filter_agent_id(
-    client, as_auth
+    client, as_auth, monkeypatch
 ):
     """H-14: ``filter_agent_id`` fed the visibility identity AND the trust gate.
 
     Naming a peer both exposed that peer's scope_agent rows (with content, so a
     direct disclosure) and skipped the trust<2 fleet forcing when the named peer
     was trust>=2 — the same escalation /memories/redistribute was fixed for.
+
+    H-14 answered 403. Since L-124 the search runs as the credential's own agent
+    whatever the body names, so the filter is let through as an author filter,
+    as on MCP ``caura_recall``: what must hold is that the peer never becomes
+    the identity.
     """
+    from core_api.routes import memories as memories_route
+
+    seen: dict = {}
+
+    async def _capture(*args, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(memories_route, "search_memories", _capture)
     tenant = f"tenant-{_uid()}"
     as_auth(tenant, agent_id="agent-a")
     resp = await client.post(
@@ -965,7 +1223,9 @@ async def test_search_cannot_borrow_a_peer_identity_via_filter_agent_id(
             "filter_agent_id": "agent-b",
         },
     )
-    assert resp.status_code == 403, resp.text
+    assert resp.status_code == 200, resp.text
+    assert seen.get("caller_agent_id") == "agent-a"
+    assert seen.get("filter_agent_id") == "agent-b"
 
 
 async def test_search_filtering_to_own_agent_id_is_allowed(client, as_auth):
@@ -1305,7 +1565,10 @@ async def test_a_tenant_credential_can_still_queue_a_fleet_command(client, as_au
     tenant = f"tenant-{_uid()}"
     node_id = (await _seed_node(client, as_auth, tenant)).node_id
 
-    as_auth(tenant)
+    # The dashboard sends this as an org admin (the gateway stamps
+    # ``X-Org-Role``). Custom ``source`` from a plain tenant key is refused
+    # (``test_code_delivery_and_secrets_hardening.py``).
+    as_auth(tenant, org_role="admin")
     resp = await client.post(
         "/api/v1/fleet/commands",
         json={
@@ -1322,3 +1585,126 @@ async def test_a_tenant_credential_can_still_queue_a_fleet_command(client, as_au
     assert [c["id"] for c in listed.json()] == [resp.json()["id"]], (
         f"a legitimate command did not reach the queue: {listed.text}"
     )
+
+
+# ---------------------------------------------------------------------------
+# L-72: an org member reached what the Skills Inbox keeps for org admins.
+#
+# The gateway stamps a signed-in user's requests ``X-Org-Role`` (admin |
+# member), and the Skills Inbox actions refuse a member. ``PUT /settings`` and
+# the agent trust, fleet and delete routes refused only agent credentials, so
+# the same member could turn off ``require_agent_approval``, swap provider keys
+# or promote any agent to trust 3. They now refuse an explicit member. A caller
+# with NO org role keeps its access: the CAURA_API_KEY path and any gateway
+# credential stamped without a role reach these routes today.
+#
+# Each refusal asserts the error code and the unchanged row, not just a 403.
+# ---------------------------------------------------------------------------
+
+
+async def _agent_row(client, as_auth, tenant: str, agent: str) -> dict | None:
+    as_auth(tenant)
+    resp = await client.get(f"/api/v1/agents?tenant_id={tenant}")
+    assert resp.status_code == 200, resp.text
+    return next((a for a in resp.json() if a["agent_id"] == agent), None)
+
+
+def _refused_as_member(resp) -> None:
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == errors.AUTH_ORG_ADMIN_REQUIRED, resp.text
+
+
+async def test_an_org_member_cannot_change_tenant_settings(client, as_auth):
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant)
+    resp = await client.put(
+        "/api/v1/settings",
+        json={"tenant_id": tenant, "agents": {"require_agent_approval": True}},
+    )
+    assert resp.status_code == 200, resp.text
+
+    as_auth(tenant, org_role="member")
+    _refused_as_member(
+        await client.put(
+            "/api/v1/settings",
+            json={"tenant_id": tenant, "agents": {"require_agent_approval": False}},
+        )
+    )
+
+    as_auth(tenant)
+    reread = await client.get("/api/v1/settings")
+    assert reread.status_code == 200, reread.text
+    assert reread.json()["agents"]["require_agent_approval"] is True
+
+
+async def test_an_org_member_cannot_move_an_agents_trust(client, as_auth, sc):
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=1)
+
+    as_auth(tenant, org_role="member")
+    _refused_as_member(
+        await client.patch(
+            f"/api/v1/agents/{agent}/trust?tenant_id={tenant}",
+            json={"trust_level": 3},
+        )
+    )
+    row = await _agent_row(client, as_auth, tenant, agent)
+    assert row["trust_level"] == 1
+
+
+async def test_an_org_member_cannot_reassign_an_agents_fleet(client, as_auth, sc):
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=1, fleet_id="fleet-home")
+
+    as_auth(tenant, org_role="member")
+    _refused_as_member(
+        await client.patch(
+            f"/api/v1/agents/{agent}/fleet?tenant_id={tenant}",
+            json={"fleet_id": "fleet-other"},
+        )
+    )
+    row = await _agent_row(client, as_auth, tenant, agent)
+    assert row["fleet_id"] == "fleet-home"
+
+
+async def test_an_org_member_cannot_delete_an_agent(client, as_auth, sc):
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=1)
+
+    as_auth(tenant, org_role="member")
+    _refused_as_member(
+        await client.delete(f"/api/v1/agents/{agent}?tenant_id={tenant}")
+    )
+    assert await _agent_row(client, as_auth, tenant, agent) is not None
+
+
+@pytest.mark.parametrize("org_role", [None, "admin"])
+async def test_an_org_admin_or_a_roleless_caller_keeps_these_routes(
+    client, as_auth, sc, org_role
+):
+    """OVER-REFUSAL GUARD. Refusing every caller would pass the tests above and
+    lock the dashboard and the CAURA_API_KEY path out of their own tenant."""
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=1, fleet_id="fleet-home")
+
+    as_auth(tenant, org_role=org_role)
+    resp = await client.put(
+        "/api/v1/settings",
+        json={"tenant_id": tenant, "agents": {"require_agent_approval": True}},
+    )
+    assert resp.status_code == 200, resp.text
+    resp = await client.patch(
+        f"/api/v1/agents/{agent}/trust?tenant_id={tenant}", json={"trust_level": 2}
+    )
+    assert resp.status_code == 200, resp.text
+    resp = await client.patch(
+        f"/api/v1/agents/{agent}/fleet?tenant_id={tenant}",
+        json={"fleet_id": "fleet-other"},
+    )
+    assert resp.status_code == 200, resp.text
+    resp = await client.delete(f"/api/v1/agents/{agent}?tenant_id={tenant}")
+    assert resp.status_code == 204, resp.text

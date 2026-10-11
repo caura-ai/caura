@@ -123,6 +123,22 @@ AUTH_FEATURE_DISABLED = "FEATURE_DISABLED"
 AUTH_UNAUTHENTICATED = "UNAUTHENTICATED"
 AUTH_SKILLS_FACTORY_DISABLED = "SKILLS_FACTORY_DISABLED"
 AUTH_SKILLS_INBOX_FORBIDDEN = "SKILLS_INBOX_FORBIDDEN"
+AUTH_ORG_ADMIN_REQUIRED = "ORG_ADMIN_REQUIRED"
+
+# M-85 — a fleet node answers only to the credential it is bound to. Its own
+# code because the way out is its own: send the node's heartbeats with that
+# credential, or have a tenant credential release the node.
+AUTH_FLEET_NODE_BOUND = "FLEET_NODE_BOUND_TO_OTHER_CREDENTIAL"
+# M-85 — an install credential with no install UUID has nothing a node can be
+# bound to, so it may not act as one.
+AUTH_INSTALL_UUID_MISSING = "INSTALL_UUID_MISSING"
+# M-86 — an agent or install credential's interview window for a fleet node
+# must cite an unused interview_request that was delivered to that node.
+AUTH_INTERVIEW_REQUEST_REQUIRED = "INTERVIEW_REQUEST_REQUIRED"
+# g2.9 — the review of held memories (listing them, rolling a session back) is
+# a signed-in person's. An agent or an API key can't be given it, so the way
+# out is to act from the dashboard.
+AUTH_PERSON_REQUIRED = "PERSON_REQUIRED"
 
 
 # ── Code for the request-budget deadline (ax-0917-h-01/h-02) ──────────────
@@ -141,6 +157,30 @@ AUTH_SKILLS_INBOX_FORBIDDEN = "SKILLS_INBOX_FORBIDDEN"
 # auth codes above were minted for: one status carrying several reasons leaves
 # the caller guessing.
 REQUEST_BUDGET_EXCEEDED = "REQUEST_BUDGET_EXCEEDED"
+
+
+# ── Code for a deployment with no embedder (L-224) ────────────────────────
+#
+# With no embedding provider configured (no tenant key, no OPENAI_API_KEY, no
+# platform embedder), documents are stored without vectors, so document search
+# cannot run at all. It answered with the 503 meant for a provider that failed
+# once, which tells a caller to retry; no retry helps until an operator
+# configures a provider. Answered 501 with this code on REST, and the same code
+# on MCP ``caura_doc``. Memory search still works, by keyword.
+EMBEDDING_NOT_CONFIGURED = "EMBEDDING_NOT_CONFIGURED"
+EMBEDDING_NOT_CONFIGURED_MESSAGE = (
+    "Document search needs an embedding provider, and none is configured, so documents are "
+    "stored without embeddings. Set OPENAI_API_KEY or PLATFORM_EMBEDDING_* on the server "
+    "(or EMBEDDING_PROVIDER=fake for test vectors). Memory search still works by keyword."
+)
+
+# ── Code for a skill folder another skill holds (L-223) ───────────────────
+#
+# ``forge/X``, ``agent/X`` and ``X`` all install as the folder ``X`` on a plugin
+# node. A node that sees two of them cannot tell which to install: it keeps a
+# copy it already has, no longer updated, and a node without one gets neither.
+# Answered 409 by the skills-inbox approve.
+SKILL_FOLDER_TAKEN = "SKILL_FOLDER_TAKEN"
 
 
 def coded_detail(code: str, message: str, **details: object) -> dict:

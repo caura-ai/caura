@@ -19,8 +19,10 @@
 
 Every long-lived integration should bind to a named agent identity rather than calling under a tenant-scoped credential. Two ways:
 
+Both are on the managed platform (caura.ai). A self-hosted core-api has no provisioning route: there, use the tenant-scoped (or standalone) key and pass an explicit `agent_id` on every call.
+
 - **Dashboard (recommended for humans):** `caura.ai/settings/organization/api-credentials` — single-card wizard, one-time raw-key reveal, manages cross-tenant + read-scope settings.
-- **API (for scripted provisioning, shown below):** `POST /api/v1/admin/agent-keys/provision` — atomic call that creates the Agent row eagerly so subsequent trust-elevation or fleet-assignment endpoints work immediately:
+- **API (for scripted provisioning, shown below):** `POST /api/v1/admin/agent-keys/provision` on the managed platform (caura.ai) — atomic call that creates the Agent row eagerly so subsequent trust-elevation or fleet-assignment endpoints work immediately:
 
 ```bash
 curl -X POST https://caura.ai/api/v1/admin/agent-keys/provision \
@@ -80,7 +82,10 @@ If `agent_id` is `null` or doesn't match what you provisioned, your credential i
 - The credential was revoked or rotated.
 - A proxy in front of Caura is stripping the `X-API-Key` header.
 
-> **Latency expectation:** `POST /search` returns 23 ms p50 / 27 ms p95 warm on our reference benchmarks. Recall (`caura_recall` / `POST /recall`) sits in the same band — it wraps search plus a small scoring step. See [`performance.md`](performance.md) for the full numbers and methodology.
+> **Latency measurement:** establish a warmed baseline for `POST /search` and
+> `POST /recall` under your expected concurrency. No current public latency
+> figure is approved; see [`performance.md`](performance.md) for measurement
+> guidance and caveats.
 
 ---
 
@@ -192,7 +197,7 @@ treat trust 1 as the floor for the *shape* rather than a guarantee for the call:
   this is what stops a trust-1 agent quietly replacing a fleet-wide rule with a
   private one.
 - **An unverified caller identity.** The self-author tier needs an agent-scoped
-  credential (`POST /admin/agent-keys/provision`), not an `X-Agent-ID` header
+  credential (`POST /admin/agent-keys/provision` on the managed platform), not an `X-Agent-ID` header
   sent alongside a tenant/admin key, so that an admin-key holder can't forge a
   rule in another agent's name.
 
@@ -257,6 +262,26 @@ A write of identical content (same `agent_id`, same `fleet_id`) is retry-safe vi
 - Identical retry → `200` with `{ "status": "duplicate", "existing_id": "…" }`.
 
 Cross-agent writes of identical content no longer collide — each agent gets its own record.
+
+### Idempotency-Key
+
+To make a retry safe, send an `Idempotency-Key` header (at most 255
+characters) on `POST /api/v1/memories`, `/api/v1/memories/bulk`,
+`/api/v1/documents` or `/api/v1/evolve/report`. A retry with the same key and a
+byte-identical body replays the first response instead of running the request
+again. `POST /api/v1/memories` and MCP `caura_write` also take the key as
+`metadata.idempotency_key`; MCP `caura_evolve` takes it as `idempotency_key`.
+
+A key belongs to the tenant, the agent the request is attributed to, and the
+way it was sent (header, body or MCP), and it lasts 24 hours. Two agents that
+happen to use the same key each get their own write. Reusing a key with a
+different body is a `422`. A retry that arrives while the first request is
+still running waits for it, and gets a `409` if the first takes too long.
+
+Every evolve report adjusts weights, even when the outcome text repeats: the
+same outcome reported after two different actions is two reports. A retry after
+a timeout is the same report, so send it with the first attempt's key. It then
+replays the first answer and adjusts nothing again.
 
 ---
 
@@ -339,7 +364,7 @@ separately. Time it yourself before choosing a timeout if you rely on it.
 
 ## Reference
 
-- `POST /api/v1/admin/agent-keys/provision` — atomic provisioning (this guide).
+- `POST /api/v1/admin/agent-keys/provision` — atomic provisioning on the managed platform (this guide).
 - `GET /api/v1/whoami` — identity probe.
 - `GET /api/v1/agents/{id}?tenant_id=...` — agent detail.
 - `PATCH /api/v1/agents/{id}/trust?tenant_id=...` — change trust level.

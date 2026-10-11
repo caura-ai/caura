@@ -22,6 +22,8 @@ use ``dict[str, int]``-style types rather than named models.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from core_api.schemas import MemoryOut, SearchWarning
@@ -29,6 +31,33 @@ from core_api.schemas import MemoryOut, SearchWarning
 # --------------------------------------------------------------------------
 # memories / recall / health / version
 # --------------------------------------------------------------------------
+
+
+class MemoryPendingWork(BaseModel):
+    embedding: int = Field(
+        description=(
+            "Live rows whose vector has not landed yet (`embedding IS NULL`), stranded ones included "
+            "(see `stranded`). With no embedding provider configured (`embedding_configured` false) "
+            "these rows stay unembedded, and `settled` ignores them."
+        )
+    )
+    enrichment: int = Field(
+        description="Live rows still marked `enrichment_pending` — the deferred LLM enrichment has not written back."
+    )
+    fanout: int = Field(
+        description="Live rows whose persisted atomic facts have not been fanned out into child memories yet."
+    )
+
+
+class MemoryStrandedWork(BaseModel):
+    embedding: int = Field(
+        description=(
+            "The `pending.embedding` rows written over an hour ago. Nothing is coming back for them: "
+            "the embed exhausted its retries, died with its process or dead-lettered (or, on a "
+            "deferred deployment, a backlog longer than an hour is still draining). Re-embed them "
+            "with `python -m core_storage_api.scripts.backfill_embeddings`."
+        )
+    )
 
 
 class MemoryStatsResponse(BaseModel):
@@ -42,6 +71,35 @@ class MemoryStatsResponse(BaseModel):
     )
     deleted: int | None = Field(default=None, description="Only when include_deleted=true.")
     total_including_deleted: int | None = Field(default=None, description="Only when include_deleted=true.")
+    pending: MemoryPendingWork | None = Field(
+        default=None,
+        description=(
+            "Background work still outstanding in this scope, from durable row markers. A row can count "
+            "on more than one axis. Contradiction marks are applied after embed/enrich events and carry "
+            "no durable marker, so allow a short grace period after `settled` flips."
+        ),
+    )
+    settled: bool | None = Field(
+        default=None,
+        description=(
+            "True when every `pending` count is zero once the `stranded` rows are set aside, or every "
+            "count but `embedding` when `embedding_configured` is false. Wait for this before measuring a "
+            "freshly ingested store, and check `stranded`: rows counted there are unembedded, so search "
+            "finds them by keyword only."
+        ),
+    )
+    stranded: MemoryStrandedWork | None = Field(
+        default=None,
+        description="Pending rows nothing will come back for, which `settled` does not wait on.",
+    )
+    embedding_configured: bool | None = Field(
+        default=None,
+        description=(
+            "False when no embedding provider is configured for the tenant: rows are stored without "
+            "embeddings and searched by keyword only, so `pending.embedding` counts rows that will stay "
+            "unembedded until a provider is set and they are re-embedded."
+        ),
+    )
 
 
 class MemoryCountResponse(BaseModel):
@@ -72,9 +130,15 @@ class MemoryContradictionsResponse(BaseModel):
     memory_id: str
     status: str | None
     superseded_by: SupersessionPeer | None = Field(
-        description="The newer memory that superseded this one; null when none is live."
+        description=(
+            "The older memory this one superseded (via supersedes_id); null when there is none or "
+            "it was deleted. The field name is kept for back-compat; newer memories that superseded "
+            "this one are in superseded_memories and in contradictions with direction superseded_by."
+        )
     )
-    superseded_memories: list[SupersessionPeer]
+    superseded_memories: list[SupersessionPeer] = Field(
+        description="Newer memories that superseded this one, each with supersedes_id pointing here."
+    )
     detection_status: str = Field(description="completed or pending.")
     contradictions: list[ContradictionEntry]
 
@@ -96,7 +160,10 @@ class RecallDiagnostic(BaseModel):
     recall_model: str | None
     recall_provider: str | None
     all_candidates: list
-    top_k_used: int | None
+    top_k_used: int | None = Field(
+        description="Row budget the search ran with, after the agent and tenant search profiles and any "
+        "strategy cap (what /search's diagnostic reports as top_k_requested), not the request's own top_k."
+    )
     retrieval_strategy: str | None
     search_params: dict
     # CAURA-722 — documented on ``SearchDiagnostic``. ``None`` on the count
@@ -109,7 +176,9 @@ class RecallResponse(BaseModel):
     query: str
     summary: str
     memory_count: int
-    memories: list[MemoryOut]
+    memories: list[MemoryOut] = Field(
+        description="The matched rows in rank order, as /search returns them; the summary reads them by date."
+    )
     # ax-0917-h-03 — DEPRECATED, and deliberately still emitted by default here.
     #
     # ``POST /recall`` is a SemVer-stable REST surface (docs/public-api-stability.md,
@@ -142,11 +211,19 @@ class RecallResponse(BaseModel):
     )
     # ax-0917-h-05 — same shape as ``SearchResponse.warnings`` (A28). Absent
     # when there is nothing to report, which is the ordinary case.
+    #
+    # CAURA-723 adds a second family to it: coded caveats about the RESULT SET
+    # rather than about the request, e.g. ``filter_agent_unknown`` when the
+    # agent filter names an id this tenant has never seen. Kept in one field —
+    # both are "the call succeeded, but something you would assume happened did
+    # not", which is exactly what ``SearchWarning`` was defined for.
     warnings: list[SearchWarning] | None = Field(
         default=None,
         description=(
-            "Non-fatal notices about this request — e.g. parameters the "
-            "endpoint does not read and therefore ignored."
+            "Non-fatal notices about this request or its result set — e.g. "
+            "parameters the endpoint does not read and therefore ignored, or "
+            "'filter_agent_unknown' when the agent filter names an id this "
+            "tenant has never seen."
         ),
     )
 
@@ -224,11 +301,61 @@ class KeystoneDoc(BaseModel):
 class KeystonesEnvelope(BaseModel):
     count: int
     items: list[KeystoneDoc]
+    rule_set_hash: str | None = Field(
+        description=(
+            "The rule-set hash of the rules in items: lowercase hex SHA-256, as "
+            "the broker computes it for the rules it delivers. Null when a rule "
+            "can't be hashed (a missing updated_at, a weight that isn't a number)."
+        )
+    )
 
 
 class KeystoneDeleteResponse(BaseModel):
     deleted: bool
     doc_id: str
+
+
+class KeystoneVersionSummary(BaseModel):
+    version: int = Field(description="The tenant's change count: 1, 2, 3, ...")
+    op: Literal["set", "delete", "baseline", "resync"] = Field(
+        description=(
+            "baseline: the set versioning started from. resync: a change that reached "
+            "the set without a version (a fleet purge, say), recorded before the next "
+            "write so that write's version shows its own change alone."
+        )
+    )
+    doc_id: str | None = Field(description="The rule that changed; null for a baseline or a resync.")
+    actor_agent_id: str | None = Field(description="The agent that made the change.")
+    actor_user_id: str | None = Field(description="The person the gateway vouched for, when there was one.")
+    created_at: str
+    rule_set_hash: str | None = Field(
+        description=(
+            "The rule-set hash of the rules this version gives the fleet_id and "
+            "agent_id asked about, as the keystones list would have returned "
+            "them. Null when a rule can't be hashed."
+        )
+    )
+    rule_count: int = Field(description="How many rules that is, after the cap.")
+    truncated: bool = Field(description="Whether the cap dropped rules, as X-Truncated.")
+
+
+class KeystoneVersionsPage(BaseModel):
+    count: int
+    items: list[KeystoneVersionSummary] = Field(description="Newest first.")
+    next_before: int | None = Field(description="Pass back as before for the next page; null on the last.")
+
+
+class KeystoneVersionRule(BaseModel):
+    doc_id: str
+    fleet_id: str | None = Field(description="Null for tenant-scope rules.")
+    data: KeystoneData
+    updated_at: str
+
+
+class KeystoneVersionDetail(KeystoneVersionSummary):
+    items: list[KeystoneVersionRule] = Field(
+        description="The rules this version gives the fleet_id and agent_id asked about."
+    )
 
 
 class WeightAdjustment(BaseModel):
@@ -323,6 +450,10 @@ class WriteSettings(BaseModel):
     default_write_mode: str | None = Field(description="fast or strong; null means fast.")
     triple_emission_enabled: bool | None
     retraction_enabled: bool | None
+    contradiction_detection_enabled: bool | None = Field(
+        description="Tenant switch for contradiction detection; null means on. False skips "
+        "every detection path for the tenant, so no row is marked outdated/conflicted."
+    )
 
 
 class SettingsResponse(BaseModel):
@@ -502,8 +633,23 @@ class IngestPreviewResponse(BaseModel):
     content_length: int
     facts: list[IngestFact]
     chunk_ms: int
-    doc_hash: str | None = Field(default=None, description="Absent on cache-hit and too-short branches.")
-    sections: int | None = Field(default=None, description="Absent on cache-hit and too-short branches.")
+    doc_hash: str | None = Field(
+        default=None,
+        description=(
+            "Echo to commit to cache this extraction. Null when sections_failed is non-zero, so a "
+            "partial extraction is never cached; absent on the too-short branch."
+        ),
+    )
+    sections: int | None = Field(
+        default=None, description="Absent on the too-short branch; 0 on a cache hit."
+    )
+    sections_failed: int | None = Field(
+        default=None,
+        description=(
+            "Sections whose LLM extraction failed; present on the extraction path. A preview that "
+            "lost every section is a 502 instead."
+        ),
+    )
     cached: bool | None = Field(default=None, description="Only on a doc-hash cache hit.")
     run_id: str | None = Field(default=None, description="Only on a cache hit: the prior run's id.")
     skipped_reason: str | None = Field(default=None, description="Only when skipped (content_too_short).")
@@ -572,6 +718,14 @@ class InsightsResponse(BaseModel):
     insight_memory_ids: list[str]
     gate_rejected: int
     insights_ms: int
+    skipped_reason: str | None = Field(
+        default=None,
+        description=(
+            "Present when the analysis did not run: `llm_unavailable` means no LLM provider answered, "
+            "so `findings` is empty because nothing was analysed, not because nothing was found. "
+            "Prior insights are left as they were."
+        ),
+    )
 
 
 class HealthResponse(BaseModel):
@@ -604,6 +758,14 @@ class ConflictOut(BaseModel):
     resolution_note: str | None = None
     resolved_by: str | None = None
     resolved_at: str | None = None
+    # --- fields present on the runtime conflict payload but previously absent here ---
+    fleet_id: str | None = None
+    relationship_confidence: float | None = None
+    diagnosis_confidence: float | None = None
+    evidence_strength: str | None = None
+    audit_reason: str | None = None
+    created_by: str | None = None
+    created_at: str | None = None
 
 
 class ConflictListResponse(BaseModel):

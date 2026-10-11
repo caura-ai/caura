@@ -123,6 +123,10 @@ def _count_tokens(text: str) -> int:
 # detection for fact extraction.
 _md = MarkdownIt("gfm-like", {"breaks": False, "html": False, "linkify": False})
 
+# Fenced and indented code. Kept verbatim wherever they appear: at the top
+# level as a ``code`` block, inside a list or blockquote as part of its text.
+_CODE_TOKENS = ("fence", "code_block")
+
 
 def parse_markdown(text: str) -> list[Block]:
     """Walk a markdown-it AST and emit a typed Block list.
@@ -130,10 +134,11 @@ def parse_markdown(text: str) -> list[Block]:
     Block types emitted:
       - ``heading``: depth = 1..6, text = the heading body
       - ``paragraph``: text = inline content
-      - ``list``: bullet/ordered items joined as ``"- item\\n- item"``
-      - ``code``: fenced or indented code blocks, body verbatim
+      - ``list``: bullet/ordered items joined as ``"- item\\n- item"``, an
+        item's nested code verbatim under it
+      - ``code``: top-level fenced or indented code blocks, body verbatim
       - ``table``: rendered as plain-text rows
-      - ``blockquote``: text = inner content
+      - ``blockquote``: text = inner content, nested code verbatim
 
     Heading depth is preserved so the chunker can use H1/H2 as section
     boundaries. Anything we don't recognize falls back to ``paragraph``.
@@ -183,13 +188,19 @@ def parse_markdown(text: str) -> list[Block]:
                     body = (inner.content or "").strip()
                     if body:
                         items.append(f"- {body}")
+                elif inner.type in _CODE_TOKENS:
+                    # M-46: a code block in an item (an install step's command)
+                    # stays verbatim under that item; it used to be dropped.
+                    body = (inner.content or "").rstrip()
+                    if body:
+                        items.append(body)
                 j += 1
             if items:
                 blocks.append(Block(type="list", text="\n".join(items)))
             i = j + 1
             continue
 
-        if ttype == "fence" or ttype == "code_block":
+        if ttype in _CODE_TOKENS:
             body = (tok.content or "").rstrip()
             if body:
                 blocks.append(Block(type="code", text=body))
@@ -233,6 +244,11 @@ def parse_markdown(text: str) -> list[Block]:
                         break
                 elif inner.type == "inline":
                     parts.append((inner.content or "").strip())
+                elif inner.type in _CODE_TOKENS:
+                    # M-46: as in a list, quoted code stays in the quote.
+                    body = (inner.content or "").rstrip()
+                    if body:
+                        parts.append(body)
                 j += 1
             if parts:
                 blocks.append(Block(type="blockquote", text="\n".join(parts)))

@@ -18,7 +18,8 @@ import {
 } from "fs";
 import { dirname, join } from "path";
 import { createHash } from "crypto";
-import { execSync } from "child_process";
+import { exec, execSync } from "child_process";
+import { promisify } from "util";
 import { hostname, platform, release, networkInterfaces } from "os";
 import { getOpenClawBaseDir } from "./paths.js";
 
@@ -31,12 +32,14 @@ import {
   CAURA_NODE_NAME,
   CAURA_FLEET_ID,
   CAURA_REQUIRE_SIGNED_COMMANDS,
+  CAURA_CLEARTEXT_REMOTE,
   CAURA_INTERVIEWER,
   CAURA_INTERVIEWER_TASKS,
   INTERVIEW_SUBMIT_MAX_EVENTS,
   INTERVIEW_SUBMIT_TIMEOUT_MS,
   BUILD_TIMEOUT_MS,
   MAX_SOURCE_SIZE,
+  assertKeyTransportAllowed,
   ensureTenantId,
   readEnv,
 } from "./env.js";
@@ -49,6 +52,7 @@ import { CAURA_TOOLS } from "./tools.js";
 import {
   getPluginDir,
   getMissingTools,
+  listedAgents,
   readOpenClawConfig,
   isCauraFullyConfigured,
 } from "./config.js";
@@ -67,7 +71,7 @@ import {
   assertPromptLength,
 } from "./validation.js";
 import { logError } from "./logger.js";
-import { getInstallId } from "./install-id.js";
+import { getDefaultAgentId, getInstallId } from "./install-id.js";
 import { getDisplayName } from "./identity.js";
 import { reconcileSkills, type ReconcileSummary } from "./reconcile-skills.js";
 
@@ -387,7 +391,80 @@ function cleanupStaleBackups(): void {
   }
 }
 
-export async function sendHeartbeat(): Promise<void> {
+let _insecureSkillsSyncWarned = false;
+
+const execAsync = promisify(exec);
+let openclawVersionLookup: Promise<string | undefined> | undefined;
+
+/**
+ * The OpenClaw CLI's version, read once per process (L-197). Every tick ran
+ * ``openclaw --version`` with execSync, which blocks the gateway's event loop
+ * (this plugin runs inside it) for as long as the CLI takes to start, up to
+ * the 3s timeout, once a minute, to re-read a value that only a restart can
+ * change. Asynchronous now, and the answer is kept: a version, or no CLI on
+ * PATH, which fails the same way every time. A lookup that timed out, as it
+ * can on a busy host at startup, is asked again on the next tick.
+ */
+function readOpenclawVersion(): Promise<string | undefined> {
+  openclawVersionLookup ??= execAsync("openclaw --version", {
+    encoding: "utf8",
+    timeout: 3000,
+    windowsHide: true,
+  }).then(
+    ({ stdout }) => stdout.trim() || undefined,
+    (e: { killed?: boolean }) => {
+      if (e?.killed) openclawVersionLookup = undefined;
+      return undefined;
+    },
+  );
+  return openclawVersionLookup;
+}
+
+// The tick in flight, if any (L-56).
+let heartbeatInFlight: Promise<void> | undefined;
+
+/**
+ * Send one heartbeat, or join the one already running.
+ *
+ * index.ts drives this with setInterval, which does not wait for the async
+ * tick. A tick parked on a slow command (an interview submit waits up to 300s)
+ * let later ticks start beside it, each rerunning the skill reconciler against
+ * the same directories and posting another heartbeat (L-56). A call made while
+ * a tick runs now gets that tick's promise, and the next interval starts fresh.
+ * The tick no longer waits for the commands it receives (``queueCommands``),
+ * so joining it never holds a heartbeat back for a slow command.
+ */
+export function sendHeartbeat(): Promise<void> {
+  heartbeatInFlight ??= runHeartbeat().finally(() => {
+    heartbeatInFlight = undefined;
+  });
+  return heartbeatInFlight;
+}
+
+// Commands from heartbeat responses, run one at a time in arrival order.
+let commandQueue: Promise<void> = Promise.resolve();
+
+/**
+ * Queue the commands a heartbeat response carries, without waiting for them.
+ *
+ * A tick that awaited its commands held the next heartbeat back for as long
+ * as the slowest one ran: an interview submit waits up to 300s, and the
+ * server marks a node stale after 90s without a heartbeat and offline after
+ * 300s. They still run one at a time, as they did within a tick. The server
+ * acks a command when it hands it out and never sends it again, so a later
+ * tick cannot queue one twice.
+ */
+function queueCommands(commands: Parameters<typeof processCommand>[0][]): void {
+  for (const cmd of commands) {
+    commandQueue = commandQueue
+      .then(() => processCommand(cmd))
+      .catch((e: unknown) => {
+        logError(`command ${String(cmd?.command)} failed`, e);
+      });
+  }
+}
+
+async function runHeartbeat(): Promise<void> {
   cleanupStaleBackups();
   verifyDeployPostRestart();
   if (!CAURA_TENANT_ID || !CAURA_NODE_NAME) return;
@@ -399,10 +476,23 @@ export async function sendHeartbeat(): Promise<void> {
   // installed on this node, plus deltas/skips) rides the heartbeat for
   // operator observability. Left undefined if reconciliation throws.
   let reconcile: ReconcileSummary | undefined;
-  try {
-    reconcile = await reconcileSkills();
-  } catch (e: unknown) {
-    logError("reconcileSkills failed", e);
+  if (CAURA_CLEARTEXT_REMOTE) {
+    // L-80: over plain HTTP anyone on the path could forge the catalog and
+    // write skills the agents follow. Keep the skills already on disk and
+    // report no summary, the same as a tick whose reconcile threw.
+    if (!_insecureSkillsSyncWarned) {
+      console.warn(
+        "[caura] skills sync is disabled: CAURA_API_URL is plain HTTP to another host. " +
+          "Installed skills are kept. Point CAURA_API_URL at https:// to sync them.",
+      );
+      _insecureSkillsSyncWarned = true;
+    }
+  } else {
+    try {
+      reconcile = await reconcileSkills();
+    } catch (e: unknown) {
+      logError("reconcileSkills failed", e);
+    }
   }
 
   const pluginDir = getPluginDir();
@@ -424,17 +514,7 @@ export async function sendHeartbeat(): Promise<void> {
     // Network interfaces unavailable
   }
 
-  // Get OpenClaw version
-  let openclawVersion: string | undefined;
-  try {
-    const ver = execSync("openclaw --version 2>/dev/null || echo unknown", {
-      encoding: "utf-8",
-      timeout: 3000,
-    }).trim();
-    if (ver && ver !== "unknown") openclawVersion = ver;
-  } catch {
-    // openclaw CLI not available
-  }
+  const openclawVersion = await readOpenclawVersion();
 
   const srcPath = join(pluginDir, "src", "index.ts");
   let pluginHash: string | undefined;
@@ -457,8 +537,8 @@ export async function sendHeartbeat(): Promise<void> {
   let agents: Array<Record<string, unknown>> | undefined;
   try {
     const config = readOpenClawConfig() as Record<string, any> | null;
-    const agentList = config?.agents?.list;
-    if (Array.isArray(agentList) && agentList.length > 0) {
+    const agentList = listedAgents(config);
+    if (agentList) {
       // Operators who configured explicit ``agents.list`` keep their
       // chosen ids verbatim. ``display_name`` defaults to the
       // hostname-prefixed form when the entry has no explicit
@@ -482,12 +562,14 @@ export async function sendHeartbeat(): Promise<void> {
     } else {
       // No explicit list — synthesize a single default agent. Pre-Task6
       // this was hardcoded to ``"main"`` and collided with every other
-      // install. Now the internal id carries the install suffix; the
-      // human label uses the hostname.
+      // install. It registers under the install's default agent id, the
+      // one its turns write under (M-107): ``main-<installId>`` for a new
+      // install, ``main`` for one from before install.json recorded it.
+      // The human label uses the hostname.
       const defaultModel = config?.agents?.defaults?.model?.primary;
       agents = [
         {
-          agentId: `main-${installId}`,
+          agentId: getDefaultAgentId(),
           name: getDisplayName("main"),
           display_name: getDisplayName("main"),
           model: defaultModel || undefined,
@@ -627,34 +709,26 @@ export async function sendHeartbeat(): Promise<void> {
 
   try {
     const result = (await apiCall("POST", "/fleet/heartbeat", body)) as Record<string, any>;
-    if (result?.commands?.length) {
-      for (const cmd of result.commands) {
-        await processCommand(cmd);
-      }
-    }
+    if (result?.commands?.length) queueCommands(result.commands);
   } catch (e: unknown) {
     logError("heartbeat failed", e);
   }
 
-  // Periodic health check every 10 heartbeats.
+  // Periodic reachability probe every 10 heartbeats.
   //
-  // Feeds the reachability tracker (plugin/src/health.ts). Previously the
-  // outcome was only console.warn'd on an empty-index result; now success
-  // flips the tracker to "reachable" and network-class failure flips it to
-  // "unreachable" so the memory-runtime paths can surface honest
-  // availability via `getMemorySearchManager` / `status` / the probes.
+  // Feeds the reachability tracker (plugin/src/health.ts): success flips it to
+  // "reachable" and a failure to "unreachable", so the memory-runtime paths
+  // can surface honest availability via `getMemorySearchManager` / `status` /
+  // the probes.
   //
-  // An empty-results search against a populated tenant can happen for
-  // benign reasons (new tenant, throttled embeddings) and is NOT treated as
-  // unreachable — only genuine network-class throws are.
+  // GET /whoami, the route ensureTenantId already calls: unmetered, and with
+  // the tenant key it looks nothing up. This was a POST /search, which scored
+  // every live row of the tenant, took a search rate-limit slot and counted
+  // as a metered search on the platform, all for one bit (L-198).
   heartbeatCount++;
   if (heartbeatCount % 10 === 0 && CAURA_TENANT_ID) {
     try {
-      (await apiCall("POST", "/search", {
-        tenant_id: CAURA_TENANT_ID,
-        query: "health check",
-        top_k: 1,
-      })) as Record<string, any>;
+      await apiCall("GET", "/whoami");
       markReachable();
     } catch (e: unknown) {
       const msg = logError("heartbeat health check failed", e);
@@ -697,6 +771,29 @@ async function processCommand(cmd: {
     assertSafePathSegment(cmd.id, "cmd.id");
   } catch (e: unknown) {
     const msg = logError(`Rejected command ${cmd.command}: invalid cmd.id`, e);
+    return;
+  }
+
+  // L-80: plain HTTP to a remote host carries these commands and the plugin
+  // source a deploy fetches, so anyone on the path could push code, or the
+  // instructions educate writes into agent workspaces, here. Signing is no
+  // defence: commands are signed with CAURA_API_KEY, which the same channel
+  // carries in cleartext when CAURA_ALLOW_INSECURE_HTTP is set, and a node with
+  // no key accepts unsigned commands. So this follows the channel, not the opt-in.
+  const writesLasting = ["deploy", "update_plugin", "educate"].includes(cmd.command);
+  if (CAURA_CLEARTEXT_REMOTE && writesLasting) {
+    const error =
+      `Refused ${cmd.command}: CAURA_API_URL is plain HTTP to another host, where anyone on the ` +
+      `path could forge it. Point CAURA_API_URL at https:// to use it.`;
+    console.warn(`[caura] ${error}`);
+    try {
+      await apiCall("POST", `/fleet/commands/${encodeURIComponent(cmd.id)}/result`, {
+        status: "rejected",
+        result: { error },
+      });
+    } catch {
+      // Report failed
+    }
     return;
   }
 
@@ -789,9 +886,13 @@ async function processCommand(cmd: {
           // gateway; the bootstrap-router alias path is the
           // unauthenticated route for fresh installs.
           const mHeaders: Record<string, string> = withUserAgent();
-          if (CAURA_API_KEY) mHeaders["X-API-Key"] = CAURA_API_KEY;
+          if (CAURA_API_KEY) {
+            assertKeyTransportAllowed();
+            mHeaders["X-API-Key"] = CAURA_API_KEY;
+          }
           const mRes = await fetch(mUrl, {
             headers: mHeaders,
+            redirect: "error",
             signal: AbortSignal.timeout(10_000),
           });
           if (mRes.ok) {

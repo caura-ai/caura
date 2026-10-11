@@ -29,6 +29,8 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from fastapi import HTTPException
+
 from common.governance import mask, scan
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings as app_settings
@@ -41,6 +43,8 @@ from core_api.constants import (
     MAX_CONTENT_LENGTH,
     NODE_OFFLINE_SECONDS,
 )
+from core_api.providers._retry import deliberate_fake_provider
+from core_api.request_phase import phase
 from core_api.schemas import BulkMemoryCreate, BulkMemoryItem, BulkMemoryResponse
 from core_api.services.memory_service import create_memories_bulk
 from core_api.services.organization_settings import get_settings_for_display, resolve_config
@@ -52,6 +56,25 @@ WATERMARK_COLLECTION = "interview_watermarks"
 # Durable async-submit job queue (#665): one doc per (node, window),
 # holding the MASKED event window until synthesis commits.
 JOBS_COLLECTION = "interview_jobs"
+# M-86: this service's own state, written with no author, which the overwrite
+# gate lets any caller replace. A watermark moved ahead stops a node's
+# interviews; a planted pending job's events are written as memories under the
+# agent it names. Storage refuses only ``_``-prefixed collections, and these
+# predate that convention, so the public document routes refuse them.
+SYSTEM_COLLECTIONS = frozenset({WATERMARK_COLLECTION, JOBS_COLLECTION})
+
+
+def refuse_system_collection(collection: str) -> None:
+    """Refuse a public document write or delete aimed at :data:`SYSTEM_COLLECTIONS`.
+
+    Every credential is refused, with the 400 storage gives a ``_``-prefixed
+    collection. Reads stay open: ``caura-interviewer`` reads its watermark.
+    """
+    if collection in SYSTEM_COLLECTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Collection '{collection}' is system-managed; the interview service writes it.",
+        )
 
 
 class InterviewJobPermanentlyFailedError(RuntimeError):
@@ -101,7 +124,7 @@ def interview_attempt_id(node_id: str, cursor_from: int, cursor_to: int) -> str:
     re-run) resolves to ``duplicate_attempt`` instead of duplicate rows.
     Matches ``_BULK_ATTEMPT_ID_PATTERN`` (``^[A-Za-z0-9._:\\-]{1,128}$``).
     """
-    digest = hashlib.sha1(f"{node_id}:{cursor_from}:{cursor_to}".encode()).hexdigest()
+    digest = hashlib.sha1(f"{node_id}:{cursor_from}:{cursor_to}".encode(), usedforsecurity=False).hexdigest()
     return f"interview:{digest[:40]}"
 
 
@@ -121,7 +144,7 @@ def watermark_doc_id(node_id: str) -> str:
     mint synthetic per-instance ids), so per-session cursors would
     fragment. Session ids still travel per-event for report grouping.
     """
-    return f"wm_{hashlib.sha1(node_id.encode()).hexdigest()[:40]}"
+    return f"wm_{hashlib.sha1(node_id.encode(), usedforsecurity=False).hexdigest()[:40]}"
 
 
 # ── Masking ──
@@ -253,9 +276,10 @@ def _empty_report() -> dict[str, list]:
 
 
 def _fake_report(events: list[dict]) -> dict:
-    """Deterministic no-LLM fallback (fake provider / total LLM outage):
-    a single episode summarizing the window so the cursor can still
-    advance — an empty report would silently drop the window's history."""
+    """Stand-in report for an explicitly configured ``fake`` provider: a
+    single episode summarizing the window, so the interview runs end to end
+    in dev and CI without a key. TEST/DEV ONLY — with no LLM the window is
+    failed instead (``_skip_interview``)."""
     if not events:
         return _empty_report()
     report = _empty_report()
@@ -270,21 +294,50 @@ def _fake_report(events: list[dict]) -> dict:
     return report
 
 
-async def _interview_chunk(prompt: str, config, events: list[dict]) -> dict:
-    """Run one map-phase LLM call through the tenant's fallback chain."""
+def _skip_interview() -> None:
+    """No-LLM synthesis: produce nothing, so the window is not consumed.
+
+    ``_fake_report`` on this path stored a stub episode and counted the
+    window as synthesized (M-50). On the async path that marked the job
+    ``done``, which is terminal, so its stored events were never
+    synthesized; inline, the watermark moved past the window. ``None`` makes
+    ``_synthesize_and_write`` fail the window instead: the async job goes
+    back to ``pending`` for the sweep, and the inline submit answers 500 with
+    the watermark unmoved. ``none`` counts as no LLM, as for the crystallizer.
+    """
+    logger.warning("interview: no LLM — window not synthesized, left for a retry")
+    return None
+
+
+async def _interview_chunk(prompt: str, config, events: list[dict]) -> dict | None:
+    """Run one map-phase LLM call through the tenant's fallback chain.
+
+    ``None`` when no LLM answered (see ``_skip_interview``).
+    """
     from core_api.providers._retry import call_with_fallback
 
     async def _do_interview(llm) -> dict:
         return await llm.complete_json(prompt, temperature=INTERVIEW_TEMPERATURE)
 
-    return await call_with_fallback(
-        primary_provider_name=config.enrichment_provider,
-        call_fn=_do_interview,
-        fake_fn=lambda: _fake_report(events),
-        tenant_config=config,
-        service_label="interview",
-        model_override=config.enrichment_model,
-    )
+    # Named for the 504: ``/interview/submit`` enforces its own 90s budget and
+    # spends it on this chain of map-phase LLM calls and then on the bulk
+    # write. Without a name here a 504 could not say which, and the two have
+    # different owners. Not indexed by chunk — the name is a log-line
+    # dimension, and ``phases_completed`` already carries one entry per chunk
+    # that finished, which is the "stalled on chunk 7 of 12" answer.
+    with phase("interview.chunk"):
+        return await call_with_fallback(
+            primary_provider_name=config.enrichment_provider,
+            call_fn=_do_interview,
+            fake_fn=(
+                (lambda: _fake_report(events))
+                if deliberate_fake_provider(config.enrichment_provider)
+                else _skip_interview
+            ),
+            tenant_config=config,
+            service_label="interview",
+            model_override=config.enrichment_model,
+        )
 
 
 # ── Reduce ──
@@ -401,14 +454,44 @@ async def _keystone_lines(tenant_id: str, fleet_id: str | None, agent_id: str) -
 # ── Watermark ──
 
 
-async def _read_watermark_seq(sc, tenant_id: str, doc_id: str) -> int:
-    doc = await sc.get_document(tenant_id, WATERMARK_COLLECTION, doc_id, read=False)
-    if doc and isinstance(doc.get("data"), dict):
+def _watermark_seq(data: dict | None) -> int:
+    if isinstance(data, dict):
         try:
-            return int(doc["data"].get("last_seq", -1))
+            return int(data.get("last_seq", -1))
         except (TypeError, ValueError):
             return -1
     return -1
+
+
+async def _read_watermark_data(sc, tenant_id: str, doc_id: str) -> dict | None:
+    doc = await sc.get_document(tenant_id, WATERMARK_COLLECTION, doc_id, read=False)
+    data = doc.get("data") if doc else None
+    return data if isinstance(data, dict) else None
+
+
+async def _read_watermark_seq(sc, tenant_id: str, doc_id: str) -> int:
+    return _watermark_seq(await _read_watermark_data(sc, tenant_id, doc_id))
+
+
+async def read_watermark_state(tenant_id: str, node_id: str) -> tuple[int, str | None]:
+    """The stream's committed cursor and the agent that last advanced it.
+
+    ``(-1, None)`` when it has never been interviewed. One read serves both,
+    because the submit route needs both: it bounds the window against the
+    cursor and refuses to let one agent continue another agent's stream.
+
+    Primary read, like every other watermark read: a lagged answer would bound
+    against a stale cursor.
+    """
+    data = await _read_watermark_data(get_storage_client(), tenant_id, watermark_doc_id(node_id))
+    agent_id = data.get("agent_id") if data else None
+    return _watermark_seq(data), agent_id if isinstance(agent_id, str) and agent_id else None
+
+
+async def read_watermark(tenant_id: str, node_id: str) -> int:
+    """The node's committed cursor (``-1`` when it has never been interviewed)."""
+    seq, _agent_id = await read_watermark_state(tenant_id, node_id)
+    return seq
 
 
 # Bounded verify-and-repair passes for the read-max-write loop below.
@@ -530,7 +613,13 @@ async def _synthesize_and_write(
             chunk_index=index,
             chunk_count=len(chunks),
         )
-        mini_reports.append(await _interview_chunk(prompt, config, chunk))
+        mini_report = await _interview_chunk(prompt, config, chunk)
+        if mini_report is None:
+            # No LLM answered: fail the window rather than store a partial
+            # report as its synthesis (M-50). It fails either way, so the
+            # chunks left are not sent.
+            return {"status": "failed", "watermark": None, "memories_written": 0, "errors": 0}
+        mini_reports.append(mini_report)
     report = mini_reports[0] if len(mini_reports) == 1 else merge_reports(mini_reports)
     # Single-chunk reports still need shape normalization + caps.
     report = merge_reports([report])

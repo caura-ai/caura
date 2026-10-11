@@ -42,8 +42,9 @@ pip install pre-commit   # or: uv pip install pre-commit
 pre-commit install
 ```
 
-The hook is configured in `.pre-commit-config.yaml` and only runs against
-`core-api/src/` and `core-storage-api/src/`. `mypy` is intentionally not in
+The hook is configured in `.pre-commit-config.yaml` and runs the ruff
+version the services pin over the trees CI checks: `common/`, `scripts/`,
+`tests/` and each service's `src/` and `tests/`. `mypy` is intentionally not in
 the hook (it needs the real project venv to resolve workspace imports
 correctly) — CI runs it authoritatively, and you can run it locally via
 the command under "Run local checks" below.
@@ -64,6 +65,12 @@ This starts PostgreSQL + pgvector, Redis, and the core API with hot reload.
 pytest tests/ -v
 ```
 
+`core-api` also keeps a small unit suite of its own, which needs no database:
+
+```bash
+pytest core-api/tests/ -v
+```
+
 `core-storage-api` has a second suite that needs a **separate database**:
 
 ```bash
@@ -73,11 +80,13 @@ pytest core-storage-api/tests/ -v
 Two databases, because the suites provision incompatibly and cannot share one:
 `tests/` builds its schema with `Base.metadata.create_all`, while
 `core-storage-api/tests/` runs the real Alembic chain. Run them against one
-database and nothing fails loudly — `create_all` leaves tables with no
-`alembic_version`, so the Alembic side stamps head and skips every migration,
-and any migration-only table (one with no ORM model, e.g. `tenant_suppression`)
-is missing from a database whose stamp claims it is current. Run them the other
-way round and the migrated schema is the one that gets polluted.
+database and it breaks in a way that points away from the cause — `create_all`
+leaves tables with no `alembic_version` and none of the chain's migration-only
+objects (e.g. `tenant_suppression`, which has no ORM model), so the storage
+suite's `init_database()` refuses to stamp it and every storage test errors at
+setup. (It used to stamp head and skip every migration, which was worse: nothing
+failed at all.) Run them the other way round and the migrated schema is the one
+that gets polluted.
 
 Each suite defaults to its own database — `caura_test` for `tests/` and
 `caura_storage` for `core-storage-api/tests/` — so no environment variable is
@@ -107,14 +116,14 @@ See `README.md` for more deployment options and environment variable details.
    ruff format already ran on `git commit`, so you only need:
    ```bash
    mypy core-api/src/ core-storage-api/src/
-   pytest tests/
+   pytest tests/ core-api/tests/
    ```
    Without the hook, also run ruff by hand:
    ```bash
-   ruff check core-api/src/ core-storage-api/src/
-   ruff format --check core-api/src/ core-storage-api/src/
+   ruff check core-api/src/ core-api/tests/ core-storage-api/src/
+   ruff format --check core-api/src/ core-api/tests/ core-storage-api/src/
    mypy core-api/src/ core-storage-api/src/
-   pytest tests/
+   pytest tests/ core-api/tests/
    ```
 6. **Open a PR against `main`.** Fill out the PR template. Branch protection requires CI green, DCO check green, and ≥1 maintainer approval before merge.
 7. **Respond to review.** Expect at least one round of feedback.
@@ -207,10 +216,12 @@ release-please opens or updates a release PR. Merging the release PR:
 1. Tags `vX.Y.Z` and creates a GitHub Release.
 2. Updates `CHANGELOG.md` with everything since the last tag,
    grouped by Conventional Commit type.
-3. Bumps the version in every pinned file: `VERSION`, every
-   `pyproject.toml`, `plugin/package.json`, `plugin/openclaw.plugin.json`.
+3. Bumps the backend and plugin versions in the files RELEASING.md lists
+   under "Version files release-please rewrites".
 
-You don't bump versions by hand; just write good commit messages.
+You don't bump those by hand; just write good commit messages. The client
+packages under `clients/` are versioned on their own: bump one by hand as its
+publish workflow describes.
 
 ## Code Style
 

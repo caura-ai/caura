@@ -107,7 +107,7 @@ def seams(monkeypatch):
     async def _resolve_write_agent(chosen_agent_id, tenant_id, fleet_id, **kwargs):
         return {"trust_level": 2, "fleet_id": fleet_id}, chosen_agent_id
 
-    async def _enforce_fleet_write(tenant_id, agent_id, fleet_id):
+    async def _enforce_fleet_write(tenant_id, agent_id, fleet_id, **_kw):
         s.fleet_writes.append((tenant_id, agent_id, fleet_id))
 
     async def _check_and_increment(tenant_id, kind):

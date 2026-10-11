@@ -38,7 +38,11 @@ from datetime import UTC, datetime
 
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.forge.poison import is_fingerprint_poisoned
-from core_api.services.forge.sentinel_scan import scan_skill_doc
+from core_api.services.forge.sentinel_scan import (
+    DEFAULT_BODY_MAX_BYTES,
+    DEFAULT_DESCRIPTION_MAX_BYTES,
+    scan_skill_doc,
+)
 from core_api.services.skill_lifecycle import (
     AutoGateResult,
     evaluate_auto_gates,
@@ -198,12 +202,13 @@ def _scan_is_clean(doc: dict) -> bool:
 
     The candidate's ``data.scan`` is written at Forge-distill time
     (``forge_service._distill_cluster`` runs ``scan_skill_doc`` and
-    stamps the result). A ``status='candidate'`` doc's scan therefore
-    always reflects its current content: the only path that mutates a
-    candidate's content is the Inbox ``edit`` endpoint, which re-runs
-    the scan AND leaves the doc in ``staged`` (so it's no longer in
-    the promoter's ``status='candidate'`` query). Trusting the
-    stamped scan here is safe — no fresh rescan needed.
+    stamps the result). A ``status='candidate'`` doc's scan reflects its
+    current content: the only path that mutates a candidate's content is
+    the Inbox ``edit`` endpoint, which re-runs the scan AND leaves the doc
+    in ``staged``. But it reflects the scanner that stamped it, and a
+    candidate minted before a scanner fix kept an old ``clean`` (M-91).
+    So this check is necessary, not sufficient: the auto-activate branch
+    also re-runs the scan (``rescan_before_apply``).
 
     NOTE: auto-gate G5 already requires ``scan.state == 'clean'`` for
     ``gates.promote`` to be True, so this check is partially redundant
@@ -235,6 +240,8 @@ async def promote_pending_candidates(
     now: datetime | None = None,
     limit: int = 50,
     auto_promote_clean: bool = False,
+    body_max_bytes: int = DEFAULT_BODY_MAX_BYTES,
+    description_max_bytes: int = DEFAULT_DESCRIPTION_MAX_BYTES,
 ) -> PromoterRunResult:
     """One promoter tick. Reads up to ``limit`` candidates; evaluates
     each; promotes those that pass all gates.
@@ -253,6 +260,29 @@ async def promote_pending_candidates(
     candidate. Candidates with a non-clean scan never reach the
     promote branch (gate G5 holds them), so they can't be
     auto-activated regardless of the flag.
+
+    A scan with only warnings is clean, so under this flag a skill whose text
+    carries a ``DESTRUCTIVE_COMMAND`` warning (``mkfs`` on a data volume,
+    ``dd`` for a swapfile, ``chmod 777`` on a directory, ``rm -rf`` below a
+    top-level directory) auto-activates, as one with an outbound-URL warning
+    always has. That is the owner's decision of 2026-10-05 (M-120): those lines
+    are routine in a runbook, and a tenant that wants every warning seen leaves
+    this flag off. ``dd`` or ``mkfs`` onto a disk warns whatever the disk, the
+    boot disk included, since the text cannot tell it from a data volume. A
+    root, home or system-directory wipe, ``chmod 777`` on one, pipe-to-shell
+    and a downloaded script that is run are critical and never reach
+    ``active`` this way.
+
+    The stamped scan answers for the scanner that wrote it, so a candidate
+    the flag would activate is scanned again first, under the tenant's size
+    caps (``body_max_bytes`` / ``description_max_bytes``); one the current
+    scanner does not pass goes to the inbox instead (M-91). Its stored
+    ``data.scan`` stays stale: the status flip is storage's status-only CAS
+    and writes nothing else, so its inbox card can still show ``clean``. The
+    log names the findings that held it back, and inbox approve rescans
+    before ``active``, so the stale stamp activates nothing.
+    TODO(M-120 follow-up): write the fresh scan with the flip once storage's
+    status CAS can carry it.
     """
     now = now or datetime.now(UTC)
     sc = get_storage_client()
@@ -315,6 +345,27 @@ async def promote_pending_candidates(
             # ``auto_promote_clean`` only chooses where it lands, never
             # whether it lands.
             is_auto = auto_promote_clean and _scan_is_clean(doc)
+            if is_auto:
+                # M-91: a candidate minted before a scanner fix keeps its old
+                # ``clean`` stamp. Re-run the scan, as the inbox approve does,
+                # before anything skips human review.
+                verdict = await rescan_before_apply(
+                    doc, body_max_bytes=body_max_bytes, description_max_bytes=description_max_bytes
+                )
+                is_auto = verdict.allow
+                if not is_auto:
+                    # The doc keeps its stale ``clean`` stamp (the status flip
+                    # writes nothing else), so say here what held it back: the
+                    # critical and fatal findings, not the warnings. The inbox
+                    # approve rescans before ``active``, so the stamp alone never
+                    # activates it.
+                    blocking = {f.code for f in verdict.findings if f.severity == "critical" or f.fatal}
+                    logger.warning(
+                        "skill_promoter: doc %s held for review: the rescan is %s (%s)",
+                        doc_id,
+                        verdict.state,
+                        ", ".join(sorted(blocking)) or "fatal finding",
+                    )
             target_status = "active" if is_auto else "staged"
             try:
                 await status_updater(tenant_id, "skills", doc_id, target_status)

@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
+from common.events.base import PermanentOpError
 from core_api.agent_ids import INSIGHTER_AGENT_ID, INSIGHTER_TRUST_LEVEL
 from core_api.clients.storage_client import CoreStorageClient
 from core_api.constants import LIFECYCLE_STALE_ARCHIVE_WEIGHT
@@ -251,6 +252,18 @@ class _CoreApiLifecycleAdapter:
             fleet_id=fleet_id,
             agent_id=INSIGHTER_AGENT_ID,
         )
+        if result.get("skipped_reason"):
+            # L-134. Returning 0 here recorded an outage as a successful run
+            # that found nothing, so a discover pass that no LLM answered left
+            # no trace in the audit trail. A terminal failure, decided by Eldad
+            # on 2026-10-09: the row says what happened and the message is acked
+            # rather than redelivered, which during a long outage would only
+            # burn retries into the DLQ. The next scheduled run tries again,
+            # and a failure row does not count toward the dedup window.
+            raise PermanentOpError(
+                f"insights skipped ({result['skipped_reason']}): no LLM provider answered, "
+                "so nothing was analysed or persisted; the next scheduled run tries again"
+            )
 
         return len(result.get("insight_memory_ids", []))
 
@@ -285,6 +298,10 @@ class _CoreApiLifecycleAdapter:
                 "tenant_id": org_id,
                 **({"fleet_id": fleet_id} if fleet_id else {}),
             },
+            # M-18: ``BackfillEntityEmbeddings`` embeds entity names with this, so
+            # they land in the tenant's embedding space (provider, model, key) as
+            # its memories do. Without it they took the process-wide provider.
+            tenant_config=config,
         )
         pipeline = build_full_entity_linking_pipeline()
         result = await pipeline.run(ctx)
@@ -371,7 +388,7 @@ class _CoreApiLifecycleAdapter:
         # in the structured log line above.
         return int(stats.get("candidates_written", 0)) + int(stats.get("promoted", 0))
 
-    async def has_recent_lifecycle_success(self, *, org_id: str, action: str, since_hours: int) -> bool:
+    async def has_recent_lifecycle_success(self, *, org_id: str, action: str, since_hours: float) -> bool:
         return await self._storage.has_recent_lifecycle_success(
             org_id=org_id, action=action, since_hours=since_hours
         )

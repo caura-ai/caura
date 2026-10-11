@@ -2,25 +2,35 @@
 
 import asyncio
 import logging
+import random
 import re
+import traceback
 from typing import Any, Final, Literal
 from uuid import UUID
 
+from common import entity_naming as _entity_naming
 from common.constants import SINGLE_VALUE_PREDICATES
 from common.embedding import get_embedding
 from common.entity_naming import canonical_match_key
+from common.llm.constants import LLM_RETRY_JITTER_FRACTION
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
     CROSS_LINK_MEMORY_BATCH_SIZE,
     CROSS_LINK_SIMILARITY_THRESHOLD,
     CROSS_LINK_TEXT_VERIFY,
+    ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S,
     ENTITY_NAME_BLOCKLIST,
     ENTITY_RESOLUTION_THRESHOLD,
     MIN_ENTITY_NAME_LENGTH,
 )
 from core_api.schemas import RelationUpsert
 from core_api.services.audit_service import log_action
-from core_api.services.entity_extraction import extract_entities_from_content
+from core_api.services.entity_extraction import (
+    ExtractedGraph,
+    ProvidersUnavailableError,
+    degraded_graph,
+    extract_entities_from_content,
+)
 from core_api.services.entity_service import upsert_relation
 from core_api.services.task_tracker import record_task_failure
 
@@ -95,47 +105,11 @@ _LITERAL_OR_ATTR_RE = re.compile(
 )
 
 
-# A42 — parenthetical qualifiers, e.g. the "(delaware)" in "acme (delaware)".
-# Matches the discriminator vocabulary ``_reattach_subject_discriminators``
-# already established ("#NNNN" and parentheticals); deliberately NOT any
-# trailing word, because unbracketed tokens are usually harmless surface
-# variation ("acme" / "acme corp") rather than a distinguisher.
-_QUALIFIER_RE = re.compile(r"[(\[]([^)\]]{1,64})[)\]]")
-
-
-def _qualifier_signature(name: str) -> frozenset[str]:
-    """Bracketed qualifiers in ``name``, normalised for comparison."""
-    return frozenset(" ".join(m.strip().lower().split()) for m in _QUALIFIER_RE.findall(name) if m.strip())
-
-
-def _same_identifier_signature(a: str, b: str) -> bool:
-    """Two names may only merge if nothing in them says they are different things.
-
-    CAURA graph-build fix (B): same set of digit-bearing identifier tokens.
-    Synthetic suffix-distinct names like 'comet #0002' vs 'comet #0012' embed
-    near-identically and trip the 0.85 similarity merge, collapsing distinct
-    entities into one contaminated mega-node.
-
-    A42 (A33 mechanism ②): digits alone are too narrow. Two genuinely distinct
-    entities distinguished by a NON-digit qualifier — 'acme (delaware)' vs
-    'acme (ohio)' — both yield an empty digit set, compare equal, and merge.
-    Downstream that reads as same_subject=true and produces a false
-    contradiction between two different things.
-
-    Asymmetry is deliberate: a name with NO qualifier merges freely with a
-    qualified one ('acme' vs 'acme (ohio)' -> allowed). An absent qualifier
-    means "unspecified", not "different", and blocking it would strand every
-    qualified mention from its own plain surface form. The chosen failure
-    direction favours coalescence — an over-merge is visible and recoverable,
-    whereas an entity that never coalesces fragments the graph silently.
-    """
-    ta = set(re.findall(r"\d[\w.\-]*", a.lower()))
-    tb = set(re.findall(r"\d[\w.\-]*", b.lower()))
-    if ta != tb:
-        return False
-    qa, qb = _qualifier_signature(a), _qualifier_signature(b)
-    # Only a CONFLICT between two present qualifiers blocks the merge.
-    return not qa or not qb or qa == qb
+# A42 / graph-build fix (B): the identifier guard lives in ``common.entity_naming``
+# so the nightly duplicate resolver in core-storage-api applies the same rule.
+_QUALIFIER_RE = _entity_naming.QUALIFIER_RE
+_qualifier_signature = _entity_naming.qualifier_signature
+_same_identifier_signature = _entity_naming.same_identifier_signature
 
 
 def _is_valid_entity(name: str, blocklist: frozenset[str] | None = None) -> bool:
@@ -203,10 +177,59 @@ async def _discover_cross_links_for_memory(
         )
 
 
-async def _purge_written_artifacts_if_dropped(
-    sc: Any, memory_id: UUID, tenant_id: str
-) -> Literal["live", "dropped", "unknown"]:
-    """Undo our own graph writes when the memory died while we were making them.
+def _content_changed(row: dict, content: str) -> bool:
+    """M-39: does the row hold different text from the text this run extracted?
+
+    Only a string that differs counts. A row without a readable ``content``
+    proves nothing, and the answer to "changed" is a reset, so it has to be
+    earned.
+    """
+    stored = row.get("content")
+    return isinstance(stored, str) and stored != content
+
+
+async def _reset_and_re_extract(sc: Any, memory_id: UUID, tenant_id: str, row: dict) -> None:
+    """M-39: replace the graph this run wrote for text the row no longer holds.
+
+    The edit that changed the text ran its own reset before these rows existed,
+    so it found nothing to clear. This is the same reset, run again now that
+    there is something to clear. It also removes rows the edit's own
+    re-extraction may already have written, which is why the current text is
+    re-extracted here rather than left to that run.
+
+    Inline, in this tracked task, rather than scheduled: the edit already
+    scheduled one extraction, and a failure here is recorded against the same
+    memory. Bounded by the edits themselves: the re-extraction is handed the
+    text it just read, so it only comes back here if another edit lands.
+    """
+    try:
+        await sc.reset_entity_artifacts(tenant_id, str(memory_id))
+    except Exception:
+        logger.exception(
+            "entity extraction: memory %s was edited while its old text was being "
+            "extracted, and the rows written for the old text could NOT be reset; "
+            "they stay beside the new text's",
+            memory_id,
+        )
+    logger.warning(
+        "entity extraction: memory %s was edited while its old text was being "
+        "extracted; reset its extraction rows and re-extracting the current text",
+        memory_id,
+    )
+    await process_entity_extraction(
+        memory_id,
+        tenant_id,
+        row.get("fleet_id"),
+        row.get("agent_id"),
+        row["content"],
+        row.get("memory_type"),
+    )
+
+
+async def _recheck_row_after_writes(
+    sc: Any, memory_id: UUID, tenant_id: str, content: str
+) -> Literal["live", "dropped", "edited", "unknown"]:
+    """Undo our own graph writes when the memory died or changed while we made them.
 
     Reports WHAT IT FOUND and leaves the policy to the caller, because the two
     call sites want different things from the same answer. An earlier revision
@@ -219,8 +242,14 @@ async def _purge_written_artifacts_if_dropped(
     ``dropped``
         The row is gone or soft-deleted, and its graph rows have been purged
         (or the purge failed, loudly — either way it is not coming back).
+    ``edited``
+        M-39. The row is live but holds different text from ``content``: it was
+        edited mid-extraction. Its extraction rows have been reset and the
+        current text re-extracted (``_reset_and_re_extract``), so nothing more
+        of this run's may be written.
     ``live``
-        The row is there. Nothing was purged and nothing should stop.
+        The row is there, holding ``content``. Nothing was purged and nothing
+        should stop.
     ``unknown``
         The read itself failed. Nothing is known and nothing was purged.
 
@@ -275,6 +304,13 @@ async def _purge_written_artifacts_if_dropped(
     A failed PURGE still reports ``dropped``: the memory is gone whether or not
     the cleanup worked, and the caller's decision does not change. Only a failed
     READ is ``unknown``.
+
+    M-39 is the same race with an edit in place of a drop, and the same
+    argument closes it: the edit's reset runs before or after our writes, and
+    this check sees the new text in every ordering where the reset ran first.
+    The subject and predicate write-backs are columns the reset does not clear,
+    so they carry the extracted text and storage applies them only while the row
+    still holds it.
     """
     try:
         live = await sc.get_memory(str(memory_id), tenant_id, read=False)
@@ -288,7 +324,10 @@ async def _purge_written_artifacts_if_dropped(
         return "unknown"
 
     if live is not None and live.get("deleted_at") is None:
-        return "live"
+        if not _content_changed(live, content):
+            return "live"
+        await _reset_and_re_extract(sc, memory_id, tenant_id, live)
+        return "edited"
 
     try:
         counts = await sc.purge_entity_artifacts(tenant_id, str(memory_id))
@@ -324,6 +363,131 @@ async def _purge_written_artifacts_if_dropped(
         counts.get("entities"),
     )
     return "dropped"
+
+
+# ``background_task_log.task_name`` for an extraction that settled for the regex
+# heuristic because every provider kept failing through ``_extract_asking_again``'s
+# retries. Apart from ``entity_extraction``: the run did not fail, it wrote the
+# heuristic's graph (which may be empty), and that is what an operator counts.
+_DEGRADED_TASK = "entity_extraction_degraded"
+
+
+async def _still_wants_extraction(memory_id: UUID, tenant_id: str, content: str) -> bool:
+    """Is the row still live, and still holding this text?
+
+    From the writer, as the check after extraction reads it. A row that is gone
+    or held (a held row reads as gone, and its release replays extraction) or
+    was edited (the edit scheduled its own extraction) gains nothing from
+    another try.
+
+    A read that fails says nothing about the row, so it answers yes, as
+    ``_recheck_row_after_writes`` treats an unknown read: the extraction goes on
+    and still ends in a graph, and the check after extraction reads the row
+    again before anything is written.
+    """
+    try:
+        live = await get_storage_client().get_memory(str(memory_id), tenant_id, read=False)
+    except Exception:
+        logger.warning(
+            "entity extraction: could not read memory %s to decide whether to ask again; going on",
+            memory_id,
+            exc_info=True,
+        )
+        return True
+    return live is not None and live.get("deleted_at") is None and not _content_changed(live, content)
+
+
+async def _extract_asking_again(
+    memory_id: UUID, tenant_id: str, content: str, memory_type: str, tenant_cfg: Any
+) -> tuple[ExtractedGraph, ProvidersUnavailableError | None] | None:
+    """Extract, and if every provider fails, ask again later before the heuristic.
+
+    A provider failure is usually brief. On staging (2026-10-07) a Vertex 429
+    during a release fell straight through to the regex heuristic, which found
+    nothing, and the memory kept no entities with nothing to retry it. So the
+    whole provider chain runs again after each of
+    ``ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S``, and only then does this
+    settle for the heuristic. A failure asking again cannot fix (output that
+    does not parse, no usable provider) is not retried: the extractor degrades
+    it at once, as before.
+
+    This runs in a background task, so the waits cost no request anything.
+
+    The tradeoff, chosen over settling for the heuristic at once: the
+    heuristic's graph, which used to be written within seconds, now waits behind
+    the retries, up to about 7.5 minutes. If the instance shuts down during a
+    wait, the task is cancelled and nothing is written; ``tracked_task`` records
+    it (``entity_extraction``, ``cancelled``), as it does every task in flight
+    at shutdown. Writing the heuristic's graph on that cancellation would not
+    finish: shutdown gives tasks 2 s to drain and 0.5 s to settle
+    (``core_api.tasks``), and a graph write is several storage calls and an
+    embedding per entity name. The cancelled row is what brings it back: the
+    hourly re-run sweep (``services.extraction_rerun``) resets the memory's
+    extraction and runs it again.
+
+    Returns the graph and, when it is the heuristic's after a provider failure,
+    that failure. ``None`` when the row stopped wanting this extraction while
+    the providers were failing.
+    """
+
+    async def _extract() -> ExtractedGraph:
+        return await extract_entities_from_content(
+            content, memory_type, tenant_config=tenant_cfg, raise_on_provider_failure=True
+        )
+
+    async def _wanted() -> bool:
+        if await _still_wants_extraction(memory_id, tenant_id, content):
+            return True
+        logger.info(
+            "entity extraction: memory %s is gone, held or edited; not asking the failing providers again",
+            memory_id,
+        )
+        return False
+
+    for delay in ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S:
+        try:
+            return await _extract(), None
+        except ProvidersUnavailableError as exc:
+            if not await _wanted():
+                return None
+            # Lengthened by the retry layer's jitter, never shortened: a bulk
+            # write's extractions fail together and would otherwise all ask
+            # again in the same second, into the limit that refused them.
+            wait = delay + random.uniform(0.0, LLM_RETRY_JITTER_FRACTION * delay)
+            logger.warning(
+                "entity extraction: every provider failed for memory %s (%s); asking again in %.0fs",
+                memory_id,
+                exc,
+                wait,
+            )
+            await asyncio.sleep(wait)
+    try:
+        return await _extract(), None
+    except ProvidersUnavailableError as exc:
+        if not await _wanted():
+            return None
+        return degraded_graph(content, tenant_cfg), exc
+
+
+async def _record_degraded(memory_id: UUID, tenant_id: str, exc: ProvidersUnavailableError) -> None:
+    """One ``background_task_log`` row for an extraction the heuristic finished.
+
+    The provider's own error goes in the message. The traceback prints it first,
+    and ``record_task_failure`` keeps only the traceback's tail, so behind a deep
+    SDK stack it would be cut off.
+    """
+    tries = len(ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S) + 1
+    cause = exc.__cause__ or exc
+    await record_task_failure(
+        _DEGRADED_TASK,
+        memory_id,
+        tenant_id,
+        RuntimeError(
+            f"{exc}, on all {tries} tries; the regex heuristic was used. "
+            f"Last error: {type(cause).__name__}: {cause}"
+        ),
+        tb="".join(traceback.format_exception(exc)),
+    )
 
 
 async def process_entity_extraction(
@@ -364,8 +528,28 @@ async def process_entity_extraction(
 
         tenant_cfg = await resolve_config(tenant_id)
 
-        graph = await extract_entities_from_content(content, memory_type, tenant_config=tenant_cfg)
+        extracted = await _extract_asking_again(memory_id, tenant_id, content, memory_type, tenant_cfg)
+        if extracted is None:
+            return
+        graph, degraded_by = extracted
+        # Only an extraction the heuristic finished is marked, so the audit
+        # entries of every other run read as they always have.
+        degraded = {"degraded": True} if degraded_by is not None else {}
+        if degraded_by is not None:
+            await _record_degraded(memory_id, tenant_id, degraded_by)
         if not graph.entities:
+            if degraded_by is not None:
+                # The heuristic found nothing. Without this entry the memory
+                # reads as "never extracted" in the audit trail, which is how
+                # the staging miss went unseen.
+                await log_action(
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    action="entity_extraction",
+                    resource_type="memory",
+                    resource_id=memory_id,
+                    detail={"entities_count": 0, "relations_count": 0, **degraded},
+                )
             return
 
         sc = get_storage_client()
@@ -383,7 +567,7 @@ async def process_entity_extraction(
         #
         # This check alone does NOT close the window, and it is not claimed to:
         # the writes below are several round-trips away, so a drop can land after
-        # it passes. ``_purge_written_artifacts_if_dropped`` at the end of the
+        # it passes. ``_recheck_row_after_writes`` at the end of the
         # persistence block is what closes that; this one is here to avoid doing
         # the work at all in the common case where the row is already gone.
         live = await sc.get_memory(str(memory_id), tenant_id, read=False)
@@ -392,6 +576,17 @@ async def process_entity_extraction(
                 "entity extraction: memory %s is gone by the time extraction finished; "
                 "discarding %d extracted entit(ies) rather than writing them to a "
                 "dropped row's graph",
+                memory_id,
+                len(graph.entities),
+            )
+            return
+        # M-39: the same check for an edit. Nothing is written yet, so there is
+        # nothing to reset, and the edit scheduled its own extraction of the new
+        # text.
+        if _content_changed(live, content):
+            logger.info(
+                "entity extraction: memory %s was edited while its old text was being "
+                "extracted; discarding %d entit(ies) for text it no longer holds",
                 memory_id,
                 len(graph.entities),
             )
@@ -558,19 +753,20 @@ async def process_entity_extraction(
                     item["name_embedding"] = emb
 
                 if match:
-                    # Existing row found — merge into it.
-                    existing_attrs = match.get("attributes") or {}
-                    merged_attrs = dict(existing_attrs)
+                    # Existing row found — merge into it. Storage merges the
+                    # item's ``attributes`` into the locked row (L-46), so the
+                    # item carries only what this extraction adds: its aliases.
+                    # A copy of the row's other attributes from the resolve
+                    # snapshot would write stale values back over a key another
+                    # writer changed in between.
+                    #
                     # NOTE: ``ExtractedEntity`` currently emits no extra
                     # attributes (only ``canonical_name`` / ``entity_type``
                     # / ``role`` come back from the LLM). If the
                     # extraction schema later grows attribute fields,
-                    # add ``merged_attrs.update(<new fields>)`` here to
-                    # match ``entity_service.upsert_entity`` (line 79:
-                    # ``if data.attributes: merged_attrs.update(data.attributes)``)
-                    # and keep the bulk path's merge semantics
-                    # equivalent to the single-row serial path.
-                    aliases = list(merged_attrs.get("_aliases") or [])
+                    # add them to ``added_attrs`` here, as
+                    # ``entity_service.upsert_entity`` sends its caller's.
+                    #
                     # Defensive fallback: storage-side ``bulk_resolve_entities``
                     # SHOULD always carry a non-empty ``canonical_name`` on a
                     # match (the row had to exist for a match to fire). An
@@ -581,17 +777,14 @@ async def process_entity_extraction(
                     # rather than silently corrupting the entity row.
                     existing_name = match.get("canonical_name") or ""
                     if not existing_name:
+                        # The matched id, not the name (L-77).
                         logger.warning(
-                            "bulk_resolve_entities match for '%s' has no canonical_name; "
+                            "bulk_resolve_entities match %s has no canonical_name; "
                             "falling back to incoming name",
-                            name,
+                            match.get("entity_id"),
                         )
                         existing_name = name
-                    if existing_name and existing_name not in aliases:
-                        aliases.append(existing_name)
-                    if name not in aliases:
-                        aliases.append(name)
-                    merged_attrs["_aliases"] = aliases
+                    added_attrs = {"_aliases": list(dict.fromkeys((existing_name, name)))}
                     # Defensive guard mirroring the ``canonical_name``
                     # fallback above: a malformed resolve match without
                     # ``entity_id`` would otherwise crash with KeyError
@@ -601,9 +794,10 @@ async def process_entity_extraction(
                     match_entity_id = match.get("entity_id")
                     if not match_entity_id:
                         logger.warning(
-                            "bulk_resolve_entities match for '%s' has no entity_id; "
+                            "bulk_resolve_entities match for a %s entity of tenant %s has no entity_id; "
                             "falling back to create path",
-                            name,
+                            entity_type,
+                            tenant_id,
                         )
                         item["action"] = "create"
                         item["canonical_name"] = name
@@ -627,11 +821,17 @@ async def process_entity_extraction(
                         # looked like a race and never got chased.
                         #
                         # Fixed by coalescing here rather than storage-side,
-                        # because the merge contract is the caller's: this is the
+                        # because the merge contract was the caller's: this is the
                         # same "dedupe at the write site" the link batch below
                         # already does for the same cause, and the same
                         # first-seen-wins rule applies to everything except the
                         # alias list, which accumulates.
+                        #
+                        # Storage now merges each item into the locked row
+                        # (L-46), which also covers this case and two
+                        # extractions racing across batches. Coalescing stays:
+                        # one item per row is what keeps ``upsert_names`` mapping
+                        # every surface form to its id.
                         #
                         # Only the UPDATE path can collide. Two creates cannot
                         # name the same row: the natural key is
@@ -646,7 +846,7 @@ async def process_entity_extraction(
                         item["action"] = "update"
                         item["entity_id"] = match_entity_id
                         item["canonical_name"] = existing_name  # first-seen wins
-                        item["attributes"] = merged_attrs
+                        item["attributes"] = added_attrs
                         entity_id_to_item[str(match_entity_id)] = len(upsert_items)
                 else:
                     # No match — create.
@@ -691,6 +891,20 @@ async def process_entity_extraction(
             created_entity_ids: list[str] = []
             for r in upserted:
                 if not r.get("entity_id"):
+                    continue
+                # L-29. ``missing``: the entity was deleted between resolve and
+                # upsert (a content-edit reset, a governance purge or the
+                # nightly merge). Its id names nothing, so mapping it would link,
+                # relate and subject-write this memory to a row that does not
+                # exist, and count it in the audit. Left out instead: the memory
+                # simply lacks that entity, as it did, minus the dangling writes.
+                if r.get("action") == "missing":
+                    logger.warning(
+                        "entity extraction: entity %s for memory %s was deleted between resolve "
+                        "and upsert; leaving it out of this memory's graph",
+                        r["entity_id"],
+                        memory_id,
+                    )
                     continue
                 idx = r["input_idx"]
                 if idx >= len(upsert_names):
@@ -814,7 +1028,12 @@ async def process_entity_extraction(
                 # likely fail again — but the failure is a bounded leak that
                 # governance's purge can still reach, and the alternative was
                 # destroying an audit record nothing rebuilds.
-                if await _purge_written_artifacts_if_dropped(sc, memory_id, tenant_id) == "dropped":
+                #
+                # ``edited`` stops too (M-39): by the time it returns, the rows
+                # are reset and the current text re-extracted, and everything
+                # below would write the old text's graph back.
+                recheck = await _recheck_row_after_writes(sc, memory_id, tenant_id, content)
+                if recheck in ("dropped", "edited"):
                     return
                 # Surface any FK violations from the per-item path
                 # (storage-side reports ``error="fk_violation"`` for rows
@@ -853,10 +1072,13 @@ async def process_entity_extraction(
             if len(subject_ids) == 1:
                 subject_id = next(iter(subject_ids))
                 try:
+                    # ``content``: storage writes it only while the row still
+                    # holds the text it was extracted from (M-39).
                     updated = await sc.set_subject_entity_if_null(
                         memory_id=str(memory_id),
                         tenant_id=tenant_id,
                         subject_entity_id=subject_id,
+                        content=content,
                     )
                     logger.info(
                         "subject_writeback memory=%s subject_entity_id=%s outcome=%s",
@@ -1036,6 +1258,7 @@ async def process_entity_extraction(
                         tenant_id=tenant_id,
                         predicate=pred,
                         object_value=str(obj),
+                        content=content,
                     )
                     logger.info(
                         "predicate_writeback memory=%s predicate=%s outcome=%s",
@@ -1077,6 +1300,7 @@ async def process_entity_extraction(
             detail={
                 "entities_count": len(name_to_id),
                 "relations_count": rel_count,
+                **degraded,
             },
         )
 
@@ -1148,9 +1372,10 @@ async def process_entity_extraction(
         #
         # The result is not branched on: nothing follows this, so ``live`` and
         # ``unknown`` are the same instruction — do nothing — and ``dropped`` has
-        # already purged by the time it returns.
+        # already purged by the time it returns, as ``edited`` has reset and
+        # re-extracted.
         if wrote_graph_rows:
-            await _purge_written_artifacts_if_dropped(sc, memory_id, tenant_id)
+            await _recheck_row_after_writes(sc, memory_id, tenant_id, content)
 
     except Exception as exc:
         logger.exception("Entity extraction failed for memory %s (non-fatal)", memory_id)
@@ -1192,11 +1417,12 @@ async def process_entity_extraction(
         # have to gate a ``finally`` anyway, so all ``finally`` buys is one fewer
         # call site.
         #
-        # Nothing is branched on. ``dropped`` has purged by the time it returns;
-        # ``live`` and ``unknown`` both mean leave it alone. ``unknown`` is the
+        # Nothing is branched on. ``dropped`` has purged by the time it returns,
+        # and ``edited`` has reset and re-extracted (M-39); ``live`` and
+        # ``unknown`` both mean leave it alone. ``unknown`` is the
         # likely answer when the storage failure that landed us here is still
         # going, and the rows do leak in that case — bounded to what was written
         # before the raise, and reachable by governance's own purge later. The
         # alternative was losing the audit record outright.
         if wrote_graph_rows:
-            await _purge_written_artifacts_if_dropped(sc, memory_id, tenant_id)
+            await _recheck_row_after_writes(sc, memory_id, tenant_id, content)

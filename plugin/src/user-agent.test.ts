@@ -1,5 +1,5 @@
 /**
- * Tests for the plugin's User-Agent (Caura Heartbeat v1, section 7).
+ * Tests for the plugin's User-Agent (Caura Heartbeat v1, section 7) and its audit surface.
  *
  * The server counts SDK families from the ``User-Agent`` prefix and matches
  * this plugin on ``openclaw-plugin``. Pin the shape so a refactor cannot
@@ -8,7 +8,11 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import {
+  SURFACE,
   USER_AGENT,
   USER_AGENT_PREFIX,
   buildUserAgent,
@@ -48,8 +52,11 @@ describe("buildUserAgent", () => {
 });
 
 describe("withUserAgent", () => {
-  test("adds User-Agent to an empty header set", () => {
-    assert.deepEqual(withUserAgent(), { "User-Agent": USER_AGENT });
+  test("adds User-Agent and the surface to an empty header set", () => {
+    assert.deepEqual(withUserAgent(), {
+      "User-Agent": USER_AGENT,
+      "X-Caura-Surface": "openclaw_plugin",
+    });
   });
 
   test("keeps existing headers intact", () => {
@@ -57,6 +64,7 @@ describe("withUserAgent", () => {
     assert.equal(headers["Content-Type"], "application/json");
     assert.equal(headers["X-API-Key"], "mc_x");
     assert.equal(headers["User-Agent"], USER_AGENT);
+    assert.equal(headers["X-Caura-Surface"], SURFACE);
   });
 
   test("returns a fresh object (does not mutate the input)", () => {
@@ -64,5 +72,20 @@ describe("withUserAgent", () => {
     const out = withUserAgent(input);
     assert.notEqual(out, input);
     assert.deepEqual(input, { "X-API-Key": "mc_x" });
+  });
+});
+
+describe("SURFACE", () => {
+  // core-api drops a surface outside its closed set and records null, without
+  // an error, so a typo here would go unnoticed. Check against the set itself.
+  test("is one of core-api's SURFACES", () => {
+    const source = readFileSync(
+      fileURLToPath(new URL("../../core-api/src/core_api/audit_actor.py", import.meta.url)),
+      "utf-8",
+    );
+    const match = source.match(/^SURFACES[^=]*=\s*frozenset\(\{([^}]*)\}\)/m);
+    assert.ok(match, "SURFACES not found in core_api/audit_actor.py");
+    const surfaces = [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    assert.ok(surfaces.includes(SURFACE), `${SURFACE} not in ${surfaces.join(", ")}`);
   });
 });

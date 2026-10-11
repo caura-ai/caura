@@ -6,6 +6,8 @@ A thin wrapper over the Caura REST API. Point it at a managed
 
 from __future__ import annotations
 
+import os
+import re
 import sys
 import urllib.parse
 from typing import Any
@@ -14,7 +16,7 @@ import httpx
 
 from ._version import __version__
 from .exceptions import AuthError, CauraAPIError, NotFoundError, RateLimitError, TransportError
-from .models import Memory, RecallResult
+from .models import Memory, RecallResult, SearchResult
 
 DEFAULT_BASE_URL = "https://caura.ai"
 
@@ -27,6 +29,40 @@ It names the package, its version and the Python major.minor, nothing more;
 no other identifying information is added and the client never contacts
 anything but ``base_url``.
 """
+
+
+_LOOPBACK_V4 = re.compile(r"127\.\d{1,3}\.\d{1,3}\.\d{1,3}")
+
+
+def _is_loopback(host: str) -> bool:
+    """The plugin's ``isLoopbackHost``: traffic to these never leaves the machine."""
+    host = host.lower()
+    return host in ("localhost", "::1") or host.endswith(".localhost") or bool(_LOOPBACK_V4.fullmatch(host))
+
+
+def _check_key_transport(base_url: str, allow_insecure_http: bool | None) -> None:
+    """Refuse to send the API key in cleartext to another machine (L-66).
+
+    https, or plain http to a loopback host, or an explicit opt-in: the same rule
+    the OpenClaw plugin applies. ``None`` defers to ``CAURA_ALLOW_INSECURE_HTTP``.
+    """
+    parts = urllib.parse.urlsplit(base_url)
+    if parts.scheme not in ("http", "https"):
+        raise ValueError(
+            f"base_url must start with https:// (or http:// for a loopback host); got scheme {parts.scheme!r}"
+        )
+    if parts.scheme == "https" or _is_loopback(parts.hostname or ""):
+        return
+    if allow_insecure_http is None:
+        allow_insecure_http = os.environ.get("CAURA_ALLOW_INSECURE_HTTP") in ("true", "1")
+    if not allow_insecure_http:
+        host = parts.netloc.rpartition("@")[2]  # never echo userinfo
+        raise ValueError(
+            f"Refusing to send the API key to {host}: base_url uses plain HTTP to a "
+            "non-loopback host, so the key would cross the network in cleartext. Use https://, or "
+            "pass allow_insecure_http=True (or set CAURA_ALLOW_INSECURE_HTTP=true) to accept the "
+            "risk, e.g. on a trusted private network."
+        )
 
 
 class Caura:
@@ -51,11 +87,13 @@ class Caura:
         agent_id: str | None = None,
         timeout: float = 30.0,
         transport: httpx.BaseTransport | None = None,
+        allow_insecure_http: bool | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("api_key is required")
         if not tenant_id:
             raise ValueError("tenant_id is required")
+        _check_key_transport(base_url, allow_insecure_http)
         self.tenant_id = tenant_id
         self.agent_id = agent_id
         self._http = httpx.Client(
@@ -101,14 +139,29 @@ class Caura:
         top_k: int = 5,
         fleet_ids: list[str] | None = None,
         filter_agent_id: str | None = None,
+        caller_agent_id: str | None = None,
         **extra: Any,
-    ) -> list[Memory]:
-        """Hybrid vector + keyword search. Returns ranked ``Memory`` objects (POST /api/v1/search)."""
+    ) -> SearchResult:
+        """Hybrid vector + keyword search (POST /api/v1/search).
+
+        Returns the ranked ``Memory`` objects as a ``SearchResult``: a list that
+        also carries the response's ``recall_tracked``, ``diagnostic``,
+        ``warnings`` and ``raw`` body.
+
+        ``caller_agent_id`` runs the search as that agent without filtering to
+        its own memories, so a tenant-scoped key can read the agent's
+        ``scope_agent`` memories. The server then reads as that agent: it
+        registers the agent if new, and holds the read to the agent's fleet
+        and trust level. It is not sent unless given; an agent-scoped key may
+        only name its own agent.
+        """
         body: dict[str, Any] = {"tenant_id": self.tenant_id, "query": query, "top_k": top_k}
         if fleet_ids:
             body["fleet_ids"] = fleet_ids
         if filter_agent_id:
             body["filter_agent_id"] = filter_agent_id
+        if caller_agent_id:
+            body["caller_agent_id"] = caller_agent_id
         body.update(extra)
         data = self._post("/api/v1/search", body)
         if not isinstance(data, dict):
@@ -118,11 +171,31 @@ class Caura:
         items = data["items"]
         if not isinstance(items, list):
             raise CauraAPIError(200, 'search response "items" must be a list')
-        return [Memory.from_dict(m) for m in items]
+        return SearchResult.from_dict(data)
 
-    def recall(self, query: str, *, top_k: int = 5, **extra: Any) -> RecallResult:
-        """Search + LLM summary. Returns a ``RecallResult`` context brief (POST /api/v1/recall)."""
-        body: dict[str, Any] = {"tenant_id": self.tenant_id, "query": query, "top_k": top_k}
+    def recall(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        caller_agent_id: str | None = None,
+        **extra: Any,
+    ) -> RecallResult:
+        """Search + LLM summary. Returns a ``RecallResult`` context brief (POST /api/v1/recall).
+
+        Asks for the result list once (``items_alias=False``): the server would
+        otherwise repeat it under ``items``, about half the response, and this
+        client reads ``memories``. Pass ``items_alias=True`` to keep the copy in
+        ``raw``. ``caller_agent_id`` is as for ``search``.
+        """
+        body: dict[str, Any] = {
+            "tenant_id": self.tenant_id,
+            "query": query,
+            "top_k": top_k,
+            "items_alias": False,
+        }
+        if caller_agent_id:
+            body["caller_agent_id"] = caller_agent_id
         body.update(extra)
         data = self._post("/api/v1/recall", body)
         if not isinstance(data, dict):
@@ -174,11 +247,16 @@ class Caura:
     ) -> dict[str, Any]:
         """Submit one Interviewer window (POST /api/v1/interview/submit).
 
-        The server interviews the window synchronously (its budget is 90s),
-        so ``timeout`` defaults well above the client-wide 30s. Returns the
-        response body plus ``"http_status"`` so callers can distinguish a
-        207 partial from a 200 committed. Raises on 4xx/5xx via the shared
-        error mapping (403 → ``AuthError``: tenant not enabled / bad key).
+        By default the server stores the window, advances the watermark and
+        answers 200 ``"status": "accepted"`` with ``memories_written`` 0: it
+        writes the memories in the background, after the response. A server
+        with ``interview_async_submit`` off instead interviews the window
+        in-line (its budget is 90s) and answers 200 ``committed`` or 207
+        ``partial`` with the count, which is why ``timeout`` defaults well
+        above the client-wide 30s. Returns the response body plus
+        ``"http_status"``. Raises on 4xx/5xx via the shared error mapping
+        (403 → ``AuthError``: tenant not enabled / bad key; 409 → this window
+        or stream is refused, as the message says).
         """
         body: dict[str, Any] = {
             "tenant_id": tenant_id or self.tenant_id,
@@ -250,7 +328,7 @@ class Caura:
     def close(self) -> None:
         self._http.close()
 
-    def __enter__(self) -> Caura:
+    def __enter__(self) -> Caura:  # noqa: PYI034 - Self is unavailable on supported Python 3.9.
         return self
 
     def __exit__(self, *exc: object) -> None:

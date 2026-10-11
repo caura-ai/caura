@@ -5,8 +5,11 @@ non-contradicting fact broke its practical basis ("commutes by bicycle",
 later "tore ACL, no weight-bearing six weeks"). Both are true; nothing
 contradicts; the bike fact must stop governing answers.
 
-Two approaches were measured before this one (see
-``benchmark/a57-recall-experiments-findings.md``):
+Two approaches were measured before this one. The findings live in
+``<multi-repo-workspace-root>/benchmark/a57-recall-experiments-findings.md``
+-- that path is relative to the WORKSPACE ROOT, one level above this repo.
+The file has never been in this repo on any ref; it is a local analysis
+artifact and is not published, so a checkout alone will not find it:
 
 * read-side retrieval tricks — recency injection useless, query expansion
   net-flat. The oracle says coverage is the ceiling (27%->80%), so the fix

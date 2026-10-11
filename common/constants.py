@@ -24,6 +24,53 @@ from common.env_utils import read_float_env, read_int_env
 # explicitly instead.
 LIVE_MEMORY_STATUSES = ("active", "confirmed", "pending")
 
+# A memory held for a person's review: written, but not live until a person
+# releases it (back to ``active``) or rejects it (``cancelled``). Nothing else
+# moves it, and nothing moves a written memory into it. Being outside
+# ``LIVE_MEMORY_STATUSES`` keeps it out of nothing on its own: search and
+# recall return most statuses, and many reads filter only on ``deleted_at IS
+# NULL``. So every read excludes it by name: no agent, search, count, graph or
+# background pass sees a held memory, only a person reviewing it. Raw SQL in
+# core-storage-api spells the value out as ``'quarantined'``.
+QUARANTINED_MEMORY_STATUS = "quarantined"
+# A rejected held memory's status. A reject also soft-deletes it
+# (``deleted_at``): ``cancelled`` is a status enrichment gives ordinary
+# memories, and search and recall return it, so the status alone would let a
+# write a person turned down reach agents. A session rollback rejects the
+# session's held memories the same way.
+QUARANTINE_REJECTED = "cancelled"
+# What a held memory may become: released (``active``) or rejected.
+QUARANTINE_EXITS = ("active", QUARANTINE_REJECTED)
+# Why a memory was held, under ``metadata["_system"]``, where the platform's own
+# keys live: caller input is stripped of that namespace, so a write can't claim
+# to be held, or released, by setting it. It stays after a release or reject, so
+# it also says the memory was held once. core-api writes it and core-storage-api
+# counts holds by its ``reason`` for the pilot report (g4.3).
+HOLD_KEY = "hold"
+# The audit actions that take a held memory out of quarantine: a person's
+# release or reject, and a session rollback, which rejects the session's held
+# memories (its row's ``detail.new_status`` is ``cancelled`` for those).
+QUARANTINE_RELEASE_ACTION = "quarantine.release"
+QUARANTINE_REJECT_ACTION = "quarantine.reject"
+SESSION_ROLLBACK_ACTION = "session.rollback"
+
+# The two statuses contradiction detection writes on a losing row — and the only
+# two any retraction path may revert FROM. Anything else on a contradicted row
+# means another writer has moved it since (a human confirmed it, the crystallizer
+# archived it, a different chain superseded it), so stamping "active" over that
+# would discard someone else's decision.
+#
+# One definition because five call sites read it and every one of them is a
+# destructive-write guard: ``contradiction_detector``'s Path-C retraction,
+# ``memory_service``'s edit-time revert, the supersedes-chain follow in
+# ``pipeline.steps.search.load_and_serialize``, outcome inference's failure
+# evidence, and core-storage-api's session rollback (g2.9), which is why it lives
+# here rather than in ``core_api.constants``. It previously lived in
+# ``outcome_inference.contradictions`` under a comment telling readers to keep it
+# in sync BY HAND with the detector's writes — which is the strongest possible
+# argument that it belongs in one place.
+CONTRADICTED_STATUSES: tuple[str, ...] = ("outdated", "conflicted")
+
 # ── Embeddings ──
 # Native dim of the default embedder (BAAI/bge-m3, see local-embedder docs).
 # Schema upgrade lives in alembic migration 012_vector_dim_1024.py — keep
@@ -803,3 +850,23 @@ AGENT_TUNABLE_KEYS: tuple[str, ...] = tuple(
 # Raising this lengthens the outage a crash causes; lowering it risks two
 # concurrent runs, whose only consequence is a second report row.
 REPORT_RUNNING_STALE_AFTER = timedelta(hours=1)
+
+
+# ---------------------------------------------------------------------------
+# Fleet
+# ---------------------------------------------------------------------------
+
+# M-85: ``fleet_nodes.owner_principal`` for a node bound to a tenant-wide
+# credential. A gateway-verified narrow credential binds as ``agent:<id>`` or
+# ``install:<uuid>`` instead.
+NODE_PRINCIPAL_TENANT = "tenant"
+
+
+# ---------------------------------------------------------------------------
+# Settings encryption
+# ---------------------------------------------------------------------------
+
+# Prefix of an ``api_keys`` value core-api encrypted with SETTINGS_ENCRYPTION_KEY
+# (``enc:v1:<Fernet token>``). Here so storage can tell a legacy plaintext key
+# from an encrypted one without holding the key (M-99).
+ENCRYPTED_SETTING_PREFIX = "enc:v1:"

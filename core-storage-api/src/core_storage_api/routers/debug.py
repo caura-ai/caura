@@ -1,8 +1,10 @@
 """Diagnostic endpoints for live DB inspection.
 
-Internal-only surface — exposed on the storage-api private VPC IP and
-gated by Cloud Run IAM. Not routed through the gateway. The endpoints
-here snapshot DB-side state (``pg_locks``, ``pg_stat_activity``,
+Off unless ``CORE_STORAGE_DEBUG_ENDPOINTS`` is set: a disabled route answers
+404. When on, callers still need the storage shared secret, like every route
+here. Cloud Run IAM adds a layer in SaaS only; compose and on-prem have
+nothing else in front of it (L-75). Not routed through the gateway. The
+endpoints here snapshot DB-side state (``pg_locks``, ``pg_stat_activity``,
 ``pg_blocking_pids``) for triaging contention storms; they're cheap
 enough to poll at 1Hz during a controlled loadtest, but expensive
 enough to NOT wire into a routine dashboard.
@@ -23,13 +25,21 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core_storage_api.config import settings
 from core_storage_api.database.init import get_session
 
-router = APIRouter(tags=["Debug"])
+
+def _require_debug_endpoints() -> None:
+    """404 unless the operator turned the debug endpoints on (L-75)."""
+    if not settings.core_storage_debug_endpoints:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+router = APIRouter(tags=["Debug"], dependencies=[Depends(_require_debug_endpoints)])
 
 
 # Direct privilege check: ``pg_read_all_stats`` (PG 10+) exposes
@@ -52,6 +62,12 @@ _PG_CHECK_STATS_SQL = text(
 # that has waiters — keeps the response small under steady state
 # and meaningful under a storm.
 #
+# Only sessions of this service's own database role (L-75): the database
+# can be shared with other services (platform-storage-api's ``enterprise.*``
+# sessions, an operator's psql), and their statements are not this
+# endpoint's to show. A ``datname`` filter would not exclude them. Blocker
+# pid lists can still name another role's pid, never its statement.
+#
 # CTE structure: ``backend_blockers`` calls ``pg_blocking_pids`` exactly
 # once per backend (it's not cheap); ``blocker_set`` collapses the union
 # of blocker pids so the final filter can do a single set lookup.
@@ -67,6 +83,7 @@ WITH backend_blockers AS (
     FROM pg_stat_activity
     WHERE pid <> pg_backend_pid()
       AND backend_type = 'client backend'
+      AND usename = current_user
 ),
 blocker_set AS (
     SELECT DISTINCT unnest(blocked_by_pids) AS pid
@@ -128,17 +145,13 @@ async def pg_locks_snapshot(
     attribute the lock to a specific statement, then chases
     ``blocked_by_pids`` to find the blocker's query.
 
-    Requires the app DB role to have ``pg_read_all_stats``; without
-    it, ``query`` / ``usename`` / ``wait_event`` come back NULL for
-    other users' backends and the snapshot is effectively blind to
-    the actual lock holder. ``pg_read_all_stats`` in the response is
-    a direct privilege check via ``pg_has_role(current_user, ...)``
-    and is always ``True`` or ``False`` — never ``null``. ``true``
-    means the role has ``pg_read_all_stats`` (or ``pg_monitor``,
-    which includes it) and the snapshot rows carry useful query
-    text; ``false`` means the role is missing both and the rows
-    will be blind to other users' backends regardless of whether
-    contention is actually present.
+    Rows are this service's own sessions only (L-75), which the role
+    can always see in full, so a lock held by another role shows up
+    as a pid in ``blocked_by_pids`` without its statement.
+    ``pg_read_all_stats`` in the response is a direct privilege check
+    via ``pg_has_role(current_user, ...)``, always ``True`` or
+    ``False``; it is kept for callers that read it, and now only
+    says whether chasing such a pid by hand would show its query.
     """
     priv_row = (await session.execute(_PG_CHECK_STATS_SQL)).one()
     has_visibility = priv_row.has_priv

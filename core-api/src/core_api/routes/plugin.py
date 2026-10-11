@@ -5,8 +5,10 @@ import json
 import logging
 import shlex
 from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
@@ -258,8 +260,25 @@ def _resolve_tenant_id() -> str:
     return ""
 
 
+TlsBootstrap = Literal["verify", "tofu"]
+
+_TLS_BOOTSTRAP_DESCRIPTION = (
+    "How the generated script trusts the server while it downloads the plugin. "
+    "``verify`` (default) checks the TLS certificate like any HTTPS client. "
+    "``tofu`` skips that check for this one script and trusts the server's "
+    "certificate on first use — only for an on-prem server with a self-signed "
+    "certificate the installing machine does not trust yet."
+)
+
+
 def _generate_install_script(
-    *, api_url: str, api_key: str, fleet_id: str, tenant_id: str, node_name: str
+    *,
+    api_url: str,
+    api_key: str,
+    fleet_id: str,
+    tenant_id: str,
+    node_name: str,
+    tls_bootstrap: TlsBootstrap,
 ) -> str:
     """Generate a bash install script with shell-safe variable assignments."""
     # Shell-quote all user inputs and assign to bash variables at the top
@@ -269,6 +288,7 @@ def _generate_install_script(
     safe_tenant_id = shlex.quote(tenant_id)
     safe_node_name = shlex.quote(node_name) if node_name else ""
     safe_version = shlex.quote(_plugin_version())
+    safe_tls_bootstrap = shlex.quote(tls_bootstrap)
     api_key_preview = api_key[:6] + "..." if len(api_key) > 6 else "(not set)"
 
     return f"""#!/usr/bin/env bash
@@ -281,6 +301,7 @@ CAURA_FLEET_ID={safe_fleet_id}
 CAURA_TENANT_ID={safe_tenant_id}
 CAURA_NODE_NAME={safe_node_name or '"$(hostname -s)"'}
 CAURA_PLUGIN_VERSION={safe_version}
+TLS_BOOTSTRAP={safe_tls_bootstrap}
 
 echo "=== Caura Plugin Installer ==="
 echo ""
@@ -333,16 +354,43 @@ echo ""
 PLUGIN_DIR="$HOME/.openclaw/plugins/memclaw"  # legacy-name-floor: floor
 CONFIG_PATH="$HOME/.openclaw/openclaw.json"
 
-# When the on-prem uses self-signed TLS, the bootstrap fetches below
-# (plugin-source, tools.json, SKILL.md) hit certificate verification
-# errors before step 8 has a chance to install the trust anchor.
-# Switch to TOFU mode for the bootstrap curls when CAURA_API_URL is
-# HTTPS — same reasoning as `docker login` against a self-signed
-# registry. After install, NODE_EXTRA_CA_CERTS handles long-term
-# trust at runtime, so no -k anywhere outside this script.
+# TLS for this script's own downloads: the manifest (sent with the API
+# key), the plugin source it then builds and runs, and step 8's
+# certificate. Verified by default, like any HTTPS client. Skipping the
+# check against a server whose certificate is valid gains nothing and hands
+# anyone able to intercept the connection the key and the code.
+#
+# TLS_BOOTSTRAP=tofu (requested with ?tls_bootstrap=tofu) is the one
+# exception: an on-prem server with a self-signed certificate this machine
+# does not trust yet. The downloads then skip verification — trust on first
+# use, the same model as `docker login` to a self-signed registry — and
+# step 8 saves that certificate for the plugin's runtime
+# (NODE_EXTRA_CA_CERTS), so no -k anywhere outside this script.
+CURL_INSECURE=""
 case "$CAURA_API_URL" in
-  https://*) CURL_INSECURE="-k" ;;
-  *)         CURL_INSECURE="" ;;
+  https://*)
+    if [ "$TLS_BOOTSTRAP" = "tofu" ]; then
+      CURL_INSECURE="-k"
+      echo "WARNING: TLS certificates are NOT verified while this script downloads"
+      echo "         the plugin (tls_bootstrap=tofu). Use it only for a server"
+      echo "         whose self-signed certificate you trust."
+      echo ""
+    else
+      # Fail early and plainly on an untrusted certificate. Otherwise its
+      # first sign is a bare "could not fetch" a few steps later. 60 is a
+      # failed verification; curl before 7.62 used 51 for a name mismatch.
+      _tls_rc=0
+      curl -sI --max-time 10 -o /dev/null "$CAURA_API_URL" || _tls_rc=$?
+      case "$_tls_rc" in
+        51|60)
+          echo "ERROR: $CAURA_API_URL presented a TLS certificate this machine does not trust."
+          echo "       For an on-prem server with a self-signed certificate, fetch this"
+          echo "       installer again with ?tls_bootstrap=tofu to trust it on first use."
+          exit 1
+          ;;
+      esac
+    fi
+    ;;
 esac
 
 # 1. Create directory structure
@@ -554,15 +602,18 @@ fi
 
 # 8. TLS trust bootstrap — only when CAURA_API_URL is HTTPS.
 # OSS / dev installs (http://localhost:8000) skip this entirely.
-# For an enterprise on-prem with a self-signed cert, the gateway exposes
-# the cert at /onprem-ca.pem; we curl it once with -k (TOFU — same trust
-# pattern as `docker login` to a self-signed registry), save it next to
-# the plugin, and write a systemd drop-in that exports
-# NODE_EXTRA_CA_CERTS so Node trusts it across openclaw-gateway restarts.
+# An enterprise on-prem gateway that terminates TLS with its own cert
+# (self-signed, or issued by a corporate CA that Node's bundled store
+# lacks) exposes it at /onprem-ca.pem. We fetch it under the same TLS mode
+# as the downloads above — verified, or under tls_bootstrap=tofu trusted
+# on first use — save it next to the plugin, and write a systemd drop-in
+# that exports NODE_EXTRA_CA_CERTS so Node trusts it across
+# openclaw-gateway restarts. Never fetched with -k by default: whatever
+# comes back is trusted for every Node process the user starts.
 case "$CAURA_API_URL" in
   https://*)
     echo "[8/8] Bootstrapping TLS trust for $CAURA_API_URL"
-    if curl -ksSL "$CAURA_API_URL/onprem-ca.pem" -o "$PLUGIN_DIR/onprem-ca.pem" \
+    if curl $CURL_INSECURE -sSL "$CAURA_API_URL/onprem-ca.pem" -o "$PLUGIN_DIR/onprem-ca.pem" \
         && [ -s "$PLUGIN_DIR/onprem-ca.pem" ] \
         && head -1 "$PLUGIN_DIR/onprem-ca.pem" | grep -q '^-----BEGIN CERTIFICATE-----$'; then
       chmod 0644 "$PLUGIN_DIR/onprem-ca.pem"
@@ -667,17 +718,19 @@ async def install_plugin_script(
         ),
     ),
     node_name: str = Query(default=""),
+    tls_bootstrap: TlsBootstrap = Query(default="verify", description=_TLS_BOOTSTRAP_DESCRIPTION),
 ):
     """Generate a bash install script for first-time plugin setup on an OpenClaw gateway."""
     api_key = request.headers.get("X-API-Key", "")
     tenant_id = _resolve_tenant_id()
 
     script = _generate_install_script(
-        api_url=api_url or _derive_api_url_from_request(request),
+        api_url=_resolve_installer_api_url(request, api_url),
         api_key=api_key,
         fleet_id=fleet_id,
         tenant_id=tenant_id,
         node_name=node_name,
+        tls_bootstrap=tls_bootstrap,
     )
     return PlainTextResponse(script, media_type="text/plain")
 
@@ -686,17 +739,22 @@ async def install_plugin_script(
 async def install_plugin_script_post(
     request: Request,
     body: InstallPluginRequest,
+    # A query parameter, not a body field: the body model forbids unknown
+    # fields, so a caller sending it there would be refused by every server
+    # that predates it. As a query parameter, older servers ignore it.
+    tls_bootstrap: TlsBootstrap = Query(default="verify", description=_TLS_BOOTSTRAP_DESCRIPTION),
 ):
     """Generate a bash install script via POST (preferred — no secrets in URL)."""
     api_key = body.api_key or request.headers.get("X-API-Key", "")
     tenant_id = _resolve_tenant_id()
 
     script = _generate_install_script(
-        api_url=body.api_url or _derive_api_url_from_request(request),
+        api_url=_resolve_installer_api_url(request, body.api_url),
         api_key=api_key,
         fleet_id=body.fleet_id,
         tenant_id=tenant_id,
         node_name=body.node_name,
+        tls_bootstrap=tls_bootstrap,
     )
     return PlainTextResponse(script, media_type="text/plain")
 
@@ -739,6 +797,45 @@ def _derive_api_url_from_request(request: Request) -> str:
     scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
     return f"{scheme}://{host}"
+
+
+def _origin(url: str) -> str | None:
+    """``scheme://host[:port]`` lowercased, or None if ``url`` is not http(s)."""
+    parts = urlsplit(url.strip())
+    if parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+        return None
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+
+
+def _resolve_installer_api_url(request: Request, requested: str | None) -> str:
+    """The API URL an installer script may embed.
+
+    The generated script sends the installer's API key to this URL, downloads
+    plugin source from it, compiles and runs it. Echoing any caller-supplied
+    value made ``https://<this host>/api/install-plugin?api_url=<anywhere>`` a
+    script served from a trusted host that ships the victim's key and code
+    execution to ``<anywhere>``. A supplied value is therefore accepted only
+    when it names this server's own origin or an operator-allowlisted one
+    (``INSTALLER_ALLOWED_API_URLS``).
+    """
+    derived = _derive_api_url_from_request(request)
+    if not requested:
+        return derived
+    from core_api.config import settings
+
+    allowed = {_origin(derived)} | {
+        _origin(u) for u in settings.installer_allowed_api_urls.split(",") if u.strip()
+    }
+    allowed.discard(None)
+    if _origin(requested) in allowed:
+        return requested.rstrip("/")
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "api_url must be this server's own URL. To allow another origin, "
+            "set INSTALLER_ALLOWED_API_URLS on the server."
+        ),
+    )
 
 
 def _generate_skill_install_script(
@@ -883,7 +980,7 @@ async def install_skill_script(
             f"Invalid 'skill' parameter. Expected one of: {sorted(_VALID_SKILLS)}. Got: {skill!r}",
             status_code=400,
         )
-    resolved_api_url = api_url if api_url else _derive_api_url_from_request(request)
+    resolved_api_url = _resolve_installer_api_url(request, api_url)
     api_key = request.headers.get("x-api-key", "")
     script = _generate_skill_install_script(
         api_url=resolved_api_url, agent=agent, api_key=api_key, skill=skill

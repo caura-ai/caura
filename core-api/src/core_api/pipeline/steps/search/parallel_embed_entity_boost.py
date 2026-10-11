@@ -22,6 +22,7 @@ from core_api.constants import (
 )
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
+from core_api.pipeline.steps.search.classify_query import ClassifyQuery
 from core_api.services.entity_tokens import extract_entity_tokens
 from core_api.services.memory_service import BlankQuery, _get_or_cache_embedding
 
@@ -45,6 +46,7 @@ async def _entity_boost_via_storage(
     use_union: bool = False,
     precomputed_hops: dict[UUID, tuple[int, float]] | None = None,
     strict_fleet_scoping: bool = False,
+    precomputed_links: list[dict] | None = None,
 ) -> tuple[set[UUID], dict[UUID, float]]:
     """Entity FTS → graph expansion → link collection via storage client.
 
@@ -53,6 +55,8 @@ async def _entity_boost_via_storage(
     sc = get_storage_client()
     boosted_memory_ids: set[UUID] = set()
     memory_boost_factor: dict[UUID, float] = {}
+    # Names the sub-call in flight, so the catch-all below can say which failed.
+    stage = "entity FTS"
 
     try:
         if precomputed_hops is not None:
@@ -74,20 +78,21 @@ async def _entity_boost_via_storage(
             if not matched_entity_ids:
                 return boosted_memory_ids, memory_boost_factor
 
-            # Graph expansion
+            # Graph expansion, one call per requested fleet, as ClassifyQuery
+            # expands (L-114): a multi-fleet request sent ``fleet_id`` None
+            # here, so storage walked every relation in the tenant and boosted
+            # through fleets the caller did not name. ``_expand_per_fleet`` also
+            # degrades a failed expansion to the hop-0 seeds (oss-0909-l-03),
+            # so one storage hiccup does not zero the request's hop-boost.
             if graph_expand and graph_max_hops > 0:
-                expand_data = {
-                    "seed_entity_ids": [str(eid) for eid in matched_entity_ids],
-                    "tenant_id": tenant_id,
-                    "fleet_id": fleet_ids[0] if fleet_ids and len(fleet_ids) == 1 else None,
-                    "max_hops": graph_max_hops,
-                    "use_union": use_union,
-                }
-                raw_hops = await sc.expand_graph(expand_data)
-                entity_hops = {
-                    UUID(eid_str): (hop_weight["hop"], hop_weight["weight"])
-                    for eid_str, hop_weight in raw_hops.items()
-                }
+                entity_hops = await ClassifyQuery._expand_per_fleet(
+                    sc,
+                    matched_entity_ids,
+                    tenant_id,
+                    fleet_ids,
+                    graph_max_hops,
+                    use_union=use_union,
+                )
             else:
                 entity_hops = dict.fromkeys(matched_entity_ids, (0, 1.0))
 
@@ -115,10 +120,17 @@ async def _entity_boost_via_storage(
                     len(entity_hops) - GRAPH_MAX_EXPANDED_ENTITIES,
                 )
 
-            raw_links = await sc.get_memory_ids_by_entity_ids(
-                [str(eid) for eid in all_entity_ids],
-                tenant_id,
-            )
+            stage = "memory-link lookup"
+            # L-175 — ClassifyQuery fetched these links for the same hops and
+            # the same cap moments ago when its pool came up short; take them
+            # only beside those hops, never for a set re-derived here.
+            if precomputed_hops is not None and precomputed_links is not None:
+                raw_links = precomputed_links
+            else:
+                raw_links = await sc.get_memory_ids_by_entity_ids(
+                    [str(eid) for eid in all_entity_ids],
+                    tenant_id,
+                )
 
             # Sort by hop order (closest entities first).
             all_links = sorted(
@@ -160,7 +172,9 @@ async def _entity_boost_via_storage(
 
             boosted_memory_ids = set(memory_boost_factor.keys())
     except Exception:
-        logger.exception("Entity/graph boost lookup failed (falling back to pure vector search)")
+        # expand_graph has its own degrade above; what lands here is the entity
+        # FTS or the memory-link lookup, and no boost survives either.
+        logger.exception("Entity boost: %s failed; falling back to pure vector search", stage)
 
     return boosted_memory_ids, memory_boost_factor
 
@@ -195,7 +209,7 @@ class ParallelEmbedAndEntityBoost:
         # Kept as distinct log reasons so ops can tell a deliberate org-level
         # disable from the precision heuristic firing.
         if not data.get("entity_retrieval", True):
-            ent_skip_reason = "disabled by org setting search.entity_retrieval"
+            ent_skip_reason = "disabled by org setting search.entity_retrieval or request entity_boost=false"
         elif data.get("entity_match_declined"):
             ent_skip_reason = "entity match declined as over-broad in classify_query"
         else:
@@ -214,6 +228,7 @@ class ParallelEmbedAndEntityBoost:
                     use_union=True,
                     precomputed_hops=data.pop("_classified_entity_hops", None),
                     strict_fleet_scoping=bool(data.get("strict_fleet_scoping")),
+                    precomputed_links=data.pop("_classified_entity_links", None),
                 )
             )
         )

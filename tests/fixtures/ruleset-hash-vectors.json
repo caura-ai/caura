@@ -1,0 +1,444 @@
+{
+  "description": "Shared test vectors for the Caura rule-set hash: SHA-256 over the RFC 8785 (JCS) canonical JSON of the merged keystone set, sorted by doc_id, members content/doc_id/scope/updated_at/weight, updated_at in UTC with six fraction digits. Plan rows g0.1 (definition) and g1.2; each implementation restates the spec: caura-daemon internal/ruleset, caura common/governance/ruleset_hash.py. Each vector either gives the canonical bytes and the hash, or names why an implementation must refuse it.",
+  "copies": "This file is copied byte for byte in caura-ai/caura-daemon (internal/ruleset/testdata/ruleset-hash-vectors.json) and caura-ai/caura (tests/fixtures/ruleset-hash-vectors.json). Both test suites pin its sha256; change both copies and both pins together.",
+  "version": 1,
+  "vectors": [
+    {
+      "name": "empty set",
+      "rules": [],
+      "canonical": "[]",
+      "hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    {
+      "name": "one rule",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 100, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Never force-push to main.\",\"doc_id\":\"no-force-push\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":100}]",
+      "hash": "7e84dbe9d8cffa1536c4e49178894f83bd47b73f339c1d08e8c12cb1e2037c58"
+    },
+    {
+      "name": "each scope",
+      "rules": [
+        {"doc_id": "tenant-rule", "content": "Applies to every agent in the tenant.", "scope": "tenant", "weight": 100, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "fleet-rule", "content": "Applies to every agent in the fleet.", "scope": "fleet", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "agent-rule", "content": "Applies to one agent.", "scope": "agent", "weight": 25, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Applies to one agent.\",\"doc_id\":\"agent-rule\",\"scope\":\"agent\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":25},{\"content\":\"Applies to every agent in the fleet.\",\"doc_id\":\"fleet-rule\",\"scope\":\"fleet\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50},{\"content\":\"Applies to every agent in the tenant.\",\"doc_id\":\"tenant-rule\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":100}]",
+      "hash": "52e4a0d8545d42607d82cc338ac3e3ee4b2b0a5b1509a371c5c031ba901fba60"
+    },
+    {
+      "name": "ordering: sorted by doc_id bytes (- . 0 _ a)",
+      "rules": [
+        {"doc_id": "b", "content": "Rule b.", "scope": "tenant", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "a_b", "content": "Rule a_b.", "scope": "fleet", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "a0", "content": "Rule a0.", "scope": "fleet", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "a.b", "content": "Rule a.b.", "scope": "agent", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "a-b", "content": "Rule a-b.", "scope": "agent", "weight": 25, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "a", "content": "Rule a.", "scope": "tenant", "weight": 100, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Rule a.\",\"doc_id\":\"a\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":100},{\"content\":\"Rule a-b.\",\"doc_id\":\"a-b\",\"scope\":\"agent\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":25},{\"content\":\"Rule a.b.\",\"doc_id\":\"a.b\",\"scope\":\"agent\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50},{\"content\":\"Rule a0.\",\"doc_id\":\"a0\",\"scope\":\"fleet\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50},{\"content\":\"Rule a_b.\",\"doc_id\":\"a_b\",\"scope\":\"fleet\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50},{\"content\":\"Rule b.\",\"doc_id\":\"b\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50}]",
+      "hash": "04260e5d8f4e037077edcd4a5b0391fff3a4d2b618d57ff5abebd4615197f676"
+    },
+    {
+      "name": "ordering: input order does not matter",
+      "rules": [
+        {"doc_id": "a", "content": "Rule a.", "scope": "tenant", "weight": 100, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "a-b", "content": "Rule a-b.", "scope": "agent", "weight": 25, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "a.b", "content": "Rule a.b.", "scope": "agent", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "a0", "content": "Rule a0.", "scope": "fleet", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "a_b", "content": "Rule a_b.", "scope": "fleet", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "b", "content": "Rule b.", "scope": "tenant", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Rule a.\",\"doc_id\":\"a\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":100},{\"content\":\"Rule a-b.\",\"doc_id\":\"a-b\",\"scope\":\"agent\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":25},{\"content\":\"Rule a.b.\",\"doc_id\":\"a.b\",\"scope\":\"agent\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50},{\"content\":\"Rule a0.\",\"doc_id\":\"a0\",\"scope\":\"fleet\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50},{\"content\":\"Rule a_b.\",\"doc_id\":\"a_b\",\"scope\":\"fleet\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50},{\"content\":\"Rule b.\",\"doc_id\":\"b\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50}]",
+      "hash": "04260e5d8f4e037077edcd4a5b0391fff3a4d2b618d57ff5abebd4615197f676"
+    },
+    {
+      "name": "weight 1 (integer literal)",
+      "rules": [
+        {"doc_id": "w", "content": "Weight test.", "scope": "tenant", "weight": 1, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Weight test.\",\"doc_id\":\"w\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":1}]",
+      "hash": "7f63f7f36ae9eb3a95604bd544625eeefdb5b693a968d3ec8d0f1b7ef07bfb80"
+    },
+    {
+      "name": "weight 1.0 (float literal) hashes like 1",
+      "rules": [
+        {"doc_id": "w", "content": "Weight test.", "scope": "tenant", "weight": 1.0, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Weight test.\",\"doc_id\":\"w\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":1}]",
+      "hash": "7f63f7f36ae9eb3a95604bd544625eeefdb5b693a968d3ec8d0f1b7ef07bfb80"
+    },
+    {
+      "name": "weight 0.5",
+      "rules": [
+        {"doc_id": "w", "content": "Weight test.", "scope": "tenant", "weight": 0.5, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Weight test.\",\"doc_id\":\"w\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":0.5}]",
+      "hash": "8f38f6f11dd63105b64aae4f4fc9bc218669aa7b02e41124cf0ca996d86bf31f"
+    },
+    {
+      "name": "weight 1e-7",
+      "rules": [
+        {"doc_id": "w", "content": "Weight test.", "scope": "tenant", "weight": 1e-7, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Weight test.\",\"doc_id\":\"w\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":1e-7}]",
+      "hash": "6c4d4c50c5b6efd31f2df42ad90e7103191bded1b5f7653160166d019d7894df"
+    },
+    {
+      "name": "weight 1E-7 and 0.0000001 hash like 1e-7",
+      "rules": [
+        {"doc_id": "w", "content": "Weight test.", "scope": "tenant", "weight": 0.0000001, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "w2", "content": "Weight test.", "scope": "tenant", "weight": 1E-7, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Weight test.\",\"doc_id\":\"w\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":1e-7},{\"content\":\"Weight test.\",\"doc_id\":\"w2\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":1e-7}]",
+      "hash": "0c15eb145f5f72ef063569ebbb9dd1733ae1cf397b7745c0c9bd52b9ee106aca"
+    },
+    {
+      "name": "weight 1e-6 is written 0.000001",
+      "rules": [
+        {"doc_id": "w", "content": "Weight test.", "scope": "tenant", "weight": 1e-6, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Weight test.\",\"doc_id\":\"w\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":0.000001}]",
+      "hash": "40c0ac8f01f5f5d19b778594eea1755d0bac9cb6043b58b78acae80ea3941208"
+    },
+    {
+      "name": "weight 1e21 is written 1e+21",
+      "rules": [
+        {"doc_id": "w", "content": "Weight test.", "scope": "tenant", "weight": 1e21, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Weight test.\",\"doc_id\":\"w\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":1e+21}]",
+      "hash": "2f7a9ff9e9c6b09b2e0d7e74c2b07be051abacea9d122627313414c5f1793019"
+    },
+    {
+      "name": "weight 1e20 is written in full",
+      "rules": [
+        {"doc_id": "w", "content": "Weight test.", "scope": "tenant", "weight": 1e20, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Weight test.\",\"doc_id\":\"w\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":100000000000000000000}]",
+      "hash": "2ade4b80c1d3c9c8b649b80a4167fb6153236dd6ba1af8ce75bf5833c1719387"
+    },
+    {
+      "name": "weight 123.456",
+      "rules": [
+        {"doc_id": "w", "content": "Weight test.", "scope": "tenant", "weight": 123.456, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Weight test.\",\"doc_id\":\"w\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":123.456}]",
+      "hash": "be21a0079df7ac64655efae38254870e4f0a936b23c0fbeb6eb08e8c7bea2c6d"
+    },
+    {
+      "name": "weight -0.0 is written 0",
+      "rules": [
+        {"doc_id": "w", "content": "Weight test.", "scope": "tenant", "weight": -0.0, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Weight test.\",\"doc_id\":\"w\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":0}]",
+      "hash": "8b967a399a5681d8bb97e173fc4a726f198a1e65ecdd3f2f3ad9148891553bf2"
+    },
+    {
+      "name": "weight -0.5",
+      "rules": [
+        {"doc_id": "w", "content": "Weight test.", "scope": "tenant", "weight": -0.5, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Weight test.\",\"doc_id\":\"w\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":-0.5}]",
+      "hash": "2a13177e67c405692d88c3f8ca582cf9fc193064bc1c109b31b508c03496dcfd"
+    },
+    {
+      "name": "weight 2^53+1 rounds to the nearest double",
+      "rules": [
+        {"doc_id": "w", "content": "Weight test.", "scope": "tenant", "weight": 9007199254740993, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Weight test.\",\"doc_id\":\"w\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":9007199254740992}]",
+      "hash": "044c20754f7aec7ece6d62c0c75267b622df73eedb99a261facc8584ec781eed"
+    },
+    {
+      "name": "stored weight buckets 25, 50, 100",
+      "rules": [
+        {"doc_id": "low", "content": "Low.", "scope": "tenant", "weight": 25, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "med", "content": "Med.", "scope": "fleet", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "high", "content": "High.", "scope": "agent", "weight": 100, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"High.\",\"doc_id\":\"high\",\"scope\":\"agent\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":100},{\"content\":\"Low.\",\"doc_id\":\"low\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":25},{\"content\":\"Med.\",\"doc_id\":\"med\",\"scope\":\"fleet\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50}]",
+      "hash": "4700df0fd252d00a68d8a0ac8ef9a6e20d4e30fbff6216ea59f5fb9c8bfdf7b5"
+    },
+    {
+      "name": "unicode: emoji and a ZWJ sequence stay raw UTF-8",
+      "rules": [
+        {"doc_id": "u", "content": "Ship it \ud83d\ude80 \ud83d\udc69\u200d\ud83d\udcbb", "scope": "tenant", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Ship it \ud83d\ude80 \ud83d\udc69\u200d\ud83d\udcbb\",\"doc_id\":\"u\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50}]",
+      "hash": "2b9a14bc429f0087a63601fee115b4ec06574c87bf21968276c21ef355f95800"
+    },
+    {
+      "name": "unicode: precomposed e-acute (U+00E9)",
+      "rules": [
+        {"doc_id": "u", "content": "caf\u00e9", "scope": "tenant", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"caf\u00e9\",\"doc_id\":\"u\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50}]",
+      "hash": "bdd782b4c843a944718e4dfa196079b859eb53577b7385e6b2114be83125d872"
+    },
+    {
+      "name": "unicode: e + combining acute (U+0301) is not normalised",
+      "rules": [
+        {"doc_id": "u", "content": "cafe\u0301", "scope": "tenant", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"cafe\u0301\",\"doc_id\":\"u\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50}]",
+      "hash": "3d97713a74a20c017803150508a28d57a8699f4ca47e1c6e07d1a74d7b09aa2d"
+    },
+    {
+      "name": "unicode: Hebrew and CJK",
+      "rules": [
+        {"doc_id": "u", "content": "\u05d0\u05dc \u05ea\u05de\u05d7\u05e7 \u5fc5\u987b\u6d4b\u8bd5", "scope": "tenant", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"\u05d0\u05dc \u05ea\u05de\u05d7\u05e7 \u5fc5\u987b\u6d4b\u8bd5\",\"doc_id\":\"u\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50}]",
+      "hash": "40df0efc6c108c2efd5860d1247f45acaeab03c264d5b892ef96aa3a11c55a03"
+    },
+    {
+      "name": "escaping: only quote, backslash and U+0000-U+001F",
+      "rules": [
+        {"doc_id": "e", "content": "q\" b\\ nl\n cr\r tab\t bs\b ff\f nul\u0000 us\u001f del\u007f <>& ls\u2028 ps\u2029 /", "scope": "tenant", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"q\\\" b\\\\ nl\\n cr\\r tab\\t bs\\b ff\\f nul\\u0000 us\\u001f del\u007f <>& ls\u2028 ps\u2029 /\",\"doc_id\":\"e\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50}]",
+      "hash": "499807ee675cf88650c7c7387275aefc278c6e631db7e879679098d8c53b0578"
+    },
+    {
+      "name": "timestamp: Z with no fraction",
+      "rules": [
+        {"doc_id": "t", "content": "Time test.", "scope": "tenant", "weight": 50, "updated_at": "2026-10-06T07:55:14Z"}
+      ],
+      "canonical": "[{\"content\":\"Time test.\",\"doc_id\":\"t\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.000000Z\",\"weight\":50}]",
+      "hash": "8474d1b255f94b9b6660f1976b3626f24346a5aa513ceee8657d59050609e369"
+    },
+    {
+      "name": "timestamp: +00:00 with a 6-digit fraction",
+      "rules": [
+        {"doc_id": "t", "content": "Time test.", "scope": "tenant", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "canonical": "[{\"content\":\"Time test.\",\"doc_id\":\"t\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50}]",
+      "hash": "7c57bf7568004c10be2c56381110910fb4b9019939552e04612c105796f81001"
+    },
+    {
+      "name": "timestamp: 1 and 3 fraction digits pad to 6",
+      "rules": [
+        {"doc_id": "t1", "content": "Time test.", "scope": "tenant", "weight": 50, "updated_at": "2026-10-06T07:55:14.5Z"},
+        {"doc_id": "t3", "content": "Time test.", "scope": "tenant", "weight": 50, "updated_at": "2026-10-06T07:55:14.123Z"}
+      ],
+      "canonical": "[{\"content\":\"Time test.\",\"doc_id\":\"t1\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.500000Z\",\"weight\":50},{\"content\":\"Time test.\",\"doc_id\":\"t3\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123000Z\",\"weight\":50}]",
+      "hash": "36efa2b5e8642b75fc5cd0ac2a7d2c6454fb1c51edd046bb1f2e56efb0ccda31"
+    },
+    {
+      "name": "timestamp: positive offset converts to UTC across midnight",
+      "rules": [
+        {"doc_id": "t", "content": "Time test.", "scope": "tenant", "weight": 50, "updated_at": "2026-10-07T01:30:00.000001+02:00"}
+      ],
+      "canonical": "[{\"content\":\"Time test.\",\"doc_id\":\"t\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T23:30:00.000001Z\",\"weight\":50}]",
+      "hash": "23e45a4cf84bfa15cbe5a2f449250648a6518915d9dc8d25c01b2e557dd0507b"
+    },
+    {
+      "name": "timestamp: negative half-hour offset",
+      "rules": [
+        {"doc_id": "t", "content": "Time test.", "scope": "tenant", "weight": 50, "updated_at": "2026-10-06T02:25:14.123456-05:30"}
+      ],
+      "canonical": "[{\"content\":\"Time test.\",\"doc_id\":\"t\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50}]",
+      "hash": "7c57bf7568004c10be2c56381110910fb4b9019939552e04612c105796f81001"
+    },
+    {
+      "name": "timestamp: -00:00 is UTC",
+      "rules": [
+        {"doc_id": "t", "content": "Time test.", "scope": "tenant", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456-00:00"}
+      ],
+      "canonical": "[{\"content\":\"Time test.\",\"doc_id\":\"t\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":50}]",
+      "hash": "7c57bf7568004c10be2c56381110910fb4b9019939552e04612c105796f81001"
+    },
+    {
+      "name": "timestamp: leap day and month boundary",
+      "rules": [
+        {"doc_id": "t", "content": "Time test.", "scope": "tenant", "weight": 50, "updated_at": "2028-02-29T23:30:00-01:00"}
+      ],
+      "canonical": "[{\"content\":\"Time test.\",\"doc_id\":\"t\",\"scope\":\"tenant\",\"updated_at\":\"2028-03-01T00:30:00.000000Z\",\"weight\":50}]",
+      "hash": "00353a9bdffe4deb2b9c230a3e6f0f8992d7d6755a5cccaf43644071e87db0d0"
+    },
+    {
+      "name": "timestamp: year boundary",
+      "rules": [
+        {"doc_id": "t", "content": "Time test.", "scope": "tenant", "weight": 50, "updated_at": "2026-12-31T23:59:59.999999-00:01"}
+      ],
+      "canonical": "[{\"content\":\"Time test.\",\"doc_id\":\"t\",\"scope\":\"tenant\",\"updated_at\":\"2027-01-01T00:00:59.999999Z\",\"weight\":50}]",
+      "hash": "1e971dbf7833a4d0a2f60106a6879c91930fe068d5c447c19e1f287a6cbbdb2b"
+    },
+    {
+      "name": "extra members are ignored",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 100, "updated_at": "2026-10-06T07:55:14.123456+00:00", "title": "No force-push", "fleet_id": null, "agent_id": "a1", "id": "0b5c", "created_at": "2026-01-01T00:00:00Z"}
+      ],
+      "canonical": "[{\"content\":\"Never force-push to main.\",\"doc_id\":\"no-force-push\",\"scope\":\"tenant\",\"updated_at\":\"2026-10-06T07:55:14.123456Z\",\"weight\":100}]",
+      "hash": "7e84dbe9d8cffa1536c4e49178894f83bd47b73f339c1d08e8c12cb1e2037c58"
+    },
+    {
+      "name": "refused: duplicate doc_id",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 100, "updated_at": "2026-10-06T07:55:14.123456+00:00"},
+        {"doc_id": "no-force-push", "content": "Another.", "scope": "fleet", "weight": 50, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: weight is a string",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": "50", "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: weight is a boolean",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": true, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: weight is null",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": null, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: missing updated_at",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 100}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: missing weight",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: doc_id is not a string",
+      "rules": [
+        {"doc_id": 7, "content": "Never force-push to main.", "scope": "tenant", "weight": 100, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: content is null",
+      "rules": [
+        {"doc_id": "no-force-push", "content": null, "scope": "tenant", "weight": 100, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: scope is not a string",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": 3, "weight": 100, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: updated_at is a number",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 100, "updated_at": 1791273332}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: timestamp without an offset",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 100, "updated_at": "2026-10-06T07:55:14.123456"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: timestamp with 7 fraction digits",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 100, "updated_at": "2026-10-06T07:55:14.1234567Z"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: timestamp with a space for T",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 100, "updated_at": "2026-10-06 07:55:14.123456+00:00"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: timestamp in lower case",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 100, "updated_at": "2026-10-06t07:55:14.123456z"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: timestamp with an empty fraction",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 100, "updated_at": "2026-10-06T07:55:14.Z"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: February 30",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 100, "updated_at": "2026-02-30T00:00:00Z"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: leap second",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 100, "updated_at": "2026-12-31T23:59:60Z"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: offset hour 24",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 100, "updated_at": "2026-10-06T07:55:14+24:00"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: offset moves the time before year 1",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 100, "updated_at": "0001-01-01T00:30:00+01:00"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: offset moves the time past year 9999",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 100, "updated_at": "9999-12-31T23:30:00-01:00"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: weight overflows a double",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "Never force-push to main.", "scope": "tenant", "weight": 1e400, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: lone surrogate in content",
+      "rules": [
+        {"doc_id": "no-force-push", "content": "half \ud800 a pair", "scope": "tenant", "weight": 100, "updated_at": "2026-10-06T07:55:14.123456+00:00"}
+      ],
+      "error": true
+    },
+    {
+      "name": "refused: rules is not an array",
+      "rules": {"doc_id": "x"},
+      "error": true
+    },
+    {
+      "name": "refused: a rule is not an object",
+      "rules": [
+        "no-force-push"
+      ],
+      "error": true
+    }
+  ]
+}

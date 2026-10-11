@@ -55,7 +55,11 @@ Answer (step by step):"""
 # the second closes the over-abstention the v1 wording caused on
 # knowledge-update questions (answerable questions turned into "not enough
 # information"). Change only with a fresh control pair on the 67-q regression
-# sample (see benchmark/a57-recall-experiments-findings.md).
+# sample. The procedure and the A64 numbers are in
+# ``<multi-repo-workspace-root>/benchmark/a57-recall-experiments-findings.md``
+# -- WORKSPACE ROOT, one level above this repo, not in this repo on any ref.
+# See ``.claude/skills/regression-bench`` for how to run the pair: it needs
+# only the LOCAL docker stack and ``dev-admin-key``, no hosted credentials.
 PREMISE_GUARD_BLOCK = """\
 Before answering, check whether the question rests on an assumption about the \
 user's current situation that the memories contradict or no longer support \
@@ -223,6 +227,15 @@ async def summarize_memories(
     if t0 is None:
         t0 = time.perf_counter()
     diagnostic_ctx = diagnostic_ctx or {}
+    # L-15 — the budget the search ran with, as /search reports it
+    # (``top_k_requested``): after the agent/tenant profile and any strategy
+    # cap, else the profile's when a short-circuit skipped the scored search.
+    # ``top_k`` is the request's own value, the schema default when omitted.
+    top_k_used = (
+        diagnostic_ctx.get("diagnostic_original_top_k")
+        or diagnostic_ctx.get("search_params", {}).get("top_k")
+        or top_k
+    )
 
     if not memories:
         resp = {
@@ -242,7 +255,7 @@ async def summarize_memories(
                 "recall_model": None,
                 "recall_provider": None,
                 "all_candidates": diagnostic_ctx.get("all_candidates", []),
-                "top_k_used": top_k,
+                "top_k_used": top_k_used,
                 "retrieval_strategy": diagnostic_ctx.get("retrieval_strategy"),
                 # CAURA-722 — this block already reports
                 # ``retrieval_strategy``, which is the field that reads as
@@ -259,12 +272,14 @@ async def summarize_memories(
             }
         return resp
 
-    # Sort chronologically so the LLM sees a natural timeline. Callers
-    # may have already sorted; the operation is idempotent.
+    # Chronological for the prompt only, so the LLM sees a natural timeline.
+    # L-136 — a sorted copy: sorting the caller's list in place returned the
+    # rows below in date order on REST /recall, which broke the rank order
+    # (and A34's correction-above-its-predecessor) that MCP keeps.
     _DT_MIN_UTC = datetime.min.replace(tzinfo=UTC)
-    memories.sort(key=lambda m: getattr(m, "ts_valid_start", None) or _DT_MIN_UTC)
-
-    memories_text = _format_memories_for_prompt(memories)
+    memories_text = _format_memories_for_prompt(
+        sorted(memories, key=lambda m: getattr(m, "ts_valid_start", None) or _DT_MIN_UTC)
+    )
     if valid_at:
         reference_date_line = f"Current Date: {valid_at.strftime('%Y-%m-%d')}\n"
     else:
@@ -288,7 +303,7 @@ async def summarize_memories(
                 "recall_model": None,
                 "recall_provider": provider,
                 "all_candidates": diagnostic_ctx.get("all_candidates", []),
-                "top_k_used": top_k,
+                "top_k_used": top_k_used,
                 "retrieval_strategy": diagnostic_ctx.get("retrieval_strategy"),
                 # CAURA-722 — this block already reports
                 # ``retrieval_strategy``, which is the field that reads as
@@ -389,7 +404,7 @@ async def summarize_memories(
             "recall_model": recall_model or "default",
             "recall_provider": provider,
             "all_candidates": diagnostic_ctx.get("all_candidates", []),
-            "top_k_used": top_k,
+            "top_k_used": top_k_used,
             "retrieval_strategy": diagnostic_ctx.get("retrieval_strategy"),
             # CAURA-722 — see SearchDiagnostic for what the pair means.
             "entity_matches": diagnostic_ctx.get("entity_matches"),

@@ -1,12 +1,14 @@
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
-from core_api.schemas import AgentOut, AgentTrustUpdate, SearchProfileUpdate
-from core_api.services.agent_service import lookup_agent, update_trust_level
+from core_api.schemas import AgentFleetUpdate, AgentOut, AgentTrustUpdate, SearchProfileUpdate
+from core_api.services.agent_service import enforce_broker_agent_ownership, lookup_agent, update_trust_level
 from core_api.services.audit_service import log_action
-from core_api.services.organization_settings import validate_search_profile
+from core_api.services.organization_settings import validate_knob_resets, validate_search_profile
 
 router = APIRouter(tags=["Admin"])
 
@@ -60,11 +62,32 @@ async def patch_agent_trust(
     # Trust changes are the master key to the whole ladder — an agent must not
     # be able to PATCH its own (or a peer's) trust_level to self-promote.
     auth.enforce_not_agent_credential("change agent trust levels")
+    auth.enforce_not_org_member("change agent trust levels")
+    # The prior values, for the audit row below. Primary: a lagged replica
+    # would record the wrong "before" for the change being audited.
+    before = await lookup_agent(tenant_id, agent_id, read=False)
     agent = await update_trust_level(
         tenant_id,
         agent_id,
         body.trust_level,
         fleet_id=body.fleet_id,
+    )
+    # Every trust move leaves a row in the tenant audit log — this is the
+    # control the whole ladder hangs off, so who changed it, and from what,
+    # has to be answerable after the fact.
+    await log_action(
+        tenant_id=tenant_id,
+        action="agent_trust_update",
+        resource_type="agent",
+        resource_id=agent.get("id"),
+        detail={
+            "agent_id": agent.get("agent_id", agent_id),
+            "old_trust_level": (before or {}).get("trust_level"),
+            "new_trust_level": agent.get("trust_level", body.trust_level),
+            "old_fleet_id": (before or {}).get("fleet_id"),
+            "new_fleet_id": agent.get("fleet_id"),
+            **auth.audit_actor(),
+        },
     )
     return AgentOut.model_validate(agent)
 
@@ -75,7 +98,7 @@ async def patch_agent_trust(
 )
 async def update_agent_fleet(
     agent_id: str,
-    body: dict,
+    body: AgentFleetUpdate,
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
@@ -86,9 +109,8 @@ async def update_agent_fleet(
     # Fleet reassignment grants home-fleet access to the target fleet — an agent
     # must not be able to relocate itself/a peer to reach another fleet's data.
     auth.enforce_not_agent_credential("reassign agent fleets")
-    fleet_id = body.get("fleet_id")
-    if not fleet_id:
-        raise HTTPException(status_code=400, detail="fleet_id is required")
+    auth.enforce_not_org_member("reassign agent fleets")
+    fleet_id = body.fleet_id
 
     sc = get_storage_client()
     agent = await lookup_agent(tenant_id, agent_id, read=False)
@@ -98,6 +120,20 @@ async def update_agent_fleet(
     old_fleet = agent.get("fleet_id")
     stored_agent_id = agent["agent_id"]
     await sc.update_agent_fleet(stored_agent_id, {"tenant_id": tenant_id, "fleet_id": fleet_id})
+    # A home-fleet move grants that fleet's own-fleet access, so it is audited
+    # like a trust change.
+    await log_action(
+        tenant_id=tenant_id,
+        action="agent_fleet_update",
+        resource_type="agent",
+        resource_id=agent.get("id"),
+        detail={
+            "agent_id": stored_agent_id,
+            "old_fleet_id": old_fleet,
+            "new_fleet_id": fleet_id,
+            **auth.audit_actor(),
+        },
+    )
     return {"agent_id": stored_agent_id, "old_fleet_id": old_fleet, "new_fleet_id": fleet_id}
 
 
@@ -121,9 +157,16 @@ async def patch_agent_tune(
     body: SearchProfileUpdate,
     tenant_id: str = Query(...),
     reset: bool = Query(default=False),
+    # ``Annotated`` so the function's own default is a real ``None``: tests call
+    # this handler directly, where ``= Query(None)`` would hand them the Query.
+    reset_knobs: Annotated[
+        list[str] | None,
+        Query(description="Knobs to clear, keeping the rest; a null in the body means 'not set'."),
+    ] = None,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Update an agent's search profile (per-agent retrieval tuning). Pass ?reset=true to clear.
+    """Update an agent's search profile (per-agent retrieval tuning). Pass ?reset=true to clear
+    every knob, or ?reset_knobs=top_k (repeatable) to clear just those (L-119).
 
     Auth: any write-capable credential for the tenant, agent-scoped included —
     self-tune is the point of the route. The two gates answer different
@@ -143,6 +186,21 @@ async def patch_agent_tune(
     # An agent may tune ITS OWN profile (also exposed via MCP caura_tune), but
     # not a peer's — block cross-agent tamper while leaving self-tune + admin keys.
     auth.enforce_self_agent(agent_id, message="Agents can only tune their own search profile.")
+    # M-123: that check passes a credential with no agent identity, and an
+    # install credential has none on the wire. The install must already own the
+    # agent: an unclaimed, missing or foreign one is refused (403, without saying
+    # which). Not the write gate's first-touch leniency: MCP ``caura_tune`` gets
+    # that through ``resolve_write_agent``, which claims the agent, but this
+    # route claims nothing, so an unclaimed agent would stay tunable by every
+    # install. Not degraded either: the agent is the resource this URL names.
+    if auth.is_install_credential:
+        await enforce_broker_agent_ownership(tenant_id, agent_id, auth.install_uuid)
+    updates = body.model_dump(exclude_none=True)
+    if reset_knobs:
+        try:
+            validate_knob_resets(reset_knobs, updates, reset_all=reset)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     sc = get_storage_client()
     # ``read=False``: this row is not just inspected, it is MERGED INTO below —
     # ``current`` starts as the stored profile and only the supplied fields are
@@ -159,6 +217,14 @@ async def patch_agent_tune(
         cleared = await sc.reset_search_profile(stored_agent_id, tenant_id)
         if not cleared:
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+        await log_action(
+            tenant_id=tenant_id,
+            agent_id=auth.agent_id,
+            action="agent_tune",
+            resource_type="agent",
+            resource_id=agent.get("id"),
+            detail={"agent_id": stored_agent_id, "reset": True, **auth.audit_actor()},
+        )
         # Storage answers the reset with ``{"ok": true}``, not the agent row, so
         # the response has to come from a re-read. The merge branch below
         # re-reads too but falls back to the stale pre-write row on a miss,
@@ -174,13 +240,24 @@ async def patch_agent_tune(
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
         return AgentOut.model_validate(refreshed)
 
-    # Merge: only set non-None fields, preserve existing profile values
+    # Merge: drop the knobs named in reset_knobs, set the non-None fields, and
+    # keep every other stored value.
     current = agent.get("search_profile") or {}
-    updates = body.model_dump(exclude_none=True)
-    if updates:
+    if updates or reset_knobs:
+        for knob in reset_knobs or ():
+            current.pop(knob, None)
         current.update(updates)
         current = validate_search_profile(current)
-        await sc.update_search_profile(agent["id"], tenant_id, current)
+        await sc.update_search_profile(agent["agent_id"], tenant_id, current)
+        cleared = {"reset_knobs": reset_knobs} if reset_knobs else {}
+        await log_action(
+            tenant_id=tenant_id,
+            agent_id=auth.agent_id,
+            action="agent_tune",
+            resource_type="agent",
+            resource_id=agent.get("id"),
+            detail={"agent_id": agent["agent_id"], "changes": updates, **cleared, **auth.audit_actor()},
+        )
         # Re-fetch to get the updated agent with full fields. ``read=False``
         # because this is a read-after-write: from a replica it can return the
         # profile as it was before the update on the line above, so the PATCH
@@ -204,9 +281,14 @@ async def delete_agent(
     # resets to DEFAULT_TRUST_LEVEL) — an agent must not delete itself/peers to
     # evade controls.
     auth.enforce_not_agent_credential("delete agents")
+    auth.enforce_not_org_member("delete agents")
     sc = get_storage_client()
     agent = await lookup_agent(tenant_id, agent_id, read=False)
     if not agent:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    # Audited once the delete has happened, never before: a delete that failed
+    # or matched nothing left an entry saying the agent was gone (L-21).
+    if not await sc.delete_agent(agent["agent_id"], tenant_id):
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
     await log_action(
         tenant_id=tenant_id,
@@ -214,4 +296,3 @@ async def delete_agent(
         resource_type="agent",
         detail={"agent_id": agent["agent_id"], "fleet_id": agent.get("fleet_id")},
     )
-    await sc.delete_agent(agent["agent_id"], tenant_id)

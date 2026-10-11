@@ -8,6 +8,18 @@ import pytest
 
 from tests.conftest import get_test_auth, uid
 
+_TEST_ORIGINS = ("http://localhost",)
+
+
+@pytest.fixture(autouse=True)
+def _allow_test_installer_origins(monkeypatch):
+    """These tests name example API hosts on purpose. Installers now only embed
+    an ``api_url`` that is this server's own origin or operator-allowlisted
+    (``INSTALLER_ALLOWED_API_URLS``), so allowlist the hosts used here."""
+    from core_api.config import settings
+
+    monkeypatch.setattr(settings, "installer_allowed_api_urls", ",".join(_TEST_ORIGINS))
+
 
 async def _write_memory(
     client,
@@ -35,15 +47,6 @@ async def _write_memory(
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. RLS bypass / unauthenticated access
 # ═══════════════════════════════════════════════════════════════════════════
-
-
-@pytest.mark.integration
-async def test_no_auth_list_memories_scoped(client):
-    """Without auth, listing memories returns only what RLS allows (standalone auto-auth)."""
-    resp = await client.get("/api/v1/memories")
-    # In standalone mode: 200 (auto-auth). In multi-tenant: 401/403/422.
-    # The key assertion: no cross-tenant data leakage.
-    assert resp.status_code in (200, 401, 403, 422)
 
 
 @pytest.mark.integration
@@ -84,13 +87,19 @@ async def test_health_no_tenant_stats(client):
 
 
 @pytest.mark.integration
-async def test_list_tenants_requires_auth(client):
-    """GET /api/tenants requires some form of authentication."""
-    # In standalone mode, auto-auth means 200 is acceptable
-    # In multi-tenant without auth, should be 401/403
-    # The admin-only version lives at /api/admin/tenants
+async def test_list_tenants_requires_auth(client, monkeypatch):
+    """GET /api/tenants refuses a request with no credential.
+
+    The suite runs standalone, where every request is authenticated, so this
+    accepted 200 and could not fail; it now runs outside standalone mode
+    (L-172). Listing memories without a credential is refused the same way in
+    tests/test_standalone.py::test_non_standalone_requires_auth.
+    """
+    from core_api.config import settings
+
+    monkeypatch.setattr(settings, "is_standalone", False)
     resp = await client.get("/api/v1/tenants")
-    assert resp.status_code in (200, 401, 403)
+    assert resp.status_code in (401, 403)
 
 
 @pytest.mark.integration
@@ -276,8 +285,20 @@ async def test_install_script_escapes_malicious_api_url(client):
             "api_key": "mc_testkey123456",
         },
     )
-    assert resp.status_code == 200
-    script = resp.text
+    # A URL that is not this server's origin is refused outright now.
+    assert resp.status_code == 400, resp.text
+
+    # The generator itself still quotes hostile input (defence in depth).
+    from core_api.routes.plugin import _generate_install_script
+
+    script = _generate_install_script(
+        api_url="https://evil.com; rm -rf /",
+        api_key="mc_testkey123456",
+        fleet_id="test-fleet",
+        tenant_id="t",
+        node_name="",
+        tls_bootstrap="verify",
+    )
     # The malicious URL must be single-quoted by shlex.quote() — not bare
     assert "CAURA_API_URL='https://evil.com; rm -rf /'" in script
     # Bare (unquoted) interpolation into curl must NOT appear

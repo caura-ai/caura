@@ -22,6 +22,8 @@ _SPEC = ToolSpec(
         "FORBIDDEN",
         "INVALID_ARGUMENTS",
         "MISSING_AGENT_ID",
+        "NOT_FOUND",
+        "REQUEST_BUDGET_EXCEEDED",
         "UNAUTHORIZED",
     ),
 )

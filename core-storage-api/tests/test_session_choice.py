@@ -73,6 +73,13 @@ _DOCUMENTED_READ_YOUR_WRITES = {"entity_resolve_duplicates"}
 # docstring above already records as unsafe. The second pass follows
 # core-api's storage client across the HTTP boundary and finds the rest.
 _MUST_STAY_ON_THE_WRITER = {
+    "memory_assert_pointers_in_tenant": (
+        "routers/memories.py::batch_update_status and update_memory_status "
+        "check every supersedes_id before writing any row. The pointer can name "
+        "a memory written moments earlier (two contradicting writes in quick "
+        "succession); under lag that row reads as absent and a valid request "
+        "is refused with a 422."
+    ),
     "entity_resolve_duplicates": (
         "Its own docstring: the merge loop re-reads rows it mutates, inside "
         "SAVEPOINTs an HTTP boundary cannot express."
@@ -106,13 +113,22 @@ _MUST_STAY_ON_THE_WRITER = {
         "pair these had NO opt-out — get_agent took no `read` argument at all "
         "— which is its own fix, not this file's."
     ),
+    "organization_settings_read": (
+        "core-api reloads its settings cache through it right after a settings "
+        "change, when the change's broadcast evicts every process's copy. Under "
+        "lag the replica hands back the settings from before the change, cached "
+        "for five minutes; a tightened write hold (g2.8) then does not apply. "
+        "core-api already asks for the writer (read=False), but the writer "
+        "service sets read_database_url, the precondition below, so this read "
+        "used to reach the replica anyway."
+    ),
 }
 
 # Private helpers. They open a session but are called only from other methods
 # in this module, so they are not independently convertible: whichever caller
 # they serve decides, and converting one in isolation would give a single
 # request two sessions with different views of the same rows.
-_INTERNAL_HELPERS = {"_describe_content_hash_winner", "_guard_document_shrink"}
+_INTERNAL_HELPERS = {"_describe_content_hash_winner"}
 
 
 def _source() -> tuple[str, ast.Module, list[str]]:
@@ -255,12 +271,69 @@ def test_the_writer_session_population_is_pinned() -> None:
     ``document_get_by_doc_id`` holds the writer for the same reason, and the two
     document lookups must not disagree about staleness — that would make the
     ``id`` path unreliable while the ``doc_id`` path was not.
+
+    138 -> 139 (pure 64 -> 65): ``memory_assert_pointers_in_tenant`` is new and
+    only selects, on the writer by design — see its ``_MUST_STAY_ON_THE_WRITER``
+    entry — so the convertible count below does not move.
+
+    139 -> 140 (pure unchanged): ``idempotency_release`` is new and DELETEs a
+    still-pending Idempotency-Key claim, so it is a write, not a backlog entry.
+
+    140 -> 141 (pure unchanged at 65): ``fleet_release_node`` is new (M-85). It
+    clears a node's binding with ``sql_update``, so it is a write and belongs on
+    the writer.
+
+    141 -> 142 (pure unchanged at 65): ``fleet_claim_interview_request`` is new
+    (M-86). It spends an interview request with ``sql_update``, a write.
+
+    142 -> 143 (pure unchanged at 65): ``organization_settings_encrypt_api_keys``
+    is new (M-99). It swaps keys with ``sql_update`` and audits with
+    ``pg_insert``, so it is a write.
+
+    143 -> 144 (pure unchanged at 65): ``memory_reset_dedup_checked`` is new
+    (M-38). It clears the crystallizer's dedup stamps with ``sql_update``, a
+    write.
+
+    144 -> 145 (pure unchanged at 65): ``entity_merge`` is new (L-46). It locks
+    the entity ``with_for_update`` and assigns the merged attributes, a write.
+
+    145 -> 143 (pure unchanged at 65): ``memory_soft_delete_by_ids``,
+    ``memory_soft_delete_by_filter`` and ``memory_soft_delete_by_run`` no longer
+    open a session. They share ``_soft_delete`` (M-52, M-53), which opens the
+    one writer session and soft-deletes the rows and their derived rows with
+    ``sql_update``, a write.
+
+    143 -> 142 (pure 65 -> 64): ``_guard_document_shrink`` no longer opens a
+    session. Both upserts pass it theirs, so the shrink check and the write
+    share one transaction, the one a keystone write records its version in
+    (g1.12). It was an internal helper, so the convertible count stays at 56.
+
+    142 -> 143 (pure unchanged at 64): ``memory_rollback_session`` is new (g2.9).
+    It outdates a session's rows and rejects its held ones with ``sql_update``,
+    a write. Its sibling ``memory_list_held`` reads on the replica.
+
+    143 -> 144 (pure 64 -> 65): ``organization_settings_read`` is new and only
+    selects, on the writer by design — see its ``_MUST_STAY_ON_THE_WRITER``
+    entry — so the convertible count below does not move. It replaces
+    ``organization_settings_get``'s replica read, which now calls it.
+
+    144 -> 145 (pure unchanged at 65): ``task_mark_handled`` is new. It moves
+    open ``background_task_log`` rows to a handled status with ``sql_update``,
+    a write. Its sibling ``task_list_open_failures`` reads on the replica.
+
+    145 -> 141 (pure 65 -> 61): ``memory_find_successors``,
+    ``entity_fts_search``, ``entity_expand_graph`` and
+    ``entity_get_memory_ids_by_entity_ids`` read on the replica (L-190). Their
+    only callers are the search pipeline's ClassifyQuery, entity boost and
+    LoadAndSerialize, which read what earlier requests wrote, never their own
+    writes; core-api already sent three of them with ``read=True`` and now
+    sends the link lookup that way too.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 137, f"{len(methods)} methods open a writer session"
-    assert len(pure) == 64, f"{len(pure)} of them show no write marker"
+    assert len(methods) == 141, f"{len(methods)} methods open a writer session"
+    assert len(pure) == 61, f"{len(pure)} of them show no write marker"
 
 
 @pytest.mark.parametrize(
@@ -302,13 +375,14 @@ def test_every_method_that_must_stay_on_the_writer_still_looks_like_a_pure_read(
 def test_the_convertible_population_is_pinned() -> None:
     """What is left after the caller analysis, so a conversion has a target.
 
-    64 methods show no write marker. Six of them must stay on the writer anyway
-    because of what CALLS them, and two are private helpers that inherit their
-    caller's session. The remaining 56 are the candidates — the number a
+    61 methods show no write marker. Eight of them must stay on the writer
+    anyway because of what CALLS them, and one is a private helper that
+    inherits its caller's session. The remaining 52 are the candidates — the number a
     conversion PR is allowed to move, and the only number in this file that
-    SHOULD go down.
+    SHOULD go down. 56 -> 52 with L-190's four search reads, converted after
+    the caller analysis recorded on the population test above.
 
-    One precondition applies to all 56 and is not visible from here: core-api's
+    One precondition applies to all 52 and is not visible from here: core-api's
     storage client already splits reads at the SERVICE level (``_read_prefix``)
     with a per-call ``read=False`` opt-out. Converting a method sends it to the
     DB replica regardless of which deployment served the request, so the
@@ -323,7 +397,7 @@ def test_the_convertible_population_is_pinned() -> None:
     assert pure >= _INTERNAL_HELPERS
 
     convertible = pure - set(_MUST_STAY_ON_THE_WRITER) - _INTERNAL_HELPERS
-    assert len(convertible) == 56, (
-        f"{len(convertible)} convertible candidates, expected 56 — "
+    assert len(convertible) == 52, (
+        f"{len(convertible)} convertible candidates, expected 52 — "
         "update this and say which way it moved and why"
     )

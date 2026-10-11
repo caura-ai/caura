@@ -34,10 +34,10 @@ Agents write plain text. Caura turns it into searchable, governed, self-improvin
 
 **One loop, three pillars: write, recall, compound** — every interaction makes the next one smarter.
 
-**Optimized for fleets.** One agent works, and that's where most teams start — nothing below changes for a single-agent setup. What Caura adds is headroom: scoped memory, cross-agent outcome propagation, and fleet-wide trust tiers are there from the first write, and they keep paying off as agents multiply. Public agent-memory benchmarks (LoCoMo, LongMemEval) measure one agent, one user, one long conversation — the single-chatbot shape — so they score the on-ramp rather than the axes that compound with agent count: latency, token efficiency, and governance. That second shape is what we see in production: dozens or thousands of agents working on behalf of one company, sharing what they learn under governance. See [Performance](#performance) for the numbers, or read the [benchmarks write-up](https://caura.ai/blog/caura-benchmarks).
+**Built for fleets.** One agent works, and that's where most teams start — nothing below changes for a single-agent setup. What Caura adds is headroom: scoped memory, cross-agent outcome propagation, and fleet-wide trust tiers are there from the first write, and they keep paying off as agents multiply. Public agent-memory benchmarks (LoCoMo, LongMemEval) measure one agent, one user, one long conversation — the single-chatbot shape. Fleet governance and workload-specific latency still need validation in the environment where they matter. See the generated [Performance](#performance) block and [evidence registry](EVIDENCE.md) for approved benchmark results, or read the [benchmarks write-up](https://caura.ai/blog/caura-benchmarks).
 
-> **In production at eToro (NASDAQ: ETOR):** 300+ AI agents on one governed
-> memory — 26,500+ memories, 1,372 shared skills, 23 ms p50 search.
+> **Production case study:** eToro uses Caura as a governed shared-memory layer
+> for its AI-agent work.
 > [Architecture deep-dive →](https://caura.ai/blog/etoro-company-brain/)
 
 <p align="center">
@@ -54,13 +54,13 @@ Agents write plain text. Caura turns it into searchable, governed, self-improvin
 
 ### Try it locally — no API key, no signup
 
-The fastest way to see Caura work. Standalone mode runs single-tenant with auth bypassed — start Caura, write a memory, and find it again. (It boots with dummy embeddings so there's nothing to configure; add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
+The fastest way to see Caura work. Standalone mode runs single-tenant with auth bypassed — start Caura, write a memory, and find it again. (With no key there's nothing to configure: memories are stored without embeddings and found by keyword. Add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
 
 ```bash
 git clone https://github.com/caura-ai/caura.git
 cd caura
 cp .env.example .env && echo "IS_STANDALONE=true" >> .env   # single-tenant, no API key
-docker compose up -d --wait                                 # Postgres + pgvector + Redis + API (~30s)
+docker compose up -d --wait                                 # Postgres + pgvector + Redis + API + scheduler (~30s)
 ```
 
 <!-- readme-quickstart-ci:start -->
@@ -155,9 +155,10 @@ tool call; the gateway rejects the reserved `mcp-agent` default on that path.
 
 ### Self-Hosted (Open Source)
 
-Docker Compose starts PostgreSQL + pgvector, Redis, the storage service, and the
-REST/MCP API. The keyless example above is the shortest path; add a provider for
-semantic recall.
+Docker Compose starts PostgreSQL + pgvector, Redis, the storage service, the
+REST/MCP API, and the `core-operations` lifecycle scheduler (nightly expiry,
+archival, purge and crystallization). The keyless example above is the shortest
+path; add a provider for semantic recall.
 
 <a id="prerequisites"></a>
 <a id="1-clone-and-configure"></a>
@@ -189,7 +190,12 @@ agent prompts and trust levels. Already have nodes running? Keeping them current
 The plugin talks only to the Caura server you configure (`CAURA_API_URL`) and
 identifies itself on every request with
 `User-Agent: openclaw-plugin/<version> (node/<major>)`, which the server's
-self-hosted heartbeat uses to count connected plugin installs.
+self-hosted heartbeat uses to count connected plugin installs, and with
+`X-Caura-Surface: openclaw_plugin`, which labels the audit rows its writes
+produce ([Audit attribution](docs/api-reference.md)). It will not send
+`CAURA_API_KEY` over plain `http://` to anything but loopback: point
+`CAURA_API_URL` at `https://`, or set `CAURA_ALLOW_INSECURE_HTTP=true` in the
+plugin `.env` to accept cleartext on a trusted private network.
 
 ### Python client
 
@@ -272,13 +278,13 @@ invest in the OSS edition.
 
 - **Tenant isolation** — row-level database separation per tenant; PII auto-detected and flagged on every write (surfaced in memory metadata as `contains_pii`/`pii_types`)
 - **Visibility scopes** — every memory is stamped at write time: `scope_agent` (private), `scope_team` (fleet-wide, default), or `scope_org` (cross-fleet). Cross-fleet recall is permissioned, not open
-- **Agent trust tiers** — four levels control cross-fleet reads, writes, and deletes. Agents are either provisioned atomically via `POST /admin/agent-keys/provision` (recommended — mints key + row + trust + fleet in one call) or auto-registered on first write (legacy fallback)
+- **Agent trust tiers** — four levels control cross-fleet reads, writes, and deletes. Agents are either provisioned atomically via `POST /admin/agent-keys/provision` on the managed platform (caura.ai; a self-hosted core-api has no such route) or auto-registered on first write
 - **Full audit log** — every write, delete, and transition logged with tenant and scope context
-- **Agent activity digests** — daily and weekly per-agent digests, generated server-side for opted-in orgs (org setting `agent_digest.enabled`, off by default). They run from core-operations' `agent-digest` / `agent-digest-weekly` cron ticks and are read back via the reports endpoints in `core-api` (`GET /api/v1/reports`, `GET /api/v1/reports/agent-activity`). A tenant that hasn't opted in pays zero cost
+- **Agent activity digests** — per-agent digests, generated server-side for opted-in orgs (org setting `agent_digest.enabled`, off by default) on the org's cadence (`agent_digest.cadence`: `daily` by default, or `weekly` or `both`; an org on the default gets no weekly digest). They run from core-operations' `agent-digest` / `agent-digest-weekly` cron ticks and are read back via the reports endpoints in `core-api` (`GET /api/v1/reports`, `GET /api/v1/reports/agent-activity`). A tenant that hasn't opted in pays zero cost
 
 ### Memory Pipeline
 
-- **Single-pass LLM enrichment** — every write auto-classifies into one of 14 memory types, generates title/summary, scores importance, flags PII, and extracts entities — from a single `content` field
+- **Single-pass LLM enrichment** — every write auto-classifies into one of 7 memory types (the server writes outcome, rule and insight itself), generates title/summary, scores importance, flags PII, and extracts entities — from a single `content` field
 - **Hybrid search** — pgvector semantic similarity + full-text keyword matching + knowledge graph expansion (up to 2 hops), ranked by composite score of similarity, importance, freshness, and graph boost. When a result set holds both a superseded memory and the memory that replaced it, the replacement is always ranked immediately above it — a stale row can surface, but never above its own correction
 - **Live knowledge graph** — people, orgs, locations, and concepts extracted into entities and relations on every write. Entity resolution runs exact name match first, then a deterministic canonical-name match (case- and whitespace-insensitive, and ignoring a leading `the`/`a`/`an`/`new`/`old`/`current`/`existing`/`legacy` — so "the new analytics service" and "analytics service" are one entity), then semantic similarity (>0.85 cosine). A qualifier is only dropped while two or more words remain, so "new york" never collapses into "york". Every surface form seen is kept as an alias on the entity
 - **Contradiction detection** — RDF triple comparison + LLM semantic analysis detects conflicting memories and automatically supersedes them, with full contradiction chain tracking
@@ -329,17 +335,17 @@ via issue or PR.
 
 Benchmarked against the two most-cited public agent-memory benchmarks. Full results, methodology, and how to reproduce them live in [`BENCHMARKS.md`](BENCHMARKS.md); operator-scale context is in [`docs/performance.md`](docs/performance.md); the full write-up is on the blog.
 
-|  | LoCoMo | LongMemEval | Search latency |
-|---|---|---|---|
-| Accuracy (LLM-judge) | **77.6%** | **92.2%** | — |
-| Token savings vs full context | **96.6%** | **79.2%** | — |
-| Latency | — | — | **23 ms p50 · 27 ms p95** |
+<!-- BEGIN GENERATED: evidence-benchmarks -->
+- **LoCoMo accuracy:** Caura scored 77.9% (1,199/1,540) under its documented LoCoMo semantic-judge protocol using the retrieval-augmented agentic-v1 pipeline.
+- **LongMemEval reference judge:** Caura answered 461 of 500 LongMemEval_S questions correctly (92.2%) under the benchmark's GPT-4o reference judge.
+- **LongMemEval secondary judge:** The same 500 frozen LongMemEval_S answers scored 90.2% (451/500) under the secondary Gemini 3.5 Flash-Lite judge.
+- **LongMemEval token efficiency:** On LongMemEval_S, the median compact retrieved context was 22,410 tokens versus a 107,706-token full haystack: 79.2% context-only savings; counting every reader call yields 75.4%.
 
-Accuracy sits inside the leading cluster across the field (Mem0, Zep, Caura — scores cluster in a narrow band). The axes we push hardest are latency and token efficiency, because those are the ones that compound as agent count grows — a few hundred ms of search latency disappears behind one LLM call, but bills millions of times a day across a fleet.
-
-> Single-agent benchmarks can't measure cross-agent recall, outcome propagation between agents, fleet-scoped visibility, or governance-aware retrieval. Those are the questions that decide whether a memory system is *deployable* inside a company. See [`docs/performance.md`](docs/performance.md#what-these-benchmarks-cant-measure).
-
-Source: [Fast, Token-Efficient, and Built for Fleets](https://caura.ai/blog/caura-benchmarks) (2026-04-19).
+Only active, approved claims appear here. Control, withdrawn, and withheld
+records remain in the evidence registry and are excluded from promotional copy.
+See [`evidence/claims.json`](evidence/claims.json) and
+[`EVIDENCE.md`](EVIDENCE.md). Do not hand-edit this block.
+<!-- END GENERATED: evidence-benchmarks -->
 
 ---
 
@@ -373,7 +379,7 @@ Add Caura to any MCP client with one config block.
 }
 ```
 
-> For team or production use, swap the tenant-scoped key for an **agent-scoped credential** — atomic provisioning via `POST /api/v1/admin/agent-keys/provision` (or the `/settings/organization/api-credentials` wizard) mints the credential + Agent row + initial trust + fleet membership in one round trip. Both kinds use the `mc_` prefix; scope is set at mint time on the credential. See [`docs/integration-without-plugin.md`](docs/integration-without-plugin.md). Using a tenant-scoped credential? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-scoped path.
+> For team or production use, swap the tenant-scoped key for an **agent-scoped credential** — on the managed platform (caura.ai), atomic provisioning via `POST /api/v1/admin/agent-keys/provision` (or the `/settings/organization/api-credentials` wizard) mints the credential + Agent row + initial trust + fleet membership in one round trip. Both kinds use the `mc_` prefix; scope is set at mint time on the credential. See [`docs/integration-without-plugin.md`](docs/integration-without-plugin.md). Using a tenant-scoped credential? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-scoped path.
 
 **Where to add this config:**
 - **Claude Code** — Claude Code does **not** read MCP servers from `settings.json`. Register the server with `claude mcp add` instead. Use `-s user` so it's available in **every** working directory — the default scope (`local`) only registers it for the current directory, which bites when you run agents from multiple folders:
@@ -594,7 +600,12 @@ Each release publishes multi-arch (linux/amd64, linux/arm64) images to [GitHub C
 ```
 ghcr.io/caura-ai/caura-memclaw-core-api:v2.5.0 # legacy-name-floor: published GHCR repository name
 ghcr.io/caura-ai/caura-memclaw-core-storage-api:v2.5.0 # legacy-name-floor: published GHCR repository name
+ghcr.io/caura-ai/caura-core-operations:v2.5.0
 ```
+
+`caura-core-operations`, the lifecycle scheduler, is newer than the other two and
+is published under the new name, so releases before it joined the stack have no
+image for it.
 
 Tags follow SemVer with floating aliases — `:v1`, `:v1.0`, `:v1.0.0`, plus `:latest` for the latest stable release. Pull them in your own compose file or Kubernetes manifests instead of building from source.
 
@@ -602,15 +613,24 @@ Tags follow SemVer with floating aliases — `:v1`, `:v1.0`, `:v1.0.0`, plus `:l
 
 ### Manual deployment (without Docker)
 
-The `core-api/` service is a standard FastAPI app that runs under any ASGI server (uvicorn, hypercorn). Requirements:
+Caura is two FastAPI services, and both run under any ASGI server (uvicorn, hypercorn). `core-storage-api` owns the database and applies the migrations when it starts. `core-api` serves the REST and MCP API and reaches the database only through it. Requirements:
 
 - Python 3.12+
-- PostgreSQL 16+ with the `pgvector` extension
+- PostgreSQL 16+ with the `pgvector` extension, for `core-storage-api`
 - Redis (optional — falls back to in-memory cache if unavailable)
 
+Both services need the same non-empty `CORE_STORAGE_SHARED_SECRET`, and core-api refuses to start without it. Point core-api at the storage service with `CORE_STORAGE_API_URL` (default `http://localhost:8002`). [AGENT-INSTALL.md, Option B](AGENT-INSTALL.md#option-b-manual-no-docker) walks through the whole install, `pip install -r requirements.txt` included.
+
+Export `.env` into the process environment before starting each service. The services load their own settings from `.env`, but some knobs are read from the environment only: the embedder (`OPENAI_EMBEDDING_*`, `EMBEDDING_QUERY_INSTRUCTION`), the reranker (`RANK_*`) and the provider model overrides (`*_DEFAULT_MODEL`). `.env.example` marks those blocks "env-only". Compose's `env_file:` puts them in the environment; a bare uvicorn run does not. An exported value takes precedence over `.env`, so export again after editing it. Sourcing hands every line to the shell, so wrap any value that contains spaces, quotes or shell characters such as `$`, `&`, `;` or backticks (a password, say) in single quotes. Otherwise the shell mangles it, and the mangled value overrides the one in `.env`.
+
 ```bash
-uvicorn core_api.app:app --host 0.0.0.0 --port 8000 --workers 2
+set -a; . ./.env; set +a
+PYTHONPATH=.:core-storage-api/src uvicorn core_storage_api.app:app --host 127.0.0.1 --port 8002
+# Then, in a second shell with the same .env exported:
+WEB_CONCURRENCY=2 PYTHONPATH=.:core-api/src uvicorn core_api.app:app --host 0.0.0.0 --port 8000
 ```
+
+uvicorn takes its worker count from `WEB_CONCURRENCY` when `--workers` is not given, and core-api reads the same variable: with `USE_STM=true` and `STM_BACKEND=memory` it refuses to start on more than one worker, since each worker would keep its own STM. Use `STM_BACKEND=redis` there.
 
 ### Deployment topologies
 
@@ -797,8 +817,8 @@ The full engine — storage, 12 MCP tools, plugin, audit trail — is Apache
 governance for teams that don't want to operate infrastructure.
 
 **Who runs Caura in production?**
-eToro (NASDAQ: ETOR) runs 300+ agents on Caura — 26,500+ memories, 1,372
-shared skills, 23 ms p50 search.
+eToro (NASDAQ: ETOR) uses Caura as a governed shared-memory layer for its
+AI-agent work.
 [Case study →](https://caura.ai/blog/etoro-company-brain/)
 
 ---

@@ -2,8 +2,8 @@
 
 Per-route opt-in: handlers call :func:`idempotency_for` after auth
 has enforced the tenant, get back a :class:`IdempotencyGuard`, check
-``guard.cached_replay`` for a cached response, and call
-``guard.record(...)`` after running the work.
+``guard.cached_replay`` for a cached response, run the work inside
+:func:`release_claim_on_error`, and call ``guard.record(...)`` after it.
 
 Not a middleware — slowapi + FastAPI already handle the request/response
 pipeline, and per-handler wiring keeps the replay contract explicit at
@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -95,11 +98,16 @@ class IdempotencyGuard:
         key: str,
         request_hash: str,
         cached: dict | None,
+        *,
+        claimed: bool = False,
     ) -> None:
         self.tenant_id = tenant_id
         self.key = key
         self.request_hash = request_hash
         self._cached = cached
+        # True only when THIS request inserted the pending claim — the one
+        # case where a failed handler leaves a row that blocks its retries.
+        self._claimed = claimed
 
     @property
     def cached_replay(self) -> tuple[Any, int] | None:
@@ -108,6 +116,29 @@ class IdempotencyGuard:
         if self._cached is None:
             return None
         return self._cached["response_body"], self._cached["status_code"]
+
+    async def release(self) -> None:
+        """Drop this request's pending claim after the handler failed.
+
+        A claim left pending answers every retry with 409 "still in
+        progress" until ``idempotency_pending_ttl_seconds`` lapses, so a
+        deterministic 403/404/422 — or a 429 from the per-tenant slot taken
+        after the claim — is masked for the whole window. Releasing lets the
+        retry run afresh and see the real outcome. Only the still-pending row
+        with this request's hash is deleted, so a recorded response survives.
+        Failures are logged, not raised: the pending TTL remains the backstop.
+        """
+        if not self._claimed:
+            return
+        self._claimed = False
+        try:
+            await get_storage_client().release_idempotency_claim(
+                tenant_id=self.tenant_id,
+                idempotency_key=self.key,
+                request_hash=self.request_hash,
+            )
+        except Exception:
+            logger.warning("Idempotency claim release failed (non-critical)", exc_info=True)
 
     async def record(self, response_body: Any, status_code: int = 200) -> None:
         """Cache the response body under this key.
@@ -159,6 +190,24 @@ class IdempotencyGuard:
             logger.warning("Idempotency record failed (non-critical)", exc_info=True)
 
 
+@asynccontextmanager
+async def release_claim_on_error(guard: IdempotencyGuard | None) -> AsyncIterator[None]:
+    """Release ``guard``'s pending claim if the wrapped work raises.
+
+    Wrap everything between :func:`idempotency_for` and ``guard.record()``,
+    including the per-tenant slot acquisition. ``Exception`` only, on
+    purpose: a ``CancelledError`` means the client went away while the work
+    may already have committed (ax-0917-h-09), and the pending claim is what
+    keeps an immediate retry from running it a second time.
+    """
+    try:
+        yield
+    except Exception:
+        if guard is not None:
+            await guard.release()
+        raise
+
+
 def _log_record_outcome(task: asyncio.Task) -> None:
     """Report a shielded idempotency record that outlived its request."""
     if task.cancelled():
@@ -174,9 +223,11 @@ async def idempotency_for(
     tenant_id: str,
     idempotency_key: str | None,
     *,
+    agent_id: str | None,
     source: Literal["header", "body"] = "header",
+    pending_ttl_seconds: float | None = None,
 ) -> IdempotencyGuard | None:
-    """Look up — and atomically claim — the inbox for (tenant, key).
+    """Look up — and atomically claim — the inbox for (tenant, agent, key).
 
     Returns None if the key was absent. On a cache hit with a
     *different* body hash, raises 422 — reusing the same key with
@@ -184,13 +235,19 @@ async def idempotency_for(
     idempotency-key draft.
 
     Call this inside a route handler *after* auth enforcement, so the
-    tenant_id passed here is already vetted.
+    tenant_id passed here is already vetted, and with ``agent_id`` the
+    write is attributed to (None for a write no agent makes).
 
     ``source`` selects a transport-specific prefix (``"header"`` →
     ``header:``, ``"body"`` → ``body:``) prepended before the lookup
     so the same string value sent via different transports never
     shares a cache bucket. Validation runs against the RAW key the
-    caller supplied; the prefix is added only for storage.
+    caller supplied; the prefix and agent are added only for storage
+    (:func:`stored_key`).
+
+    ``pending_ttl_seconds`` is how long the claim holds while the work
+    runs, ``idempotency_pending_ttl_seconds`` unless the route's own
+    budget is longer (the bulk write's).
 
     Body hashing note: uses raw request bytes. Clients retrying a write
     MUST send byte-identical bodies (same JSON serializer, same key
@@ -215,6 +272,61 @@ async def idempotency_for(
     """
     if not idempotency_key:
         return None
+    body_bytes = await request.body()
+    return await idempotency_for_hash(
+        tenant_id,
+        idempotency_key,
+        hashlib.sha256(body_bytes).hexdigest(),
+        agent_id=agent_id,
+        source=source,
+        pending_ttl_seconds=pending_ttl_seconds,
+    )
+
+
+def stored_key(source: str, agent_id: str | None, idempotency_key: str) -> str:
+    """The key a claim is stored under: transport, writing agent, client key.
+
+    Keys are scoped per agent (L-12, Eldad 2026-10-11). Tenant-wide, two agents
+    that derived the same key and sent byte-identical bodies got the first
+    agent's cached reply, its memory id and attribution, and the second write
+    never happened: REST hashes only the body, and the agent travels in the
+    credential or ``X-Agent-ID``. The agent is length-prefixed, so no other
+    (agent, key) pair can spell the same stored key.
+    """
+    agent = agent_id or ""
+    return f"{source}:{len(agent)}:{agent}:{idempotency_key}"
+
+
+def arguments_hash(**args: Any) -> str:
+    """Stable hash of a tool call's arguments, for :func:`idempotency_for_hash`.
+
+    Key order and serialisation are fixed, so the same arguments always hash
+    the same and different ones never do: the IETF draft's "same key, different
+    body is a client error" holds as it does for REST's raw request bytes.
+    """
+    canonical = json.dumps(args, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+async def idempotency_for_hash(
+    tenant_id: str,
+    idempotency_key: str | None,
+    request_hash: str,
+    *,
+    agent_id: str | None,
+    source: Literal["header", "body", "mcp"],
+    pending_ttl_seconds: float | None = None,
+) -> IdempotencyGuard | None:
+    """:func:`idempotency_for` for a caller that hashes its own request.
+
+    An MCP tool call has no request body of its own to hash, so
+    ``caura_write`` and ``caura_evolve`` hash their arguments with
+    :func:`arguments_hash` and claim under the ``mcp:`` prefix, which keeps
+    their keys out of the REST buckets (L-103). Validation, the claim, the poll
+    and the replay are the same code either way.
+    """
+    if not idempotency_key:
+        return None
     if not idempotency_key.strip():
         raise HTTPException(status_code=400, detail="Idempotency-Key must not be blank")
     if len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LEN:
@@ -223,10 +335,7 @@ async def idempotency_for(
             detail=f"Idempotency-Key must be at most {MAX_IDEMPOTENCY_KEY_LEN} characters",
         )
 
-    namespaced_key = f"{source}:{idempotency_key}"
-
-    body_bytes = await request.body()
-    request_hash = hashlib.sha256(body_bytes).hexdigest()
+    namespaced_key = stored_key(source, agent_id, idempotency_key)
 
     sc = get_storage_client()
 
@@ -284,8 +393,12 @@ async def idempotency_for(
     # full TTL on success. A crashed handler leaves the row pending only
     # until ``idempotency_pending_ttl_seconds`` elapses; after that the
     # expired-row reclaim path in ``idempotency_claim`` lets a fresh
-    # request take over the key automatically.
-    pending_expires_at = datetime.now(UTC) + timedelta(seconds=settings.idempotency_pending_ttl_seconds)
+    # request take over the key automatically. A route whose work may run
+    # longer passes its own TTL: an expired claim lets a same-key retry run
+    # the work a second time while the first is still in flight (L-07).
+    if pending_ttl_seconds is None:
+        pending_ttl_seconds = settings.idempotency_pending_ttl_seconds
+    pending_expires_at = datetime.now(UTC) + timedelta(seconds=pending_ttl_seconds)
     try:
         claimed, existing = await sc.claim_idempotency(
             tenant_id=tenant_id,
@@ -298,7 +411,7 @@ async def idempotency_for(
         return IdempotencyGuard(tenant_id, namespaced_key, request_hash, cached=None)
 
     if claimed:
-        return IdempotencyGuard(tenant_id, namespaced_key, request_hash, cached=None)
+        return IdempotencyGuard(tenant_id, namespaced_key, request_hash, cached=None, claimed=True)
 
     if existing and existing["request_hash"] != request_hash:
         raise HTTPException(

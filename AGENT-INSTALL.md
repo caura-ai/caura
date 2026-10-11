@@ -17,7 +17,7 @@ You need these on your machine:
 git clone https://github.com/caura-ai/caura.git
 cd caura
 
-# 2. Start everything (PostgreSQL + pgvector, Redis, Caura API)
+# 2. Start everything (PostgreSQL + pgvector, Redis, Caura API, lifecycle scheduler)
 docker compose up -d
 
 # 3. Wait for healthy (usually ~15 seconds)
@@ -66,19 +66,27 @@ psql -U postgres -c "CREATE USER caura WITH PASSWORD 'changeme';"
 psql -U postgres -c "CREATE DATABASE caura OWNER caura;"
 psql -U caura -d caura -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
-# 6. Start the storage service. It applies Alembic migrations during startup.
+# 6. Export .env, then start the storage service. Some settings are read from
+#    the process environment only, so each service's shell exports .env first
+#    (POSIX shells; on Windows set the variables in the environment instead).
+#    Sourcing hands .env to the shell: single-quote any value you add that
+#    contains spaces, quotes, $, &, ; or backticks (the sample above is safe).
+#    The storage service applies Alembic migrations during startup.
+set -a; . ./.env; set +a
 PYTHONPATH=.:core-storage-api/src uvicorn core_storage_api.app:app \
   --host 127.0.0.1 --port 8002
 
 # 7. In a second terminal, activate the same venv, return to the repo root,
-#    and start core-api. It talks to the storage service on port 8002.
+#    export .env, and start core-api. It talks to the storage service on port 8002.
 source venv/bin/activate
+set -a; . ./.env; set +a
 PYTHONPATH=.:core-api/src uvicorn core_api.app:app \
   --host 127.0.0.1 --port 8000
 
 # 8. Verify (in another terminal)
 curl http://localhost:8000/api/v1/health
-# Expected: {"status":"ok","storage":"connected","redis":"connected","event_bus":"ok"}
+# Expected: {"status":"ok","storage":"connected","redis":"not configured","event_bus":"ok"}
+# (this .env sets no REDIS_URL; redis is optional and "not configured" counts as healthy)
 ```
 
 Caura is running at `http://localhost:8000`.
@@ -107,6 +115,10 @@ Use `my-long-random-admin-key` as `X-API-Key`. You pass `tenant_id`
 explicitly in request bodies / query params. Admin/system keys are
 intentionally rejected by MCP; use standalone mode, a tenant-scoped key, or
 Path 3 for MCP.
+
+With `ADMIN_API_KEY` blank, the Docker stack generates an admin key for its own
+lifecycle scheduler (`admin-key-init`) and keeps it inside the stack. Setting
+`ADMIN_API_KEY` replaces it, for the scheduler too.
 
 **Path 3 — Gate the API with a shared key.** Set `CAURA_API_KEY` in your
 `.env`. REST and MCP clients send that key via `X-API-Key` plus `X-Tenant-ID`
@@ -149,10 +161,6 @@ If you're an OpenClaw agent running on a gateway, install the plugin instead:
 CAURA_URL=http://localhost:8000
 CAURA_KEY=YOUR_KEY_HERE      # admin key (Path 2) or shared gate key (Path 3)
 CAURA_FLEET=my-fleet
-CAURA_AGENT_ID=my-agent        # optional but recommended: a stable, human-readable
-                              # identity for THIS install (e.g. webclaw, vm-01). If
-                              # unset, the plugin uses a stable per-install id
-                              # (main-<install_id>) so installs don't collide.
 
 # Run the install script (API key in header, not query param)
 curl -sf -H "X-API-Key: $CAURA_KEY" "$CAURA_URL/api/v1/install-plugin?fleet_id=$CAURA_FLEET&api_url=$CAURA_URL" | bash
@@ -162,6 +170,8 @@ openclaw gateway restart    # or: systemctl --user restart openclaw-gateway
 ```
 
 This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims the exclusive memory slot (disabling `memory-core`), and configures `openclaw.json` to allowlist the agent-facing tools. The plugin calls the local Caura API over HTTP — same tools as MCP. <!-- legacy-name-floor: the installer still writes the frozen plugin directory -->
+
+Optional but recommended: give this install a stable, readable identity (for example `webclaw` or `vm-01`) by adding `CAURA_AGENT_ID=my-agent` to the `.env` in that plugin directory, then restarting the gateway. The installer does not take an agent id, and re-running it rewrites that `.env`, so add the line again afterwards. Without it, the plugin uses a stable per-install id (`main-<install_id>`) so installs don't collide.
 
 **MCP vs Plugin — which to use:**
 
@@ -248,7 +258,7 @@ Once connected via MCP or the OpenClaw plugin, you have these tools:
 | `caura_write` | Store a memory — send `content` (single) or `items` (batch ≤100). Everything else is auto-inferred |
 | `caura_recall` | Hybrid semantic + keyword search. Set `include_brief=true` to get the LLM's answer to the query alongside the matching memories |
 | `caura_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete` |
-| `caura_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2 |
+| `caura_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet` on your own fleet trust ≥ 1, another fleet or `scope=all` trust ≥ 2 |
 | `caura_doc` | Document CRUD, op-dispatched: `write`, `read`, `query`, `delete`, `list_collections`, `search` (semantic) on named JSON collections |
 | `caura_entity_get` | Look up an entity with linked memories and relations |
 | `caura_tune` | Adjust per-agent search parameters (top_k, min_similarity, graph hops, blend weights) |
@@ -275,7 +285,7 @@ USE_LLM_FOR_MEMORY_CREATION=true
 OPENAI_API_KEY=sk-...
 ```
 
-Then restart the server (`docker compose restart core-api` or re-run uvicorn).
+Then restart the server: `docker compose restart core-api`, or export `.env` again (`set -a; . ./.env; set +a`) and re-run uvicorn. An exported value takes precedence over `.env`, so skipping the export keeps the old one.
 
 ## What You Now Have
 
@@ -288,14 +298,24 @@ Then restart the server (`docker compose restart core-api` or re-run uvicorn).
 
 ## Performance Expectations
 
-On our reference benchmarks (warm cache, single tenant):
+Current approved benchmark evidence:
 
-- **Search latency:** 23 ms p50, 27 ms p95
-- **Recall accuracy:** 77.6% (LoCoMo, 2026-04-19) / 92.2% (LongMemEval, 2026-09-15,
-  the benchmark's reference judge; 90.2% under a stricter second judge)
-- **Token savings vs full context:** 79% (LongMemEval) to 97% (LoCoMo)
+<!-- BEGIN GENERATED: evidence-benchmarks -->
+- **LoCoMo accuracy:** Caura scored 77.9% (1,199/1,540) under its documented LoCoMo semantic-judge protocol using the retrieval-augmented agentic-v1 pipeline.
+- **LongMemEval reference judge:** Caura answered 461 of 500 LongMemEval_S questions correctly (92.2%) under the benchmark's GPT-4o reference judge.
+- **LongMemEval secondary judge:** The same 500 frozen LongMemEval_S answers scored 90.2% (451/500) under the secondary Gemini 3.5 Flash-Lite judge.
+- **LongMemEval token efficiency:** On LongMemEval_S, the median compact retrieved context was 22,410 tokens versus a 107,706-token full haystack: 79.2% context-only savings; counting every reader call yields 75.4%.
 
-If you see search latency materially above ~50 ms p50 after warm-up, the pgvector index is likely cold or your embedding-provider roundtrip is the bottleneck — see [`docs/performance.md`](docs/performance.md) for the methodology and the operator-scale notes.
+Only active, approved claims appear here. Control, withdrawn, and withheld
+records remain in the evidence registry and are excluded from promotional copy.
+See [`evidence/claims.json`](evidence/claims.json) and
+[`EVIDENCE.md`](EVIDENCE.md). Do not hand-edit this block.
+<!-- END GENERATED: evidence-benchmarks -->
+
+If search latency is materially above your warmed baseline, the pgvector index
+may be cold or your embedding-provider roundtrip may be the bottleneck — see
+[`docs/performance.md`](docs/performance.md) for measurement guidance and
+operator-scale notes.
 
 ## Full Reference
 

@@ -11,24 +11,28 @@ third-party loggers once they're all imported.
 Lifespan ordering:
 1. Re-route third-party loggers (uvicorn / scheduler) onto the JSON handler.
 2. If ``settings.is_standalone``: skip scheduler entirely. The service runs
-   as a no-op; OSS standalone deployments should not deploy this image
-   at all, but the flag is a defensive short-circuit.
+   as a no-op. This is an off switch, not a deployment rule: the stock compose
+   stack runs this service against its standalone core-api (M-109), and an
+   operator who drives the admin endpoints some other way sets it here.
 3. Otherwise: register cron jobs via ``scheduler.register(...)`` and call
-   ``scheduler.start()``. Eleven jobs are registered unconditionally: six daily
-   lifecycle ticks (``lifecycle-archive-expired``, ``lifecycle-archive-stale``,
-   ``lifecycle-purge-soft-deleted``, ``lifecycle-crystallize``,
-   ``lifecycle-entity-link``, ``lifecycle-insights``), each wall-clock
-   aligned to its configurable UTC hour; ``agent-digest`` (daily) and
-   ``agent-digest-weekly`` (weekly) for per-agent activity digests; and
-   ``interviewer-schedule`` (hourly, top of hour) which queues Interviewer
-   work — per-tenant settings gate actual command creation; and
-   ``embedding-coverage`` (hourly, top of hour), a read-only sample that logs
-   how many live memories are still unembedded; and ``lifecycle-reconcile``
-   (hourly, half past), which republishes audit rows a fanout wrote but never
-   published a message for, offset off the fanout hours it repairs. A twelfth,
-   ``embed-backfill``, registers only when ``embed_backfill_enabled`` is set,
-   because its Pub/Sub topic is Terraform-provisioned and firing into an
-   unprovisioned topic would just error every night.
+   ``scheduler.start()``. Twelve jobs are registered unconditionally: six
+   daily lifecycle ticks (``lifecycle-archive-expired``,
+   ``lifecycle-archive-stale``, ``lifecycle-purge-soft-deleted``,
+   ``lifecycle-crystallize``, ``lifecycle-entity-link``,
+   ``lifecycle-insights``), each wall-clock aligned to its configurable UTC
+   hour; ``agent-digest`` (daily) and ``agent-digest-weekly`` (weekly) for
+   per-agent activity digests; and ``interviewer-schedule`` (hourly, top of
+   hour) which queues Interviewer work — per-tenant settings gate actual
+   command creation; and ``embedding-coverage`` (hourly, top of hour), a
+   read-only sample that logs how many live memories are still unembedded;
+   and ``lifecycle-reconcile`` (hourly, half past), which republishes audit
+   rows a fanout wrote but never published a message for, offset off the
+   fanout hours it repairs; and ``entity-extraction-rerun`` (hourly, quarter
+   to), which re-runs entity extraction for memories that lost it. A
+   thirteenth, ``embed-backfill``, registers only when
+   ``embed_backfill_enabled`` is set, because its Pub/Sub topic is
+   Terraform-provisioned and firing into an unprovisioned topic would just
+   error every night.
 
    Every one of those is wall-clock aligned, so every one of them fires
    once per live replica of this service unless something coordinates
@@ -71,6 +75,8 @@ from core_operations.scheduler import (
     scheduler,
     seconds_until_next_utc_half_past,
     seconds_until_next_utc_hour,
+    seconds_until_next_utc_hour_multiple,
+    seconds_until_next_utc_minute_past,
     seconds_until_next_utc_top_of_hour,
     seconds_until_next_utc_weekday_hour,
 )
@@ -82,6 +88,7 @@ from core_operations.tasks import (
     run_crystallize_tick,
     run_embed_backfill_tick,
     run_embedding_coverage_tick,
+    run_entity_extraction_rerun_tick,
     run_entity_link_tick,
     run_insights_tick,
     run_interviewer_schedule_tick,
@@ -131,10 +138,13 @@ def _register_scheduled_tasks() -> None:
     )
     # A72 — cadence is configurable. At the default (24) this is byte-for-byte
     # today's behaviour: one run, wall-clock aligned to
-    # ``lifecycle_pipeline_run_at_hour``. Below 24 the alignment changes meaning
-    # — "every N hours from the next top of hour" rather than "at 02:00" — so
-    # the delay provider switches with it rather than pretending a sub-daily
-    # cadence can still anchor to one hour of the day.
+    # ``lifecycle_pipeline_run_at_hour``. Below 24 it fires every N hours on
+    # slots counted from that hour (N=6 runs at 02, 08, 14, 20 by default).
+    #
+    # The delay provider is what sets the cadence, not the period: an aligned
+    # task sleeps only what its provider returns, and the period merely sizes
+    # the tick lease. This used to pair an N-hour period with the next-top-of-
+    # hour provider, so every sub-daily setting fired hourly.
     _crystallize_hours = max(1, settings.lifecycle_crystallize_every_hours)
     scheduler.register(
         "lifecycle-crystallize",
@@ -143,7 +153,11 @@ def _register_scheduled_tasks() -> None:
         delay_provider=(
             _daily_at("lifecycle_pipeline_run_at_hour")
             if _crystallize_hours >= 24
-            else (lambda: seconds_until_next_utc_top_of_hour())
+            else (
+                lambda: seconds_until_next_utc_hour_multiple(
+                    _crystallize_hours, anchor_hour=settings.lifecycle_pipeline_run_at_hour
+                )
+            )
         ),
     )
     scheduler.register(
@@ -199,6 +213,17 @@ def _register_scheduled_tasks() -> None:
         run_lifecycle_reconcile_tick,
         delay_provider=lambda: seconds_until_next_utc_half_past(),
     )
+    # Re-runs entity extraction for memories that lost it: an extraction that
+    # raised, was cancelled by a shutdown, or settled for the regex heuristic
+    # (core-api ``services.extraction_rerun``). Hourly at quarter to, clear of
+    # the top-of-hour jobs and of the reconcile at half past; core-api answers
+    # at once and runs the re-runs in the background, a few at a time.
+    scheduler.register(
+        "entity-extraction-rerun",
+        3600,
+        run_entity_extraction_rerun_tick,
+        delay_provider=lambda: seconds_until_next_utc_minute_past(45),
+    )
     # Interviewer Phase 1: hourly queue-only tick; per-tenant period_hours
     # gates actual command creation, so opted-out tenants pay zero cost.
     scheduler.register(
@@ -234,12 +259,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     if settings.is_standalone:
-        # OSS standalone deployments shouldn't deploy this image at all.
-        # If we're here it's a misconfiguration — escalate so it shows up
-        # in alerts rather than silently consuming a Cloud Run slot.
+        # The off switch. The stock compose stack runs this service against a
+        # standalone core-api and leaves it unset (M-109); set on THIS service
+        # it disables every tick. Warned rather than logged at info, so a value
+        # inherited from a shared env file (env.dev and .env.example both set
+        # it) does not silently stop the nightly lifecycle.
         logger.warning(
-            "Standalone mode — scheduler disabled. core-operations is a no-op; "
-            "this image should not be deployed in standalone."
+            "IS_STANDALONE is set — scheduler disabled. core-operations is a no-op "
+            "and no lifecycle tick will fire."
         )
         yield
         logger.info("Shutting down core-operations (standalone)")
@@ -250,8 +277,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # immediately, not after the first cron tick fires and 401s
         # against core-api hours later.
         logger.warning(
-            "CORE_API_ADMIN_API_KEY is unset; every fanout POST will be "
-            "unauthorised. Set the env var before the next cron interval.",
+            "CORE_API_ADMIN_API_KEY is unset and CORE_API_ADMIN_API_KEY_FILE names no "
+            "key; every fanout POST will be unauthorised. Set one before the next "
+            "cron interval.",
         )
 
     _register_scheduled_tasks()

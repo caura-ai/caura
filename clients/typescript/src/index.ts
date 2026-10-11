@@ -24,6 +24,46 @@ function runtimeTag(): string {
   return node ? ` (node/${node.split(".")[0]})` : "";
 }
 
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "::1" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+  );
+}
+
+function envAllowsInsecureHttp(): boolean {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  return ["true", "1"].includes(env?.CAURA_ALLOW_INSECURE_HTTP ?? "");
+}
+
+/**
+ * Refuse to send the API key in cleartext to another machine (L-66): https, or
+ * plain http to a loopback host, or an explicit opt-in. The same rule as the
+ * OpenClaw plugin's `keyTransportPolicy`.
+ */
+function assertKeyTransportAllowed(baseUrl: string, allowInsecureHttp: boolean | undefined): void {
+  const expected = "baseUrl must start with https:// (or http:// for a loopback host)";
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error(`${expected}; got an invalid URL`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`${expected}; got ${url.protocol}`);
+  }
+  if (url.protocol === "https:" || isLoopbackHost(url.hostname)) return;
+  if (allowInsecureHttp ?? envAllowsInsecureHttp()) return;
+  throw new Error(
+    `Refusing to send the API key to ${url.host}: baseUrl uses plain HTTP to a non-loopback host, ` +
+      `so the key would cross the network in cleartext. Use https://, or pass allowInsecureHttp: true ` +
+      `(or set CAURA_ALLOW_INSECURE_HTTP=true) to accept the risk, e.g. on a trusted private network.`,
+  );
+}
+
 export class CauraError extends Error {}
 
 /** Raised on network failures or timeouts, retaining the original error as cause. */
@@ -74,6 +114,24 @@ export interface Memory {
   raw: Record<string, unknown>;
 }
 
+/**
+ * The envelope `/search` returns around its results (L-94). `search()` returns
+ * the ranked memories as an array that also carries these fields.
+ */
+export interface SearchEnvelope {
+  /** Whether this search reinforced the memories it returned; null when the server did not say. */
+  recallTracked: boolean | null;
+  /** The retrieval trace a `diagnostic: true` search returns, else null. */
+  diagnostic: Record<string, unknown> | null;
+  /** Coded caveats about the result set, such as a parameter the server ignored, else null. */
+  warnings: Array<Record<string, unknown>> | null;
+  /** The whole response body. */
+  raw: Record<string, unknown>;
+}
+
+/** The ranked memories, as an array, with the envelope on it. */
+export type SearchResult = Memory[] & SearchEnvelope;
+
 export interface RecallResult {
   summary: string | null;
   supportingMemories: Memory[];
@@ -87,6 +145,12 @@ export interface CauraOptions {
   timeoutMs?: number;
   /** Inject a custom fetch (e.g. for tests). Defaults to global fetch. */
   fetch?: typeof globalThis.fetch;
+  /**
+   * Send the API key over plain http to a non-loopback host. Off by default: the
+   * key would cross the network in cleartext. Unset defers to
+   * `CAURA_ALLOW_INSECURE_HTTP` (`true` or `1`); an explicit `false` beats it.
+   */
+  allowInsecureHttp?: boolean;
 }
 
 export interface WriteOptions {
@@ -101,17 +165,30 @@ export interface SearchOptions {
   topK?: number;
   fleetIds?: string[];
   filterAgentId?: string;
+  /**
+   * Read as this agent without filtering to its own memories, so a
+   * tenant-scoped key can read the agent's `scope_agent` memories. The server
+   * then registers the agent if new and holds the read to its fleet and trust
+   * level. Sent only when set; an agent-scoped key may only name its own agent.
+   */
+  callerAgentId?: string;
   [extra: string]: unknown;
 }
 
 export interface RecallOptions {
   topK?: number;
+  /** As for `search`. */
+  callerAgentId?: string;
   [extra: string]: unknown;
 }
 
 export interface GetDocumentOptions {
   collection: string;
   tenantId?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function toMemory(d: Record<string, any>): Memory {
@@ -143,6 +220,7 @@ export class Caura {
     this.tenantId = options.tenantId;
     this.agentId = options.agentId;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
+    assertKeyTransportAllowed(this.baseUrl, options.allowInsecureHttp);
     this.timeoutMs = options.timeoutMs ?? 30000;
     this.headers = {
       "X-API-Key": apiKey,
@@ -167,12 +245,18 @@ export class Caura {
     return toMemory(await this.request("POST", "/api/v1/memories", body));
   }
 
-  /** Hybrid vector + keyword search. POST /api/v1/search */
-  async search(query: string, options: SearchOptions = {}): Promise<Memory[]> {
-    const { topK = 5, fleetIds, filterAgentId, ...extra } = options;
+  /**
+   * Hybrid vector + keyword search. POST /api/v1/search
+   *
+   * Resolves to the ranked memories as an array that also carries the response
+   * envelope (`recallTracked`, `diagnostic`, `warnings`, `raw`).
+   */
+  async search(query: string, options: SearchOptions = {}): Promise<SearchResult> {
+    const { topK = 5, fleetIds, filterAgentId, callerAgentId, ...extra } = options;
     const body: Record<string, unknown> = { tenant_id: this.tenantId, query, top_k: topK };
     if (fleetIds) body.fleet_ids = fleetIds;
     if (filterAgentId) body.filter_agent_id = filterAgentId;
+    if (callerAgentId) body.caller_agent_id = callerAgentId;
     Object.assign(body, extra);
     const data = await this.request("POST", "/api/v1/search", body);
     if (!data || typeof data !== "object" || Array.isArray(data)) {
@@ -181,17 +265,38 @@ export class Caura {
     if (!("items" in data)) {
       throw new CauraApiError(200, 'search response missing "items" list');
     }
-    const items = (data as Record<string, unknown>).items;
+    const payload = data as Record<string, unknown>;
+    const items = payload.items;
     if (!Array.isArray(items)) {
       throw new CauraApiError(200, 'search response "items" must be a list');
     }
-    return items.map((m) => toMemory(m as Record<string, any>));
+    const { recall_tracked: recallTracked, diagnostic, warnings } = payload;
+    const envelope: SearchEnvelope = {
+      recallTracked: typeof recallTracked === "boolean" ? recallTracked : null,
+      diagnostic: isRecord(diagnostic) ? diagnostic : null,
+      warnings: Array.isArray(warnings) ? warnings : null,
+      raw: payload,
+    };
+    const memories = items.map((m) => toMemory(m as Record<string, any>));
+    return Object.assign(memories, envelope);
   }
 
-  /** Search + LLM-synthesized context brief. POST /api/v1/recall */
+  /**
+   * Search + LLM-synthesized context brief. POST /api/v1/recall
+   *
+   * Asks for the result list once (`items_alias: false`): the server would
+   * otherwise repeat it under `items`, about half the response, and this client
+   * reads `memories`. Pass `items_alias: true` to keep the copy in `raw`.
+   */
   async recall(query: string, options: RecallOptions = {}): Promise<RecallResult> {
-    const { topK = 5, ...extra } = options;
-    const body: Record<string, unknown> = { tenant_id: this.tenantId, query, top_k: topK };
+    const { topK = 5, callerAgentId, ...extra } = options;
+    const body: Record<string, unknown> = {
+      tenant_id: this.tenantId,
+      query,
+      top_k: topK,
+      items_alias: false,
+    };
+    if (callerAgentId) body.caller_agent_id = callerAgentId;
     Object.assign(body, extra);
     const data = await this.request("POST", "/api/v1/recall", body);
     if (!data || typeof data !== "object" || Array.isArray(data)) {
@@ -245,6 +350,9 @@ export class Caura {
           headers: this.headers,
           body: serializedBody,
           signal: controller.signal,
+          // fetch re-sends X-API-Key to a redirect target, even cross-origin
+          // or from https to http, so a redirect is an error (L-66).
+          redirect: "error",
         });
       } catch (cause) {
         throw new TransportError(cause);

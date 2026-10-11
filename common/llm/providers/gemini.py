@@ -16,7 +16,10 @@ import json
 import logging
 import time
 
-from common.llm.constants import LLM_JSON_MAX_OUTPUT_TOKENS
+from common.llm.constants import (
+    GOOGLE_GENAI_REQUEST_TIMEOUT_SECONDS,
+    LLM_JSON_MAX_OUTPUT_TOKENS,
+)
 from common.llm.providers._json_shape import unwrap_singleton_array
 from common.llm.providers._shape_error import ProviderResponseShapeError
 from common.llm.providers._truncation import raise_if_truncated
@@ -54,7 +57,15 @@ class GeminiLLMProvider:
         self._model = model
         # Build the SDK client once — reuse the underlying HTTP session
         # across calls instead of reconstructing it per request.
-        self._client = genai.Client(api_key=self._api_key)
+        from google.genai import types
+
+        # ``HttpOptions.timeout`` is in MILLISECONDS; the SDK default is none.
+        self._client = genai.Client(
+            api_key=self._api_key,
+            http_options=types.HttpOptions(
+                timeout=int(GOOGLE_GENAI_REQUEST_TIMEOUT_SECONDS * 1000)
+            ),
+        )
 
     @property
     def provider_name(self) -> str:
@@ -69,6 +80,7 @@ class GeminiLLMProvider:
         prompt: str,
         *,
         temperature: float = 0.0,
+        seed: int | None = None,
     ) -> dict:
         """Synchronous JSON completion via google-genai."""
         from google.genai import types
@@ -80,6 +92,10 @@ class GeminiLLMProvider:
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=temperature,
+                # The caller's seed (L-95): entity extraction pins one so a
+                # re-ask returns the same answer, and skips retrying a shape
+                # failure on that basis. Dropping it made that false here.
+                seed=seed,
                 # Runaway guard — same failure mode as the Vertex provider:
                 # an uncapped looping generation comes back as truncated JSON.
                 max_output_tokens=LLM_JSON_MAX_OUTPUT_TOKENS,
@@ -147,8 +163,8 @@ class GeminiLLMProvider:
     ) -> dict:
         """Async wrapper around the synchronous Gemini JSON completion.
 
-        ``seed`` / ``response_schema`` / ``reasoning_effort`` are
-        accepted-and-ignored (OpenAI
+        ``seed`` is sent with the request (L-95). ``response_schema`` /
+        ``reasoning_effort`` are accepted-and-ignored (OpenAI
         structured-output kwargs). Rejecting them made every
         ``complete_json(..., seed=..., response_schema=...)`` caller —
         notably entity extraction — raise ``TypeError``, exhaust its
@@ -156,7 +172,7 @@ class GeminiLLMProvider:
         Gemini-configured tenant (audit C1).
         """
         return await asyncio.to_thread(
-            self._complete_json_sync, prompt, temperature=temperature
+            self._complete_json_sync, prompt, temperature=temperature, seed=seed
         )
 
     async def complete_text(

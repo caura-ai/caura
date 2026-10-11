@@ -43,9 +43,14 @@ def upgrade() -> None:
     # ``ALTER TABLE ADD COLUMN`` with no DEFAULT is metadata-only on
     # PostgreSQL — no row rewrite, no full-table lock beyond the
     # AccessExclusive flash needed to update pg_class.
+    # ``if_not_exists``: entering the autocommit block below COMMITS this add
+    # before the CONCURRENTLY build, while alembic_version moves only once
+    # upgrade() returns. A build interrupted there leaves the column behind,
+    # and a plain ADD COLUMN would fail every retry with DuplicateColumn.
     op.add_column(
         "memories",
         sa.Column("client_request_id", sa.Text(), nullable=True),
+        if_not_exists=True,
     )
     # CREATE INDEX CONCURRENTLY cannot run inside a transaction.
     # Mirrors the pattern in 005 — clean up an interrupted prior build

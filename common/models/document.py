@@ -3,7 +3,7 @@ from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, Index, Text, UniqueConstraint, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.constants import VECTOR_DIM
@@ -38,8 +38,10 @@ class Document(Base):
     # write it. ``memories.agent_id`` is NOT NULL because a memory has never
     # been writable without one.
     agent_id: Mapped[str | None] = mapped_column(Text)
+    # ``json``, not JSONB: migration 001 creates it that way (CAURA-595), and
+    # ``test_models_match_the_migrated_schema`` holds the model to the schema.
     data: Mapped[dict] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+        JSON, nullable=False, server_default=text("'{}'::jsonb")
     )
     # Optional embedding populated when op=write resolves a string to embed
     # from data["summary"] (or data["description"] for the skills collection

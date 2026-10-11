@@ -121,13 +121,38 @@ def test_eviction_is_lru_not_fifo(monkeypatch):
     assert _openai(monkeypatch, model="model-hot") is first
 
 
-def test_only_the_pool_owning_provider_is_cached():
-    """Gemini and Fake hold no client, so caching them would buy nothing and
-    add a lifetime to reason about."""
-    src = inspect.getsource(registry.get_llm_provider)
-    assert "_PROVIDER_CACHE" in src
-    gemini_branch = src[src.index("ProviderName.GEMINI") :]
-    assert "_PROVIDER_CACHE" not in gemini_branch
+_GEMINI_KEY = "gm-test-m110-aaaaaaaaaaaaaaaaaaaaaaaa"
+
+
+def _gemini(*, key=_GEMINI_KEY, model="gemini-2.5-flash"):
+    from types import SimpleNamespace
+
+    return get_llm_provider(
+        "gemini",
+        SimpleNamespace(gemini_api_key=key, enrichment_model=model),
+        model_override=model,
+    )
+
+
+def test_gemini_reuses_one_provider_per_configuration():
+    """M-110: Gemini holds a client too. ``GeminiLLMProvider.__init__`` builds a
+    ``genai.Client``, which builds a sync and an async httpx client, so one
+    provider per call was a client per call: built on the event loop, a fresh
+    TLS connection each time, and never closed."""
+    assert _gemini() is _gemini()
+
+
+def test_a_different_gemini_key_or_model_gets_its_own_provider():
+    """Same rule as the OpenAI-compatible branch: the key is the configuration."""
+    a = _gemini()
+    assert _gemini(model="gemini-2.5-pro") is not a
+    assert _gemini(key="gm-test-m110-bbbbbbbbbbbbbbbbbbbbbbbb") is not a
+
+
+def test_fake_is_not_cached():
+    """Fake holds no client, so caching it would buy nothing."""
+    assert get_llm_provider("fake") is not get_llm_provider("fake")
+    assert not registry._PROVIDER_CACHE
 
 
 async def test_an_evicted_provider_gets_closed():

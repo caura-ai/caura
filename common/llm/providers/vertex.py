@@ -32,7 +32,10 @@ import threading
 import time
 from typing import Any
 
-from common.llm.constants import LLM_JSON_MAX_OUTPUT_TOKENS
+from common.llm.constants import (
+    GOOGLE_GENAI_REQUEST_TIMEOUT_SECONDS,
+    LLM_JSON_MAX_OUTPUT_TOKENS,
+)
 from common.llm.providers._json_shape import unwrap_singleton_array
 from common.llm.providers._shape_error import ProviderResponseShapeError
 from common.llm.providers._truncation import raise_if_truncated
@@ -133,10 +136,13 @@ class VertexLLMProvider:
                         "project": self._project_id,
                         "location": self._location,
                     }
+                    # ``HttpOptions.timeout`` is in MILLISECONDS.
+                    http_options: dict = {
+                        "timeout": int(GOOGLE_GENAI_REQUEST_TIMEOUT_SECONDS * 1000)
+                    }
                     if self._location in _MULTI_REGION_LOCATIONS:
-                        client_kwargs["http_options"] = types.HttpOptions(
-                            base_url=_BARE_VERTEX_BASE_URL
-                        )
+                        http_options["base_url"] = _BARE_VERTEX_BASE_URL
+                    client_kwargs["http_options"] = types.HttpOptions(**http_options)
                     self._client = genai.Client(**client_kwargs)
         return self._client
 
@@ -145,6 +151,7 @@ class VertexLLMProvider:
         prompt: str,
         *,
         temperature: float = 0.0,
+        seed: int | None = None,
     ) -> dict:
         """Synchronous JSON completion via google-genai (Vertex mode)."""
         from google.genai import types
@@ -156,6 +163,10 @@ class VertexLLMProvider:
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=temperature,
+                # The caller's seed (L-95): entity extraction pins one so a
+                # re-ask returns the same answer, and skips retrying a shape
+                # failure on that basis. Dropping it made that false here.
+                seed=seed,
                 # Runaway guard: without a ceiling, a looping generation
                 # runs to the model's own output limit and comes back as
                 # truncated JSON (~200KB partials seen on prod 2026-08-26).
@@ -230,13 +241,13 @@ class VertexLLMProvider:
     ) -> dict:
         """Async wrapper around synchronous Vertex AI JSON completion.
 
-        ``seed`` / ``response_schema`` / ``reasoning_effort`` are
-        accepted-and-ignored (OpenAI structured-output / reasoning
-        kwargs) — see ``GeminiProvider.complete_json`` for why rejecting
-        them silently broke entity extraction (C1).
+        ``seed`` is sent with the request (L-95). ``response_schema`` /
+        ``reasoning_effort`` are accepted-and-ignored (OpenAI structured-output
+        / reasoning kwargs) — see ``GeminiProvider.complete_json`` for why
+        rejecting them silently broke entity extraction (C1).
         """
         return await asyncio.to_thread(
-            self._complete_json_sync, prompt, temperature=temperature
+            self._complete_json_sync, prompt, temperature=temperature, seed=seed
         )
 
     async def complete_text(

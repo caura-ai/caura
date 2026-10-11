@@ -80,7 +80,7 @@ Add this to your MCP client configuration:
 | Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Claude Desktop (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
 | Claude Code | `~/.claude.json` (user scope) — preferred; register via `claude mcp add --scope user --transport http caura https://your-caura-instance.example.com/mcp --header "X-API-Key: mc_your_key"` |
-| Cursor | Settings -> MCP Servers -> Add Server (type: `sse`, URL: `https://your-caura-instance.example.com/mcp`) |
+| Cursor | Settings -> MCP Servers -> Add Server by URL (`https://your-caura-instance.example.com/mcp`); `/mcp` serves the Streamable HTTP transport, not SSE |
 
 > The Claude Code MCP-server registry lives in `~/.claude.json` — NOT `~/.claude/settings.json`. The latter's schema rejects an `mcpServers` block. Prefer the `claude mcp add` CLI over hand-editing so the correct file is written.
 
@@ -126,7 +126,7 @@ The MCP server exposes 12 tools that clients discover automatically. Description
 
 | Tool | Purpose |
 |---|---|
-| `caura_write` | Store a memory. Single write (`content`) or batch (`items` ≤100). LLM auto-infers type, title, summary, embedding. Long content auto-chunked |
+| `caura_write` | Store a memory. Single write (`content`) or batch (`items` ≤100). LLM auto-infers type, title, summary, embedding. Long content is auto-chunked where the tenant turned it on |
 | `caura_recall` | Hybrid semantic + keyword search with graph-enhanced retrieval. `include_brief=true` returns an LLM-summarized context paragraph. Supports `fleet_ids` |
 | `caura_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete`, `bulk_delete`, `lineage`. Re-embeds on content updates |
 | `caura_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) and own-fleet `scope=fleet` need trust ≥ 1; another fleet or `scope=all` needs trust ≥ 2 |
@@ -223,11 +223,21 @@ CAURA_API_KEY=mc_your_key_here                          # tenant-scoped API key
 CAURA_FLEET_ID=fleet-001                                # identifies this fleet
 CAURA_NODE_NAME=my-gateway                              # friendly name shown in Fleet page
 # CAURA_TENANT_ID=                                      # auto-resolved from API key
-# CAURA_AUTO_WRITE_TURNS=true                           # default; set false to disable auto-write
+# CAURA_AUTO_WRITE_TURNS=true                           # false disables automatic conversation writes
 # CAURA_AUTO_FIX_CONFIG=false                           # set true to auto-fix openclaw.json on startup
 ```
 
 The plugin loads this `.env` file automatically. Both `CAURA_*` and `MEMCLAW_*` keys are read — and only those, so a `.env` cannot set `PATH` or `NODE_OPTIONS`. The pre-rename `MEMCLAW_*` spelling of every name above keeps working; where both are set the first **non-empty** one wins, so a half-filled template cannot blank out a working value. If you use systemd, also add the vars to a drop-in file (`.env` values don't override existing process env). <!-- legacy-name-floor: rule 3 dual-read alias -->
+
+Automatic conversation writes include user messages from `ingest`, assistant
+turn summaries, compaction summaries, and the session summary that OpenClaw's
+pre-compaction memory-flush turn asks the agent to write, all stored as episode
+memories with the server's default `scope_team` visibility. Set
+`CAURA_AUTO_WRITE_TURNS=false` and restart the plugin to disable all four;
+OpenClaw then runs no memory-flush turn. Local message buffering, recall,
+explicit memory tools and runtime compaction continue to work. This does not
+delete existing memories or disable the separately enabled Interviewer
+(`CAURA_INTERVIEWER`).
 
 **Configure OpenClaw** — edit `~/.openclaw/openclaw.json`:
 
@@ -337,7 +347,11 @@ Caura enforces a 4-tier trust system for agents. Agents are auto-registered on t
 ### How it works
 
 - On first write, the agent is auto-registered with trust level 1 and the `fleet_id` from that write becomes its "home fleet"
+- When the tenant setting `agents.require_agent_approval` is on, a new agent is registered at trust level 0 instead — on whichever call first names it (a write, a search or recall, a fleet heartbeat, `caura_tune`, a document write) — and stays there until an admin raises it
 - Trust level is enforced on every API call — an agent at level 1 attempting a cross-fleet search gets a 403
+- Documents follow the delete bar: an agent below level 3 may create documents and update the ones it wrote or that another agent of its own fleet wrote, but replacing a document an agent of another fleet authored (or `force=true` on `POST /documents`) needs level 3. Documents with no recorded author stay writable. Graph writes (`POST /entities/upsert`, `POST /relations/upsert`) and document writes into a fleet other than the agent's own need level 3, as memory writes do
+- Soft-deleted rows (`include_deleted=true` on `GET /memories`, `GET /memories/stats`, `caura_list`, `caura_stats`) and `POST /ingest/undo/{run_id}` need level 3 for an agent credential
+- Trust and home-fleet changes (`PATCH /agents/{id}/trust`, `PATCH /agents/{id}/fleet`) are recorded in the tenant audit log as `agent_trust_update` / `agent_fleet_update`
 - The admin API key bypasses all trust enforcement
 
 ### Managing trust levels
@@ -381,7 +395,7 @@ AFTER completing work:
   `active`; tags are caller-supplied)
 - Dates auto-extracted: "deadline March 30" → ts_valid_end
 - Contradictions auto-detected: conflicting older memories marked outdated
-- Long content (>2000 chars) is auto-chunked into atomic facts
+- Long content (>2000 chars) is auto-chunked into atomic facts when the tenant turns auto-chunking on (off by default)
 - Set visibility: "scope_agent" (you only), "scope_team" (default), "scope_org" (all fleets)
 - Optionally override `memory_type` with a caller-writeable type (`fact`,
   `episode`, `decision`, `preference`, `task`, `plan`, or `action`), plus
@@ -643,25 +657,24 @@ Search respects visibility automatically. Agents see: all `scope_org` memories +
 
 ### Auto-chunking
 
-Content exceeding 2,000 characters is automatically split into atomic facts via LLM:
+Auto-chunking is opt-in, off by default: set the tenant setting `chunking.auto_chunk_enabled` to `true` to turn it on. Then content exceeding 2,000 characters is split into atomic facts via LLM:
 
 - Creates a **parent memory** with the full content (tagged `auto_chunked: true`)
 - Creates **child memories** for each extracted fact (tagged `source: "auto_chunk"`, linked to parent)
 - Both parent and children inherit type, weight, status, visibility
-- Togglable per tenant via `auto_chunk_enabled` setting
 - Falls back to single-memory write if chunking fails
-
-> **Note:** This is a behavior change — integrations sending long content will now get multiple memories instead of one. Disable per tenant if needed.
 
 ### Lifecycle automation
 
-Background scheduler runs every 24 hours and automatically:
+The `core-operations` scheduler, which the stock `docker compose` stack runs, fires these ticks nightly (02:00 UTC by default, each movable in its settings):
 
-1. **Expires** — active memories past `ts_valid_end` → status `outdated`
-2. **Archives** — memories older than 180 days with weight ≤ 0.3 and zero recalls → status `archived`
-3. **Crystallizes** — triggers crystallization when active memory count exceeds 1,000
+1. **Expires** — active memories past `ts_valid_end` or `expires_at` → status `outdated`, which default search excludes
+2. **Archives** — active memories older than 90 days with weight below 0.3 and no recalls → status `archived`
+3. **Purges** — soft-deleted memories past the tenant's retention window are removed
+4. **Crystallizes** — merges near-duplicate clusters for tenants with `crystallizer.auto_crystallize` on and more than 1,000 active memories, when something was written since the last run
+5. **Links entities** and **discovers insights** — for tenants that enable `entity_linking.auto_entity_linking_enabled` and `insights.auto_insights_enabled`
 
-Togglable per tenant via `lifecycle_automation_enabled` setting.
+Expiry and archival are togglable per tenant via the `lifecycle.lifecycle_automation_enabled` setting. A deployment that does not run `core-operations` runs none of these.
 
 ### Temporal validity
 
@@ -729,7 +742,7 @@ detection run the same as single writes.
 
 ### Deduplication
 
-Content-hash rejects exact duplicates within a tenant+fleet scope (HTTP 409). Same content can exist in different fleets.
+Content-hash rejects exact duplicates within a tenant + fleet + agent scope (HTTP 409). The same content can exist in different fleets, and two agents in one fleet can each write it.
 
 ### Troubleshooting
 
@@ -740,6 +753,8 @@ Content-hash rejects exact duplicates within a tenant+fleet scope (HTTP 409). Sa
 | Plugin allowed but not loading | Missing `plugins.entries.memclaw.enabled: true` or `plugins.load.paths` entry — the installer and Fix Configuration set both | <!-- legacy-name-floor: troubleshooting names the frozen live config key -->
 | All config issues | Use the "Fix Configuration" button in Fleet Browser Plugin Manager to auto-fix all settings |
 | `ECONNREFUSED` | Check `CAURA_API_URL`, ensure API is running |
+| API URL redirects | Set `CAURA_API_URL` to the final server URL. Credential-bearing plugin requests reject redirects so an API key cannot be forwarded to another host. |
+| Agent-key provisioning unavailable | Concurrent calls for one agent share one provisioning attempt. Failed attempts wait 60 seconds before retrying; a 404 disables provisioning until plugin restart. The existing tenant-key fallback remains, so this is not an agent-revocation control. |
 | 401 Unauthorized | Check `CAURA_API_KEY` env var on gateway |
 | 403 Forbidden | Key used for wrong tenant, or agent trust level too low |
 | 409 Conflict | Duplicate content — safe to ignore |

@@ -5,7 +5,9 @@ restore of an organization. Carries the list of tenant_ids the action
 applies to plus an ``action`` discriminator so a single topic covers
 both directions of the lifecycle. The OSS subscriber upserts a row in
 ``public.tenant_suppression`` per tenant_id: ``suppress`` sets
-``suppressed_at = now()``; ``restore`` clears it.
+``suppressed_at = now()``; ``restore`` clears it. The envelope's
+``occurred_at`` orders them: storage ignores an upsert older than the one it
+holds, so redelivery order cannot undo a newer decision.
 
 Out of band: the **synchronous** check happens at the auth-api layer
 (CAURA-690) so an unexpired JWT cannot reach a soft-deleted org's data

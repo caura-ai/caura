@@ -120,6 +120,10 @@ async def resolve_doc_memory_agent(
         agent_id,
         fleet_id,
         display_name=None if caller_agent_id else "Caura Doc Indexer",
+        # A real caller registers the way the tenant's approval setting says
+        # (``None`` reads it). The indexer is the server's own identity, not an
+        # agent anyone could approve, so it is never parked at trust 0.
+        require_approval=None if caller_agent_id else False,
     )
     return agent_id
 

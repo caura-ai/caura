@@ -23,6 +23,8 @@ class ResolveSearchProfile:
             query=ctx.data["query"],
             top_k=ctx.data["top_k"],
             tenant_config=ctx.tenant_config,
+            # SIDE-60 — a caller-named ``top_k`` beats profile / tenant default.
+            top_k_explicit=bool(ctx.data.get("top_k_explicit")),
         )
         # D12 — a per-request ``min_similarity`` (SearchRequest field) outranks
         # the whole resolution ladder for this one call: request → agent
@@ -35,9 +37,13 @@ class ResolveSearchProfile:
         # An actual lexical hit may relax only the untuned global fallback.
         # Keep this provenance outside search_params: it is core filtering state,
         # not a storage scoring knob.
-        ctx.data["allow_fts_global_floor_bypass"] = _uses_global_min_similarity(
+        untuned = _uses_global_min_similarity(
             ctx.data.get("search_profile"),
             ctx.tenant_config,
             override,
         )
+        ctx.data["allow_fts_global_floor_bypass"] = untuned
+        # L-112 — the same provenance, read by ClassifyQuery: a floor someone
+        # named declines the entity-lookup route, which cannot apply one.
+        ctx.data["min_similarity_tuned"] = not untuned
         return None

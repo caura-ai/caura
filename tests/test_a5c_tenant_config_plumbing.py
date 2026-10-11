@@ -44,7 +44,7 @@ async def test_worker_forwards_resolved_tenant_config_to_extractor() -> None:
 
     captured: dict = {}
 
-    async def fake_extract(content, memory_type, tenant_config=None):
+    async def fake_extract(content, memory_type, tenant_config=None, **_kw):
         captured["tenant_config"] = tenant_config
         # Return empty so the worker short-circuits before hitting storage
         # — we only need to observe what was passed IN.
@@ -108,7 +108,7 @@ async def test_worker_still_works_when_resolve_config_returns_default() -> None:
 
     captured: dict = {}
 
-    async def fake_extract(content, memory_type, tenant_config=None):
+    async def fake_extract(content, memory_type, tenant_config=None, **_kw):
         captured["tenant_config"] = tenant_config
         return ExtractedGraph(entities=[], relations=[], mentions=[])
 

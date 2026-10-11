@@ -38,6 +38,7 @@ os.environ.setdefault("CORE_STORAGE_SHARED_SECRET", "test-storage-secret")
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from core_storage_api.config import settings
@@ -108,6 +109,57 @@ async def client(_ensure_schema) -> AsyncClient:
 
 
 # ---------------------------------------------------------------------------
+# Index plans — whether one index can serve a statement
+# ---------------------------------------------------------------------------
+
+
+async def plan_with_only_index(stmt, *indexes: str) -> str:
+    """``EXPLAIN`` of ``stmt`` on an empty copy of ``memories`` with ``indexes`` as its only indexes.
+
+    A plan test asks whether a migration's index CAN serve a statement. On the
+    real table most predicates have several indexes that could serve them, and
+    the planner picks one by cost, which follows the table's statistics: the
+    rows earlier tests left and whether autovacuum has analyzed them yet. So the
+    same plan check passed on one run and failed on the next:
+    ``ix_memories_held`` lost to ``ix_memories_status``, and
+    ``ix_memories_ingest_doc_hash`` to ``ix_memories_tenant_agent``.
+
+    The copy gets each index's definition from the migrated schema, so a missing
+    index still fails here. ``pg_temp`` comes first on the search path, so the
+    statement's ``memories`` is the copy. With no other index and sequential
+    scans off, the plan names an index exactly when it can serve the statement.
+    More than one index is for a statement only a combination can serve, such as
+    an OR with one index per arm. The copy goes with the transaction.
+    """
+    from core_storage_api.database.init import get_engine
+
+    sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+    async with get_engine().connect() as conn:
+        definitions = []
+        for index in indexes:
+            found = await conn.execute(
+                text(
+                    "SELECT indexdef FROM pg_indexes "
+                    "WHERE schemaname = 'public' AND tablename = 'memories' AND indexname = :name"
+                ),
+                {"name": index},
+            )
+            definition = found.scalar_one_or_none()
+            assert definition is not None, f"{index} is not on the migrated memories table"
+            assert " ON public.memories " in definition, definition
+            definitions.append(definition)
+        await conn.execute(text("CREATE TEMP TABLE memories (LIKE public.memories) ON COMMIT DROP"))
+        for definition in definitions:
+            await conn.execute(text(definition.replace(" ON public.memories ", " ON pg_temp.memories ", 1)))
+        shadowed = await conn.execute(
+            text("SELECT 'memories'::regclass::oid = 'pg_temp.memories'::regclass::oid")
+        )
+        assert shadowed.scalar_one(), "memories does not resolve to the copy"
+        await conn.execute(text("SET LOCAL enable_seqscan = off"))
+        return "\n".join(row[0] for row in (await conn.execute(text(f"EXPLAIN {sql}"))).all())
+
+
+# ---------------------------------------------------------------------------
 # Tenant / fleet identifiers (unique per session to avoid collisions)
 # ---------------------------------------------------------------------------
 
@@ -139,26 +191,28 @@ UQ_LIVE_CONTENT_HASH_SQL = (
 )
 
 
-def load_migration_040():
-    """Load migration 040 as a module.
+def load_migration(filename: str):
+    """Load a migration as a module.
 
     By path because the versions directory is not an importable package and the
-    filename starts with a digit. Shared so the fixture below and the migration's
-    own tests both execute the REAL ``CLEANUP_SQL`` — a re-typed copy in either
-    place could drift from the migration and still pass.
+    filename starts with a digit. Tests execute a migration's REAL SQL this way
+    — a re-typed copy could drift from the migration and still pass.
     """
     import importlib.util
     import pathlib
 
-    path = (
-        pathlib.Path("core-storage-api/src/core_storage_api/database/migrations/versions")
-        / "040_memories_content_hash_unique.py"
-    )
-    spec = importlib.util.spec_from_file_location("migration_040", path)
+    path = pathlib.Path("core-storage-api/src/core_storage_api/database/migrations/versions") / filename
+    spec = importlib.util.spec_from_file_location(f"migration_{filename[:3]}", path)
     assert spec is not None and spec.loader is not None, f"cannot load {path}"
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_migration_040():
+    """Migration 040, shared so the fixture below and the migration's own tests
+    both execute the REAL ``CLEANUP_SQL``."""
+    return load_migration("040_memories_content_hash_unique.py")
 
 
 @pytest.fixture

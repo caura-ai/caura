@@ -1,6 +1,7 @@
 """Test-only time-warp endpoint for E2E temporal manipulation.
 
-Gated behind TESTING=1 — route is not registered at all in production.
+Gated behind TESTING=1, which also registers the route. Production refuses to
+boot with TESTING=1, and the guard below refuses production on its own (L-68).
 """
 
 import logging
@@ -12,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from core_api.auth import AuthContext, get_auth_context
+from core_api.config import settings
 from core_api.errors import (
     AUTH_FEATURE_DISABLED,
     AUTH_TENANT_MISMATCH,
@@ -57,10 +59,19 @@ class TimeWarpResponse(BaseModel):
 
 
 def _require_testing_mode() -> None:
-    """Fail fast if TESTING env var is not set."""
+    """Fail fast unless TESTING=1, and always in production.
+
+    The environment check does not rely on the variable that registered the
+    route, so one inherited from a CI image still leaves production closed.
+    """
     if os.getenv("TESTING") != "1":
         raise HTTPException(
             status_code=403, detail=coded_detail(AUTH_FEATURE_DISABLED, "Testing endpoints require TESTING=1")
+        )
+    if settings.environment == "production":
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(AUTH_FEATURE_DISABLED, "Testing endpoints are disabled in production"),
         )
 
 

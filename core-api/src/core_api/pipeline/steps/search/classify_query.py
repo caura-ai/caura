@@ -39,9 +39,14 @@ from core_api.pipeline.steps.search.retrieval_types import (
     RetrievalStrategy,
 )
 from core_api.schemas import EntityLinkOut
+from core_api.search_trim import is_derived_fanout_row
 from core_api.services.entity_tokens import extract_entity_tokens
 
 _GRAPH_HOP_BOOST_FALLBACK = GRAPH_HOP_BOOST[max(GRAPH_HOP_BOOST)]
+
+# RECENT_CONTEXT's default row budget. Applies only when the caller did not
+# name ``top_k`` on the request (see the RECENT_CONTEXT branch below).
+_RECENT_CONTEXT_TOP_K_CAP = 5
 
 _RECENT_CONTEXT_RE = re.compile(
     r"\b(what was i|what did i|my recent|my latest"
@@ -71,6 +76,7 @@ class ClassifyQuery:
         fleet_ids: list[str] | None = ctx.data.get("fleet_ids")
         fleet_ids = fleet_ids or None  # normalise [] → None for consistent fleet filtering
         caller_agent_id: str | None = ctx.data.get("caller_agent_id")
+        caller_tenant_id: str | None = ctx.data.get("caller_tenant_id")
         filter_agent_id: str | None = ctx.data.get("filter_agent_id")
         memory_type_filter: str | None = ctx.data.get("memory_type_filter")
         status_filter: str | None = ctx.data.get("status_filter")
@@ -102,15 +108,33 @@ class ClassifyQuery:
         # smuggle expanded hops past its own ``graph_expand`` gate.
         graph_expand: bool = ctx.data.get("graph_expand", True)
 
+        # C27 — resolved once here and handed to BOTH entity-FTS and the memory
+        # load below. It used to be read inline at the ``_collect_memories``
+        # call only, which is how ``_entity_fts`` came to be the one entity-FTS
+        # caller in the tree that never sent it (oss-0922-m-02): the sibling in
+        # ``parallel_embed_entity_boost`` forwards it, the storage route
+        # defaults it False when absent, so strict tenants silently got
+        # permissive entity matching HERE and strict matching everywhere else.
+        strict_fleet_scoping: bool = bool(ctx.data.get("strict_fleet_scoping"))
+
         tokens = extract_entity_tokens(query) if entity_retrieval else []
 
         if not entity_retrieval:
-            logger.info("classify_query: entity retrieval disabled by org setting (tenant=%s)", tenant_id)
+            logger.info(
+                "classify_query: entity retrieval disabled by org setting or request entity_boost=false (tenant=%s)",
+                tenant_id,
+            )
 
         if tokens:
             try:
                 sc = get_storage_client()
-                matched_ids = await self._entity_fts(sc, tokens, tenant_id, fleet_ids)
+                matched_ids = await self._entity_fts(
+                    sc,
+                    tokens,
+                    tenant_id,
+                    fleet_ids,
+                    strict_fleet_scoping=strict_fleet_scoping,
+                )
 
                 # CAURA-722 — record the count HERE, before the over-broad
                 # branch below empties ``matched_ids``. Reading it later would
@@ -124,6 +148,14 @@ class ClassifyQuery:
                 # diagnostic-only branch in a hot path for no measurable gain.
                 # Exposure stays gated at the route.
                 ctx.data["entity_matches"] = len(matched_ids)
+
+                # L-175 — a match of nothing is an answer too. Stashed as an
+                # empty hop set, which ParallelEmbedAndEntityBoost takes as
+                # authoritative, so it does not send the same tokens to the same
+                # index again. Only here: an over-broad match (below) empties
+                # ``matched_ids`` but says so with ``entity_match_declined``.
+                if not matched_ids:
+                    ctx.data["_classified_entity_hops"] = {}
 
                 # CAURA-698: over-broad match → not a "name a specific entity"
                 # query. The precision argument for entity_lookup breaks down
@@ -188,6 +220,29 @@ class ClassifyQuery:
                     )
                     matched_ids = []
 
+                # L-112 — a floor someone named (the request, the agent profile
+                # or the tenant default) declines the same way. The route builds
+                # its rows with no cosine and skips PostFilterResults, so it
+                # cannot apply ``min_similarity``, and the field promises the
+                # caller it is applied. Only the untuned global floor keeps the
+                # route, as only it may be relaxed for a lexical hit.
+                if matched_ids and ctx.data.get("min_similarity_tuned"):
+                    entity_hops = await self._hops_for_seeds(
+                        sc,
+                        matched_ids,
+                        tenant_id,
+                        fleet_ids,
+                        graph_max_hops,
+                        graph_expand=graph_expand,
+                    )
+                    ctx.data["_classified_entity_hops"] = entity_hops
+                    logger.info(
+                        "classify_query: entity_lookup declined — min_similarity %s is tuned, "
+                        "falling through with hop boost",
+                        search_params.get("min_similarity"),
+                    )
+                    matched_ids = []
+
                 if matched_ids:
                     entity_hops = await self._hops_for_seeds(
                         sc,
@@ -206,12 +261,14 @@ class ClassifyQuery:
                         query=query,
                         fleet_ids=fleet_ids,
                         caller_agent_id=caller_agent_id,
+                        caller_tenant_id=caller_tenant_id,
                         filter_agent_id=filter_agent_id,
                         memory_type_filter=memory_type_filter,
                         status_filter=status_filter,
                         valid_at=valid_at,
                         readable_tenant_ids=readable_tenant_ids,
-                        strict_fleet_scoping=bool(ctx.data.get("strict_fleet_scoping")),
+                        strict_fleet_scoping=strict_fleet_scoping,
+                        include_derived=ctx.data.get("include_derived", True),
                         pool_report=ctx.data,
                     )
 
@@ -243,7 +300,8 @@ class ClassifyQuery:
                         # min_similarity is not applied to entity_lookup results:
                         # these rows are retrieved by graph traversal (hop boost)
                         # rather than vector similarity, so vec_sim is None and the
-                        # cosine threshold is not meaningful here.
+                        # cosine threshold is not meaningful here. Only the untuned
+                        # global floor gets this far; a tuned one declined above.
                         # PostFilterResults will SKIP via its guard.
                         ctx.data["filtered_rows"] = filtered_rows
                         ctx.data["retrieval_plan"] = plan
@@ -324,11 +382,27 @@ class ClassifyQuery:
 
         # RECENT_CONTEXT: recency-intent keywords.
         if _RECENT_CONTEXT_RE.search(query):
-            overrides = {
+            overrides: dict = {
                 "freshness_decay_days": 7,
                 "freshness_floor": 0.2,
-                "top_k": min(search_params["top_k"], 5),
             }
+            # SIDE-57 — the 5-row cap is a default for "what did I just do"
+            # queries, not a ceiling on the caller. A request that named
+            # ``top_k`` explicitly (``top_k_explicit``, set by the route from
+            # the body's ``model_fields_set``) gets what it asked for: before
+            # this, ``top_k=150`` silently came back as 5 rows whenever the
+            # query happened to contain "most recent" / "what did i". The cap
+            # still applies when the budget came from a default (request
+            # default, agent profile, tenant default), which is the case it
+            # was written for.
+            resolved_top_k = search_params["top_k"]
+            if not ctx.data.get("top_k_explicit"):
+                overrides["top_k"] = min(resolved_top_k, _RECENT_CONTEXT_TOP_K_CAP)
+                if overrides["top_k"] < resolved_top_k:
+                    # SIDE-59 — recorded only when the cap actually cut the
+                    # budget; the /search route surfaces it as a response
+                    # header so it is no longer invisible outside diagnostic.
+                    ctx.data["strategy_top_k_cap"] = overrides["top_k"]
             plan = RetrievalPlan(
                 strategy=RetrievalStrategy.RECENT_CONTEXT,
                 search_param_overrides=overrides,
@@ -470,14 +544,26 @@ class ClassifyQuery:
         tokens: list[str],
         tenant_id: str,
         fleet_ids: list[str] | None,
+        *,
+        strict_fleet_scoping: bool = False,
     ) -> list[UUID]:
-        """Full-text search against the entity index via storage client."""
+        """Full-text search against the entity index via storage client.
+
+        ``strict_fleet_scoping`` rides with ``fleet_ids`` and only inside that
+        branch, because it narrows the fleet predicate rather than adding one:
+        ``entity_fts_search`` applies ``_fleet_scope_clause`` only when fleets
+        were named, so sending the flag without them would be inert on the
+        wire and misleading in a request log. Same shape as the sibling caller
+        in ``parallel_embed_entity_boost``.
+        """
         data = {
             "tokens": tokens,
             "tenant_id": tenant_id,
         }
         if fleet_ids:
             data["fleet_ids"] = fleet_ids
+            if strict_fleet_scoping:
+                data["strict_fleet_scoping"] = True
         result = await sc.fts_search_entities(data)
         return [UUID(eid) for eid in result]
 
@@ -491,6 +577,7 @@ class ClassifyQuery:
         query: str = "",
         fleet_ids: list[str] | None = None,
         caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
         filter_agent_id: str | None = None,
         memory_type_filter: str | None = None,
         status_filter: str | None = None,
@@ -498,6 +585,7 @@ class ClassifyQuery:
         readable_tenant_ids: list[str] | None = None,
         pool_report: dict | None = None,
         strict_fleet_scoping: bool = False,
+        include_derived: bool = True,
     ) -> list[types.SimpleNamespace]:
         """Load memories linked to graph-expanded entities, scored by hop distance."""
         all_entity_ids = list(entity_hops.keys())
@@ -515,6 +603,12 @@ class ClassifyQuery:
             [str(eid) for eid in all_entity_ids],
             tenant_id,
         )
+        # L-175 — the boost step needs these same links when the search falls
+        # through: same hops, same cap, same order. It reads them only beside
+        # the hops the caller stashes on a decline, so links from a load that
+        # raised afterwards are never taken for a set the boost re-derived.
+        if pool_report is not None:
+            pool_report["_classified_entity_links"] = raw_links
 
         # Sort by hop distance so closest entities are processed first.
         all_links = sorted(
@@ -567,11 +661,10 @@ class ClassifyQuery:
         # the exclusive route when it can, and the row build below can never
         # produce more rows than ``memory_boost`` has entries — so an under-sized
         # pool cannot pass that gate whatever the load returns. Loading anyway
-        # spent a per-tenant storage permit and pulled full rows (embedding and
-        # tsvector included) for a result the caller discards. Reporting the
-        # pool size lets the caller say why it declined, since ``[]`` alone
-        # cannot distinguish "under-filled" from "no linked memories at all"
-        # (the ``not memory_boost`` return above).
+        # spent a per-tenant storage permit and a storage read for a result the
+        # caller discards. Reporting the pool size lets the caller say why it
+        # declined, since ``[]`` alone cannot distinguish "under-filled" from
+        # "no linked memories at all" (the ``not memory_boost`` return above).
         #
         # One-directional on purpose. The converse is NOT decidable here: the
         # load applies visibility filters (caller_agent_id / status / valid_at)
@@ -602,6 +695,7 @@ class ClassifyQuery:
             "memory_ids": list(memory_boost.keys()),
             "fleet_ids": fleet_ids,
             "caller_agent_id": caller_agent_id,
+            "caller_tenant_id": caller_tenant_id,
             "filter_agent_id": filter_agent_id,
             "memory_type_filter": memory_type_filter,
             "status_filter": status_filter,
@@ -655,6 +749,12 @@ class ClassifyQuery:
             for mid, boost in memory_boost.items()
             if mid in memories_by_id
         ]
+        # L-16 — ``include_derived=false`` holds on this route too. Only
+        # PostFilterResults applied it, and this route skips that step. Dropped
+        # before the top_k trim, so a pool the children leave short falls
+        # through on the caller's re-check rather than answering short.
+        if not include_derived:
+            rows = [row for row in rows if not is_derived_fanout_row(getattr(row.Memory, "metadata_", None))]
         # Re-rank the candidate pool by lexical overlap with the query before
         # trimming to top_k. entity_lookup matches greedily and hop-boost is
         # near-uniform, so the exact-entity memory can be diluted below

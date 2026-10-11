@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, Index, SmallInteger, String, Text, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.models.base import Base
@@ -37,7 +37,9 @@ class Agent(Base):
     # admin-grouping suffix. No index: read per-agent, never a query predicate.
     owner_install_uuid: Mapped[str | None] = mapped_column(String(36))
     trust_level: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("1"))
-    search_profile: Mapped[dict | None] = mapped_column(JSONB)
+    # ``json``, not JSONB: migration 001 creates it that way (CAURA-595), and
+    # ``test_models_match_the_migrated_schema`` holds the model to the schema.
+    search_profile: Mapped[dict | None] = mapped_column(JSON)
     # ``belonging_type`` / ``owner_ref``: the typed agent→owner relationship the
     # report API (GET /api/v1/reports) uses to resolve where an agent's report
     # goes. Two kinds:

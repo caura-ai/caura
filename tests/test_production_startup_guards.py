@@ -8,6 +8,17 @@ headers from anyone who could reach core-api directly.
 The whole block was previously untested, because it lived inline in ``lifespan``
 where a test could not reach it without driving the entire startup sequence. It
 is now a function, so every guard here is covered — not just the new one.
+
+M-78 and L-68 of the 2026-10-01 OSS audit: staging and every sandbox run as
+``ENVIRONMENT=sandbox``, which skipped every guard, perimeter included. A sandbox
+now keeps the perimeter and standalone guards; the production-only secrets stay
+production-only by decision. Production also refuses ``TESTING=1``, which mounts
+the test-only routes.
+
+M-15 of the same audit: ``DEPLOYMENT_MODE=deferred`` on the default in-process
+event bus published every write's embed and enrich requests to no subscriber, so
+every memory stayed unembedded and unenriched with no error or log. Every
+environment now refuses that boot.
 """
 
 from __future__ import annotations
@@ -17,6 +28,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import SecretStr
 
+from common.events.inprocess import InProcessEventBus
 from core_api.app import _DANGEROUS_DEFAULTS, _validate_startup_settings
 from tests._legacy_contracts import LEGACY_API_KEY_FIELD
 
@@ -32,21 +44,28 @@ def _prod(*, compat_api_key=None, **overrides):
         "gateway_shared_secret": "a-real-gateway-secret",
         LEGACY_API_KEY_FIELD: compat_api_key,
         "core_storage_shared_secret": SecretStr("a-real-storage-secret"),
+        "deployment_mode": "inline",
     }
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+@pytest.fixture(autouse=True)
+def _no_testing_flag(monkeypatch):
+    """The suite runs with ``TESTING=1`` (tests/conftest.py), which production
+    refuses, so each guard here starts from a deployment without it."""
+    monkeypatch.delenv("TESTING", raising=False)
 
 
 def test_a_fully_configured_production_boot_is_allowed():
     _validate_startup_settings(_prod())
 
 
-@pytest.mark.parametrize("environment", ["development", "sandbox"])
-def test_non_production_environments_skip_production_only_guards(environment):
-    """With storage auth configured, dev/sandbox skip production-only guards."""
+def test_development_skips_every_hosted_guard():
+    """With storage auth configured, a local development boot needs nothing else."""
     _validate_startup_settings(
         _prod(
-            environment=environment,
+            environment="development",
             gateway_shared_secret=None,
             admin_api_key=None,
             settings_encryption_key=None,
@@ -54,6 +73,46 @@ def test_non_production_environments_skip_production_only_guards(environment):
             is_standalone=True,
         )
     )
+
+
+def _sandbox(**overrides):
+    """A hosted non-production deployment that passes the sandbox guards."""
+    return _prod(environment="sandbox", **overrides)
+
+
+def test_sandbox_skips_only_the_production_secrets():
+    """M-78, scoped by decision: a sandbox keeps the perimeter guards, but not the
+    production-only secrets, which its deploy is not known to set."""
+    _validate_startup_settings(
+        _sandbox(admin_api_key=None, settings_encryption_key=None, jwt_secret="")
+    )
+
+
+def test_sandbox_requires_a_perimeter():
+    """M-78. A sandbox is reachable like production, so with neither control set
+    its header-trust path takes identity headers from anyone."""
+    with pytest.raises(RuntimeError, match="GATEWAY_SHARED_SECRET"):
+        _validate_startup_settings(_sandbox(gateway_shared_secret=None))
+
+
+def test_sandbox_accepts_the_api_key_as_its_perimeter():
+    _validate_startup_settings(
+        _sandbox(gateway_shared_secret=None, compat_api_key="a-real-api-key")
+    )
+
+
+def test_sandbox_refuses_standalone_mode():
+    with pytest.raises(RuntimeError, match="IS_STANDALONE=true is not allowed"):
+        _validate_startup_settings(_sandbox(is_standalone=True))
+
+
+def test_production_refuses_testing_mode(monkeypatch):
+    """L-68. ``TESTING=1`` mounts the test-only ``/testing`` routes, and the same
+    variable was their only guard, so one inherited from a CI image reached
+    production unnoticed."""
+    monkeypatch.setenv("TESTING", "1")
+    with pytest.raises(RuntimeError, match="TESTING=1"):
+        _validate_startup_settings(_prod())
 
 
 def test_production_requires_a_perimeter():
@@ -242,3 +301,39 @@ def test_a_secretstr_wrapped_default_is_still_caught():
 
     with pytest.raises(RuntimeError, match="JWT_SECRET must be changed"):
         _validate_startup_settings(_prod(jwt_secret=_Secret("change-me-in-production")))
+
+
+# ── M-15: deferred mode needs a bus core-worker shares ──────────────────────
+
+
+@pytest.mark.parametrize("environment", ["development", "sandbox", "production"])
+def test_deferred_mode_on_the_in_process_bus_is_refused(monkeypatch, environment):
+    """Deferred writes publish embed and enrich requests that only core-worker
+    consumes. On the in-process bus nothing in core-api subscribes to them, so
+    every memory stayed unembedded and unenriched with no error or log."""
+    monkeypatch.setattr("core_api.app.get_event_bus", lambda: InProcessEventBus())
+    with pytest.raises(RuntimeError, match="DEPLOYMENT_MODE=deferred"):
+        _validate_startup_settings(
+            _prod(environment=environment, deployment_mode="deferred")
+        )
+
+
+def test_deferred_mode_on_a_shared_bus_is_allowed(monkeypatch):
+    """Control: the SaaS shape, core-worker subscribed on Pub/Sub."""
+
+    class _SharedBus:
+        pass
+
+    monkeypatch.setattr("core_api.app.get_event_bus", _SharedBus)
+    _validate_startup_settings(_prod(deployment_mode="deferred"))
+
+
+def test_inline_mode_does_not_build_the_event_bus(monkeypatch):
+    """Inline boots never consult the bus here, so validation builds nothing
+    ahead of the lifespan."""
+
+    def _no_bus():
+        raise AssertionError("an inline boot must not build the event bus")
+
+    monkeypatch.setattr("core_api.app.get_event_bus", _no_bus)
+    _validate_startup_settings(_prod())

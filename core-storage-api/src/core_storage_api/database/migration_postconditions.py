@@ -17,6 +17,20 @@ class MigrationPostcondition:
     predicate: str
     severity: PostconditionSeverity
     message: str
+    # SQL returning true where THIS deployment could never have applied the
+    # migration, so an unmet post-condition is the documented outcome rather
+    # than a defect.
+    #
+    # A soft-failing migration promises "apply this if you are allowed to", and
+    # until now the post-condition tested the stronger "this was applied". On
+    # every deployment that is not allowed — the normal case on managed
+    # Postgres — the two disagree forever, and the gap was carried in prose
+    # inside ``message`` where nothing could act on it. Stating it in SQL lets
+    # the probe tell the two apart: expected here, or genuinely unapplied.
+    #
+    # Left None for a post-condition whose migration has no skip branch; those
+    # are unconditional and any failure is real.
+    expected_when: str | None = None
 
 
 MIGRATION_POSTCONDITIONS: tuple[MigrationPostcondition, ...] = (
@@ -39,14 +53,33 @@ MIGRATION_POSTCONDITIONS: tuple[MigrationPostcondition, ...] = (
         severity="warning",
         message=(
             "cosine_distance(vector, vector) still has the default procost, so migration 044 "
-            "did not apply here. Expected wherever the app user does not own the pgvector "
-            "extension, which is the normal case on managed Postgres. It is latent rather than "
-            "a live defect: it changes plan choice only where the planner would otherwise pick "
-            "a sequential scan over the HNSW index, so check idx_scan on that index in "
-            "pg_stat_user_indexes before treating it as urgent. Repair is manual and optional: "
-            "connect as the pgvector extension owner and run "
-            "ALTER FUNCTION cosine_distance(vector, vector) COST 100; "
+            "did not apply here — and the role this service connects as is the pgvector "
+            "extension owner, or a member of it, so this was NOT the ownership skip 044 "
+            "tolerates. It is latent rather than a live defect: it changes plan choice only "
+            "where the planner would otherwise pick a sequential scan over the HNSW index, so "
+            "check idx_scan on that index in pg_stat_user_indexes before treating it as "
+            "urgent. Repair: ALTER FUNCTION cosine_distance(vector, vector) COST 100; "
             "re-running the migration will never fix an ownership failure."
+        ),
+        # 044 tolerates TWO failures, and this has to cover both or it claims
+        # more than it knows. ``insufficient_privilege``: altering a function
+        # requires owning it or membership in the owning role, which
+        # ``pg_has_role`` answers, and which is true for a superuser, who could
+        # also apply it. ``undefined_function``: no such function, so there was
+        # nothing to alter — ``to_regprocedure`` returns NULL rather than
+        # raising, the row is simply absent, and COALESCE turns that absence
+        # into the same "could not have applied it" answer.
+        #
+        # Without the COALESCE the missing-function case returns no row, which
+        # reads as "not expected" and fires a warning whose message asserts this
+        # role owns the pgvector extension — a claim nothing established. That
+        # is the exact fault this post-condition is being fixed for, one level
+        # down, so it is worth the extra clause.
+        expected_when=(
+            "SELECT NOT COALESCE("
+            "(SELECT pg_has_role(current_user, proowner, 'USAGE') FROM pg_proc "
+            "WHERE oid = to_regprocedure('cosine_distance(vector, vector)'))"
+            ", false)"
         ),
     ),
 )

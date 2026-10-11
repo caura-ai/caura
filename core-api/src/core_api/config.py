@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Literal, Self
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from common.embedding._registry import DEFAULT_LOCAL_EMBEDDING_MODEL
@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # ``db_pool_*`` settings + ``database_url`` were removed with the engine.
     api_key: str | None = None  # legacy, deprecated
     admin_api_key: str | None = None
+    # A file holding the admin key, read only when ``admin_api_key`` and the
+    # legacy ``api_key`` are both unset or blank (M-109, L-229): the compose stack
+    # generates one so its bundled scheduler can reach the admin endpoints. An
+    # operator's ADMIN_API_KEY, or a legacy API_KEY, wins.
+    admin_api_key_file: str = ""
     # Optional: when set, all non-admin requests must present this key. Both
     # spellings are accepted as INPUTS; ``_prefer_the_new_api_key_name`` below
     # collapses them onto the second field, the only one downstream code reads —
@@ -60,16 +65,14 @@ class Settings(BaseSettings):
     # MUST emit VECTOR_DIM dimensions; the provider now refuses a mismatch at
     # load rather than failing later at INSERT.
     #
-    # DECLARED, not read: ``common/embedding/_registry.py`` reads
-    # ``LOCAL_EMBEDDING_MODEL`` from ``os.environ`` directly, because that
-    # registry is shared with core-worker and must not import a service's
-    # config. This field exists so the variable appears in core-api's own
-    # settings surface; nothing consults the attribute.
+    # ``common/embedding/_registry.py`` reads ``LOCAL_EMBEDDING_MODEL`` from
+    # ``os.environ`` directly, because that registry is shared with core-worker
+    # and must not import a service's config. ``bridge_credentials_to_environ``
+    # exports this field there: on a bare-metal run nothing else puts a
+    # ``.env`` value into the environment (M-18).
     #
     # Default from the shared constant for the reason ``embedding_provider``
     # above gives: two copies of one literal is how they disagreed last time.
-    # ``test_every_core_api_setting_is_read_by_something`` names this field as
-    # the one declared-but-unread setting, with that distinction.
     local_embedding_model: str = DEFAULT_LOCAL_EMBEDDING_MODEL
     # Per-deploy control for where embedding + LLM enrichment run.
     #
@@ -133,8 +136,11 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     openrouter_api_key: str | None = None
+    atlascloud_api_key: str | None = None
     gemini_api_key: str | None = None
-    entity_extraction_provider: str = "openai"  # none | fake | openai | anthropic | openrouter | gemini
+    # none | fake | openai | openrouter | gemini — NOT anthropic, see
+    # ``_reject_anthropic_structured_output``.
+    entity_extraction_provider: str = "openai"
     entity_extraction_model: str = "gpt-5.4-nano"
     # E3 — reasoning-effort for the contradiction judge's LLM calls.
     # Valid values are MODEL-SPECIFIC (gpt-5.4 family, wet-tested:
@@ -182,6 +188,14 @@ class Settings(BaseSettings):
     caura_telemetry_state_dir: str = str(Path(tempfile.gettempdir()) / "caura-heartbeat")
     redis_url: str = ""  # e.g. redis://localhost:6379/0. Empty = in-memory fallback.
     cors_origins: str = "http://localhost:3000"
+    # Extra origins the installer endpoints (``/install-plugin``,
+    # ``/install-skill``) may bake into a generated script via ``api_url``,
+    # comma-separated, e.g. ``https://caura.example.com``. The origin that
+    # served the request is always allowed; set this only when a proxy hides
+    # the public host from this service. Anything else is refused, because
+    # the script sends the installer's API key to that URL and runs code it
+    # downloads from there.
+    installer_allowed_api_urls: str = ""
     # Request-wide budget enforced by RequestTimeoutMiddleware. 45s fits
     # comfortably under the 120s gateway/Cloud Run cap (CAURA-623 raised
     # the nginx ``proxy_read_timeout`` from 60s to 120s; the staging
@@ -241,6 +255,37 @@ class Settings(BaseSettings):
     # raise the platform timeout BEFORE raising this budget (the
     # startup validator enforces the ceiling).
     interview_request_timeout_seconds: float = 90.0
+    # Per-``tools/call`` budget on the MCP transport (oss-0924-h-02).
+    #
+    # ``RequestTimeoutMiddleware`` skips ``/mcp`` on purpose — the mount
+    # serves long-lived streaming responses and a blanket cancel would
+    # cut them — so until this existed a ``tools/call`` had NO
+    # server-side deadline at all. That is not merely a missing feature:
+    # ``per_tenant_storage_slot`` justifies its UNBOUNDED acquire queue
+    # with "the outer request budget already caps total wall time", and
+    # ``caura_recall`` reaches that exact semaphore through
+    # ``search_memories``. The invariant the code asserts was true on
+    # REST and false on the surface agents actually use. This budget is
+    # what makes it true on both, which is why it is a restoration
+    # rather than a new policy.
+    #
+    # Scoped to ONE tool dispatch, not to the mount: the SSE/streamable
+    # response that carries the session is untouched, so the reason the
+    # middleware skips ``/mcp`` does not apply here.
+    #
+    # 90s, matching ``bulk_request_timeout_seconds`` rather than the 45s
+    # hot-path ``request_timeout_seconds``, because the MCP surface
+    # serves the union of both shapes: ``caura_write`` with a batch calls
+    # ``create_memories_bulk`` directly (mcp_server.py), with none of the
+    # bulk ROUTE's own ``asyncio.wait_for`` around it, and ``caura_doc``
+    # ingest is comparable. At 45s this budget would cancel MCP work that
+    # REST grants 90s — shedding load in the name of restoring a cap,
+    # which is the one thing this change is not for. 90s also keeps
+    # bulk's and interview's 30s headroom under the 120s platform ceiling
+    # (``PLATFORM_REQUEST_CEILING_SECONDS``), above which a budget is
+    # dead config: nginx / Cloud Run sever the connection first. The
+    # startup validator enforces that ceiling.
+    mcp_request_timeout_seconds: float = 90.0
     # Async interview submit (#665). When True (default), the submit route
     # persists the masked window as a durable ``interview_jobs`` doc,
     # advances the watermark, and returns 200 ``accepted`` immediately;
@@ -305,6 +350,19 @@ class Settings(BaseSettings):
     audit_queue_max_size: int = 10000
     audit_queue_flush_threshold: int = 50
     audit_queue_flush_interval_seconds: float = 1.0
+    # Cap on the audit flusher's wait for one tenant's ``storage_write``
+    # slot (oss-0927-m-04). The flusher is a background loop, so no
+    # request budget sits over that acquire, and it gathers every tenant
+    # of a chunk: without this, one tenant with saturated storage slots
+    # holds the whole flush cycle, the queue stops draining, and at
+    # ``audit_queue_max_size`` every tenant's events drop at enqueue.
+    # On expiry only that tenant's slice is lost (logged, counted in
+    # ``failed_count``). Caps the acquire only — the storage POST that
+    # follows is bounded by the storage client's own timeouts. 10s is
+    # ten flush intervals: long enough to ride out a burst of that
+    # tenant's own writes holding the slot, short enough that the other
+    # tenants' events wait seconds rather than a whole request budget.
+    audit_flush_slot_timeout_seconds: float = 10.0
     # Capability-usage adoption counters (services/capability_usage.py).
     # In-process aggregation flushed to the ``capability_usage`` table on
     # this interval — the data behind the per-capability / per-transport /
@@ -353,8 +411,10 @@ class Settings(BaseSettings):
     # max_instances`` should sit comfortably below the storage-writer
     # pool size (10/instance x 11 = 110 fleet-wide today) so a single
     # tenant can't park more than ~20% of pool slots. Acquire is
-    # unbounded — a saturated tenant queues here while the route
-    # budget caps total wait time; see ``per_tenant_storage_slot``.
+    # unbounded — a saturated tenant queues here while the CALLER's
+    # budget caps total wait time: the request budget on request paths,
+    # ``audit_flush_slot_timeout_seconds`` on the background audit
+    # flusher. The full roster is on ``per_tenant_storage_slot``.
     per_tenant_storage_write_concurrency: int = 2
     per_tenant_storage_search_concurrency: int = 4
     # Fail-fast budget when the cap is exhausted. Long enough to absorb
@@ -395,8 +455,10 @@ class Settings(BaseSettings):
     # row pending; without a short TTL it would soft-ban the key for the
     # full 24h. The expired-row reclaim path in ``idempotency_claim``
     # auto-recovers stuck pending rows once this TTL elapses. Sized
-    # generously above realistic handler latency (single write <2s, bulk
-    # write <60s, search <2s).
+    # generously above realistic handler latency (single write <2s, search
+    # <2s). The bulk write may run its whole ``bulk_request_timeout_seconds``
+    # after storage work of its own, so it claims for that budget plus this
+    # TTL (L-07): an expired claim let a same-key retry run the bulk twice.
     idempotency_pending_ttl_seconds: int = 90
     environment: Literal["development", "production", "sandbox"] = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
@@ -448,6 +510,18 @@ class Settings(BaseSettings):
         if not self.core_storage_shared_secret.get_secret_value():
             self.core_storage_shared_secret = SecretStr(
                 read_shared_secret_file(self.core_storage_shared_secret_file)
+            )
+        return self
+
+    @model_validator(mode="after")
+    def resolve_admin_api_key(self) -> Self:
+        # Blank as well as unset: .env.example ships ``ADMIN_API_KEY=``. Not
+        # over a legacy ``API_KEY`` either (L-229): ``get_admin_key`` prefers
+        # ``admin_api_key``, so the generated key would shadow it and an operator
+        # whose .env carries only the legacy key would lose admin access.
+        if not self.admin_api_key and not self.api_key and self.admin_api_key_file:
+            self.admin_api_key = read_shared_secret_file(
+                self.admin_api_key_file, env_name="ADMIN_API_KEY_FILE"
             )
         return self
 
@@ -528,6 +602,12 @@ class Settings(BaseSettings):
     # before reading the log as a blast radius. See caura-ai/caura#1205.
     enforce_mcp_plan_limits: bool = False
     stm_backend: str = "memory"  # memory | redis
+    # Worker processes serving this API (L-35). The image starts its workers
+    # from ``WEB_CONCURRENCY`` (core-api/Dockerfile), and the uvicorn CLI reads
+    # it when ``--workers`` is not given, so this is the one place a process
+    # learns the count: nothing in a worker can see its siblings. Read only by
+    # the in-memory STM guard below.
+    web_concurrency: int = 1
     stm_notes_ttl: int = 86400  # 24h
     stm_bulletin_ttl: int = 172800  # 48h
 
@@ -541,17 +621,6 @@ class Settings(BaseSettings):
     platform_embedding_provider: str = ""  # "openai" | "" (disabled)
     platform_embedding_api_key: SecretStr = SecretStr("")  # OpenAI: API key for embeddings
     platform_embedding_model: str = ""  # e.g. "text-embedding-3-small"
-
-    # Security audit — scheduler + threshold alerts. Enterprise-only feature;
-    # OSS standalone deployments can leave these at defaults (all off).
-    # Per-org overrides live in organization_settings.security_audit.
-    security_audit_schedule_enabled: bool = False
-    security_audit_schedule_cron: str = "0 2 * * *"  # daily 02:00 by default
-    security_audit_alerts_enabled: bool = False
-    security_audit_alert_recipients: list[str] = []  # comma-separated env → list
-    security_audit_alert_score_below: float | None = None
-    security_audit_alert_critical_findings_min: int | None = None
-    security_audit_alert_score_drop_delta: float | None = None
 
     @model_validator(mode="after")
     def _prefer_the_new_api_key_name(self) -> "Settings":
@@ -571,11 +640,24 @@ class Settings(BaseSettings):
         # vars like LOG_LEVEL=debug are accepted.
         return v.upper() if isinstance(v, str) else v
 
-    @field_validator("security_audit_alert_recipients", mode="before")
+    @field_validator(
+        "per_tenant_search_concurrency",
+        "per_tenant_write_concurrency",
+        "per_tenant_embed_concurrency",
+        "per_tenant_storage_write_concurrency",
+        "per_tenant_storage_search_concurrency",
+        "contradiction_detection_concurrency",
+    )
     @classmethod
-    def _split_recipients(cls, v: object) -> object:
-        if isinstance(v, str):
-            return [s.strip() for s in v.split(",") if s.strip()]
+    def _concurrency_cap_must_be_positive(cls, v: int, info: ValidationInfo) -> int:
+        # ``asyncio.Semaphore(0)`` is valid Python but every ``acquire()``
+        # blocks forever: the route-entry caps would 429 every request, the
+        # unbounded storage slots and the detection gate would stall until
+        # the caller's budget expires. 0 is not a disable switch — reject at
+        # config load so the misconfig surfaces at startup (core-worker
+        # rejects its storage-write cap the same way).
+        if v < 1:
+            raise ValueError(f"{info.field_name} must be >= 1; 0 would block every acquire of that cap")
         return v
 
     @model_validator(mode="after")
@@ -617,6 +699,21 @@ class Settings(BaseSettings):
                 f"must be >= BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS "
                 f"({BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS}s)."
             )
+        for budget in ("request_timeout_seconds", "bulk_request_timeout_seconds"):
+            # L-08: the same ceiling as the interview and MCP budgets below.
+            # Past it the platform severs the connection with its own bare
+            # 504 at 120s while the handler keeps running and may commit, so
+            # the app's structured 504 (phase, retry guidance) never arrives.
+            # ``BULK_REQUEST_TIMEOUT_SECONDS=150`` is the natural reaction to
+            # bulk 504s, which is why this is checked rather than documented.
+            value = getattr(self, budget)
+            if value > PLATFORM_REQUEST_CEILING_SECONDS:
+                raise ValueError(
+                    f"{budget} ({value}s) must be <= PLATFORM_REQUEST_CEILING_SECONDS "
+                    f"({PLATFORM_REQUEST_CEILING_SECONDS}s); raise the platform "
+                    "timeout (nginx proxy_read_timeout / Cloud Run) and update "
+                    "the constant before raising this budget."
+                )
         if self.interview_request_timeout_seconds > PLATFORM_REQUEST_CEILING_SECONDS:
             # A budget past the platform ceiling can never fire — the
             # gateway/Cloud Run severs the connection first while the
@@ -624,6 +721,31 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"interview_request_timeout_seconds "
                 f"({self.interview_request_timeout_seconds}s) must be <= "
+                f"PLATFORM_REQUEST_CEILING_SECONDS "
+                f"({PLATFORM_REQUEST_CEILING_SECONDS}s); raise the platform "
+                "timeout (nginx proxy_read_timeout / Cloud Run) and update "
+                "the constant before raising this budget."
+            )
+        if self.audit_flush_slot_timeout_seconds <= 0:
+            # ``asyncio.timeout(0)`` expires before the first acquire can
+            # succeed, so every tenant's slice would be dropped on every
+            # flush — a budget that silently turns audit ingestion off.
+            raise ValueError(
+                f"audit_flush_slot_timeout_seconds "
+                f"({self.audit_flush_slot_timeout_seconds}s) must be > 0; "
+                "set audit_queue_max_size = 0 to bypass the queue instead."
+            )
+        if self.mcp_request_timeout_seconds > PLATFORM_REQUEST_CEILING_SECONDS:
+            # Same rule as interview's, for the same reason: past the
+            # platform ceiling the budget can never fire, because the
+            # gateway severs the connection while the tool keeps running.
+            # Worth enforcing here specifically — this budget exists to make
+            # a cap that the code already CLAIMS actually exist, so a value
+            # that cannot fire would restore the claim in config and leave
+            # ``per_tenant_storage_slot``'s docstring lying exactly as before.
+            raise ValueError(
+                f"mcp_request_timeout_seconds "
+                f"({self.mcp_request_timeout_seconds}s) must be <= "
                 f"PLATFORM_REQUEST_CEILING_SECONDS "
                 f"({PLATFORM_REQUEST_CEILING_SECONDS}s); raise the platform "
                 "timeout (nginx proxy_read_timeout / Cloud Run) and update "
@@ -763,17 +885,6 @@ class Settings(BaseSettings):
             )
         return self
 
-    @field_validator("security_audit_schedule_cron")
-    @classmethod
-    def _validate_cron_field(cls, v: str) -> str:
-        from croniter import CroniterBadCronError, croniter
-
-        try:
-            croniter(v)
-        except (CroniterBadCronError, ValueError) as exc:
-            raise ValueError(f"Invalid cron expression {v!r}: {exc}") from exc
-        return v
-
     @model_validator(mode="after")
     def _remap_deprecated_vertex(self) -> "Settings":
         """Graceful fallback for deprecated tenant-tier ``vertex`` provider.
@@ -799,14 +910,14 @@ class Settings(BaseSettings):
             )
             object.__setattr__(self, "embedding_provider", "openai")
             # A user coming from Vertex likely has no OPENAI_API_KEY — without a
-            # key the registry silently falls back to FakeEmbeddingProvider,
-            # which breaks semantic search with no clear signal. Escalate.
+            # key memories are stored without embeddings, so semantic search
+            # finds nothing new. Escalate.
             if not self.openai_api_key and not self.platform_embedding_provider:
                 logger.error(
                     "EMBEDDING_PROVIDER was remapped from 'vertex' to 'openai', but "
                     "OPENAI_API_KEY is unset and PLATFORM_EMBEDDING_PROVIDER is not "
-                    "configured. Semantic search will use FakeEmbeddingProvider and "
-                    "produce zero-vectors. Set OPENAI_API_KEY or configure "
+                    "configured. Memories will be stored without embeddings (keyword "
+                    "search only). Set OPENAI_API_KEY or configure "
                     "PLATFORM_EMBEDDING_PROVIDER=openai to restore embeddings."
                 )
         if self.entity_extraction_provider == "vertex":
@@ -826,6 +937,49 @@ class Settings(BaseSettings):
                     "OPENAI_API_KEY or configure PLATFORM_LLM_PROVIDER to restore "
                     "enrichment."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_anthropic_structured_output(self) -> "Settings":
+        """Refuse ``ENTITY_EXTRACTION_PROVIDER=anthropic`` at startup.
+
+        oss-0915-m-01. This provider drives enrichment, entity extraction and
+        the contradiction judge — all structured-output (``complete_json``)
+        calls — and Anthropic's OpenAI-compatible endpoint 400s on every one of
+        them (``ANTHROPIC_JSON_UNSUPPORTED`` in the OpenAI provider has the two
+        error shapes). At runtime that degraded to the fake provider while
+        writes reported success, so a crash here is the kinder failure.
+        String literal for the same circular-import reason as
+        ``_remap_deprecated_vertex``.
+        """
+        if self.entity_extraction_provider == "anthropic":
+            raise ValueError(
+                "ENTITY_EXTRACTION_PROVIDER=anthropic is not supported: "
+                "enrichment, entity extraction and contradiction detection use "
+                "structured JSON output, which Anthropic's OpenAI-compatible "
+                "endpoint rejects (HTTP 400 on every call). Set "
+                "ENTITY_EXTRACTION_PROVIDER to openai, openrouter or gemini."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _refuse_in_memory_stm_across_workers(self) -> "Settings":
+        """Refuse in-memory STM when more than one worker serves the API.
+
+        L-35. ``InMemorySTM`` lives in one process, so with two workers each
+        holds its own notes and bulletins and a read lands on whichever worker
+        the kernel picks: STM reads differently request to request. The
+        warning meant to catch this read ``WEB_CONCURRENCY``, which nothing
+        set, so it never fired. The image now starts its workers from that
+        variable, and this refuses the combination outright (Eldad, 2026-10-09).
+        """
+        if self.use_stm and self.stm_backend == "memory" and self.web_concurrency > 1:
+            raise ValueError(
+                f"USE_STM=true with STM_BACKEND=memory cannot serve {self.web_concurrency} "
+                "workers (WEB_CONCURRENCY): each would keep its own STM, so notes and "
+                "bulletins would read differently request to request. Set "
+                "STM_BACKEND=redis (with REDIS_URL), or WEB_CONCURRENCY=1."
+            )
         return self
 
     @property
@@ -873,10 +1027,19 @@ def bridge_credentials_to_environ() -> None:
         "OPENAI_API_KEY": settings.openai_api_key or "",
         "ANTHROPIC_API_KEY": settings.anthropic_api_key or "",
         "OPENROUTER_API_KEY": settings.openrouter_api_key or "",
+        "ATLASCLOUD_API_KEY": settings.atlascloud_api_key or "",
         "GEMINI_API_KEY": settings.gemini_api_key or "",
         # Default provider + model used by ``common.enrichment.service``.
         "ENTITY_EXTRACTION_PROVIDER": settings.entity_extraction_provider or "",
         "ENTITY_EXTRACTION_MODEL": settings.entity_extraction_model or "",
+        # Embedding provider and local model, read from ``os.environ`` by
+        # ``common.embedding`` (M-18): the provider by every embedder with no
+        # tenant config (the nightly entity backfill, the query-embedding cache
+        # key), the local model by the registry for every caller. Unbridged, a
+        # bare-metal ``.env`` that picked ``local`` embedded memories with it and
+        # those callers with the default provider: two vector spaces.
+        "EMBEDDING_PROVIDER": settings.embedding_provider or "",
+        "LOCAL_EMBEDDING_MODEL": settings.local_embedding_model or "",
         # OpenAI client timeout used by ``common.llm.constants``.
         "OPENAI_REQUEST_TIMEOUT_SECONDS": str(settings.openai_request_timeout_seconds),
         # Platform-tier singletons read by ``common.llm._platform``.

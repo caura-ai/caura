@@ -27,6 +27,7 @@ process.env.CAURA_KEYSTONES_TOKEN_CAP = "120"; // ~480 chars
 
 const keystones = await import("./keystones.js");
 const { formatKeystones, fetchKeystonesBlock, invalidateKeystoneCache } = keystones;
+const { createToolFromSpec } = await import("./tool-definitions.js");
 
 interface MockCall {
   url: string;
@@ -35,6 +36,8 @@ interface MockCall {
 
 let originalFetch: typeof fetch;
 let calls: MockCall[];
+let originalWarn: typeof console.warn;
+let warnings: string[];
 const KEYSTONES_ROUTE = "/memclaw/keystones"; // legacy-name-ok: live compatibility route
 
 // ``apiCall`` resolves a per-agent key via ``resolveAgentKey`` when an
@@ -45,7 +48,7 @@ function keystoneCalls(): MockCall[] {
   return calls.filter((c) => c.url.includes(KEYSTONES_ROUTE));
 }
 
-function installFetch(body: unknown, status = 200): void {
+function installFetch(body: unknown, status = 200, headers: Record<string, string> = {}): void {
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     calls.push({ url: String(input), init });
     // Make any non-keystones lookup (agent-key provisioning, tenant
@@ -57,7 +60,7 @@ function installFetch(body: unknown, status = 200): void {
     }
     return new Response(JSON.stringify(body), {
       status,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...headers },
     });
   }) as typeof fetch;
 }
@@ -119,17 +122,33 @@ describe("formatKeystones", () => {
     ]);
     assert.match(out, /no-secrets:/);
   });
+
+  test("distinguishes server truncation from local omissions within the token cap", () => {
+    const rules = [100, 50, 1].map((weight) => ({
+      doc_id: `rule-${weight}`, data: { content: "x".repeat(100), weight },
+    }));
+    const out = formatKeystones(rules, true);
+    assert.match(out, /rule-100:/);
+    assert.match(out, /2 more rules omitted/);
+    assert.match(out, /server truncated the rule set; additional rules are not shown/);
+    assert.ok(out.length <= 120 * 4, `block exceeded token cap: ${out.length}`);
+    assert.doesNotMatch(formatKeystones(rules), /server truncated/);
+  });
 });
 
 describe("fetchKeystonesBlock", () => {
   beforeEach(() => {
     originalFetch = globalThis.fetch;
     calls = [];
+    originalWarn = console.warn;
+    warnings = [];
+    console.warn = (...args: unknown[]) => { warnings.push(args.join(" ")); };
     invalidateKeystoneCache();
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
   });
 
   test("returns a non-empty block on the happy path", async () => {
@@ -143,6 +162,66 @@ describe("fetchKeystonesBlock", () => {
     const block = await fetchKeystonesBlock({ agentId: "agent-A", fleetId: "fleet-A" });
     assert.match(block, /<keystone_rules>/);
     assert.match(block, /R1:/);
+  });
+
+  test("reads the REST items envelope and caches the server truncation notice", async () => {
+    installFetch({ count: 1, items: [
+      { doc_id: "r1", data: { title: "R1", content: "Body", weight: 50 } },
+    ] }, 200, { "X-Truncated": "true" });
+    const opts = { agentId: "a", fleetId: undefined };
+    const first = await fetchKeystonesBlock(opts);
+    assert.match(first, /R1:/);
+    assert.match(first, /server truncated the rule set/);
+    assert.doesNotMatch(first, /more rules omitted/);
+    assert.equal(await fetchKeystonesBlock(opts), first);
+    assert.equal(keystoneCalls().length, 1);
+    assert.equal(new URL(keystoneCalls()[0].url).searchParams.get("envelope"), "true");
+    assert.equal(warnings.filter((w) => w.includes("incomplete rule set")).length, 1);
+  });
+
+  test("logs server truncation even when no rule fits the local token cap", async () => {
+    installFetch([{ doc_id: "large", data: { content: "x".repeat(500) } }], 200,
+      { "X-Truncated": "true" });
+    assert.equal(await fetchKeystonesBlock({ agentId: "a", fleetId: undefined }), "");
+    assert.ok(warnings.some((w) => w.includes("server truncated the response")));
+  });
+
+  test("manual tool normalizes bare lists and preserves header truncation and identity", async () => {
+    const rules = [{ doc_id: "r1", data: { content: "Rule" } }];
+    installFetch(rules, 200, { "X-Truncated": "true" });
+    const signal = new AbortController().signal;
+    const result = await createToolFromSpec("caura_keystones").execute("ks", {
+      tenant_id: "t_keystones_test", fleet_id: "f", agent_id: "a",
+    }, signal);
+    assert.deepEqual(JSON.parse(result.content[0].text), { count: 1, truncated: true, rules });
+    const call = keystoneCalls()[0];
+    const query = new URL(call.url).searchParams;
+    assert.equal(query.get("tenant_id"), "t_keystones_test");
+    assert.equal(query.get("fleet_id"), "f");
+    assert.equal(query.get("agent_id"), "a");
+    assert.equal(query.get("envelope"), "true");
+    assert.equal(call.init?.signal, signal);
+  });
+
+  test("manual tool preserves empty REST hints and drops agents without a fleet", async () => {
+    installFetch({ count: 0, items: [], hint: "No rules configured." }, 200,
+      { "X-Truncated": "false" });
+    const result = await createToolFromSpec("caura_keystones").execute("ks", {
+      tenant_id: "t_keystones_test", fleet_id: "", agent_id: "a",
+    });
+    assert.deepEqual(JSON.parse(result.content[0].text), {
+      count: 0, truncated: false, rules: [], hint: "No rules configured.",
+    });
+    assert.equal(new URL(keystoneCalls()[0].url).searchParams.get("agent_id"), null);
+  });
+
+  test("normalizes non-empty REST and legacy envelopes without requiring headers", async () => {
+    const rules = [{ doc_id: "r1", data: { content: "Rule" } }];
+    for (const body of [{ count: 1, items: rules }, { count: 1, rules, truncated: true }]) {
+      installFetch(body);
+      const result = await keystones.fetchKeystonesPayload({ tenant_id: "t_keystones_test" });
+      assert.deepEqual(result, { count: 1, rules, truncated: "truncated" in body });
+    }
   });
 
   test("accepts a bare-list response shape too (forward-compatibility)", async () => {

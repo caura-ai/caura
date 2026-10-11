@@ -40,7 +40,7 @@ All paths are prefixed with `/api/v1` unless noted. Request and response shapes 
 | Documents | `POST /documents`, `GET /documents`, `GET /documents/{id}`, `POST /documents/query`, `DELETE /documents/{id}` |
 | Keystones | `GET /keystones`, `POST /keystones`, `DELETE /keystones/{doc_id}` (supported legacy route: `/memclaw/keystones`) | <!-- legacy-name-floor: documents the compatibility route -->
 | Fleet | `POST /fleet/heartbeat`, `GET /fleet/nodes`, `POST /fleet/commands`, `GET /fleet/commands` |
-| Agents | `GET /agents`, `GET /agents/{id}`, `PATCH /agents/{id}/trust`, `POST /admin/agent-keys/provision` (atomic key + row + trust + fleet), `GET /whoami` (identity probe) |
+| Agents | `GET /agents`, `GET /agents/{id}`, `PATCH /agents/{id}/trust`, `POST /admin/agent-keys/provision` (managed platform only: atomic key + row + trust + fleet; a self-hosted core-api has no such route), `GET /whoami` (identity probe) |
 | Insights | `POST /insights/generate` |
 | Evolve | `POST /evolve/report` |
 | Crystallizer | `POST /crystallize`, `POST /crystallize/all`, `GET /crystallize/reports`, `GET /crystallize/latest` |
@@ -55,12 +55,22 @@ Read by the OpenClaw plugin. The plugin's published name (`memclaw`) and these v
 
 | Var | Purpose |
 |---|---|
-| `CAURA_API_URL` | Base URL of the core-api server. |
+| `CAURA_API_URL` | Final base URL of the core-api server. Credential-bearing plugin requests reject redirects; configure the destination directly. Use `https://` for any non-loopback host — see `CAURA_ALLOW_INSECURE_HTTP`. |
 | `CAURA_API_KEY` | Tenant or admin API key sent in `X-API-Key`. |
+| `CAURA_ALLOW_INSECURE_HTTP` | `true` to send `CAURA_API_KEY` over plain `http://` to a non-loopback host (e.g. a trusted private network). Unset (default): the plugin refuses such calls with an error naming the host. Loopback (`localhost`, `127.0.0.0/8`, `::1`) never needs it. Plain HTTP to a non-loopback host also carries fleet commands, plugin source and the skills catalog, so there the plugin rejects `deploy`, `update_plugin` and `educate` commands and does not sync skills (installed skills are kept), with or without this opt-in and with or without `CAURA_API_KEY`: anyone on the path could otherwise push code or agent instructions to the node. |
 | `CAURA_TENANT_ID` | Optional pre-resolved tenant id; bypasses lookup. |
 | `CAURA_FLEET_ID` | Default fleet id for writes/heartbeat. |
 | `CAURA_NODE_NAME` | Fleet node identifier reported on heartbeat. |
-| `CAURA_AUTO_WRITE_TURNS` | Auto-write turn summaries (default `true`). |
+| `CAURA_AUTO_WRITE_TURNS` | Automatic conversation-memory writes (default `true`): user messages from `ingest`, assistant turn summaries, compaction summaries, and the session summary that OpenClaw's pre-compaction memory-flush turn asks the agent to write. Set `false` to disable all four; OpenClaw then runs no memory-flush turn. |
+
+The automatic writes create episode memories using the server's default
+visibility (`scope_team`). Ingest saves user messages of at least 100 characters,
+truncates them to 500 characters plus an ellipsis, and caps writes at 10 per
+session. Turning this flag off leaves in-memory buffering, recall, explicit
+`caura_write` calls and OpenClaw's runtime compaction available. It does not
+delete previously saved memories. The independently enabled Interviewer and
+its durable work-trail buffer have separate controls (`CAURA_INTERVIEWER`).
+Restart the plugin after changing the environment variable.
 
 **Legacy spellings.** Every `CAURA_*` variable in this document — the table above, the `CAURA_API_KEY` server gate, and `CAURA_VERSION` in compose — currently also answers to its pre-rename `MEMCLAW_*` name. Use `CAURA_*` for new configuration. Where both are set the first **non-empty** value wins — deliberately, rather than the first one *defined* — so an unfilled `CAURA_FOO=` in a deploy template cannot blank out a working `MEMCLAW_FOO`. <!-- legacy-name-floor: documents the current dual-read behavior -->
 
@@ -74,11 +84,11 @@ These mirror the [configuration reference](api-reference.md#configuration).
 | Group | Vars |
 |---|---|
 | Database | Storage service: `DATABASE_URL`, `READ_DATABASE_URL` or a complete `ALLOYDB_*` connection set; migration/dev helpers: `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` (stock Compose hardcodes its container connection values) |
-| Auth | `ADMIN_API_KEY`, `CAURA_API_KEY`, `GATEWAY_SHARED_SECRET`, `JWT_SECRET`, `CORE_STORAGE_SHARED_SECRET`, `CORE_STORAGE_SHARED_SECRET_FILE`, `IS_STANDALONE` |
+| Auth | `ADMIN_API_KEY`, `ADMIN_API_KEY_FILE`, `CAURA_API_KEY`, `GATEWAY_SHARED_SECRET`, `JWT_SECRET`, `CORE_STORAGE_SHARED_SECRET`, `CORE_STORAGE_SHARED_SECRET_FILE`, `IS_STANDALONE` |
 | Providers | `EMBEDDING_PROVIDER`, `ENTITY_EXTRACTION_PROVIDER`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `USE_LLM_FOR_MEMORY_CREATION` |
 | Runtime | `CORS_ORIGINS`, `ENVIRONMENT`, `SETTINGS_ENCRYPTION_KEY`, `REDIS_URL` |
 
-Production startup requires `ADMIN_API_KEY`, a non-default `JWT_SECRET`,
+Production startup requires `ADMIN_API_KEY` (or `ADMIN_API_KEY_FILE`), a non-default `JWT_SECRET`,
 `SETTINGS_ENCRYPTION_KEY`, and either `GATEWAY_SHARED_SECRET` or
 `CAURA_API_KEY`; `IS_STANDALONE=true` is not allowed.
 
@@ -98,8 +108,8 @@ Anything not listed above is internal and may change in any release without a ma
 
 - Python module layout (`core_api.middleware.*`, `core_api.providers.*`, `core_api.pipeline.*`, `core_api.services.*`, `common/*`)
 - Database schema, table names, migration paths
-- Gateway-injected HTTP headers (`X-Gateway-Secret`, `X-Tenant-ID`, `X-Agent-ID`, `X-Org-Read-Only`)
-- Most `/api/v1/admin/*` and all `/api/v1/testing/*` routes (the documented exception is `POST /admin/agent-keys/provision`, which is part of the stable identity-bootstrap surface — see the Agents row above)
+- Gateway-injected HTTP headers (`X-Gateway-Secret`, `X-Tenant-ID`, `X-Agent-ID`, `X-Org-Read-Only`, `X-User-ID`)
+- Most `/api/v1/admin/*` and all `/api/v1/testing/*` routes (the documented exception is `POST /admin/agent-keys/provision`, part of the managed platform's stable identity-bootstrap surface — see the Agents row above)
 - The `core-storage-api` microservice (internal, not user-facing)
 - The plugin's TypeScript module structure
 - API-key prefix formats — currently unified on `mc_…` (with legacy `mca_…` / `mci_…` aliases still accepted via back-compat); formats may continue to evolve

@@ -401,3 +401,174 @@ test("transport mapping does not wrap invalid JSON", async () => {
   const client = makeClient(() => new Response("not json"));
   await assert.rejects(client.health(), SyntaxError);
 });
+
+// L-66: the key never crosses the network in cleartext unless the caller opts in.
+
+function clientFor(baseUrl: string, options: Record<string, unknown> = {}): Caura {
+  return makeClient(() => jsonResponse(200, { status: "ok" }), { baseUrl, ...options });
+}
+
+function withEnvOptIn<T>(value: string | undefined, run: () => T): T {
+  const saved = process.env.CAURA_ALLOW_INSECURE_HTTP;
+  if (value === undefined) delete process.env.CAURA_ALLOW_INSECURE_HTTP;
+  else process.env.CAURA_ALLOW_INSECURE_HTTP = value;
+  try {
+    return run();
+  } finally {
+    if (saved === undefined) delete process.env.CAURA_ALLOW_INSECURE_HTTP;
+    else process.env.CAURA_ALLOW_INSECURE_HTTP = saved;
+  }
+}
+
+test("plain http to a remote host is refused", () => {
+  withEnvOptIn(undefined, () => {
+    assert.throws(
+      () => clientFor("http://caura.example"),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /caura\.example/);
+        assert.match(err.message, /allowInsecureHttp/);
+        assert.match(err.message, /CAURA_ALLOW_INSECURE_HTTP/);
+        return true;
+      },
+    );
+  });
+});
+
+for (const scheme of ["ftp", "ws", "file"]) {
+  test(`a ${scheme}:// base URL is refused`, () => {
+    withEnvOptIn(undefined, () => {
+      assert.throws(() => clientFor(`${scheme}://caura.example`), /https:\/\//);
+    });
+  });
+}
+
+for (const baseUrl of [
+  "https://caura.example",
+  "http://localhost:8000",
+  "http://LOCALHOST:8000",
+  "http://api.localhost",
+  "http://127.0.0.1:8000",
+  "http://127.8.9.10",
+  "http://[::1]:8000",
+]) {
+  test(`${baseUrl} is allowed`, async () => {
+    const client = withEnvOptIn(undefined, () => clientFor(baseUrl));
+    assert.deepEqual(await client.health(), { status: "ok" });
+  });
+}
+
+test("allowInsecureHttp allows plain http", () => {
+  withEnvOptIn(undefined, () => clientFor("http://caura.example", { allowInsecureHttp: true }));
+});
+
+for (const value of ["true", "1"]) {
+  test(`CAURA_ALLOW_INSECURE_HTTP=${value} allows plain http`, () => {
+    withEnvOptIn(value, () => clientFor("http://caura.example"));
+  });
+}
+
+for (const value of ["", "false", "0", "yes"]) {
+  test(`CAURA_ALLOW_INSECURE_HTTP=${JSON.stringify(value)} does not opt in`, () => {
+    withEnvOptIn(value, () => {
+      assert.throws(() => clientFor("http://caura.example"));
+    });
+  });
+}
+
+test("an explicit allowInsecureHttp: false beats the env opt-in", () => {
+  withEnvOptIn("true", () => {
+    assert.throws(() => clientFor("http://caura.example", { allowInsecureHttp: false }));
+  });
+});
+
+test("requests refuse redirects, so the key is never re-sent to a redirect target", async () => {
+  let redirect: RequestRedirect | undefined;
+  const client = makeClient((_url, init) => {
+    redirect = init.redirect;
+    return jsonResponse(200, { status: "ok" });
+  });
+  await client.health();
+  assert.equal(redirect, "error");
+});
+
+// What search() and recall() send and return (audit 2026-10-01, B33 and B35).
+// L-173: recall asks for its list once (`items_alias: false`). L-94: search keeps
+// the envelope around its results. L-03: `callerAgentId` is an opt-in option of
+// both.
+
+test("L-173: recall asks for the list once unless told otherwise", async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  const client = makeClient((_url, init) => {
+    bodies.push(JSON.parse(init.body as string));
+    return jsonResponse(200, liveRecallBody([{ id: "m1", content: "a" }]));
+  });
+
+  const result = await client.recall("q");
+  await client.recall("q", { items_alias: true });
+
+  assert.equal(bodies[0].items_alias, false);
+  assert.equal(result.supportingMemories[0].id, "m1");
+  assert.equal(bodies[1].items_alias, true);
+});
+
+test("L-94: search keeps the envelope around its results", async () => {
+  const envelope = {
+    items: [{ id: "m1", content: "a" }],
+    recall_tracked: true,
+    diagnostic: { candidates: 3 },
+    warnings: [
+      {
+        code: "unrecognized_parameters",
+        message: "bogus is not a /search parameter",
+        details: { params: ["bogus"] },
+      },
+    ],
+  };
+  const client = makeClient(() => jsonResponse(200, envelope));
+
+  const results = await client.search("q", { diagnostic: true, bogus: 1 });
+
+  assert.ok(Array.isArray(results));
+  assert.equal(results.length, 1);
+  assert.equal(results[0].id, "m1");
+  const kept = results as unknown as Record<string, unknown>;
+  assert.equal(kept.recallTracked, true);
+  assert.deepEqual(kept.diagnostic, { candidates: 3 });
+  assert.deepEqual(kept.warnings, envelope.warnings);
+  assert.deepEqual(kept.raw, envelope);
+});
+
+test("L-94: an envelope without the optional fields reads as null", async () => {
+  const client = makeClient(() => jsonResponse(200, { items: [] }));
+
+  const results = await client.search("q");
+
+  assert.equal(results.length, 0);
+  const kept = results as unknown as Record<string, unknown>;
+  assert.equal(kept.recallTracked, null);
+  assert.equal(kept.diagnostic, null);
+  assert.equal(kept.warnings, null);
+});
+
+for (const method of ["search", "recall"] as const) {
+  test(`L-03: ${method} sends callerAgentId only when asked`, async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const client = makeClient(
+      (_url, init) => {
+        bodies.push(JSON.parse(init.body as string));
+        return jsonResponse(200, method === "search" ? { items: [] } : liveRecallBody([]));
+      },
+      { agentId: "a1" },
+    );
+
+    await client[method]("q");
+    await client[method]("q", { callerAgentId: "a1" });
+
+    // Unset, the client's agentId is not asserted: the server would narrow the
+    // read to that agent's fleet and trust (Eldad, 2026-10-08).
+    assert.equal("caller_agent_id" in bodies[0], false);
+    assert.equal(bodies[1].caller_agent_id, "a1");
+    assert.equal("callerAgentId" in bodies[1], false);
+  });
+}

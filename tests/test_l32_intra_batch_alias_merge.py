@@ -169,13 +169,17 @@ async def test_both_surface_forms_survive_the_merge(
 
 
 @_worker_patches
-async def test_the_merge_preserves_the_rows_other_attributes(
+async def test_the_item_carries_aliases_not_the_rows_other_attributes(
     mock_resolve, mock_extract, mock_sc_factory, _embed, _log, _rel
 ):
-    """Coalescing must not become a way to drop everything except ``_aliases``.
+    """The row's other attributes stay in the row, not in the payload (L-46).
 
-    A fix that rebuilt the payload from the second form alone would also make
-    the alias assertion above pass while wiping the row's real attributes.
+    This used to assert the opposite: storage assigned ``attributes`` wholesale,
+    so dropping ``industry`` from the payload would have wiped it. Storage now
+    merges an update item into the locked row, and a copy of the resolve
+    snapshot's attributes would write stale values back over a concurrent
+    change. ``tests/test_entity_upsert_merges.py`` asserts that the row keeps
+    them.
     """
     mock_resolve.return_value = _config()
     mock_extract.return_value = _graph(
@@ -187,9 +191,8 @@ async def test_the_merge_preserves_the_rows_other_attributes(
 
     await _run()
 
-    merged = _items_for(sc, EXISTING_ID)[0]["attributes"]
-    assert merged["industry"] == "technology"
-    assert merged["founded"] == "1911"
+    sent = _items_for(sc, EXISTING_ID)[0]["attributes"]
+    assert sent == {"_aliases": [EXISTING_NAME, "IBM", "I.B.M."]}
 
 
 @_worker_patches
