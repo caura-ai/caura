@@ -263,6 +263,26 @@ A write of identical content (same `agent_id`, same `fleet_id`) is retry-safe vi
 
 Cross-agent writes of identical content no longer collide — each agent gets its own record.
 
+### Idempotency-Key
+
+To make a retry safe, send an `Idempotency-Key` header (at most 255
+characters) on `POST /api/v1/memories`, `/api/v1/memories/bulk`,
+`/api/v1/documents` or `/api/v1/evolve/report`. A retry with the same key and a
+byte-identical body replays the first response instead of running the request
+again. `POST /api/v1/memories` and MCP `caura_write` also take the key as
+`metadata.idempotency_key`; MCP `caura_evolve` takes it as `idempotency_key`.
+
+A key belongs to the tenant, the agent the request is attributed to, and the
+way it was sent (header, body or MCP), and it lasts 24 hours. Two agents that
+happen to use the same key each get their own write. Reusing a key with a
+different body is a `422`. A retry that arrives while the first request is
+still running waits for it, and gets a `409` if the first takes too long.
+
+Every evolve report adjusts weights, even when the outcome text repeats: the
+same outcome reported after two different actions is two reports. A retry after
+a timeout is the same report, so send it with the first attempt's key. It then
+replays the first answer and adjusts nothing again.
+
 ---
 
 ## Write bodies reject unknown fields

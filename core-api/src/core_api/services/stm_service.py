@@ -20,17 +20,9 @@ def get_stm_backend_instance() -> STMBackend:
         from core_api.providers import get_stm_backend
 
         _stm_instance = get_stm_backend(settings.stm_backend)
+        # In-memory STM on more than one worker is refused at startup
+        # (``Settings._refuse_in_memory_stm_across_workers``, L-35).
         logger.info("STM backend initialised: %s", settings.stm_backend)
-        import os
-
-        workers = int(os.getenv("WEB_CONCURRENCY", "1"))
-        if settings.stm_backend == "memory" and workers > 1:
-            logger.warning(
-                "InMemorySTM is not shared across workers — "
-                "each of %d workers has its own STM state. "
-                "Use stm_backend='redis' for multi-worker deployments.",
-                workers,
-            )
     return _stm_instance
 
 

@@ -134,7 +134,12 @@ class LogRecallEvent:
                 "strategy": strategy,
                 "filter_agent_id": ctx.data.get("filter_agent_id"),
                 "fleet_scope": ",".join(fleet_ids) if fleet_ids else None,
-                "top_k": ctx.data.get("top_k"),
+                # L-15 — the budget the search ran with: ExecuteScoredSearch's
+                # ``final_top_k`` (after the agent/tenant profile and any
+                # strategy cap), else the profile's when a short-circuit skipped
+                # it. ``ctx.data["top_k"]`` is the raw request value, which
+                # read as a budget that never existed.
+                "top_k": ctx.data.get("final_top_k") or sp.get("top_k") or ctx.data.get("top_k"),
                 "min_similarity": _f(sp.get("min_similarity")),
                 "result_count": len(returned_rows),
                 "top_score": top_score,

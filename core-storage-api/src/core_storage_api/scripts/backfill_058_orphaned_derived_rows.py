@@ -138,7 +138,9 @@ async def _pass(*, tenant_id: str | None, batch: int, dry_run: bool, run_at: dat
                     found.rows += (await conn.execute(count)).scalar_one()
                 else:
                     result = await conn.execute(
-                        sa.update(Memory).where(*where).values(deleted_at=run_at, status="deleted")
+                        sa.update(Memory)
+                        .where(*where)
+                        .values(deleted_at=run_at, status="deleted", status_changed_at=run_at)
                     )
                     found.rows += result.rowcount or 0
         logger.debug("... %s keys, %s rows, cursor %s", found.keys, found.rows, after)

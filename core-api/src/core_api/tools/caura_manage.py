@@ -74,11 +74,17 @@ _SPEC = ToolSpec(
         ),
     ),
     error_codes=(
+        "AGENT_NOT_REGISTERED",
+        "AGENT_TRUST_TOO_LOW",
+        "BAD_REQUEST",
+        "DUPLICATE_MEMORY",
+        "FLEET_SCOPE_FORBIDDEN",
         "FORBIDDEN",
         "INVALID_ARGUMENTS",
         "MISSING_AGENT_ID",
         "NOT_FOUND",
         "PERMISSION_DENIED",
+        "REQUEST_BUDGET_EXCEEDED",
         "UNAUTHORIZED",
     ),
 )

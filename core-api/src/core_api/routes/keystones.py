@@ -79,6 +79,7 @@ from core_api.errors import (
     coded_detail,
 )
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
+from core_api.services.agent_service import lookup_agent
 from core_api.services.audit_service import log_action
 from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
@@ -337,17 +338,23 @@ def _surface_storage_error(exc: httpx.HTTPStatusError) -> HTTPException:
     return HTTPException(status_code=exc.response.status_code, detail=detail)
 
 
-def _principal(fleet_id: str | None, agent_id: str | None) -> tuple[str | None, str | None]:
+async def _principal(
+    tenant_id: str, fleet_id: str | None, agent_id: str | None
+) -> tuple[str | None, str | None]:
     """The ``(fleet_id, agent_id)`` whose rules a read resolves.
 
-    The agent is canonical, and dropped when there's no ``fleet_id``:
-    agent-scope rows are keyed on the (fleet_id, agent_id) pair, so an
-    agent-only filter can't resolve them. Mirrors the MCP handler's guard so
-    both surfaces return identical results for the same input.
+    Agent-scope rows are keyed on the (fleet_id, agent_id) pair, so an agent
+    named without a fleet reads its home fleet (L-122), as MCP
+    ``caura_keystones`` does. Dropping the agent instead answered with the
+    tenant's rules alone, a 200 that did not say the filter was discarded. An
+    agent with no row has no home fleet, and reads the tenant's rules, as there.
     """
-    if not fleet_id or agent_id is None:
+    if agent_id is None:
         return fleet_id, None
-    return fleet_id, canonical_service_agent_id(agent_id)
+    agent_id = canonical_service_agent_id(agent_id)
+    if not fleet_id:
+        fleet_id = ((await lookup_agent(tenant_id, agent_id)) or {}).get("fleet_id")
+    return (fleet_id, agent_id) if fleet_id else (None, None)
 
 
 def _rule_set_hash(rows: list[dict], tenant_id: str) -> str | None:
@@ -376,7 +383,10 @@ async def list_keystones(
     response: Response,
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),
-    agent_id: str | None = Query(default=None),
+    agent_id: str | None = Query(
+        default=None,
+        description="Agent whose rules to merge in. Without fleet_id, the agent's home fleet is used.",
+    ),
     envelope: bool = Query(
         default=False,
         description=(
@@ -400,7 +410,7 @@ async def list_keystones(
     caller can tell whether a set it holds is still current.
     """
     auth.enforce_readable_tenant(tenant_id)
-    fleet_id, agent_id = _principal(fleet_id, agent_id)
+    fleet_id, agent_id = await _principal(tenant_id, fleet_id, agent_id)
     sc = get_storage_client()
     try:
         rows, truncated = await sc.list_keystones(
@@ -683,12 +693,12 @@ async def list_keystone_versions(
     ``(fleet_id, agent_id)``: the rules the keystones list would have returned
     them then. A receipt's hash names its version that way. Without ``fleet_id``
     that is the tenant-wide rules alone, as for the list, and ``agent_id``
-    without ``fleet_id`` is dropped, as there.
+    without ``fleet_id`` reads the agent's home fleet, as there (L-122).
 
     Tenant-scoped like ``/audit-log``: the history names who made each change.
     """
     auth.enforce_tenant(tenant_id)
-    fleet_id, agent_id = _principal(fleet_id, agent_id)
+    fleet_id, agent_id = await _principal(tenant_id, fleet_id, agent_id)
     try:
         return await get_storage_client().list_keystone_versions(
             tenant_id, fleet_id=fleet_id, agent_id=agent_id, limit=limit, before=before
@@ -708,7 +718,7 @@ async def get_keystone_version(
     """One keystone version, with the rules it gives ``(fleet_id, agent_id)``
     as ``items``, in the list's order. Compare two versions to diff them."""
     auth.enforce_tenant(tenant_id)
-    fleet_id, agent_id = _principal(fleet_id, agent_id)
+    fleet_id, agent_id = await _principal(tenant_id, fleet_id, agent_id)
     try:
         found = await get_storage_client().get_keystone_version(
             tenant_id, version, fleet_id=fleet_id, agent_id=agent_id

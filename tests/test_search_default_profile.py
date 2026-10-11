@@ -297,8 +297,9 @@ def test_caura_tune_signature_matches_the_knob_table():
     from common.constants import AGENT_TUNABLE_KEYS, SEARCH_KNOBS
     from core_api.mcp_server import caura_tune
 
-    # ``agent_id`` names the target and ``reset`` clears every knob; neither is one.
-    not_knobs = ("agent_id", "reset")
+    # ``agent_id`` names the target, ``reset`` clears every knob and
+    # ``reset_knobs`` clears the named ones (L-119); none of them is a knob.
+    not_knobs = ("agent_id", "reset", "reset_knobs")
     params = [p for p in inspect.signature(caura_tune).parameters if p not in not_knobs]
     assert set(params) == set(AGENT_TUNABLE_KEYS), (
         f"caura_tune exposes {sorted(set(params) ^ set(AGENT_TUNABLE_KEYS))} "

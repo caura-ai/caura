@@ -58,11 +58,14 @@ from core_api.constants import (
 from core_api.errors import (
     AUTH_ORG_SUSPENDED,
     AUTH_PLAN_LIMIT,
+    EMBEDDING_NOT_CONFIGURED,
+    EMBEDDING_NOT_CONFIGURED_MESSAGE,
     REQUEST_BUDGET_EXCEEDED,
     code_for_status,
 )
 from core_api.heartbeat.clients import record_mcp as _record_mcp_client
 from core_api.middleware.idempotency import (
+    IdempotencyGuard,
     arguments_hash,
     idempotency_for_hash,
     idempotency_key_from_metadata,
@@ -115,6 +118,7 @@ from core_api.services.organization_settings import (
     get_raw_settings,
     get_settings_for_display,
     resolve_config,
+    validate_knob_resets,
     validate_search_profile,
 )
 from core_api.services.recall_service import summarize_memories
@@ -824,8 +828,8 @@ def _refuse_default_agent_on_gateway(agent_id: str) -> str | None:
     documented as ``agent row missing from list_agents``.
 
     The shared ``CAURA_API_KEY`` (Path 2) binds no agent either. Outside
-    standalone, REST refuses a write that names none (``_missing_agent_id_error``
-    in routes/memories.py), so this refuses the default there too (L-101). Path 2
+    standalone, REST refuses a write that names none (``missing_agent_id_error``
+    in services/caller_identity.py), so this refuses the default there too (L-101). Path 2
     sets the tenant from ``X-Tenant-ID`` without the gateway flag, which is how
     it is told apart here.
 
@@ -1883,8 +1887,9 @@ async def caura_write(
                 if refuse := _check_plan_limit("create", tenant_id):
                     return _with_latency(refuse, t0)
                 # ``metadata.idempotency_key`` replays a retried write here as it
-                # does on REST POST /memories (L-103). A tool call has no request
-                # bytes of its own, so its arguments are what is hashed.
+                # does on REST POST /memories (L-103), per writing agent (L-12).
+                # A tool call has no request bytes of its own, so its arguments
+                # are what is hashed.
                 guard = await idempotency_for_hash(
                     tenant_id,
                     idempotency_key_from_metadata(metadata),
@@ -1901,6 +1906,7 @@ async def caura_write(
                         visibility=visibility,
                         write_mode=write_mode,
                     ),
+                    agent_id=agent_id,
                     source="mcp",
                 )
                 if guard is not None and (replay := guard.cached_replay) is not None:
@@ -2556,6 +2562,9 @@ async def caura_tune(
     graph_max_hops: Annotated[int | None, Field(description="0-3.")] = None,
     similarity_blend: Annotated[float | None, Field(description="0-1.")] = None,
     reset: Annotated[bool, Field(description="Clear every tuned knob.")] = False,
+    reset_knobs: Annotated[
+        list[str] | None, Field(description="Clear only these knobs; others are kept.")
+    ] = None,
 ) -> ToolReply:
     t0 = time.perf_counter()
     if err := _check_auth():
@@ -2581,12 +2590,18 @@ async def caura_tune(
         return _with_latency(_error_response("INVALID_ARGUMENTS", f"{e}"), t0)
 
     updates = profile.model_dump(exclude_none=True)
+    if reset_knobs:
+        # L-119 — the same refusals as REST PATCH /agents/{id}/tune?reset_knobs=.
+        try:
+            validate_knob_resets(reset_knobs, updates, reset_all=reset)
+        except ValueError as e:
+            return _with_latency(_error_response("INVALID_ARGUMENTS", str(e)), t0)
     if reset and updates:
         message = "reset clears every knob; set knobs in a separate call."
         return _with_latency(_error_response("INVALID_ARGUMENTS", message), t0)
     # No knobs and no reset is a read, which REST's GET /agents/{id}/tune serves
     # without write scope and without creating the agent row (L-104).
-    is_read = not updates and not reset
+    is_read = not updates and not reset and not reset_knobs
     if not is_read and (err := _check_write_scope()):
         return err
     # WRITE → home tenant only. ``resolve_write_agent`` scopes the lookup or
@@ -2621,17 +2636,20 @@ async def caura_tune(
                 resource_id=agent.get("id"),
                 detail={"agent_id": agent_id, "reset": True, "via": "mcp", **_audit_actor()},
             )
-        if updates:
+        if updates or reset_knobs:
+            for knob in reset_knobs or ():
+                current.pop(knob, None)
             current.update(updates)
             current = validate_search_profile(current)
             await get_storage_client().update_search_profile(agent["agent_id"], tenant_id, current)
+            cleared = {"reset_knobs": reset_knobs} if reset_knobs else {}
             await log_action(
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 action="agent_tune",
                 resource_type="agent",
                 resource_id=agent.get("id"),
-                detail={"agent_id": agent_id, "changes": updates, "via": "mcp", **_audit_actor()},
+                detail={"agent_id": agent_id, "changes": updates, **cleared, "via": "mcp", **_audit_actor()},
             )
         return _with_latency(_dumps({"agent_id": agent_id, "search_profile": current}), t0)
     except HTTPException as e:
@@ -3382,7 +3400,7 @@ async def caura_doc(
                     return _with_latency(
                         _error_response("INVALID_ARGUMENTS", "op=search requires a non-empty 'query'."), t0
                     )
-                from common.embedding import get_embedding
+                from common.embedding import embedding_configured, get_embedding
 
                 # Same-provider query embedding — see routes/documents.py
                 # search: the query vector must come from the provider that
@@ -3401,6 +3419,13 @@ async def caura_doc(
                 # Interactive search — see documents.py: not background.
                 query_embedding = await get_embedding(query, tenant_config, background=False)
                 if query_embedding is None:
+                    # No provider at all is permanent, unlike a provider that
+                    # failed once — see routes/documents.py (L-224).
+                    if not embedding_configured(tenant_config):
+                        return _with_latency(
+                            _error_response(EMBEDDING_NOT_CONFIGURED, EMBEDDING_NOT_CONFIGURED_MESSAGE),
+                            t0,
+                        )
                     return _with_latency(
                         _error_response(
                             "UPSTREAM_ERROR",
@@ -4043,6 +4068,7 @@ async def caura_insights(
         _build_method,
         _DiscoverResult,
         _persist_findings,
+        skipped_reason_of,
         synthesize_insights,
     )
     from core_api.services.organization_settings import resolve_config
@@ -4142,6 +4168,8 @@ async def caura_insights(
             "insight_memory_ids": [mid for mid in insight_ids if mid],
             "gate_rejected": synth.get("gate_rejected", 0),
             "insights_ms": int((time.perf_counter() - t0) * 1000),
+            # L-134: same as REST — an outage is named, not left to the prose.
+            **skipped_reason_of(synth),
         }
         return _with_latency(_dumps(result), t0)
     except HTTPException as e:
@@ -4176,6 +4204,9 @@ async def caura_evolve(
     scope: Annotated[str, Field(description="agent|fleet|all.")] = "agent",
     agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     fleet_id: Annotated[str | None, Field(description="Required when scope='fleet'.")] = None,
+    idempotency_key: Annotated[
+        str | None, Field(description="A retry with the same key replays the first answer.")
+    ] = None,
 ) -> ToolReply:
     """Record a real-world outcome against the memories that influenced the
     action: adjust weights, generate preventive rules on failure. Closes the
@@ -4183,8 +4214,15 @@ async def caura_evolve(
 
     scope='agent' (default) requires trust ≥ 1 and limits adjustments to
     memories the caller wrote. scope='fleet'/'all' requires trust ≥ 2.
+
+    ``idempotency_key`` makes a retry safe (L-30, Eldad 2026-10-11). Every
+    report adjusts weights, by design: the same outcome reported after two
+    different actions is two reports. A retry after a timeout or a redelivery
+    is the same report, and without a key it adjusted them again.
     """
     t0 = time.perf_counter()
+    # Claimed after the trust gate; the handlers below release it on a failure.
+    guard: IdempotencyGuard | None = None
     if err := _check_auth():
         return err
     if err := _check_write_scope():
@@ -4265,6 +4303,24 @@ async def caura_evolve(
                 )
             if terr:
                 return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
+            # Before the quota charge, as on caura_write: a replay is not a
+            # second report and does not pay for one.
+            guard = await idempotency_for_hash(
+                tenant_id,
+                idempotency_key,
+                arguments_hash(
+                    outcome=outcome,
+                    outcome_type=outcome_type,
+                    related_ids=related_ids,
+                    scope=scope,
+                    agent_id=agent_id,
+                    fleet_id=fleet_id,
+                ),
+                agent_id=agent_id,
+                source="mcp",
+            )
+            if guard is not None and (replay := guard.cached_replay) is not None:
+                return _with_latency(replay[0]["result"], t0)
             await check_and_increment(tenant_id, "evolve")
 
             # A15: classify why no weights will move, mirroring the REST
@@ -4335,13 +4391,20 @@ async def caura_evolve(
                 weight_adjustment_skipped_reason=weight_adjustment_skipped_reason,
                 t0=t0,
             )
-        return _with_latency(_dumps(result), t0)
+        serialized = _dumps(result)
+        if guard is not None:
+            await guard.record({"result": serialized})
+        return _with_latency(serialized, t0)
     except HTTPException as e:
+        if guard is not None:
+            await guard.release()
         return _with_latency(
             _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
         )
     except Exception as e:
         logger.exception("Unhandled error in caura_evolve")
+        if guard is not None:
+            await guard.release()
         return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
 
 

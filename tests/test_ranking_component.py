@@ -8,8 +8,6 @@ provider that violates the length contract.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from common.ranking import RankCandidate, get_ranking
@@ -63,19 +61,19 @@ async def test_get_ranking_defaults_to_noop_identity():
 
 
 @pytest.mark.asyncio
-async def test_get_ranking_fake_via_tenant_config():
-    tenant = SimpleNamespace(rank_provider="fake")
+async def test_get_ranking_fake_via_rank_provider(monkeypatch):
+    monkeypatch.setenv("RANK_PROVIDER", "fake")
     cands = [_cand("a", "nope", 0.5), _cand("b", "alpha", 0.5)]
-    scores = await get_ranking("alpha", cands, tenant)
+    scores = await get_ranking("alpha", cands)
     assert scores is not None
     assert scores[1] > scores[0]
 
 
 @pytest.mark.asyncio
-async def test_get_ranking_unknown_provider_degrades_to_none():
-    tenant = SimpleNamespace(rank_provider="does-not-exist")
+async def test_get_ranking_unknown_provider_degrades_to_none(monkeypatch):
+    monkeypatch.setenv("RANK_PROVIDER", "does-not-exist")
     cands = [_cand("a", "x", 0.5)]
-    assert await get_ranking("q", cands, tenant) is None
+    assert await get_ranking("q", cands) is None
 
 
 @pytest.mark.asyncio
@@ -91,7 +89,7 @@ async def test_get_ranking_length_contract_violation_degrades(monkeypatch):
         "common.ranking._service.get_rank_provider", lambda name, tc=None: BadRanker()
     )
     cands = [_cand("a", "x", 0.5), _cand("b", "y", 0.5)]
-    assert await get_ranking("q", cands, SimpleNamespace(rank_provider="bad")) is None
+    assert await get_ranking("q", cands) is None
 
 
 @pytest.mark.asyncio
@@ -119,8 +117,6 @@ async def test_local_provider_missing_dependency_is_permanent(monkeypatch, caplo
     )
     monkeypatch.setattr("common.ranking._service._permanent_logged", set())
     with caplog.at_level("ERROR"):
-        out = await get_ranking(
-            "q", [_cand("a", "x", 0.5)], SimpleNamespace(rank_provider="local")
-        )
+        out = await get_ranking("q", [_cand("a", "x", 0.5)])
     assert out is None
     assert any("not retrying" in rec.getMessage() for rec in caplog.records)

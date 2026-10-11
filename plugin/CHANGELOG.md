@@ -4,6 +4,29 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.24.6](https://github.com/caura-ai/caura/compare/plugin-v2.24.5...plugin-v2.24.6) (2026-10-11)
+
+
+### Bug Fixes
+
+* idempotency keys replay what they promise (B31) ([#2031](https://github.com/caura-ai/caura/issues/2031)) ([0d2a7a1](https://github.com/caura-ai/caura/commit/0d2a7a17e0506072796d82b4d91403bbf605b91f))
+
+## [2.24.5](https://github.com/caura-ai/caura/compare/plugin-v2.24.4...plugin-v2.24.5) (2026-10-11)
+
+
+### Bug Fixes
+
+* B26 REST writes answer as their MCP twins ([#2024](https://github.com/caura-ai/caura/issues/2024)) ([750cc4d](https://github.com/caura-ai/caura/commit/750cc4d3111d6a6d49246749d53215693c85103e))
+* MCP manifests list the codes tools pass through (L-138) ([#2028](https://github.com/caura-ai/caura/issues/2028)) ([85e21a5](https://github.com/caura-ai/caura/commit/85e21a5820204235cc450c1f0f2aeea601f216d6))
+
+## [2.24.4](https://github.com/caura-ai/caura/compare/plugin-v2.24.3...plugin-v2.24.4) (2026-10-09)
+
+
+### Bug Fixes
+
+* B41 recheck defects (L-229, L-224, L-223) ([#2017](https://github.com/caura-ai/caura/issues/2017)) ([0779ad3](https://github.com/caura-ai/caura/commit/0779ad30a2f58beed1af7fe8b013646bb936176e))
+* **plugin:** plugin batch (B36, L-163, L-199) ([#2018](https://github.com/caura-ai/caura/issues/2018)) ([07e8b0d](https://github.com/caura-ai/caura/commit/07e8b0deabcbaf4ac943993c36a02133e1f40750))
+
 ## [2.24.3](https://github.com/caura-ai/caura/compare/plugin-v2.24.2...plugin-v2.24.3) (2026-10-08)
 
 

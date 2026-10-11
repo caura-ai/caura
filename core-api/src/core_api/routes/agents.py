@@ -1,3 +1,5 @@
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core_api import openapi_responses as _oar
@@ -6,7 +8,7 @@ from core_api.clients.storage_client import get_storage_client
 from core_api.schemas import AgentFleetUpdate, AgentOut, AgentTrustUpdate, SearchProfileUpdate
 from core_api.services.agent_service import enforce_broker_agent_ownership, lookup_agent, update_trust_level
 from core_api.services.audit_service import log_action
-from core_api.services.organization_settings import validate_search_profile
+from core_api.services.organization_settings import validate_knob_resets, validate_search_profile
 
 router = APIRouter(tags=["Admin"])
 
@@ -155,9 +157,16 @@ async def patch_agent_tune(
     body: SearchProfileUpdate,
     tenant_id: str = Query(...),
     reset: bool = Query(default=False),
+    # ``Annotated`` so the function's own default is a real ``None``: tests call
+    # this handler directly, where ``= Query(None)`` would hand them the Query.
+    reset_knobs: Annotated[
+        list[str] | None,
+        Query(description="Knobs to clear, keeping the rest; a null in the body means 'not set'."),
+    ] = None,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Update an agent's search profile (per-agent retrieval tuning). Pass ?reset=true to clear.
+    """Update an agent's search profile (per-agent retrieval tuning). Pass ?reset=true to clear
+    every knob, or ?reset_knobs=top_k (repeatable) to clear just those (L-119).
 
     Auth: any write-capable credential for the tenant, agent-scoped included —
     self-tune is the point of the route. The two gates answer different
@@ -186,6 +195,12 @@ async def patch_agent_tune(
     # install. Not degraded either: the agent is the resource this URL names.
     if auth.is_install_credential:
         await enforce_broker_agent_ownership(tenant_id, agent_id, auth.install_uuid)
+    updates = body.model_dump(exclude_none=True)
+    if reset_knobs:
+        try:
+            validate_knob_resets(reset_knobs, updates, reset_all=reset)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     sc = get_storage_client()
     # ``read=False``: this row is not just inspected, it is MERGED INTO below —
     # ``current`` starts as the stored profile and only the supplied fields are
@@ -225,20 +240,23 @@ async def patch_agent_tune(
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
         return AgentOut.model_validate(refreshed)
 
-    # Merge: only set non-None fields, preserve existing profile values
+    # Merge: drop the knobs named in reset_knobs, set the non-None fields, and
+    # keep every other stored value.
     current = agent.get("search_profile") or {}
-    updates = body.model_dump(exclude_none=True)
-    if updates:
+    if updates or reset_knobs:
+        for knob in reset_knobs or ():
+            current.pop(knob, None)
         current.update(updates)
         current = validate_search_profile(current)
         await sc.update_search_profile(agent["agent_id"], tenant_id, current)
+        cleared = {"reset_knobs": reset_knobs} if reset_knobs else {}
         await log_action(
             tenant_id=tenant_id,
             agent_id=auth.agent_id,
             action="agent_tune",
             resource_type="agent",
             resource_id=agent.get("id"),
-            detail={"agent_id": agent["agent_id"], "changes": updates, **auth.audit_actor()},
+            detail={"agent_id": agent["agent_id"], "changes": updates, **cleared, **auth.audit_actor()},
         )
         # Re-fetch to get the updated agent with full fields. ``read=False``
         # because this is a read-after-write: from a replica it can return the
