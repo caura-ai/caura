@@ -3,15 +3,24 @@
     "description": "Structured-document CRUD in named collections. write upserts by collection+doc_id \u2014 include data['summary'] (1-3 dense sentences, intent-focused) to make the doc semantically searchable; omit it to store without indexing. Every write also mints a memory carrying the doc's data \u2014 so the body is caura_recall-able with or without a summary \u2014 and delete un-mints it; skills and _-prefixed collections are exempt. query filters by where dict; list_collections enumerates every collection this tenant has (with counts); search runs semantic retrieval over data['summary'] vectors \u2014 pass collection to scope to one (narrow strategy), or omit collection to span every collection in the tenant (broad strategy). Use for structured records (customers, config). For memories use caura_write.",
     "error_codes": [
       "AGENT_NOT_APPROVED",
+      "AGENT_NOT_REGISTERED",
+      "AGENT_TRUST_TOO_LOW",
+      "BAD_REQUEST",
+      "CONFLICT",
+      "DUPLICATE_MEMORY",
       "EMBEDDING_NOT_CONFIGURED",
+      "FLEET_SCOPE_FORBIDDEN",
       "FORBIDDEN",
       "INTERNAL_ERROR",
       "INVALID_ARGUMENTS",
       "MISSING_AGENT_ID",
       "NOT_FOUND",
       "PLAN_LIMIT_READ_ONLY",
+      "REQUEST_BUDGET_EXCEEDED",
       "UNAUTHORIZED",
-      "UPSTREAM_ERROR"
+      "UNAVAILABLE",
+      "UPSTREAM_ERROR",
+      "UPSTREAM_TIMEOUT"
     ],
     "impl_status": "live",
     "name": "caura_doc",
@@ -176,6 +185,7 @@
       "INTERNAL_ERROR",
       "INVALID_ARGUMENTS",
       "NOT_FOUND",
+      "REQUEST_BUDGET_EXCEEDED",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",
@@ -195,12 +205,18 @@
   {
     "description": "Report what happened after acting on memories. related_ids = the memory UUIDs that influenced the action (use IDs from your most recent caura_recall). scope: agent (default, trust \u2265 1)|fleet|all (trust \u2265 2; fleet_id required when scope='fleet'). Weight adjustments and rule generation are scoped \u2014 agents can only evolve memories they own (scope=agent), their fleet (scope=fleet), or any (scope=all).",
     "error_codes": [
+      "CONFLICT",
+      "DUPLICATE_MEMORY",
+      "FLEET_SCOPE_FORBIDDEN",
       "FORBIDDEN",
       "INTERNAL_ERROR",
       "INVALID_ARGUMENTS",
       "MISSING_AGENT_ID",
       "PLAN_LIMIT_READ_ONLY",
-      "UNAUTHORIZED"
+      "REQUEST_BUDGET_EXCEEDED",
+      "UNAUTHORIZED",
+      "UNAVAILABLE",
+      "UPSTREAM_TIMEOUT"
     ],
     "impl_status": "live",
     "name": "caura_evolve",
@@ -253,12 +269,18 @@
   {
     "description": "Reflect over your memory store. scope: agent (default, trust \u2265 1)|fleet|all (trust \u2265 2; divergence requires fleet/all). Findings are saved as insight-type memories for future runs to build on.",
     "error_codes": [
+      "CONFLICT",
+      "DUPLICATE_MEMORY",
+      "FLEET_SCOPE_FORBIDDEN",
       "FORBIDDEN",
       "INTERNAL_ERROR",
       "INVALID_ARGUMENTS",
       "MISSING_AGENT_ID",
       "PLAN_LIMIT_READ_ONLY",
-      "UNAUTHORIZED"
+      "REQUEST_BUDGET_EXCEEDED",
+      "UNAUTHORIZED",
+      "UNAVAILABLE",
+      "UPSTREAM_TIMEOUT"
     ],
     "impl_status": "live",
     "name": "caura_insights",
@@ -301,6 +323,7 @@
       "FORBIDDEN",
       "INTERNAL_ERROR",
       "MISSING_AGENT_ID",
+      "REQUEST_BUDGET_EXCEEDED",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",
@@ -335,6 +358,7 @@
       "MISSING_AGENT_ID",
       "NOT_FOUND",
       "PLAN_LIMIT_READ_ONLY",
+      "REQUEST_BUDGET_EXCEEDED",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",
@@ -441,6 +465,7 @@
       "INTERNAL_ERROR",
       "INVALID_ARGUMENTS",
       "MISSING_AGENT_ID",
+      "REQUEST_BUDGET_EXCEEDED",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",
@@ -559,11 +584,17 @@
   {
     "description": "Per-memory lifecycle. bulk_delete and lineage are not in the plugin; lineage returns the supersession chain. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete and bulk_delete are soft (prefer transition to outdated/archived).",
     "error_codes": [
+      "AGENT_NOT_REGISTERED",
+      "AGENT_TRUST_TOO_LOW",
+      "BAD_REQUEST",
+      "DUPLICATE_MEMORY",
+      "FLEET_SCOPE_FORBIDDEN",
       "FORBIDDEN",
       "INVALID_ARGUMENTS",
       "MISSING_AGENT_ID",
       "NOT_FOUND",
       "PERMISSION_DENIED",
+      "REQUEST_BUDGET_EXCEEDED",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",
@@ -703,10 +734,17 @@
   {
     "description": "Find memories by meaning (hybrid semantic+keyword). Set include_brief=true for an LLM summary paragraph. For non-semantic browse use caura_list; for read-by-id use caura_manage op=read.",
     "error_codes": [
+      "BAD_REQUEST",
+      "FLEET_SCOPE_FORBIDDEN",
       "FORBIDDEN",
+      "INTERNAL_ERROR",
       "INVALID_ARGUMENTS",
       "MISSING_AGENT_ID",
-      "UNAUTHORIZED"
+      "RATE_LIMITED",
+      "REQUEST_BUDGET_EXCEEDED",
+      "UNAUTHORIZED",
+      "UNAVAILABLE",
+      "UPSTREAM_TIMEOUT"
     ],
     "impl_status": "live",
     "name": "caura_recall",
@@ -799,6 +837,7 @@
       "INTERNAL_ERROR",
       "INVALID_ARGUMENTS",
       "MISSING_AGENT_ID",
+      "REQUEST_BUDGET_EXCEEDED",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",
@@ -858,6 +897,7 @@
       "INVALID_ARGUMENTS",
       "MISSING_AGENT_ID",
       "NOT_FOUND",
+      "REQUEST_BUDGET_EXCEEDED",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",
@@ -956,13 +996,21 @@
     "description": "Store NEW memories. Provide exactly one of {content, items} (batch \u2264100). System auto-classifies type, importance, title, dates. visibility: scope_team (default) / scope_org / scope_agent. Prefer team/org for sharing. If the response has metadata.embedding_pending=true the memory is saved but not yet semantically searchable (~15-20s); it is already findable by keyword and in caura_list, so do not re-write it. Pass write_mode='strong' to embed inline when you must recall it now. Unknown keys are rejected, not ignored: put your own under metadata.",
     "error_codes": [
       "AGENT_NOT_APPROVED",
+      "BAD_REQUEST",
       "BATCH_TOO_LARGE",
+      "CONFLICT",
+      "DUPLICATE_MEMORY",
+      "FLEET_SCOPE_FORBIDDEN",
       "FORBIDDEN",
+      "INTERNAL_ERROR",
       "INVALID_ARGUMENTS",
       "INVALID_BATCH_ITEM",
       "MISSING_AGENT_ID",
       "PLAN_LIMIT_READ_ONLY",
-      "UNAUTHORIZED"
+      "REQUEST_BUDGET_EXCEEDED",
+      "UNAUTHORIZED",
+      "UNAVAILABLE",
+      "UPSTREAM_TIMEOUT"
     ],
     "impl_status": "live",
     "name": "caura_write",

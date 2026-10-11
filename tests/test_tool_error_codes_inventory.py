@@ -23,6 +23,14 @@ by five handlers, so a hoisted set would make the invariant
 ``emitted == declared | ENVELOPE`` — which cannot see a spurious envelope code
 in a spec, and blind spots in this scan are the one thing this file exists to
 avoid.
+
+WHAT THE HANDLER DOES NOT SAY (L-138). The scan used to stop at the handler's
+own source, and two paths ran past it. ``call_tool`` answers
+``REQUEST_BUDGET_EXCEEDED`` for any tool that overruns the request budget, and
+a handler's ``except HTTPException`` answers whatever the service layer raised
+under it — ``DUPLICATE_MEMORY`` on caura_write, ``AGENT_TRUST_TOO_LOW`` on
+caura_manage. Both now count (``tool_codes``); the scan's own module docstring
+says how far the service walk goes and where it stops.
 """
 
 from __future__ import annotations
@@ -30,7 +38,15 @@ from __future__ import annotations
 import pytest
 
 import core_api.tools as tools
-from tests._error_codes import emitted_codes, prebaked_error_constants
+from tests._error_codes import (
+    dispatch_codes,
+    emitted_codes,
+    prebaked_error_constants,
+    reached_definitions,
+    service_codes,
+    tool_codes,
+    unresolved_raises,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -50,7 +66,7 @@ def test_every_emittable_code_is_declared() -> None:
     for spec in _specs():
         if spec.handler is None:
             continue
-        missing = sorted(emitted_codes(spec.handler.__name__) - set(spec.error_codes))
+        missing = sorted(tool_codes(spec.handler.__name__) - set(spec.error_codes))
         if missing:
             offenders.append(f"    {spec.name}: {missing}")
     assert not offenders, (
@@ -68,7 +84,7 @@ def test_every_declared_code_is_reachable() -> None:
     for spec in _specs():
         if spec.handler is None or spec.name in DECLARED_NOT_EMITTED_ALLOWLIST:
             continue
-        phantom = sorted(set(spec.error_codes) - emitted_codes(spec.handler.__name__))
+        phantom = sorted(set(spec.error_codes) - tool_codes(spec.handler.__name__))
         if phantom:
             offenders.append(f"    {spec.name}: {phantom}")
     assert not offenders, (
@@ -125,6 +141,62 @@ def test_the_scan_follows_helpers_and_dict_literals() -> None:
     )
     assert "UNAUTHORIZED" in manage, (
         "the auth preamble is not being followed — every handler calls _check_auth"
+    )
+
+
+def test_the_scan_follows_the_dispatcher() -> None:
+    """Path 5. No handler names ``REQUEST_BUDGET_EXCEEDED``: ``call_tool``
+    answers it for whichever tool overran the budget, so a scan that walks
+    handlers alone reports it for none of them (L-138)."""
+    assert "REQUEST_BUDGET_EXCEEDED" in dispatch_codes(), (
+        "call_tool's budget envelope is not being read — it passes the code "
+        "by name, as _error_response(REQUEST_BUDGET_EXCEEDED, …)"
+    )
+
+
+def test_the_scan_follows_the_service_layer() -> None:
+    """Path 6, pinned on codes the audit found a caller could receive and no
+    manifest listed (L-138), and on the hop that is easiest to lose.
+
+    caura_write's near-duplicate refusal is raised two calls below the handler
+    by a pipeline STEP, which the write reaches only by instantiating it in a
+    composition — so the walk has to follow a class into its methods. And
+    caura_manage's trust refusal is a ``coded_detail`` code, which a scan that
+    maps statuses alone would report as ``FORBIDDEN``.
+    """
+    step = (
+        "core_api.pipeline.steps.write.check_semantic_duplicate."
+        "CheckSemanticDuplicate.execute"
+    )
+    assert step in reached_definitions("caura_write"), (
+        "the service walk no longer reaches the write pipeline's steps"
+    )
+    assert "DUPLICATE_MEMORY" in service_codes("caura_write")
+    manage = service_codes("caura_manage")
+    assert "AGENT_TRUST_TOO_LOW" in manage, (
+        "coded_detail codes are not being read — enforce_update refuses "
+        "with coded_detail(AUTH_AGENT_TRUST_TOO_LOW, …)"
+    )
+    assert "NOT_FOUND" in manage, "update_memory's 404 is not being reached"
+
+
+def test_the_service_scan_names_every_raise_it_reaches() -> None:
+    """A raise the walk reaches but cannot name a code for is a code some
+    caller can receive and no manifest will list. Reported rather than
+    dropped, so this fails instead of the manifest going quietly short."""
+    offenders = []
+    for spec in _specs():
+        if spec.handler is None:
+            continue
+        if sites := unresolved_raises(spec.handler.__name__):
+            offenders.append(f"    {spec.name}: {sorted(sites)}")
+    assert not offenders, (
+        "the service walk reached HTTPExceptions whose code it cannot "
+        "resolve from the source:\n"
+        + "\n".join(offenders)
+        + "\n\nGive the raise a status and detail the scan can read (a "
+        "literal, a module constant, or coded_detail), or teach "
+        "tests/_error_codes.py the new shape."
     )
 
 

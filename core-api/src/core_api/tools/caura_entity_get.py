@@ -19,6 +19,7 @@ _SPEC = ToolSpec(
         "INTERNAL_ERROR",
         "INVALID_ARGUMENTS",
         "NOT_FOUND",
+        "REQUEST_BUDGET_EXCEEDED",
         "UNAUTHORIZED",
     ),
 )

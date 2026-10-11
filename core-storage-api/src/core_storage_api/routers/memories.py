@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re as _re
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -2322,7 +2322,7 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
         # Status + pointer update must be atomic — a partial update
         # (status advances but pointer clear is rejected) would leave
         # the row in an invalid state. Caught wet-testing 2026-05-19.
-        from sqlalchemy import or_, select
+        from sqlalchemy import case, or_, select
         from sqlalchemy import update as sql_update
 
         from common.models import Memory
@@ -2349,7 +2349,18 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                         Memory.supersedes_id.is_(None),
                     ),
                 )
-                .values(supersedes_id=None, status=status)
+                .values(
+                    supersedes_id=None,
+                    status=status,
+                    # Stamped only when the status moves (L-142). core-api
+                    # retracts by re-writing the winner's current status, and
+                    # stamping that would put a contradicted winner back in the
+                    # contradiction window with no new contradiction.
+                    status_changed_at=case(
+                        (Memory.status.is_distinct_from(status), datetime.now(UTC)),
+                        else_=Memory.status_changed_at,
+                    ),
+                )
             )
             if result.rowcount == 0:  # type: ignore[attr-defined]
                 # Three different situations reach zero rows, and answering
@@ -2434,11 +2445,19 @@ async def update_embedding(memory_id: UUID, request: Request) -> dict:
     tenant_id = body.get("tenant_id")
     if not tenant_id:
         raise HTTPException(status_code=422, detail="tenant_id is required")
+    if "metadata" in body:
+        # L-42: this route wrote ``metadata`` over the stored document
+        # wholesale, discarding every enrichment and ``_system`` key, and
+        # nothing sent it. Refused rather than ignored, so a caller learns
+        # where the merge lives.
+        raise HTTPException(
+            status_code=422,
+            detail="metadata is not accepted here; send metadata_patch to PATCH /memories/{id} to merge it",
+        )
     updated = await _svc.memory_update_embedding(
         memory_id,
         tenant_id=tenant_id,
         embedding=body["embedding"],
-        metadata=body.get("metadata"),
         # Optional: the hash of the text the caller actually embedded. Absent
         # leaves provenance NULL ("unknown"), which is honest — the service
         # deliberately does not infer it from the row, since the row may have
@@ -2446,7 +2465,7 @@ async def update_embedding(memory_id: UUID, request: Request) -> dict:
         embedded_content_hash=body.get("embedded_content_hash"),
     )
     if not updated:
-        # No row for this (id, tenant) — surface 404 rather than a silent
+        # No live row for this (id, tenant) — surface 404 rather than a silent
         # 200 (consistent with PATCH /memories/{id}); the client returns
         # None so callers don't count a no-op as a successful write.
         raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found")

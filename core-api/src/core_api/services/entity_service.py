@@ -68,10 +68,11 @@ async def upsert_entity(
             sim = row.get("similarity", 0.0)
             if sim >= ENTITY_RESOLUTION_THRESHOLD:
                 entity = row.get("entity") or row
+                # The matched entity's id, never either name (L-77).
                 logger.info(
-                    "Entity resolution: '%s' matched '%s' (sim=%.3f)",
-                    data.canonical_name,
-                    entity.get("canonical_name"),
+                    "Entity resolution: a %s name matched entity %s (sim=%.3f)",
+                    data.entity_type,
+                    entity.get("id"),
                     sim,
                 )
                 break

@@ -10,6 +10,28 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.30.5](https://github.com/caura-ai/caura/compare/backend-v3.30.4...backend-v3.30.5) (2026-10-11)
+
+
+### Bug Fixes
+
+* memory writes keep their own record straight (B37/B40) ([#2029](https://github.com/caura-ai/caura/issues/2029)) ([f43a79a](https://github.com/caura-ai/caura/commit/f43a79adf595f399d6c58a5a244a66e86b3290a6))
+
+## [3.30.4](https://github.com/caura-ai/caura/compare/backend-v3.30.3...backend-v3.30.4) (2026-10-11)
+
+
+### Bug Fixes
+
+* B26 REST reads answer as their MCP twins ([#2023](https://github.com/caura-ai/caura/issues/2023)) ([eac35f2](https://github.com/caura-ai/caura/commit/eac35f2998a49ba463cbaa0810b59199c254cc3b))
+* B26 REST writes answer as their MCP twins ([#2024](https://github.com/caura-ai/caura/issues/2024)) ([750cc4d](https://github.com/caura-ai/caura/commit/750cc4d3111d6a6d49246749d53215693c85103e))
+* MCP manifests list the codes tools pass through (L-138) ([#2028](https://github.com/caura-ai/caura/issues/2028)) ([85e21a5](https://github.com/caura-ai/caura/commit/85e21a5820204235cc450c1f0f2aeea601f216d6))
+
+
+### Dependencies
+
+* **clients:** bump @types/node from 26.6.2 to 26.6.4 in /clients/typescript in the clients-npm-minor-patch group across 1 directory ([#1848](https://github.com/caura-ai/caura/issues/1848)) ([63e0ed8](https://github.com/caura-ai/caura/commit/63e0ed82723218693730415426abb491dd3cf4a0))
+* update cryptography requirement from &gt;=50.0.1 to &gt;=50.0.2 ([#1844](https://github.com/caura-ai/caura/issues/1844)) ([cfc29e7](https://github.com/caura-ai/caura/commit/cfc29e7e8f7d352709bf6858c3fdcb2f8a1de4e3))
+
 ## [3.30.3](https://github.com/caura-ai/caura/compare/backend-v3.30.2...backend-v3.30.3) (2026-10-10)
 
 

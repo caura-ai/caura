@@ -32,7 +32,7 @@ mcp>=2.2.0,<3
 
 # Auth: password hashing, JWT, TOTP, encryption
 argon2-cffi>=25.1.0
-cryptography>=50.0.1
+cryptography>=50.0.2
 python-jose[cryptography]>=3.5.0
 pyotp>=2.10.0
 cachetools>=7.2.0
@@ -46,7 +46,7 @@ redis[hiredis]>=8.1.0,<9
 slowapi>=0.1.10,<1.0
 
 # Error tracking (optional — set SENTRY_DSN to enable)
-sentry-sdk[fastapi]>=2.69.2,<3
+sentry-sdk[fastapi]>=2.71.0,<3
 
 # Structured logging with GCP Cloud Logging severity mapping (common/structlog_config.py)
 structlog>=26.1.0,<27
