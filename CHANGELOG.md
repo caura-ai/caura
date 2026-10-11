@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.30.8](https://github.com/caura-ai/caura/compare/backend-v3.30.7...backend-v3.30.8) (2026-10-11)
+
+
+### Bug Fixes
+
+* install and operator tooling keep their contracts (B34) ([#2037](https://github.com/caura-ai/caura/issues/2037)) ([31bd7a9](https://github.com/caura-ai/caura/commit/31bd7a92f279df1e8a698f72df41d69360a1df91))
+
 ## [3.30.7](https://github.com/caura-ai/caura/compare/backend-v3.30.6...backend-v3.30.7) (2026-10-11)
 
 
