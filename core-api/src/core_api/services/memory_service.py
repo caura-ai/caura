@@ -2649,6 +2649,11 @@ async def create_memories_bulk(
     final_results = cast("list[BulkItemResult]", results)
 
     bulk_ms = round((time.perf_counter() - t0) * 1000)
+    # Value metering: where each newly created memory came from. The broker
+    # writes through here, stamping its session on every item's metadata.
+    from core_api.services.value_ledger import schedule_bulk_origins
+
+    schedule_bulk_origins(data, final_results)
     return BulkMemoryResponse(
         created=created_count,
         duplicates=dup_count,

@@ -178,3 +178,25 @@ def test_the_mcp_write_tool_does_not_offer_origin():
     params = set(inspect.signature(_SPEC.handler).parameters)
     assert "content" in params
     assert not {p for p in params if "origin" in p or "token" in p}
+
+
+def test_a_bulk_write_records_an_origin_per_created_item_a_moment_apart(scheduled):
+    sc.set_session(None, None)
+    data = SimpleNamespace(
+        tenant_id="t1",
+        agent_id="broker:abc",
+        items=[
+            SimpleNamespace(metadata={"session_id": "broker-s"}, origin=None)
+            for _ in range(3)
+        ],
+    )
+    results = [
+        SimpleNamespace(index=0, status="created", id="m0"),
+        SimpleNamespace(index=1, status="duplicate_content", id="m1"),
+        SimpleNamespace(index=2, status="created", id="m2"),
+    ]
+    value_ledger.schedule_bulk_origins(data, results)
+    rows = [c["row"] for c in scheduled]
+    assert [r["memory_id"] for r in rows] == ["m0", "m2"]
+    assert all(r["session_id"] == "broker-s" for r in rows)
+    assert rows[0]["written_at"] < rows[1]["written_at"]

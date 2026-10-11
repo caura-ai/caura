@@ -14,7 +14,7 @@ A request with no session records nothing: "per session" needs a session.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from core_api.clients.storage_client import get_storage_client
@@ -75,6 +75,35 @@ def schedule_origin(memory: Any, *, origin: dict | None = None) -> None:
         track_task(_record_origin(str(tenant_id), row))
     except Exception:
         logger.warning("value metering: origin skipped", exc_info=True)
+
+
+def schedule_bulk_origins(data: Any, results: list[Any]) -> None:
+    """After a bulk write: an origin for each item this attempt created.
+
+    One write per created item, in order, so each item's origin runs from the
+    previous item's — a batch written at once is one stretch of work, and its
+    first item carries it.
+    """
+    try:
+        now = datetime.now(UTC)
+        for step, r in enumerate(results):
+            if _field(r, "status") != "created" or not _field(r, "id"):
+                continue
+            item = data.items[_field(r, "index")]
+            schedule_origin(
+                {
+                    "id": _field(r, "id"),
+                    "tenant_id": data.tenant_id,
+                    "agent_id": data.agent_id,
+                    "metadata": item.metadata,
+                    # A microsecond apart, so each item measures from the one
+                    # before it: equal times would give every item the whole stretch.
+                    "created_at": now + timedelta(microseconds=step),
+                },
+                origin=item.origin.model_dump() if getattr(item, "origin", None) else None,
+            )
+    except Exception:
+        logger.warning("value metering: bulk origins skipped", exc_info=True)
 
 
 async def _record_reuse(tenant_id: str, body: dict) -> None:
