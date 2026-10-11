@@ -623,6 +623,13 @@ class MCPAuthMiddleware:
             if _tenant_id_var.get(_UNAUTH) not in (_UNAUTH, _NO_AUTH):
                 _record_mcp_client()
 
+            # The agent session (value metering): read Mcp-Session-Id, or issue
+            # one on this response. See ``core_api.session_context``.
+            from core_api.session_context import run_with_mcp_session
+
+            await run_with_mcp_session(scope, receive, send, self.app)
+            return
+
         await self.app(scope, receive, send)
 
 
@@ -1181,6 +1188,11 @@ class _InstrumentedMCPServer(MCPServer):
                     status=status,
                     duration_ms=(time.perf_counter() - t0) * 1000.0,
                 )
+                # Value metering: this call belongs to the MCP session.
+                if _get_tenant() not in _SENTINEL_TENANTS:
+                    from core_api.services.session_tracker import touch_current
+
+                    touch_current(_get_tenant(), _get_agent_id())
 
 
 # ── Why this transport carries its own deadline (oss-0924-h-02) ──

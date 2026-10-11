@@ -105,6 +105,10 @@ def schedule_recall_value(
             return
         measures, parents = summarize(results, caller_agent_id)
         track_task(_record(tenant_id, source or "search", measures, parents))
+        # Value metering: first recalls by this session of other sessions' memories.
+        from core_api.services.value_ledger import schedule_reuse
+
+        schedule_reuse(results, tenant_id=tenant_id, reader_agent_id=caller_agent_id)
     except Exception:
         logger.warning("recall savings skipped due to error", exc_info=True)
 

@@ -329,3 +329,7 @@ class RequestObservationMiddleware:
                     status="ok" if status_code < 400 else "error",
                     duration_ms=duration_ms,
                 )
+                # Value metering: a call in the caller's session, if it named one.
+                from core_api.services.session_tracker import touch_current
+
+                touch_current(tenant_id)

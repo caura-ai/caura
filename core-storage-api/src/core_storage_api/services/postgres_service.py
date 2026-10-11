@@ -127,6 +127,7 @@ from common.models.organization_settings import OrganizationSettings, Organizati
 from common.models.recall_log import RecallCandidate, RecallEvent
 from common.models.tenant_usage_counter import TenantUsageCounter
 from common.models.usage_minutes import LlmUsageMinute, UsageFlushBatch, ValueUsageMinute
+from common.models.value_metering import AgentSession, MemoryOrigin, MemoryReuse
 from common.organization_settings_merge import diff_settings, merge_settings_update
 from common.settings_version import SETTINGS_VERSION_KEY, version_of
 from core_storage_api.observability import PhaseTimer, db_measure
@@ -1390,6 +1391,21 @@ _ADMIN_LIST_SORTABLE = frozenset(
 # ``memories`` / ``entities``. ``relations`` and ``fleet_commands`` are
 # listed explicitly (ahead of their parents) so their per-table counts are
 # reported rather than hidden inside a cascade.
+#: Every column ``value_record_origin`` writes, named so no caller key decides one.
+_MEMORY_ORIGIN_COLUMNS: tuple[str, ...] = (
+    "memory_id",
+    "tenant_id",
+    "session_id",
+    "agent_id",
+    "written_at",
+    "origin_seconds",
+    "origin_calls",
+    "origin_tokens_in",
+    "origin_tokens_out",
+    "origin_turns",
+    "origin_source",
+)
+
 _PURGE_TENANT_TABLES: tuple[str, ...] = (
     "relations",
     "fleet_commands",
@@ -1404,6 +1420,10 @@ _PURGE_TENANT_TABLES: tuple[str, ...] = (
     # prevent. Added by migration 036, after H-09 swept for exactly this.
     "memory_conflicts",
     "memory_derivations",
+    # Value metering (migration 067): their own tenant_id, so listed ahead of
+    # ``memories`` rather than left to its cascade, and reported by the purge.
+    "memory_origins",
+    "memory_reuse",
     "memories",
     "entities",
     "agents",
@@ -1450,6 +1470,9 @@ _PURGE_TENANT_TABLES: tuple[str, ...] = (
     # its agents, so they go with it.
     "llm_usage_minutes",
     "value_usage_minutes",
+    # Value metering (migration 067); ``memory_origins`` and ``memory_reuse``
+    # are listed ahead of ``memories`` above.
+    "agent_sessions",
 )
 
 # Tenant-scoped and deliberately NOT purged, recorded here so their absence
@@ -6747,6 +6770,293 @@ class PostgresService:
                 .group_by(*metric_dims)
             )
             return {"model_calls": rows(llm), "savings": rows(value)}
+
+    # ── Value metering (migration 067) ──────────────────────────────────────
+
+    async def value_touch_sessions(self, tenant_id: str, rows: list[dict]) -> int:
+        """Record agent sessions seen in one tenant: first and last seen, calls added.
+
+        Additive and order-free, so several core-api instances touching one
+        session all land: the earliest first sighting and the latest last one
+        win, calls add, and an agent or source already known is kept.
+        """
+        if not rows:
+            return 0
+        async with get_session() as session:
+            for r in rows:
+                stmt = pg_insert(AgentSession).values(
+                    tenant_id=tenant_id,
+                    session_id=r["session_id"],
+                    agent_id=r.get("agent_id") or "",
+                    source=r.get("source") or "",
+                    first_seen=r["first_seen"],
+                    last_seen=r["last_seen"],
+                    calls=r.get("calls", 0),
+                )
+                await session.execute(
+                    stmt.on_conflict_do_update(
+                        index_elements=[AgentSession.tenant_id, AgentSession.session_id],
+                        set_={
+                            "first_seen": func.least(AgentSession.first_seen, stmt.excluded.first_seen),
+                            "last_seen": func.greatest(AgentSession.last_seen, stmt.excluded.last_seen),
+                            "calls": AgentSession.calls + stmt.excluded.calls,
+                            "agent_id": func.coalesce(
+                                func.nullif(AgentSession.agent_id, ""), stmt.excluded.agent_id
+                            ),
+                            "source": func.coalesce(
+                                func.nullif(AgentSession.source, ""), stmt.excluded.source
+                            ),
+                        },
+                    )
+                )
+        return len(rows)
+
+    async def value_record_origin(self, tenant_id: str, row: dict) -> dict | None:
+        """Record the work behind one memory, once. Returns what was stored, or None if it already was.
+
+        ``origin_seconds`` runs from the later of the session's first sighting
+        and its previous recorded write to this one; with neither known it is
+        NULL rather than a guess. Reported tokens and turns are stored as sent.
+        """
+        written_at = row["written_at"]
+        async with get_session() as session:
+            # The session is known from this write at the latest.
+            await session.execute(
+                pg_insert(AgentSession)
+                .values(
+                    tenant_id=tenant_id,
+                    session_id=row["session_id"],
+                    agent_id=row.get("agent_id") or "",
+                    source=row.get("session_source") or "",
+                    first_seen=written_at,
+                    last_seen=written_at,
+                    calls=0,
+                )
+                .on_conflict_do_nothing(index_elements=[AgentSession.tenant_id, AgentSession.session_id])
+            )
+            started = await session.scalar(
+                select(AgentSession.first_seen).where(
+                    AgentSession.tenant_id == tenant_id, AgentSession.session_id == row["session_id"]
+                )
+            )
+            previous = await session.scalar(
+                select(func.max(MemoryOrigin.written_at)).where(
+                    MemoryOrigin.tenant_id == tenant_id,
+                    MemoryOrigin.session_id == row["session_id"],
+                    MemoryOrigin.written_at < written_at,
+                )
+            )
+            since = max(t for t in (started, previous) if t is not None) if (started or previous) else None
+            seconds = max(0, int((written_at - since).total_seconds())) if since is not None else None
+            values = {
+                "memory_id": row["memory_id"],
+                "tenant_id": tenant_id,
+                "session_id": row["session_id"],
+                "agent_id": row.get("agent_id") or "",
+                "written_at": written_at,
+                "origin_seconds": seconds,
+                "origin_calls": row.get("origin_calls"),
+                "origin_tokens_in": row.get("origin_tokens_in"),
+                "origin_tokens_out": row.get("origin_tokens_out"),
+                "origin_turns": row.get("origin_turns"),
+                "origin_source": row.get("origin_source"),
+            }
+            inserted = await session.scalar(
+                pg_insert(MemoryOrigin)
+                .values(**{k: values[k] for k in _MEMORY_ORIGIN_COLUMNS})
+                .on_conflict_do_nothing(index_elements=[MemoryOrigin.memory_id])
+                .returning(MemoryOrigin.memory_id)
+            )
+        return values if inserted is not None else None
+
+    async def value_record_reuse(
+        self,
+        tenant_id: str,
+        *,
+        session_id: str,
+        reader_agent_id: str,
+        memory_ids: list[str],
+        recalled_at: datetime,
+    ) -> int:
+        """Record the first time this session recalls each memory written in another session.
+
+        The writer's session is the memory's recorded origin, else the
+        broker's ``metadata.session_id``; a memory written by this same
+        session is not a reuse. Insert-or-ignore on (tenant, session, memory)
+        is the "once per session" rule. Returns the reuses newly recorded.
+        """
+        ids = [UUID(m) for m in dict.fromkeys(memory_ids)]
+        if not ids:
+            return 0
+        async with get_session() as session:
+            found = await session.execute(
+                select(
+                    Memory.id,
+                    Memory.agent_id,
+                    func.coalesce(MemoryOrigin.session_id, Memory.metadata_["session_id"].astext, "").label(
+                        "writer_session"
+                    ),
+                )
+                .outerjoin(MemoryOrigin, MemoryOrigin.memory_id == Memory.id)
+                .where(Memory.tenant_id == tenant_id, Memory.id.in_(ids))
+            )
+            rows = [
+                {
+                    "tenant_id": tenant_id,
+                    "session_id": session_id,
+                    "memory_id": mid,
+                    "reader_agent_id": reader_agent_id or "",
+                    "writer_agent_id": agent or "",
+                    "writer_session_id": writer_session or "",
+                    "first_recalled_at": recalled_at,
+                }
+                for mid, agent, writer_session in found.all()
+                if writer_session != session_id
+            ]
+            if not rows:
+                return 0
+            inserted = await session.execute(
+                pg_insert(MemoryReuse)
+                .values(rows)
+                .on_conflict_do_nothing(
+                    index_elements=[MemoryReuse.tenant_id, MemoryReuse.session_id, MemoryReuse.memory_id]
+                )
+                .returning(MemoryReuse.memory_id)
+            )
+            return len(inserted.all())
+
+    async def value_query(self, tenant_id: str, *, start: datetime, end: datetime, top: int = 8) -> dict:
+        """One tenant's value figures in ``[start, end)``."""
+        in_window = (MemoryReuse.first_recalled_at >= start, MemoryReuse.first_recalled_at < end)
+        reuse = (
+            select(
+                MemoryReuse.session_id,
+                MemoryReuse.memory_id,
+                MemoryReuse.reader_agent_id,
+                MemoryReuse.writer_agent_id,
+                MemoryReuse.first_recalled_at,
+                MemoryOrigin.origin_seconds,
+                MemoryOrigin.origin_calls,
+                MemoryOrigin.origin_tokens_in,
+                MemoryOrigin.origin_tokens_out,
+                MemoryOrigin.origin_turns,
+            )
+            .outerjoin(MemoryOrigin, MemoryOrigin.memory_id == MemoryReuse.memory_id)
+            .where(MemoryReuse.tenant_id == tenant_id, *in_window)
+            .subquery()
+        )
+        cross = (
+            (reuse.c.reader_agent_id != "")
+            & (reuse.c.writer_agent_id != "")
+            & (reuse.c.reader_agent_id != reuse.c.writer_agent_id)
+        )
+        async with get_read_session() as session:
+            totals = (
+                (
+                    await session.execute(
+                        select(
+                            func.count().label("reuses"),
+                            func.count(func.distinct(reuse.c.session_id)).label("sessions_helped"),
+                            func.count(func.distinct(reuse.c.memory_id)).label("memories_reused"),
+                            func.coalesce(func.sum(reuse.c.origin_seconds), 0).label("origin_seconds"),
+                            func.count(reuse.c.origin_seconds).label("reuses_with_time"),
+                            func.coalesce(func.sum(reuse.c.origin_calls), 0).label("origin_calls"),
+                            func.coalesce(func.sum(reuse.c.origin_tokens_in), 0).label("origin_tokens_in"),
+                            func.coalesce(func.sum(reuse.c.origin_tokens_out), 0).label("origin_tokens_out"),
+                            func.count(reuse.c.origin_tokens_in).label("reuses_with_tokens"),
+                            func.coalesce(func.sum(reuse.c.origin_turns), 0).label("origin_turns"),
+                            func.count().filter(cross).label("cross_agent_reuses"),
+                        )
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            sessions = await session.scalar(
+                select(func.count())
+                .select_from(AgentSession)
+                .where(
+                    AgentSession.tenant_id == tenant_id,
+                    AgentSession.last_seen >= start,
+                    AgentSession.first_seen < end,
+                )
+            )
+            day = func.date_trunc("day", reuse.c.first_recalled_at)
+            daily = (
+                (
+                    await session.execute(
+                        select(
+                            day.label("day"),
+                            func.count().label("reuses"),
+                            func.coalesce(func.sum(reuse.c.origin_seconds), 0).label("origin_seconds"),
+                        )
+                        .group_by(day)
+                        .order_by(day)
+                    )
+                )
+                .mappings()
+                .all()
+            )
+
+            async def leaders(column: Any) -> list[dict]:
+                rows = (
+                    (
+                        await session.execute(
+                            select(
+                                column.label("agent_id"),
+                                func.count().label("reuses"),
+                                func.coalesce(func.sum(reuse.c.origin_seconds), 0).label("origin_seconds"),
+                            )
+                            .where(column != "", cross)
+                            .group_by(column)
+                            .order_by(func.count().desc())
+                            .limit(top)
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                return [
+                    {k: int(v) if isinstance(v, int | Decimal) else v for k, v in r.items()} for r in rows
+                ]
+
+            teachers = await leaders(reuse.c.writer_agent_id)
+            learners = await leaders(reuse.c.reader_agent_id)
+            conflicts = await session.scalar(
+                select(func.count())
+                .select_from(MemoryConflict)
+                .where(
+                    MemoryConflict.tenant_id == tenant_id,
+                    MemoryConflict.created_at >= start,
+                    MemoryConflict.created_at < end,
+                )
+            )
+            changed = func.coalesce(Memory.status_changed_at, Memory.created_at)
+            superseded = await session.scalar(
+                select(func.count())
+                .select_from(Memory)
+                .where(
+                    Memory.tenant_id == tenant_id,
+                    Memory.status == "outdated",
+                    changed >= start,
+                    changed < end,
+                )
+            )
+        return {
+            "totals": {k: int(v) for k, v in totals.items()},
+            "sessions": int(sessions or 0),
+            "daily": [
+                {
+                    "day": r["day"].date().isoformat(),
+                    "reuses": int(r["reuses"]),
+                    "origin_seconds": int(r["origin_seconds"]),
+                }
+                for r in daily
+            ],
+            "teachers": teachers,
+            "learners": learners,
+            "prevented": {"conflicts_caught": int(conflicts or 0), "outdated_kept_out": int(superseded or 0)},
+        }
 
     async def tenant_usage_query(
         self,

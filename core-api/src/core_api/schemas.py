@@ -149,6 +149,22 @@ class EntityLinkIn(BaseModel):
     role: str
 
 
+class OriginReport(BaseModel):
+    """The work behind a memory, as something beside the agent observed it (value metering).
+
+    Sent by a hook, the OpenClaw plugin or an SDK that read the provider's own
+    usage since the session's previous write — never a model's estimate of
+    itself, which is why the MCP ``caura_write`` tool does not offer it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tokens_in: int | None = Field(default=None, ge=0, le=100_000_000)
+    tokens_out: int | None = Field(default=None, ge=0, le=100_000_000)
+    turns: int | None = Field(default=None, ge=0, le=100_000)
+    source: Literal["hook", "plugin", "sdk"]
+
+
 class MemoryCreate(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
@@ -168,6 +184,13 @@ class MemoryCreate(TenantScopedBody):
     source_uri: str | None = None
     run_id: str | None = None
     metadata: dict | None = Field(default=None, description=CALLER_METADATA_DESCRIPTION)
+    origin: OriginReport | None = Field(
+        default=None,
+        description=(
+            "Value metering: tokens and turns the session spent since its previous write, as a hook, "
+            "plugin or SDK read them from the provider. Leave unset rather than estimate."
+        ),
+    )
     entity_links: list[EntityLinkIn] = []
     expires_at: datetime | None = Field(default=None, description=EXPIRES_AT_DESCRIPTION)
     # RDF triple

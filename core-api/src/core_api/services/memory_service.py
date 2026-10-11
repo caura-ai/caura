@@ -903,7 +903,12 @@ async def create_memory(data: MemoryCreate, *, is_inferred: bool = False) -> Mem
     # needs its own call and its own route-level test.
     if data.metadata:
         data.metadata = sanitize_caller_metadata(data.metadata)
-    return await _run_write_pipeline(data, is_inferred=is_inferred)
+    out = await _run_write_pipeline(data, is_inferred=is_inferred)
+    # Value metering: where this memory came from (its session's work), once.
+    from core_api.services.value_ledger import schedule_origin
+
+    schedule_origin(out, origin=data.origin.model_dump() if getattr(data, "origin", None) else None)
+    return out
 
 
 def _memory_out_with_created_links(ctx, memory: dict) -> MemoryOut:

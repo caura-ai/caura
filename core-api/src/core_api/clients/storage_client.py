@@ -1871,6 +1871,34 @@ class CoreStorageClient:
         )
         return result or {}  # type: ignore[return-value]
 
+    async def value_touch_sessions(self, tenant_id: str, rows: list[dict]) -> dict:
+        """Agent sessions seen in one tenant (value metering, migration 067). Additive."""
+        result = await self._post(
+            f"/value/sessions?tenant_id={quote(tenant_id, safe='')}", {"sessions": rows}
+        )
+        return result or {}  # type: ignore[return-value]
+
+    async def value_record_origin(self, tenant_id: str, row: dict) -> dict:
+        """The work behind one memory; recorded once per memory, so safe to retry."""
+        result = await self._post(
+            f"/value/origins?tenant_id={quote(tenant_id, safe='')}", row, idempotent=True
+        )
+        return result or {}  # type: ignore[return-value]
+
+    async def value_record_reuse(self, tenant_id: str, body: dict) -> dict:
+        """First recalls by a session of memories from other sessions; insert-or-ignore, so safe to retry."""
+        result = await self._post(
+            f"/value/reuse?tenant_id={quote(tenant_id, safe='')}", body, idempotent=True
+        )
+        return result or {}  # type: ignore[return-value]
+
+    async def value_query(self, tenant_id: str, body: dict) -> dict:
+        """One tenant's value figures."""
+        result = await self._post(
+            f"/value/query?tenant_id={quote(tenant_id, safe='')}", body, read=True, idempotent=True
+        )
+        return result or {}  # type: ignore[return-value]
+
     async def increment_tenant_usage(self, rows: list[dict]) -> int:
         """ADD to per-tenant, per-period counters in ``tenant_usage_counters``.
 

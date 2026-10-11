@@ -28,10 +28,12 @@ from common.models.usage_minutes import (
     UsageFlushBatch,
     ValueUsageMinute,
 )
+from common.models.value_metering import AgentSession, MemoryOrigin, MemoryReuse
 
 __all__ = [
     "Agent",
     "AgentActivityDigest",
+    "AgentSession",
     "AuditChainHead",
     "AuditLog",
     "BackgroundTaskLog",
@@ -52,6 +54,8 @@ __all__ = [
     "MemoryConflict",
     "MemoryDerivation",
     "MemoryEntityLink",
+    "MemoryOrigin",
+    "MemoryReuse",
     "OrganizationSettings",
     "OrganizationSettingsAudit",
     "RecallCandidate",

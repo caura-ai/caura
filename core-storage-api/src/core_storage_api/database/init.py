@@ -42,8 +42,10 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # one build can stop between them) and drops ``ix_memories_status_changed_at``,
 # last; both join the probe. 066 creates the usage-metering tables
 # (``llm_usage_minutes``, ``value_usage_minutes``, ``usage_flush_batches``) in
-# one transaction, so the last of them joins the probe.
-_HEAD_FINGERPRINT_REVISION = "066"
+# one transaction, so the last of them joins the probe. 067 adds the value
+# metering tables (``agent_sessions``, ``memory_origins``, ``memory_reuse``),
+# also in one transaction; the last joins the probe.
+_HEAD_FINGERPRINT_REVISION = "067"
 _HEAD_FINGERPRINT_SQL: str | None = (
     "SELECT (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -55,7 +57,9 @@ _HEAD_FINGERPRINT_SQL: str | None = (
     "AND EXISTS (SELECT 1 FROM information_schema.columns "
     "WHERE table_schema = 'public' AND table_name = 'background_task_log' AND column_name = 'handled_at') "
     "AND EXISTS (SELECT 1 FROM information_schema.tables "
-    "WHERE table_schema = 'public' AND table_name = 'usage_flush_batches')"
+    "WHERE table_schema = 'public' AND table_name = 'usage_flush_batches') "
+    "AND EXISTS (SELECT 1 FROM information_schema.tables "
+    "WHERE table_schema = 'public' AND table_name = 'memory_reuse')"
 )
 
 _engine: AsyncEngine | None = None

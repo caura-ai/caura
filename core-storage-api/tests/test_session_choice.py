@@ -342,7 +342,10 @@ def test_the_writer_session_population_is_pinned() -> None:
     # 135 -> 136: ``usage_flush`` (usage metering, migration 066) claims a
     # batch id and upserts the minute totals in one writer transaction. Its
     # sibling ``usage_query`` reads on the replica.
-    assert len(methods) == 136, f"{len(methods)} methods open a writer session"
+    # 136 -> 139: value metering (migration 067) writes sessions, memory
+    # origins and reuse (``value_touch_sessions``, ``value_record_origin``,
+    # ``value_record_reuse``); ``value_query`` reads on the replica.
+    assert len(methods) == 139, f"{len(methods)} methods open a writer session"
     assert len(pure) == 60, f"{len(pure)} of them show no write marker"
 
 
