@@ -40,6 +40,7 @@ from common.events.lifecycle_archive_request import (
 from common.events.lifecycle_forge_request import LifecycleForgeDistillRequest
 from common.events.lifecycle_purge_request import LifecyclePurgeRequest
 from common.events.topics import Topics
+from common.usage import scoped
 
 logger = logging.getLogger(__name__)
 
@@ -375,6 +376,12 @@ async def write_success(
         )
 
 
+# Lifecycle payloads name the tenant ``org_id`` (the OSS tenant is the org).
+@scoped(
+    None,
+    tenant=lambda a: (a["event"].payload or {}).get("tenant_id") or (a["event"].payload or {}).get("org_id"),
+    fleet=lambda a: (a["event"].payload or {}).get("fleet_id"),
+)
 async def _run_action(
     event: Event,
     *,

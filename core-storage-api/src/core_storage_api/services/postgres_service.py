@@ -19,6 +19,7 @@ from collections import OrderedDict, defaultdict
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, NamedTuple
 from uuid import UUID
@@ -125,6 +126,7 @@ from common.models.memory import (
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.models.recall_log import RecallCandidate, RecallEvent
 from common.models.tenant_usage_counter import TenantUsageCounter
+from common.models.usage_minutes import LlmUsageMinute, UsageFlushBatch, ValueUsageMinute
 from common.organization_settings_merge import diff_settings, merge_settings_update
 from common.settings_version import SETTINGS_VERSION_KEY, version_of
 from core_storage_api.observability import PhaseTimer, db_measure
@@ -1444,6 +1446,10 @@ _PURGE_TENANT_TABLES: tuple[str, ...] = (
     "forge_rejected_fingerprints",
     "capability_usage",
     "tenant_usage_counters",
+    # Usage metering (migration 066): counts only, but keyed by the tenant and
+    # its agents, so they go with it.
+    "llm_usage_minutes",
+    "value_usage_minutes",
 )
 
 # Tenant-scoped and deliberately NOT purged, recorded here so their absence
@@ -1516,6 +1522,9 @@ _PURGE_FLEET_TABLES: tuple[str, ...] = (
     "session_traces",
     "agent_activity_digests",
     "forge_rejected_fingerprints",
+    # Usage metering (migration 066) carries ``fleet_id`` too.
+    "llm_usage_minutes",
+    "value_usage_minutes",
 )
 
 
@@ -6553,6 +6562,191 @@ class PostgresService:
                     )
                 )
         return len(rows)
+
+    # ── Usage metering (migration 066) ──────────────────────────────────────
+
+    #: Flush ids older than this are pruned; a writer re-sends a lost batch
+    #: within seconds, so a day of history is far more than dedupe needs.
+    USAGE_BATCH_RETENTION_HOURS = 24
+
+    async def usage_flush(
+        self, tenant_id: str, batch_id: UUID, llm_rows: list[dict], value_rows: list[dict]
+    ) -> bool:
+        """Add one tenant's flush of per-minute totals, ONCE. Returns False for a re-sent batch.
+
+        Every row is written under ``tenant_id``: the rows carry no tenant of
+        their own, so a flush cannot reach another tenant's totals.
+
+        One transaction: the batch id is claimed first, and the totals are
+        added only when the claim is new, so a writer that re-sends a batch
+        whose reply it lost is counted once. Additive upserts on the minute
+        keys, so several instances flushing the same minute all land.
+
+        A tenant whose settings say ``observability.usage_metering_enabled:
+        false`` is skipped here, in one place for every writer — core-worker
+        holds no settings of its own. ``organization_settings`` is keyed by the
+        tenant id, as ``resolve_config`` reads it.
+        """
+        async with get_session() as session:
+            off = await session.execute(
+                select(OrganizationSettings.org_id).where(
+                    OrganizationSettings.org_id == tenant_id,
+                    OrganizationSettings.settings["observability"]["usage_metering_enabled"]
+                    .as_boolean()
+                    .is_(False),
+                )
+            )
+            if off.scalar_one_or_none() is not None:
+                llm_rows, value_rows = [], []
+            claimed = await session.execute(
+                pg_insert(UsageFlushBatch)
+                .values(batch_id=batch_id)
+                .on_conflict_do_nothing(index_elements=[UsageFlushBatch.batch_id])
+                .returning(UsageFlushBatch.batch_id)
+            )
+            if claimed.scalar_one_or_none() is None:
+                return False
+            # Every column named, none taken from the caller's keys: the row
+            # dimensions are inserted, and only the counts are ever updated.
+            for r in llm_rows:
+                llm = pg_insert(LlmUsageMinute).values(
+                    minute=r["minute"],
+                    tenant_id=tenant_id,
+                    agent_id=r["agent_id"],
+                    fleet_id=r["fleet_id"],
+                    operation=r["operation"],
+                    kind=r["kind"],
+                    provider=r["provider"],
+                    model=r["model"],
+                    calls=r["calls"],
+                    failures=r["failures"],
+                    tokens_in=r["tokens_in"],
+                    tokens_out=r["tokens_out"],
+                    tokens_reasoning=r["tokens_reasoning"],
+                )
+                await session.execute(
+                    llm.on_conflict_do_update(
+                        index_elements=[
+                            LlmUsageMinute.minute,
+                            LlmUsageMinute.tenant_id,
+                            LlmUsageMinute.agent_id,
+                            LlmUsageMinute.fleet_id,
+                            LlmUsageMinute.operation,
+                            LlmUsageMinute.kind,
+                            LlmUsageMinute.provider,
+                            LlmUsageMinute.model,
+                        ],
+                        set_={
+                            "calls": LlmUsageMinute.calls + llm.excluded.calls,
+                            "failures": LlmUsageMinute.failures + llm.excluded.failures,
+                            "tokens_in": LlmUsageMinute.tokens_in + llm.excluded.tokens_in,
+                            "tokens_out": LlmUsageMinute.tokens_out + llm.excluded.tokens_out,
+                            "tokens_reasoning": LlmUsageMinute.tokens_reasoning
+                            + llm.excluded.tokens_reasoning,
+                        },
+                    )
+                )
+            for r in value_rows:
+                val = pg_insert(ValueUsageMinute).values(
+                    minute=r["minute"],
+                    tenant_id=tenant_id,
+                    agent_id=r["agent_id"],
+                    fleet_id=r["fleet_id"],
+                    operation=r["operation"],
+                    metric=r["metric"],
+                    quantity=r["quantity"],
+                )
+                await session.execute(
+                    val.on_conflict_do_update(
+                        index_elements=[
+                            ValueUsageMinute.minute,
+                            ValueUsageMinute.tenant_id,
+                            ValueUsageMinute.agent_id,
+                            ValueUsageMinute.fleet_id,
+                            ValueUsageMinute.operation,
+                            ValueUsageMinute.metric,
+                        ],
+                        set_={"quantity": ValueUsageMinute.quantity + val.excluded.quantity},
+                    )
+                )
+            await session.execute(
+                delete(UsageFlushBatch).where(
+                    UsageFlushBatch.received_at
+                    < func.now() - text(f"interval '{self.USAGE_BATCH_RETENTION_HOURS} hours'")
+                )
+            )
+        return True
+
+    async def usage_query(
+        self,
+        tenant_id: str,
+        *,
+        start: datetime,
+        end: datetime,
+        group_by: list[str],
+    ) -> dict:
+        """One tenant's totals in ``[start, end)``, grouped by the given dimensions.
+
+        ``group_by`` takes ``day`` and any of the row dimensions; the model
+        totals ignore ``metric`` and the savings totals ignore the model-only
+        dimensions (``kind``, ``provider``, ``model``).
+        """
+
+        def dims(model: Any, allowed: tuple[str, ...]) -> list[Any]:
+            out = []
+            for name in group_by:
+                if name == "day":
+                    out.append(func.date_trunc("day", model.minute).label("day"))
+                elif name in allowed:
+                    out.append(getattr(model, name).label(name))
+            return out
+
+        def rows(result: Any) -> list[dict]:
+            out = []
+            for row in result.mappings():
+                d = dict(row)
+                if isinstance(d.get("day"), datetime):
+                    d["day"] = d["day"].date().isoformat()
+                out.append({k: (int(v) if isinstance(v, Decimal) else v) for k, v in d.items()})
+            return out
+
+        llm_dims = dims(LlmUsageMinute, ("agent_id", "fleet_id", "operation", "kind", "provider", "model"))
+        value_dims = dims(ValueUsageMinute, ("agent_id", "fleet_id", "operation", "metric"))
+        # A report over minutes already flushed: the replica is fine (L-190).
+        async with get_read_session() as session:
+            llm = await session.execute(
+                select(
+                    *llm_dims,
+                    *[
+                        func.coalesce(func.sum(getattr(LlmUsageMinute, c)), 0).label(c)
+                        for c in ("calls", "failures", "tokens_in", "tokens_out", "tokens_reasoning")
+                    ],
+                )
+                .where(
+                    LlmUsageMinute.tenant_id == tenant_id,
+                    LlmUsageMinute.minute >= start,
+                    LlmUsageMinute.minute < end,
+                )
+                .group_by(*llm_dims)
+                # An ungrouped SUM over no rows is one row of zeros; say "nothing" instead.
+                .having(func.count() > 0)
+            )
+            # Savings are always broken out by metric: summing different measures is meaningless.
+            metric_dims = (
+                value_dims
+                if any(d.key == "metric" for d in value_dims)
+                else [*value_dims, ValueUsageMinute.metric.label("metric")]
+            )
+            value = await session.execute(
+                select(*metric_dims, func.coalesce(func.sum(ValueUsageMinute.quantity), 0).label("quantity"))
+                .where(
+                    ValueUsageMinute.tenant_id == tenant_id,
+                    ValueUsageMinute.minute >= start,
+                    ValueUsageMinute.minute < end,
+                )
+                .group_by(*metric_dims)
+            )
+            return {"model_calls": rows(llm), "savings": rows(value)}
 
     async def tenant_usage_query(
         self,

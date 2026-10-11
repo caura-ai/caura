@@ -259,6 +259,12 @@ DEFAULT_SETTINGS: dict = {
         # candidate-row volume on the bulk path. Capped at the same
         # ``_NEAR_MISS_LIMIT`` per sampled event as ``mcp_recall``.
         "search_recall_near_miss_sample_rate": None,
+        # On by default. Per-minute totals of this workspace's model calls
+        # (tokens in, out and reasoning per agent, operation and model) and
+        # recall savings, kept in its own database (``llm_usage_minutes`` /
+        # ``value_usage_minutes``). Counts only, never content; nothing is
+        # sent anywhere. False stops recording from the next flush.
+        "usage_metering_enabled": None,
     },
     "chunking": {
         "auto_chunk_enabled": None,
@@ -821,6 +827,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "insights.auto_insights_enabled": bool,
     "observability.recall_logging_enabled": bool,
     "observability.search_recall_logging_enabled": bool,
+    "observability.usage_metering_enabled": bool,
     "observability.search_recall_near_miss_sample_rate": (int, float),
     "chunking.auto_chunk_enabled": bool,
     "agents.require_agent_approval": bool,
@@ -1419,6 +1426,12 @@ class ResolvedConfig:
     def recall_logging_enabled(self) -> bool:
         val = self._ts.get("observability", {}).get("recall_logging_enabled")
         return val if val is not None else False
+
+    # Usage metering — on by default (see the defaults above).
+    @property
+    def usage_metering_enabled(self) -> bool:
+        val = self._ts.get("observability", {}).get("usage_metering_enabled")
+        return val if val is not None else True
 
     # Search-path recall logging — opt-in (default False). When on, the
     # automatic ``/search`` path is logged too (lighter: returned-only, no

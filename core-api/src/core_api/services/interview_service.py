@@ -32,6 +32,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from common.governance import mask, scan
+from common.usage import scoped
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings as app_settings
 from core_api.constants import (
@@ -580,6 +581,7 @@ async def advance_watermark(
 # ── Orchestrator ──
 
 
+@scoped("interview", tenant="tenant_id", agent="agent_id", fleet="fleet_id")
 async def _synthesize_and_write(
     *,
     tenant_id: str,

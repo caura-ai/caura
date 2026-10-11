@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from common.llm import call_with_fallback
+from common.usage import scoped
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.organization_settings import AGENT_DIGEST_CADENCE_PERIODS, get_settings_for_display
 from core_api.services.report_corpus import (
@@ -108,6 +109,7 @@ def _build_prompt(agent: dict, mems: list[dict], period: str, mode: str = "durab
     )
 
 
+@scoped("agent-digest", tenant="org_id", agent=lambda a: a["agent"].get("agent_id"))
 async def _summarize_agent(
     *,
     org_id: str,

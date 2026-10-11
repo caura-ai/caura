@@ -21,6 +21,7 @@ from core_storage_api.routers.tasks import router as tasks_router
 from core_storage_api.routers.tenant_suppression import router as tenant_suppression_router
 from core_storage_api.routers.tenant_usage import router as tenant_usage_router
 from core_storage_api.routers.tenants import router as tenants_router
+from core_storage_api.routers.usage import router as usage_router
 
 __all__ = [
     "agents_router",
@@ -46,4 +47,5 @@ __all__ = [
     "tasks_router",
     "tenant_suppression_router",
     "tenants_router",
+    "usage_router",
 ]

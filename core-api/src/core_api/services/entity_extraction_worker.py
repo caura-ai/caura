@@ -14,6 +14,7 @@ from common.constants import SINGLE_VALUE_PREDICATES
 from common.embedding import get_embedding, get_embeddings_batch
 from common.entity_naming import canonical_match_key
 from common.llm.constants import LLM_RETRY_JITTER_FRACTION
+from common.usage import scoped
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
     CROSS_LINK_MEMORY_BATCH_SIZE,
@@ -574,6 +575,7 @@ async def _embed_names(names: list[str], tenant_cfg: Any) -> list[list[float] | 
     return embedded
 
 
+@scoped("entity-extraction", tenant="tenant_id", agent="agent_id", fleet="fleet_id")
 async def process_entity_extraction(
     memory_id: UUID,
     tenant_id: str,

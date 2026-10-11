@@ -13,6 +13,7 @@ from uuid import UUID
 from fastapi import HTTPException
 
 from common import duplicate_memory
+from common.usage import scoped
 from core_api.constants import (
     EVOLVE_FAILURE_DELTA,
     EVOLVE_MAX_RELATED_IDS,
@@ -868,6 +869,7 @@ async def report_outcome(
     )
 
 
+@scoped("evolve", tenant="tenant_id", agent="agent_id", fleet="fleet_id")
 async def _maybe_generate_rule(
     tenant_id: str,
     outcome: str,

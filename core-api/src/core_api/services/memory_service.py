@@ -46,6 +46,7 @@ from common.embedding import (
 )
 from common.events import publish_memory_embed_request, publish_memory_enrich_request
 from common.governance import mask, scan
+from common.usage import scoped
 from core_api.constants import (
     ANN_POOL_SHADOW,
     ANN_POOL_SIZE,
@@ -863,6 +864,12 @@ def _memory_to_out(
     )
 
 
+@scoped(
+    "write",
+    tenant=lambda a: a["data"].tenant_id,
+    agent=lambda a: a["data"].agent_id,
+    fleet=lambda a: a["data"].fleet_id,
+)
 async def create_memory(data: MemoryCreate, *, is_inferred: bool = False) -> MemoryOut:
     """Create one memory.
 
@@ -1532,6 +1539,12 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
     return _memory_out_with_created_links(ctx, memory)
 
 
+@scoped(
+    "write",
+    tenant=lambda a: a["data"].tenant_id,
+    agent=lambda a: a["data"].agent_id,
+    fleet=lambda a: a["data"].fleet_id,
+)
 async def create_memories_bulk(
     data: BulkMemoryCreate,
     *,
@@ -2955,6 +2968,7 @@ async def _record_stranded(
     )
 
 
+@scoped("reembed", tenant="tenant_id")
 async def _reembed_memory(
     memory_id: UUID,
     content: str,
@@ -3117,6 +3131,7 @@ async def _reembed_memory(
     )
 
 
+@scoped("reembed", tenant="tenant_id", fleet="fleet_id")
 async def _reembed_memories_bulk(
     items: list[tuple[UUID, str]],
     tenant_id: str,
@@ -3831,6 +3846,7 @@ def _merged_metadata(stored: dict, metadata_patch: dict) -> dict:
     return merged
 
 
+@scoped("enrichment", tenant="tenant_id", agent="agent_id", fleet="fleet_id")
 async def _enrich_memory_background(
     memory_id: UUID,
     content: str,
@@ -4399,6 +4415,7 @@ _EDIT_PINNED_ENRICHMENT_FIELDS: frozenset[str] = frozenset({"memory_type", "weig
 _EDIT_KEPT_IF_SET_FIELDS: frozenset[str] = frozenset({"title", "ts_valid_start", "ts_valid_end"})
 
 
+@scoped("update", tenant="tenant_id", agent="agent_id")
 async def update_memory(
     memory_id: UUID,
     tenant_id: str,
@@ -5780,6 +5797,7 @@ def _extract_temporal_date_range(
     return None
 
 
+@scoped(None, tenant="tenant_id", agent="caller_agent_id")
 async def search_memories(
     tenant_id: str,
     query: str,

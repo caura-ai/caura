@@ -36,6 +36,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from common.events.base import PermanentOpError
+from common.usage import scoped
 from core_api.clients.storage_client import DocumentStatusChangedError, get_storage_client
 from core_api.services.forge.forge_service import (
     CandidateSlugClaimedError,
@@ -289,6 +290,7 @@ async def _wire_llm_fn() -> LlmFn:
 # ── Public entry point ────────────────────────────────────────────
 
 
+@scoped("forge", tenant="tenant_id", fleet="fleet_id")
 async def run_forge_cron_tick(
     *,
     tenant_id: str,

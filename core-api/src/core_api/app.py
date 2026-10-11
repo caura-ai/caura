@@ -327,7 +327,9 @@ async def _flush_one_tenant(tid: str, tevs: list[dict]) -> None:
         raise
 
 
-async def _shut_down(event_bus: EventBus, *, audit_queue, capability_usage_agg, usage_meter) -> None:
+async def _shut_down(
+    event_bus: EventBus, *, audit_queue, capability_usage_agg, usage_meter, usage_ledger=None
+) -> None:
     """core-api's shutdown steps, in order. Out of ``lifespan`` so the order
     can be tested."""
     # Each shutdown step is independent — a failure in one (a
@@ -400,6 +402,11 @@ async def _shut_down(event_bus: EventBus, *, audit_queue, capability_usage_agg, 
     # client, so it has to run before that client closes below. Without it
     # a clean shutdown would discard up to one flush interval of counts.
     shutdown_steps.append(usage_meter.stop(timeout=5.0))
+    # Usage metering's last flush, for the same reason.
+    if usage_ledger is not None:
+        from core_api.services.usage_ledger import uninstall as uninstall_usage_ledger
+
+        shutdown_steps.append(uninstall_usage_ledger(usage_ledger))
     shutdown_steps.extend(
         [
             event_bus.stop(),
@@ -501,6 +508,12 @@ async def lifespan(app):
         # arrive out-of-band via ``x-org-read-only`` (see ``usage_service``).
         usage_meter = UsageMeter()
         usage_meter.start()
+
+        # Usage metering (common.usage): per-minute totals of every model call
+        # and of recall savings, flushed through this process's storage client.
+        from core_api.services.usage_ledger import install as install_usage_ledger
+
+        usage_ledger = install_usage_ledger()
         configure_hooks(ServiceHooks(audit_log=log_action, usage_meter=usage_meter.record))
 
         # Anonymous daily heartbeat (docs/telemetry.md). ``install`` evaluates
@@ -711,6 +724,7 @@ async def lifespan(app):
             audit_queue=audit_queue,
             capability_usage_agg=capability_usage_agg,
             usage_meter=usage_meter,
+            usage_ledger=usage_ledger,
         )
         executor.shutdown(wait=False)
 

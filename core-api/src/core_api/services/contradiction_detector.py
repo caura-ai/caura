@@ -27,6 +27,7 @@ from uuid import UUID
 
 from common.constants import predicate_cluster
 from common.provider_names import ProviderName
+from common.usage import scoped
 from core_api.cache import cache_delete_if, cache_set_nx
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
@@ -786,6 +787,12 @@ async def _detection_disabled_for_tenant(tenant_id: str, memory_id, path: str) -
     return True
 
 
+@scoped(
+    "contradiction",
+    tenant="tenant_id",
+    fleet="fleet_id",
+    agent=lambda a: (a.get("new_memory") or {}).get("agent_id"),
+)
 async def detect_contradictions_async(
     memory_id: UUID,
     tenant_id: str,
@@ -3121,6 +3128,7 @@ async def _retract_unlinked_verdicts(sc, new_memory: dict, tenant_config) -> int
 # ---------------------------------------------------------------------------
 
 
+@scoped("contradiction", tenant="tenant_id", fleet="fleet_id")
 async def detect_contradictions_by_entities_async(
     memory_id: UUID,
     tenant_id: str,

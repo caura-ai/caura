@@ -68,6 +68,7 @@ from common.events.suppression_handlers import (
     register_suppression_consumer,
 )
 from common.events.topics import Topics
+from common.usage import scoped
 from core_worker.backfill import run_embedding_backfill
 from core_worker.clients.storage_client import (
     find_embedding_by_content_hash,
@@ -102,6 +103,11 @@ def configure(storage_client_factory: StorageClientFactory) -> None:
     _storage_client_factory = storage_client_factory
 
 
+@scoped(
+    "embed",
+    tenant=lambda a: (a["event"].payload or {}).get("tenant_id"),
+    fleet=lambda a: (a["event"].payload or {}).get("fleet_id"),
+)
 async def handle_embed_request(event: Event) -> None:
     """Process a single embed-request event."""
     try:
@@ -653,6 +659,11 @@ def _build_patch(
     return patch
 
 
+@scoped(
+    "enrichment",
+    tenant=lambda a: (a["event"].payload or {}).get("tenant_id"),
+    fleet=lambda a: (a["event"].payload or {}).get("fleet_id"),
+)
 async def handle_enrich_request(event: Event) -> None:
     """Process a single enrich-request event.
 
@@ -825,6 +836,11 @@ class _SuppressionAdapter(SuppressionStorageAdapter):
         )
 
 
+@scoped(
+    "embed",
+    tenant=lambda a: (a["event"].payload or {}).get("tenant_id"),
+    fleet=lambda a: (a["event"].payload or {}).get("fleet_id"),
+)
 async def handle_embed_backfill_request(event: Event) -> None:
     """Re-embed one org's NULL-embedding rows.
 

@@ -20,6 +20,7 @@ from common.llm.constants import (
     GOOGLE_GENAI_REQUEST_TIMEOUT_SECONDS,
     LLM_JSON_MAX_OUTPUT_TOKENS,
 )
+from common.llm.providers._genai_usage import record_genai_call
 from common.llm.providers._json_shape import unwrap_singleton_array
 from common.llm.providers._shape_error import ProviderResponseShapeError
 from common.llm.providers._truncation import raise_if_truncated
@@ -103,6 +104,7 @@ class GeminiLLMProvider:
         )
         llm_ms = int((time.perf_counter() - t0) * 1000)
         logger.info("Gemini complete_json (%s) took %dms", self._model, llm_ms)
+        record_genai_call(response, provider=self.provider_name, model=self._model)
         try:
             text = response.text or ""
         except ValueError as exc:
@@ -145,6 +147,7 @@ class GeminiLLMProvider:
         )
         llm_ms = int((time.perf_counter() - t0) * 1000)
         logger.info("Gemini complete_text (%s) took %dms", self._model, llm_ms)
+        record_genai_call(response, provider=self.provider_name, model=self._model)
         try:
             return response.text or ""
         except ValueError as exc:

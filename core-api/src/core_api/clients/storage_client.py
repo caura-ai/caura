@@ -18,6 +18,7 @@ from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from common.http_retry import CONNECT_PHASE_MAX_ATTEMPTS, with_connect_phase_retry, with_retry
 from common.settings_version import SETTINGS_CHANGED
 from common.storage_auth import is_storage_shared_secret_rejection
+from common.usage import per_tenant
 from core_api.clients.identity_token import evict as _evict_id_token
 from core_api.clients.identity_token import fetch_auth_header
 from core_api.config import settings
@@ -1846,6 +1847,29 @@ class CoreStorageClient:
         """
         result = await self._post("/capability-usage", {"rows": rows})
         return result.get("inserted", 0)  # type: ignore[union-attr]
+
+    async def flush_usage(self, batch: dict) -> dict:
+        """Send one usage-metering batch (``common.usage.UsageAggregator``), a flush per tenant.
+
+        Storage binds each flush to one tenant (``per_tenant``). Each part is
+        idempotent by its derived ``batch_id`` — storage claims it once
+        (migration 066) — so the batch is safe to retry on any failure, unlike
+        ``increment_tenant_usage``. Returns how many parts were newly applied.
+        """
+        applied = 0
+        for tenant_id, part in per_tenant(batch):
+            result = await self._post(
+                f"/usage/flush?tenant_id={quote(tenant_id, safe='')}", part, idempotent=True
+            )
+            applied += bool((result or {}).get("applied"))  # type: ignore[union-attr]
+        return {"applied": applied}
+
+    async def query_usage(self, tenant_id: str, body: dict) -> dict:
+        """One tenant's usage totals: ``{"model_calls": [...], "savings": [...]}``."""
+        result = await self._post(
+            f"/usage/query?tenant_id={quote(tenant_id, safe='')}", body, read=True, idempotent=True
+        )
+        return result or {}  # type: ignore[return-value]
 
     async def increment_tenant_usage(self, rows: list[dict]) -> int:
         """ADD to per-tenant, per-period counters in ``tenant_usage_counters``.

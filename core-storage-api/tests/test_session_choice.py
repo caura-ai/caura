@@ -339,7 +339,10 @@ def test_the_writer_session_population_is_pinned() -> None:
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 135, f"{len(methods)} methods open a writer session"
+    # 135 -> 136: ``usage_flush`` (usage metering, migration 066) claims a
+    # batch id and upserts the minute totals in one writer transaction. Its
+    # sibling ``usage_query`` reads on the replica.
+    assert len(methods) == 136, f"{len(methods)} methods open a writer session"
     assert len(pure) == 60, f"{len(pure)} of them show no write marker"
 
 

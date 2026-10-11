@@ -20,6 +20,7 @@ from common.enrichment.constants import (
     SERVER_RESERVED_MEMORY_TYPES,
 )
 from common.events.lifecycle_publishers import publish_crystallize_on_demand_request
+from common.usage import scoped
 from core_api.clients.storage_client import get_storage_client
 
 try:
@@ -596,6 +597,7 @@ async def _execute_crystallization(
 # ---------------------------------------------------------------------------
 
 
+@scoped("crystallize", tenant="tenant_id", fleet="fleet_id")
 async def _run_crystallization(
     tenant_id: str,
     fleet_id: str | None,

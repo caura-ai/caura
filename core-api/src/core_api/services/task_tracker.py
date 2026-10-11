@@ -8,6 +8,7 @@ from collections.abc import Coroutine, MutableMapping
 from typing import Any
 from uuid import UUID
 
+from common.usage import usage_scope
 from core_api.clients.storage_client import get_storage_client
 
 logger = logging.getLogger(__name__)
@@ -94,7 +95,10 @@ async def tracked_task(
     avoiding unbounded table growth.
     """
     try:
-        await coro
+        # Model calls the task makes are metered to its tenant; the agent and
+        # fleet carry over from the request that scheduled it, when there was one.
+        with usage_scope(tenant_id=tenant_id, operation=task_name):
+            await coro
     except asyncio.CancelledError as exc:
         # OSS 08/14 M-19 / 09/02 M-56 — cancellation must not be silent.
         #
