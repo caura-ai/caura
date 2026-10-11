@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.24.6](https://github.com/caura-ai/caura/compare/plugin-v2.24.5...plugin-v2.24.6) (2026-10-11)
+
+
+### Bug Fixes
+
+* idempotency keys replay what they promise (B31) ([#2031](https://github.com/caura-ai/caura/issues/2031)) ([0d2a7a1](https://github.com/caura-ai/caura/commit/0d2a7a17e0506072796d82b4d91403bbf605b91f))
+
 ## [2.24.5](https://github.com/caura-ai/caura/compare/plugin-v2.24.4...plugin-v2.24.5) (2026-10-11)
 
 
