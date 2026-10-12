@@ -886,3 +886,13 @@ ENCRYPTED_SETTING_PREFIX = "enc:v1:"
 # statuses it may replace (``expected_status``) found the stored document in
 # another, or found none where one had to exist. Nothing was written (L-24).
 DOCUMENT_STATUS_CHANGED = "document_status_changed"
+
+
+# ---------------------------------------------------------------------------
+# Memory writes
+# ---------------------------------------------------------------------------
+
+# ``detail.error`` on storage's 409 when a memory PATCH that named the text it
+# was computed from (``expected_content``) found the row holding other text: a
+# later edit replaced it. Nothing was written (O16).
+MEMORY_CONTENT_CHANGED = "memory_content_changed"

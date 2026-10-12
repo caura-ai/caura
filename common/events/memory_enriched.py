@@ -48,3 +48,6 @@ class MemoryEnriched(BaseModel):
     # Empty string when the enricher produced no useful hint —
     # back-channel consumers should short-circuit on falsy.
     retrieval_hint: str = ""
+    # Echoes the request's flag (O16): this was an edit's run, so core-api
+    # acts on it only while the row still holds ``content``.
+    current_content_only: bool = False

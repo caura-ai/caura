@@ -33,6 +33,7 @@ async def publish_memory_enrich_request(
     reference_datetime: datetime | None = None,
     agent_provided_fields: list[str] | None = None,
     caller_owned_metadata_keys: list[str] | None = None,
+    current_content_only: bool = False,
 ) -> None:
     """Publish one enrich-request event for a memory persisted without inline enrichment.
 
@@ -54,6 +55,9 @@ async def publish_memory_enrich_request(
     and skips only the legacy top-level mirror — the same split
     ``set_system_value`` makes, so both halves of the C25 read view stay
     correct.
+
+    ``current_content_only`` marks an edit's run, which may land only while the
+    row still holds ``content`` (O16).
 
     Fire-and-forget: ``bus.publish`` returns once the transport has
     accepted the message (Pub/Sub) or the in-process subscriber has been
@@ -89,6 +93,7 @@ async def publish_memory_enrich_request(
         fallback_model=fallback_model,
         agent_provided_fields=agent_provided_fields,
         caller_owned_metadata_keys=caller_owned_metadata_keys,
+        current_content_only=current_content_only,
     )
     event = Event(
         event_type=Topics.Memory.ENRICH_REQUESTED,

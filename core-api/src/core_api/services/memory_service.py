@@ -2895,6 +2895,9 @@ async def _schedule_enrich_or_inline(
             reference_datetime=reference_datetime,
             agent_provided_fields=agent_provided_fields,
             caller_owned_metadata_keys=caller_owned_metadata_keys,
+            # O16: the worker's PATCH then names the text, and storage refuses
+            # it once a later edit replaced it.
+            current_content_only=current_content_only,
         )
 
 
@@ -5079,8 +5082,8 @@ async def update_memory(
                         agent_provided_fields=sorted(pins),
                         caller_owned_metadata_keys=sorted(caller_owned_keys(row_meta)),
                         run_governance_remediation=True,
-                        # Inline only: the deferred worker receives no such
-                        # check, so a superseded run can still land there.
+                        # A later edit supersedes this run: inline it checks the
+                        # row, deferred storage refuses the worker's PATCH (O16).
                         current_content_only=True,
                     ),
                     "background_enrichment",

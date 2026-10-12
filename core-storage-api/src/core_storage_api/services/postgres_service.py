@@ -43,6 +43,7 @@ from sqlalchemy import (
     or_,
     select,
     text,
+    true,
     tuple_,
 )
 from sqlalchemy import update as sql_update
@@ -1770,6 +1771,15 @@ class DocumentStatusChangedError(Exception):
     """
 
 
+class MemoryContentChangedError(Exception):
+    """A memory PATCH named the text it was computed from (``expected_content``),
+    and the row holds other text: a later edit replaced it (O16).
+
+    Answered 409 ``MEMORY_CONTENT_CHANGED`` by ``app``. Nothing was written. The
+    edit that replaced the text scheduled its own enrichment.
+    """
+
+
 def _fleet_scope(column, fleet_id: str | None):
     """Fleet predicate matching an index that groups on ``COALESCE(fleet_id, '')``.
 
@@ -2526,7 +2536,13 @@ class PostgresService:
         return out
 
     async def memory_update(
-        self, memory_id: UUID, tenant_id: str, patch: dict, *, derived_deleted: list[dict] | None = None
+        self,
+        memory_id: UUID,
+        tenant_id: str,
+        patch: dict,
+        *,
+        derived_deleted: list[dict] | None = None,
+        expected_content: str | None = None,
     ) -> bool:
         """Apply arbitrary field updates to a memory.
 
@@ -2547,6 +2563,12 @@ class PostgresService:
           transaction, so the parent and its children change together or not
           at all. The children it deletes are appended to ``derived_deleted``
           when the caller passes a list.
+
+        ``expected_content``, when given, is the text the patch was computed
+        from, and the row must still hold it (O16): the worker's enrichment of
+        an edit, which a later edit may have overtaken. Checked under the row's
+        lock, so that edit cannot land between the check and the write, and
+        answered with ``MemoryContentChangedError`` (409) when it fails.
 
         Other top-level keys whose names don't match a ``Memory`` column
         are silently dropped — callers validate upstream.
@@ -2640,9 +2662,16 @@ class PostgresService:
             # statement is what makes the read-then-merge atomic — the decision
             # about which keys a platform patch may mirror is taken under the
             # same ``FOR UPDATE`` that the merge itself runs beneath.
+            #
+            # ``holds_content`` is compared in SQL, so the row's text is not
+            # shipped back on every PATCH to answer a question only the
+            # worker's enrichment of an edit asks.
+            holds_content = true() if expected_content is None else Memory.content == expected_content
             row = (
                 await session.execute(
-                    select(Memory.id, Memory.deleted_at, Memory.metadata_)
+                    select(
+                        Memory.id, Memory.deleted_at, Memory.metadata_, holds_content.label("holds_content")
+                    )
                     .where(Memory.id == memory_id, Memory.tenant_id == tenant_id)
                     .with_for_update()
                 )
@@ -2651,6 +2680,10 @@ class PostgresService:
                 return False  # row truly absent — caller → 404
             if row.deleted_at is not None:
                 return False  # soft-deleted — caller → 404, no UPDATE runs
+            if not row.holds_content:
+                raise MemoryContentChangedError(
+                    f"memory {memory_id} no longer holds the text this patch was computed from"
+                )
             # After the existence check, so a patch on an absent row stays a 404
             # rather than being judged on its pointers.
             await self._assert_pointers_in_tenant(session, tenant_id, [values])

@@ -174,3 +174,12 @@ class MemoryEnrichRequest(BaseModel):
     #
     # ``None`` = caller owns nothing here.
     caller_owned_metadata_keys: list[str] | None = None
+
+    # An edit's run (H-07): it may land only while the row still holds
+    # ``content``. A later edit that replaced the text scheduled its own run,
+    # and this one would write the old text's verdicts over the new. The
+    # worker sends ``content`` as its PATCH's ``expected_content`` and storage
+    # refuses the write once the row moved on (O16). The inline path makes the
+    # same check through ``_enrich_memory_background``'s parameter of this
+    # name, and checks only an edit's run, so this defaults off.
+    current_content_only: bool = False
