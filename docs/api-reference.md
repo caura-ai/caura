@@ -41,7 +41,7 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/entities/upsert` | POST | Create or update entity |
 | `/entities/{id}` | GET | Entity detail with relations and linked memories |
 | `/relations/upsert` | POST | Create or update relation |
-| `/graph` | GET | Full knowledge graph (entities + relations) |
+| `/graph` | GET | Knowledge graph (entities + relations). Capped at `GRAPH_MAX_ENTITIES` entities (default 10,000) and `GRAPH_MAX_RELATIONS` relations (default 50,000): past a cap the newest entities and the heaviest relations among them come back, with `truncated: true` |
 
 </details>
 
@@ -64,7 +64,7 @@ See also the [public API stability contract](public-api-stability.md) and the
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/agents` | GET | List registered agents with trust levels |
+| `/agents` | GET | List registered agents with trust levels, newest first. Paged with `limit` (default and most 1,000) and `offset`; `X-Next-Offset` gives the next page's offset while more follow |
 | `/agents/{id}` | GET | Single agent detail |
 | `/agents/{id}/trust` | PATCH | Set trust level (0-3) |
 

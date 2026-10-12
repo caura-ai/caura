@@ -2227,10 +2227,17 @@ class CoreStorageClient:
         self,
         tenant_id: str,
         fleet_id: str | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[dict]:
+        """Every agent of the tenant, newest first, or one page with ``limit``."""
         params: dict[str, Any] = {"tenant_id": tenant_id}
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
+        if limit is not None:
+            params["limit"] = limit
+            params["offset"] = offset
         return await self._get_list("/agents", **params)
 
     async def update_trust_level(self, agent_id: str, data: dict) -> dict | None:

@@ -165,6 +165,12 @@ GRAPH_MAX_HOPS = 2  # max relation hops to expand during search
 GRAPH_MAX_EXPANDED_ENTITIES = (
     200  # cap on entity IDs in the IN clause after graph expansion
 )
+# L-176. ``GET /graph`` read every entity and relation of a tenant, uncapped.
+# Past these caps the newest entities, and the heaviest relations among them,
+# come back and the response says ``truncated``. The defaults are meant to sit
+# above any tenant's graph; a deployment whose graph outgrows them raises them.
+GRAPH_MAX_ENTITIES = read_int_env("GRAPH_MAX_ENTITIES", 10_000)
+GRAPH_MAX_RELATIONS = read_int_env("GRAPH_MAX_RELATIONS", 50_000)
 
 # Relation-type weights: strong semantic relations boost more than structural ones.
 RELATION_TYPE_WEIGHTS: dict[str, float] = {

@@ -929,6 +929,11 @@ MAX_AUDIT_LIMIT = 200
 # response header: a body envelope would break every existing caller.
 AUDIT_NEXT_CURSOR_HEADER = "X-Next-Cursor"
 DEFAULT_ENTITY_LIMIT = 100
+# GET /agents (L-186): a page of at most this many, and by default this many,
+# meant to hold a whole tenant. Also a bare list, so the next page's offset
+# travels in a header when there is one.
+MAX_AGENT_LIST_LIMIT = 1_000
+AGENT_NEXT_OFFSET_HEADER = "X-Next-Offset"
 
 # ── Agent trust levels ──
 DEFAULT_TRUST_LEVEL = 1

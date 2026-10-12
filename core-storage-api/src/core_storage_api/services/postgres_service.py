@@ -29,6 +29,7 @@ from sqlalchemy import (
     String,
     Table,
     and_,
+    any_,
     bindparam,
     case,
     cast,
@@ -61,8 +62,10 @@ from common.constants import (
     DEFAULT_RELATION_TYPE_WEIGHT,
     ENCRYPTED_SETTING_PREFIX,
     ENTITY_RESOLUTION_CANDIDATE_LIMIT,
+    GRAPH_MAX_ENTITIES,
     GRAPH_MAX_EXPANDED_ENTITIES,
     GRAPH_MAX_HOPS,
+    GRAPH_MAX_RELATIONS,
     HOLD_KEY,
     LIVE_MEMORY_STATUSES,
     NODE_PRINCIPAL_TENANT,
@@ -8983,8 +8986,9 @@ class PostgresService:
         caller_agent_id: str | None = None,
         caller_tenant_id: str | None = None,
         caller_fleet_ids: Sequence[str] | None = None,
-    ) -> tuple[list[Entity], list[Relation]]:
-        """Return all entities and relations for a tenant (optionally filtered by fleet).
+    ) -> tuple[list[Entity], list[Relation], bool]:
+        """Return a tenant's entities and relations (optionally by fleet), and whether
+        either was cut short.
 
         The nodes are narrowed exactly as ``entity_list`` narrows them for the
         same reader, and an edge is kept only when both of its endpoints
@@ -8995,6 +8999,12 @@ class PostgresService:
         Skips the heavy ``name_embedding`` (pgvector) and ``search_vector`` (TSVECTOR)
         columns — the graph view doesn't need them, and loading + serialising them
         dominates the response time for tenants with many entities.
+
+        L-176: both reads are capped, at ``GRAPH_MAX_ENTITIES`` and
+        ``GRAPH_MAX_RELATIONS``. Past a cap the newest entities, and the heaviest
+        relations among them, come back and the third value is ``True``. The edge
+        filter runs in SQL, so the relation cap counts only edges between kept
+        nodes; the node ids travel as one array parameter, however many there are.
         """
         async with get_session() as session:
             entity_stmt = (
@@ -9019,25 +9029,33 @@ class PostgresService:
                 )
             else:
                 entity_stmt = entity_stmt.where(_entity_visible_to_tenant(tenant_id))
-            entities_result = await session.execute(entity_stmt)
-            entities = list(entities_result.scalars().all())
+            entity_stmt = entity_stmt.order_by(Entity.created_at.desc(), Entity.id)
+            entity_stmt = entity_stmt.limit(GRAPH_MAX_ENTITIES + 1)
+            entities = list((await session.execute(entity_stmt)).scalars().all())
+            truncated = len(entities) > GRAPH_MAX_ENTITIES
+            entities = entities[:GRAPH_MAX_ENTITIES]
 
+            node_ids = bindparam(
+                "node_ids", [e.id for e in entities], type_=postgresql.ARRAY(postgresql.UUID(as_uuid=True))
+            )
             relation_stmt = select(Relation).where(
-                Relation.tenant_id == tenant_id, _relation_has_live_evidence()
+                Relation.tenant_id == tenant_id,
+                _relation_has_live_evidence(),
+                # An edge to a node not returned would name it by id.
+                Relation.from_entity_id == any_(node_ids),
+                Relation.to_entity_id == any_(node_ids),
             )
             if fleet_id:
                 relation_stmt = relation_stmt.where(
                     or_(Relation.fleet_id == fleet_id, Relation.fleet_id.is_(None))
                 )
-            relations_result = await session.execute(relation_stmt)
-            node_ids = {e.id for e in entities}
-            relations = [
-                r
-                for r in relations_result.scalars().all()
-                if r.from_entity_id in node_ids and r.to_entity_id in node_ids
-            ]
+            # ``weight`` is nullable, and a NULL sorts first in a descending order.
+            relation_stmt = relation_stmt.order_by(Relation.weight.desc().nulls_last(), Relation.id)
+            relation_stmt = relation_stmt.limit(GRAPH_MAX_RELATIONS + 1)
+            relations = list((await session.execute(relation_stmt)).scalars().all())
+            truncated = truncated or len(relations) > GRAPH_MAX_RELATIONS
 
-            return entities, relations
+            return entities, relations[:GRAPH_MAX_RELATIONS], truncated
 
     # ------------------------------------------------------------------
     # Memory-entity links (entity side)
@@ -10755,11 +10773,23 @@ class PostgresService:
     async def agent_list_by_tenant(
         self,
         tenant_id: str,
+        *,
+        fleet_id: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[Agent]:
+        """The tenant's agents, newest first; one fleet's when ``fleet_id`` is set.
+
+        L-186: ``limit``/``offset`` page it in SQL, with ``id`` breaking ties so
+        pages neither overlap nor skip. The fleet filter is in SQL too: applied
+        after a page it would shrink the page, not select it.
+        """
+        stmt = select(Agent).where(Agent.tenant_id == tenant_id)
+        if fleet_id:
+            stmt = stmt.where(Agent.fleet_id == fleet_id)
+        stmt = stmt.order_by(Agent.created_at.desc(), Agent.id).offset(offset).limit(limit)
         async with get_session() as session:
-            result = await session.execute(
-                select(Agent).where(Agent.tenant_id == tenant_id).order_by(Agent.created_at.desc())
-            )
+            result = await session.execute(stmt)
             return list(result.scalars().all())
 
     async def agent_add(self, data: dict) -> Agent:

@@ -421,6 +421,13 @@ class GraphEdge(BaseModel):
 class GraphResponse(BaseModel):
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+    truncated: bool = Field(
+        description=(
+            "True when the graph was larger than the server's caps (GRAPH_MAX_ENTITIES, "
+            "GRAPH_MAX_RELATIONS): the newest entities and the heaviest relations among "
+            "them were returned, not all of them."
+        ),
+    )
 
 
 # --------------------------------------------------------------------------
