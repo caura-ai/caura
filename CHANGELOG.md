@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.30.12](https://github.com/caura-ai/caura/compare/backend-v3.30.11...backend-v3.30.12) (2026-10-12)
+
+
+### Bug Fixes
+
+* the root SQLAlchemy cap follows the services to 2.1 (L-166) ([#2058](https://github.com/caura-ai/caura/issues/2058)) ([cd76a3a](https://github.com/caura-ai/caura/commit/cd76a3ae547bb57f1c067e62236656d700842e90))
+
+
+### Dependencies
+
+* bump the uv-minor-patch group across 4 directories with 9 updates ([#2050](https://github.com/caura-ai/caura/issues/2050)) ([64db83d](https://github.com/caura-ai/caura/commit/64db83d4d29755a060db2cdc05b9af41462ee509))
+
 ## [3.30.11](https://github.com/caura-ai/caura/compare/backend-v3.30.10...backend-v3.30.11) (2026-10-12)
 
 
