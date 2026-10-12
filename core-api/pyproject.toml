@@ -11,8 +11,8 @@ dependencies = [
     # version; this range only bounds future re-locks.
     "fastapi>=0.141.1,<1",
     "uvicorn[standard]>=0.51.0,<1",
-    # Capped below 2.1 for the reason given in core-storage-api/pyproject.toml;
-    # the two packages move to 2.1 together.
+    # The cap is the next minor, as core-storage-api's is. CI type-checks and
+    # tests each package against its own uv.lock.
     "sqlalchemy[asyncio]>=2.0,<2.2",
     # SQLAlchemy[asyncio] pulls in greenlet. greenlet 3.5.0 shipped wheels for
     # macOS/Windows ARM only (no Linux x86_64) which broke the Linux runner, but

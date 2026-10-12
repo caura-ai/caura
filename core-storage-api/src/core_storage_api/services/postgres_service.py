@@ -205,7 +205,7 @@ def _ordered_link_rows(rows: list[dict]) -> list[dict]:
     return [by_key[key] for key in sorted(by_key)]
 
 
-def _ordered_memory_lock_select(memory_ids: list[UUID], tenant_id: str) -> Select[tuple[Memory]]:
+def _ordered_memory_lock_select(memory_ids: list[UUID], tenant_id: str) -> Select[Memory]:
     """``SELECT ... FOR UPDATE`` over ``memories``, locked in one global order.
 
     Same hazard as ``_ordered_link_rows`` one table up. A multi-row
@@ -3758,6 +3758,7 @@ class PostgresService:
                     if len(duplicated) == 0 or duplicated[-1] != row[0]:
                         duplicated.append(row[0])
                     continue
+                assert row[0] is not None  # narrow for mypy: ``IN (hashes)`` never matches NULL
                 out[row[0]] = {"id": row[1], "client_request_id": row[2]}
             # Warn, for the reason ``_warn_duplicate_content_hash``'s own
             # docstring gives: it is shared by both dedup gates deliberately,
@@ -6820,12 +6821,11 @@ class PostgresService:
             ).one_or_none()
             if mem_row is None:
                 return None
-            memory, agent_display_name = mem_row
+            [memory] = _attach_agent_display_names([mem_row])
             if memory.tenant_id != tenant_id or memory.deleted_at is not None:
                 return None
             if memory.status == QUARANTINED_MEMORY_STATUS and not include_held:
                 return None
-            memory.agent_display_name = agent_display_name
 
             link_rows = (
                 await session.execute(
@@ -8195,13 +8195,13 @@ class PostgresService:
                 # Phase 1's fleet key: ``''`` and NULL are one fleet (L-47).
                 nearest = nearest.where(_fleet_scope(Entity.fleet_id, it.get("fleet_id")))
                 found = nearest.subquery()
-                stmt = (
+                scored = (
                     select(Entity, (1.0 - found.c.distance).label("similarity"))
                     .join(found, Entity.id == found.c.id)
                     .order_by(found.c.distance)
                 )
 
-                rows = (await session.execute(stmt)).all()
+                rows = (await session.execute(scored)).all()
                 for entity, sim in rows:
                     if float(sim) >= threshold:
                         out[idx] = {
@@ -9258,7 +9258,7 @@ class PostgresService:
                 .with_for_update(of=Relation)
             )
         ).all()
-        relation_ids_to_delete = []
+        relation_ids_to_delete: list[UUID] = []
         for relation_id, replacement_id in affected_relations:
             if replacement_id is None:
                 relation_ids_to_delete.append(relation_id)
@@ -9688,7 +9688,7 @@ class PostgresService:
             # lock those rows in the same order.
             pairs = sorted(roles)
 
-            def upsert(batch: list[tuple[UUID, UUID]]) -> ReturningInsert[tuple[UUID, UUID, str, Any]]:
+            def upsert(batch: list[tuple[UUID, UUID]]) -> ReturningInsert[UUID, UUID, str, Any]:
                 # Composite PK is (memory_id, entity_id); ``role`` is not part
                 # of the unique key. The no-op SET (``role =
                 # memory_entity_links.role``) is the standard trick that lets

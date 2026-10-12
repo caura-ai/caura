@@ -404,7 +404,7 @@ async def _resolve_versions(
     async with get_read_session() as session:
         rows = (await session.execute(stmt)).all()
 
-    resolved: dict[int, tuple[Row[Any], list[dict[str, Any]]]] = {}
+    resolved: dict[int, tuple[Row[*tuple[Any, ...]], list[dict[str, Any]]]] = {}
     for found in rows:
         _, matched = resolved.setdefault(found.version, (found, []))
         if found.rule is not None:
@@ -412,7 +412,9 @@ async def _resolve_versions(
     return [_summary(found, matched) for found, matched in resolved.values()]
 
 
-def _summary(version: Row[Any], matched: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _summary(
+    version: Row[*tuple[Any, ...]], matched: list[dict[str, Any]]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     rules = matched[:KEYSTONE_MAX_RESULTS]
     try:
         hashed: str | None = rule_set_hash(rules_from_keystone_rows(rules))
