@@ -99,10 +99,12 @@ def _caps(requirement: Requirement) -> list[Version]:
     return [Version(s.version) for s in requirement.specifier if s.operator == "<"]
 
 
-def test_l166_the_root_requirements_cap_no_higher_than_the_services() -> None:
-    """The local-dev install runs the services from one environment, so it may
-    not admit a version that any service declaring the package excludes: its cap
-    is no higher than the lowest cap a service sets."""
+def test_l166_the_root_requirements_cap_is_the_services_lowest() -> None:
+    """The local-dev install runs the services from one environment, so its cap
+    on a package is the lowest cap a service declaring it sets. Higher, and it
+    admits a version that service excludes. Lower, and it excludes versions
+    every service accepts and the images may ship: core-api and core-storage-api
+    moved to SQLAlchemy 2.1 while the root stayed below it."""
     declared: dict[str, list[Requirement]] = {}
     for service in SERVICES:
         project = _project(service)
@@ -114,7 +116,7 @@ def test_l166_the_root_requirements_cap_no_higher_than_the_services() -> None:
             name = canonicalize_name(requirement.name)
             declared.setdefault(name, []).append(requirement)
 
-    wider = []
+    mismatched = []
     for line in (REPO / "requirements.txt").read_text().splitlines():
         line = line.split("#", 1)[0].strip()
         if not line:
@@ -124,6 +126,6 @@ def test_l166_the_root_requirements_cap_no_higher_than_the_services() -> None:
         caps = [cap for requirement in declaring for cap in _caps(requirement)]
         if not caps:
             continue  # no service caps it
-        if not _caps(root) or min(_caps(root)) > min(caps):
-            wider.append(f"{line} (a service caps it at <{min(caps)})")
-    assert wider == []
+        if not _caps(root) or min(_caps(root)) != min(caps):
+            mismatched.append(f"{line} (the lowest service cap is <{min(caps)})")
+    assert mismatched == []
