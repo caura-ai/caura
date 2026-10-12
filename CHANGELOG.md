@@ -10,6 +10,20 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.30.11](https://github.com/caura-ai/caura/compare/backend-v3.30.10...backend-v3.30.11) (2026-10-12)
+
+
+### Bug Fixes
+
+* entity names are embedded only when they need a vector (L-181) ([#2055](https://github.com/caura-ai/caura/issues/2055)) ([7a152c7](https://github.com/caura-ai/caura/commit/7a152c7bd0698a214f75a627c8f130aa8baf269f))
+* the graph and the agent list are capped, and say so (L-176, L-186) ([#2056](https://github.com/caura-ai/caura/issues/2056)) ([3ca7ebb](https://github.com/caura-ai/caura/commit/3ca7ebb18859226dadfa1ddd01a9f6f30ff8d35d))
+
+
+### Dependencies
+
+* bump types-croniter from 6.2.4.20260711 to 6.2.4.20261006 in /core-api ([#2052](https://github.com/caura-ai/caura/issues/2052)) ([6aa7d5e](https://github.com/caura-ai/caura/commit/6aa7d5ef56097a240d9ec245d0b87c9c9eb88d51))
+* update sqlalchemy[asyncio] requirement from &lt;2.1,&gt;=2.0 to &gt;=2.0,&lt;2.2 in /core-api ([#2051](https://github.com/caura-ai/caura/issues/2051)) ([24ccd65](https://github.com/caura-ai/caura/commit/24ccd65cf17e1ec6a13f07c9d82170c7b67b78e3))
+
 ## [3.30.10](https://github.com/caura-ai/caura/compare/backend-v3.30.9...backend-v3.30.10) (2026-10-12)
 
 
