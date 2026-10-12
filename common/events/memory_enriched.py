@@ -43,11 +43,14 @@ class MemoryEnriched(BaseModel):
     tenant_id: str
     # Carried so the back-channel consumer doesn't need a storage GET
     # round trip just to dispatch contradiction detection. Same trade
-    # we made for ``MemoryEmbedRequest.content``.
+    # we made for ``MemoryEmbedRequest.content``. It is also the text the
+    # enrichment judged: core-api acts on the event only while the row still
+    # holds it (O19).
     content: str = Field(min_length=1)
     # Empty string when the enricher produced no useful hint —
     # back-channel consumers should short-circuit on falsy.
     retrieval_hint: str = ""
-    # Echoes the request's flag (O16): this was an edit's run, so core-api
-    # acts on it only while the row still holds ``content``.
-    current_content_only: bool = False
+    # Always true, and read by no current core-api: since O19 the ENRICHED
+    # handler checks every run. core-api of backend-v3.30.13 (O16) checks a run
+    # only when this is set, so it stays on the wire, set, until none runs.
+    current_content_only: bool = True

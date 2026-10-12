@@ -1,10 +1,12 @@
-"""O16: an edit's deferred enrichment lands only on the text it judged.
+"""O16 and O19: an enrichment lands only on the text it judged.
 
-An edit's request says ``current_content_only``. The worker sends the text it
-enriched as the PATCH's ``expected_content``. Storage refuses the PATCH with 409
-``memory_content_changed`` once a later edit has replaced that text, and the
-worker then neither retries nor announces it. Storage's half is in the root
-suite's ``tests/test_o16_deferred_edit_enrichment_follows_the_content.py``.
+Every run, a create's as well as an edit's, sends the text it enriched as the
+PATCH's ``expected_content``. Storage refuses the PATCH with 409
+``memory_content_changed`` once an edit has replaced that text, and the worker
+then neither retries nor announces it. O16 checked an edit's run only, so a
+create's run that finished after an edit wrote the original text's verdicts over
+the edited text's (O19). Storage's half is in the root suite's
+``tests/test_o16_o19_enrichment_lands_only_on_its_text.py``.
 """
 
 from __future__ import annotations
@@ -23,45 +25,25 @@ from core_worker.clients.storage_client import update_memory_enrichment
 CONTENT = "The rollout plan moved to Thursday after the platform review."
 
 
-def _event(**payload) -> Event:
-    return Event(
-        event_type="caura.memory.enrich-requested",
-        tenant_id="tenant-A",
-        payload={"memory_id": str(uuid4()), "tenant_id": "tenant-A", "content": CONTENT, **payload},
-    )
-
-
-@pytest.fixture
-def worker(monkeypatch) -> tuple[AsyncMock, AsyncMock]:
+async def test_a_creates_patch_names_the_text_it_judged(monkeypatch) -> None:
+    """A create's request, which carries nothing but the text."""
     consumer.configure(lambda: MagicMock(spec=httpx.AsyncClient))
     monkeypatch.setattr(
         consumer, "enrich_memory", AsyncMock(return_value=EnrichmentResult(memory_type="fact"))
     )
     update = AsyncMock(return_value=True)
-    publish = AsyncMock()
     monkeypatch.setattr(consumer, "update_memory_enrichment", update)
-    monkeypatch.setattr(consumer, "publish_memory_enriched", publish)
-    return update, publish
+    monkeypatch.setattr(consumer, "publish_memory_enriched", AsyncMock())
 
+    await consumer.handle_enrich_request(
+        Event(
+            event_type="caura.memory.enrich-requested",
+            tenant_id="tenant-A",
+            payload={"memory_id": str(uuid4()), "tenant_id": "tenant-A", "content": CONTENT},
+        )
+    )
 
-@pytest.mark.parametrize(("current_content_only", "expected_content"), [(True, CONTENT), (False, None)])
-async def test_an_edits_patch_names_the_text_it_judged(
-    worker, current_content_only, expected_content
-) -> None:
-    update, _ = worker
-
-    await consumer.handle_enrich_request(_event(current_content_only=current_content_only))
-
-    assert update.await_args.kwargs.get("expected_content") == expected_content
-
-
-async def test_an_edits_announcement_says_it_is_one(worker) -> None:
-    """So core-api's ENRICHED handler can skip it if a later edit lands first."""
-    _, publish = worker
-
-    await consumer.handle_enrich_request(_event(current_content_only=True))
-
-    assert publish.await_args.kwargs["current_content_only"] is True
+    assert update.await_args.kwargs.get("expected_content") == CONTENT
 
 
 def _client(status_code: int, detail: object) -> MagicMock:

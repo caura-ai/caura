@@ -560,10 +560,11 @@ async def update_memory_enrichment(
     answer False. No fields answers True: nothing was refused, and the row is
     as enriched as this result makes it.
 
-    ``expected_content`` is the text an edit's enrichment judged (O16). Storage
+    ``expected_content`` is the text the enrichment judged (O16, O19). Storage
     applies the PATCH only while the row still holds it, and otherwise answers
-    409 ``MEMORY_CONTENT_CHANGED``: a later edit replaced the text and scheduled
-    its own enrichment. That answers False too, without a retry.
+    409 ``MEMORY_CONTENT_CHANGED``: an edit replaced the text, so the result
+    describes text the row no longer holds. That answers False too, without a
+    retry.
     """
     if not fields:
         # Defensive — heuristic fallback may produce an all-defaults
@@ -587,7 +588,7 @@ async def update_memory_enrichment(
         return False
     if resp.status_code == 409 and _error_code(resp) == MEMORY_CONTENT_CHANGED:
         logger.info(
-            "memory %s was edited again before its enrichment landed; ack-dropping the superseded run",
+            "memory %s was edited before its enrichment landed; ack-dropping the superseded run",
             memory_id,
         )
         return False

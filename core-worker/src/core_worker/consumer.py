@@ -747,13 +747,14 @@ async def handle_enrich_request(event: Event) -> None:
             memory_id=request.memory_id,
             tenant_id=request.tenant_id,
             fields=patch,
-            # O16: an edit's run lands only while the row holds the text it
-            # judged. A later edit replaced it otherwise, and scheduled its own.
-            expected_content=request.content if request.current_content_only else None,
+            # O16, O19: the result lands only while the row holds the text it
+            # judged. Otherwise an edit replaced it, and the result describes
+            # text the row no longer holds.
+            expected_content=request.content,
         )
     if not landed:
         # As for EMBEDDED above: refused (404/422), logged, not announced (L-54).
-        # Likewise when a later edit superseded this run (O16).
+        # Likewise when an edit superseded this run (O16, O19).
         return
 
     # Back-channel: announce successful enrichment so core-api (or any
@@ -768,7 +769,6 @@ async def handle_enrich_request(event: Event) -> None:
             tenant_id=request.tenant_id,
             content=request.content,
             retrieval_hint=result.retrieval_hint or "",
-            current_content_only=request.current_content_only,
         )
     except Exception:
         logger.exception(

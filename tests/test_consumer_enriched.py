@@ -102,6 +102,7 @@ async def test_handle_memory_enriched_invokes_contradiction_detection(
         "id": str(memory_id),
         "tenant_id": "tenant-A",
         "fleet_id": "fleet-X",
+        "content": "we decided to use postgres over mongo",
         "embedding": [0.1] * 1536,
     }
 
@@ -146,6 +147,7 @@ async def test_handle_memory_enriched_passes_none_fleet_id(
     mock_storage_client.get_memory.return_value = {
         "id": str(memory_id),
         "fleet_id": None,
+        "content": "x",
         "embedding": [0.5] * 8,
     }
 
@@ -171,6 +173,7 @@ async def test_handle_memory_enriched_defers_when_embedding_missing(
     mock_storage_client.get_memory.return_value = {
         "id": "doesnt-matter",
         "fleet_id": None,
+        "content": "hello world",
         "embedding": None,  # the race state we're asserting on
     }
 
@@ -192,6 +195,7 @@ async def test_handle_memory_enriched_defers_on_empty_embedding(
     mock_storage_client.get_memory.return_value = {
         "id": "any",
         "fleet_id": None,
+        "content": "hello world",
         "embedding": [],
     }
 

@@ -1775,8 +1775,8 @@ class MemoryContentChangedError(Exception):
     """A memory PATCH named the text it was computed from (``expected_content``),
     and the row holds other text: a later edit replaced it (O16).
 
-    Answered 409 ``MEMORY_CONTENT_CHANGED`` by ``app``. Nothing was written. The
-    edit that replaced the text scheduled its own enrichment.
+    Answered 409 ``MEMORY_CONTENT_CHANGED`` by ``app``. Nothing was written: the
+    patch describes text the row no longer holds.
     """
 
 
@@ -2565,8 +2565,8 @@ class PostgresService:
           when the caller passes a list.
 
         ``expected_content``, when given, is the text the patch was computed
-        from, and the row must still hold it (O16): the worker's enrichment of
-        an edit, which a later edit may have overtaken. Checked under the row's
+        from, and the row must still hold it (O16, O19): the worker's
+        enrichment, which an edit may have overtaken. Checked under the row's
         lock, so that edit cannot land between the check and the write, and
         answered with ``MemoryContentChangedError`` (409) when it fails.
 
@@ -2665,7 +2665,7 @@ class PostgresService:
             #
             # ``holds_content`` is compared in SQL, so the row's text is not
             # shipped back on every PATCH to answer a question only the
-            # worker's enrichment of an edit asks.
+            # worker's enrichment asks.
             holds_content = true() if expected_content is None else Memory.content == expected_content
             row = (
                 await session.execute(

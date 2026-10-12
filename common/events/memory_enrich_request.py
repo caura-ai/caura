@@ -60,6 +60,9 @@ class MemoryEnrichRequest(BaseModel):
 
     memory_id: UUID
     tenant_id: str
+    # The text to enrich, and the text the result may land on: the worker sends
+    # it as its PATCH's ``expected_content``, and storage refuses the write once
+    # an edit has replaced it (O16, O19).
     content: str = Field(min_length=1)
 
     # Reference datetime used as ``today`` in the prompt's
@@ -175,11 +178,8 @@ class MemoryEnrichRequest(BaseModel):
     # ``None`` = caller owns nothing here.
     caller_owned_metadata_keys: list[str] | None = None
 
-    # An edit's run (H-07): it may land only while the row still holds
-    # ``content``. A later edit that replaced the text scheduled its own run,
-    # and this one would write the old text's verdicts over the new. The
-    # worker sends ``content`` as its PATCH's ``expected_content`` and storage
-    # refuses the write once the row moved on (O16). The inline path makes the
-    # same check through ``_enrich_memory_background``'s parameter of this
-    # name, and checks only an edit's run, so this defaults off.
-    current_content_only: bool = False
+    # Always true, and read by no current worker: since O19 every run lands
+    # only on ``content``. The worker of backend-v3.30.13 (O16) sends
+    # ``content`` as its PATCH's ``expected_content`` only when this is set, so
+    # it stays on the wire, set, until no worker of that release runs.
+    current_content_only: bool = True
