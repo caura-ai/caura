@@ -96,6 +96,16 @@ def _build_sc_mock(
     return sc
 
 
+def _vectors(names, *_args, **_kwargs):
+    """``get_embeddings_batch``: one vector per name."""
+    return [[0.1] * 8 for _ in names]
+
+
+def _no_vectors(names, *_args, **_kwargs):
+    """``get_embeddings_batch`` for a provider that embeds nothing."""
+    return [None for _ in names]
+
+
 _WORKER = "core_api.services.entity_extraction_worker"
 
 
@@ -107,7 +117,7 @@ _WORKER = "core_api.services.entity_extraction_worker"
 @pytest.mark.unit
 @patch(f"{_WORKER}.log_action", new_callable=AsyncMock)
 @patch(f"{_WORKER}.upsert_relation", new_callable=AsyncMock)
-@patch(f"{_WORKER}.get_embedding", new_callable=AsyncMock)
+@patch(f"{_WORKER}.get_embeddings_batch", new_callable=AsyncMock)
 @patch(f"{_WORKER}.get_storage_client")
 @patch(f"{_WORKER}.extract_entities_from_content", new_callable=AsyncMock)
 @patch("core_api.services.organization_settings.resolve_config", new_callable=AsyncMock)
@@ -124,7 +134,7 @@ async def test_extractor_repeating_one_entity_writes_one_link(
             _entity("Analytics Service", role="mentioned"),
         ]
     )
-    mock_embed.return_value = None  # no similarity phase in this test
+    mock_embed.side_effect = _no_vectors  # no similarity phase in this test
 
     eid = str(uuid4())
     sc = _build_sc_mock(
@@ -150,7 +160,7 @@ async def test_extractor_repeating_one_entity_writes_one_link(
 @pytest.mark.unit
 @patch(f"{_WORKER}.log_action", new_callable=AsyncMock)
 @patch(f"{_WORKER}.upsert_relation", new_callable=AsyncMock)
-@patch(f"{_WORKER}.get_embedding", new_callable=AsyncMock)
+@patch(f"{_WORKER}.get_embeddings_batch", new_callable=AsyncMock)
 @patch(f"{_WORKER}.get_storage_client")
 @patch(f"{_WORKER}.extract_entities_from_content", new_callable=AsyncMock)
 @patch("core_api.services.organization_settings.resolve_config", new_callable=AsyncMock)
@@ -167,7 +177,7 @@ async def test_qualifier_variants_in_one_extraction_collapse_to_one_entity(
             _entity("postgresql 16"),
         ]
     )
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
 
     svc_id, pg_id = str(uuid4()), str(uuid4())
     sc = _build_sc_mock(
@@ -197,7 +207,7 @@ async def test_qualifier_variants_in_one_extraction_collapse_to_one_entity(
 @pytest.mark.unit
 @patch(f"{_WORKER}.log_action", new_callable=AsyncMock)
 @patch(f"{_WORKER}.upsert_relation", new_callable=AsyncMock)
-@patch(f"{_WORKER}.get_embedding", new_callable=AsyncMock)
+@patch(f"{_WORKER}.get_embeddings_batch", new_callable=AsyncMock)
 @patch(f"{_WORKER}.get_storage_client")
 @patch(f"{_WORKER}.extract_entities_from_content", new_callable=AsyncMock)
 @patch("core_api.services.organization_settings.resolve_config", new_callable=AsyncMock)
@@ -214,7 +224,7 @@ async def test_two_names_resolving_to_same_entity_write_one_link(
             _entity("postgresql"),
         ]
     )
-    mock_embed.return_value = [0.1] * 8
+    mock_embed.side_effect = _vectors
 
     shared = str(uuid4())
     sc = _build_sc_mock(
@@ -429,7 +439,7 @@ async def _write_memory(sc, tenant_id: str, content: str) -> dict:
 
 @pytest.mark.integration
 @patch(f"{_WORKER}.log_action", new_callable=AsyncMock)
-@patch(f"{_WORKER}.get_embedding", new_callable=AsyncMock)
+@patch(f"{_WORKER}.get_embeddings_batch", new_callable=AsyncMock)
 @patch(f"{_WORKER}.extract_entities_from_content", new_callable=AsyncMock)
 @patch("core_api.services.organization_settings.resolve_config", new_callable=AsyncMock)
 async def test_wet_test_replay_one_subject_one_entity_no_duplicate_links(
@@ -441,7 +451,7 @@ async def test_wet_test_replay_one_subject_one_entity_no_duplicate_links(
     link row each, and the second surface form recorded as an alias."""
     tid = _t()
     mock_cfg.return_value = _config()
-    mock_embed.return_value = None  # deterministic phases only (no similarity)
+    mock_embed.side_effect = _no_vectors  # name phases only, no similarity
 
     mem1 = await _write_memory(
         sc,

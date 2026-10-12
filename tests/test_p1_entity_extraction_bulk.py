@@ -3,9 +3,10 @@
 The pre-fix path issued up to ~6 HTTPs per entity (1 embed + up to 2 in
 ``upsert_entity`` find/create + up to 2 in find/create-link).
 
-After P1:
-  - one ``asyncio.gather`` round of ``get_embedding`` calls
-  - one ``sc.bulk_resolve_entities`` HTTP
+After P1 and L-181:
+  - one ``sc.bulk_resolve_entities`` HTTP that resolves every name by name
+  - one ``get_embeddings_batch`` call for the names that left unmatched
+  - one ``sc.bulk_resolve_entities`` HTTP that resolves those by similarity
   - one ``sc.bulk_upsert_entities`` HTTP
   - one ``sc.bulk_upsert_entity_links`` HTTP
 
@@ -79,7 +80,24 @@ def _build_sc_mock(
     # written to the graph of a row governance dropped mid-extraction. These
     # tests exercise a live row.
     sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None})
-    sc.bulk_resolve_entities = AsyncMock(return_value=resolve_returns)
+    # ``resolve_returns`` is aligned to the names the first call sends. Later
+    # calls are answered by name, and a similarity match only to an item that
+    # carries a vector, as storage's Phase 2 does (L-181).
+    by_name: dict[str, dict | None] = {}
+
+    async def resolve(*, tenant_id, items, threshold):
+        if not by_name:
+            names = [item["canonical_name"] for item in items]
+            by_name.update(zip(names, resolve_returns, strict=True))
+        answers = []
+        for item in items:
+            match = by_name.get(item["canonical_name"])
+            if match and match["matched_by"] == "similarity":
+                match = match if item["name_embedding"] is not None else None
+            answers.append(match)
+        return answers
+
+    sc.bulk_resolve_entities = AsyncMock(side_effect=resolve)
     sc.bulk_upsert_entities = AsyncMock(return_value=upsert_returns)
     sc.bulk_upsert_entity_links = AsyncMock(
         return_value=links_returns
@@ -93,6 +111,11 @@ def _build_sc_mock(
     return sc
 
 
+def _vectors(names, *_args, **_kwargs):
+    """``get_embeddings_batch``: one vector per name."""
+    return [[0.1] * 10 for _ in names]
+
+
 # ---------------------------------------------------------------------------
 # Shape tests — one HTTP per stage
 # ---------------------------------------------------------------------------
@@ -103,7 +126,8 @@ def _build_sc_mock(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -114,13 +138,14 @@ def _build_sc_mock(
 async def test_bulk_path_collapses_to_3_storage_https_for_n_entities(
     mock_resolve, mock_extract, mock_sc_factory, mock_embed, _rel, _log
 ):
-    """Three new entities → exactly one bulk_resolve + one bulk_upsert +
-    one bulk_upsert_entity_links. Zero per-row find/create calls."""
+    """Three new entities → one bulk_resolve by name, one by similarity for
+    the three it left, one bulk_upsert and one bulk_upsert_entity_links. Zero
+    per-row find/create calls."""
     mock_resolve.return_value = _config()
     mock_extract.return_value = _graph(
         [_entity("alice"), _entity("bob"), _entity("carol")]
     )
-    mock_embed.return_value = [0.1] * 10
+    mock_embed.side_effect = _vectors
 
     sc = _build_sc_mock(
         resolve_returns=[None, None, None],  # all new (no match)
@@ -142,7 +167,7 @@ async def test_bulk_path_collapses_to_3_storage_https_for_n_entities(
             memory_type="episodic",
         )
 
-    assert sc.bulk_resolve_entities.call_count == 1
+    assert sc.bulk_resolve_entities.call_count == 2
     assert sc.bulk_upsert_entities.call_count == 1
     assert sc.bulk_upsert_entity_links.call_count == 1
     # Legacy per-row paths must be untouched.
@@ -155,7 +180,8 @@ async def test_bulk_path_collapses_to_3_storage_https_for_n_entities(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -163,17 +189,15 @@ async def test_bulk_path_collapses_to_3_storage_https_for_n_entities(
     new_callable=AsyncMock,
 )
 @patch("core_api.services.organization_settings.resolve_config", new_callable=AsyncMock)
-async def test_embeddings_fire_concurrently_via_gather(
+async def test_unmatched_names_are_embedded_in_one_batch(
     mock_resolve, mock_extract, mock_sc_factory, mock_embed, _rel, _log
 ):
-    """The N embed calls land on the storage layer / provider in
-    parallel — assert all N are awaited within the same gather tick by
-    checking that ``get_embedding`` saw all N inputs (without
-    requiring per-call sequencing)."""
+    """The names the by-name pass left go to the provider in one
+    ``get_embeddings_batch`` call, not one call each (L-181)."""
     mock_resolve.return_value = _config()
     names = ["alice", "bob", "carol", "dave"]
     mock_extract.return_value = _graph([_entity(n) for n in names])
-    mock_embed.return_value = [0.1] * 10
+    mock_embed.side_effect = _vectors
     sc = _build_sc_mock(
         resolve_returns=[None] * 4,
         upsert_returns=[
@@ -193,9 +217,8 @@ async def test_embeddings_fire_concurrently_via_gather(
             memory_type="episodic",
         )
 
-    # All four names were embedded (one call each).
-    embed_args = [c.args[0] for c in mock_embed.await_args_list]
-    assert sorted(embed_args) == sorted(names)
+    mock_embed.assert_awaited_once()
+    assert mock_embed.await_args.args[0] == names
 
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
@@ -203,7 +226,8 @@ async def test_embeddings_fire_concurrently_via_gather(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -234,7 +258,7 @@ async def test_zero_entities_skips_bulk_https_entirely(
     assert sc.bulk_resolve_entities.call_count == 0
     assert sc.bulk_upsert_entities.call_count == 0
     assert sc.bulk_upsert_entity_links.call_count == 0
-    assert mock_embed.call_count == 0  # gather skipped too
+    assert mock_embed.call_count == 0  # nothing embedded either
 
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
@@ -242,7 +266,8 @@ async def test_zero_entities_skips_bulk_https_entirely(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -259,7 +284,7 @@ async def test_blocklisted_entities_filtered_before_bulk_path(
     mock_extract.return_value = _graph(
         [_entity("alice"), _entity("team"), _entity("bob"), _entity("system")]
     )
-    mock_embed.return_value = [0.1] * 10
+    mock_embed.side_effect = _vectors
 
     sc = _build_sc_mock(
         resolve_returns=[None, None],
@@ -280,7 +305,7 @@ async def test_blocklisted_entities_filtered_before_bulk_path(
             memory_type="episodic",
         )
 
-    payload = sc.bulk_resolve_entities.call_args.kwargs
+    payload = sc.bulk_resolve_entities.await_args_list[0].kwargs
     names = [it["canonical_name"] for it in payload["items"]]
     assert names == ["alice", "bob"]  # blocklisted survivors removed, order preserved
 
@@ -290,7 +315,8 @@ async def test_blocklisted_entities_filtered_before_bulk_path(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -317,7 +343,7 @@ async def test_duplicate_canonical_names_collapse_to_first(
             _entity("bob"),
         ]
     )
-    mock_embed.return_value = [0.1] * 10
+    mock_embed.side_effect = _vectors
 
     sc = _build_sc_mock(
         resolve_returns=[None, None],
@@ -338,7 +364,7 @@ async def test_duplicate_canonical_names_collapse_to_first(
             memory_type="episodic",
         )
 
-    resolve_payload = sc.bulk_resolve_entities.call_args.kwargs
+    resolve_payload = sc.bulk_resolve_entities.await_args_list[0].kwargs
     names = [it["canonical_name"] for it in resolve_payload["items"]]
     assert names == ["alice", "bob"]
 
@@ -358,7 +384,8 @@ async def test_duplicate_canonical_names_collapse_to_first(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -378,7 +405,7 @@ async def test_first_seen_wins_canonical_when_longer_name_arrives(
     existing_entity_id = str(uuid4())
     mock_resolve.return_value = _config()
     mock_extract.return_value = _graph([_entity("globex industries", "organization")])
-    mock_embed.return_value = [0.1] * 10
+    mock_embed.side_effect = _vectors
 
     sc = _build_sc_mock(
         # bulk_resolve returns the existing ``globex`` row matched by similarity.
@@ -423,7 +450,8 @@ async def test_first_seen_wins_canonical_when_longer_name_arrives(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -440,7 +468,7 @@ async def test_existing_aliases_preserved_and_extended(
     existing_entity_id = str(uuid4())
     mock_resolve.return_value = _config()
     mock_extract.return_value = _graph([_entity("acme co", "organization")])
-    mock_embed.return_value = [0.1] * 10
+    mock_embed.side_effect = _vectors
 
     sc = _build_sc_mock(
         resolve_returns=[
@@ -482,7 +510,8 @@ async def test_existing_aliases_preserved_and_extended(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -500,7 +529,7 @@ async def test_no_match_takes_create_path(
     or {}``)."""
     mock_resolve.return_value = _config()
     mock_extract.return_value = _graph([_entity("brand-new-entity", "person")])
-    mock_embed.return_value = [0.1] * 10
+    mock_embed.side_effect = _vectors
 
     sc = _build_sc_mock(
         resolve_returns=[None],
@@ -532,7 +561,8 @@ async def test_no_match_takes_create_path(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -540,22 +570,20 @@ async def test_no_match_takes_create_path(
     new_callable=AsyncMock,
 )
 @patch("core_api.services.organization_settings.resolve_config", new_callable=AsyncMock)
-async def test_embedding_failure_yields_null_in_resolve_payload(
+async def test_a_name_that_fails_to_embed_is_created_without_a_vector(
     mock_resolve, mock_extract, mock_sc_factory, mock_embed, _rel, _log
 ):
-    """``return_exceptions=True`` on the gather means a per-entity
-    embed failure surfaces as ``None`` in the resolve payload, NOT a
-    raised exception. Storage's Phase 2 (similarity) then skips that
-    item; exact-match still runs. Same skip semantic as the old
-    serial path's per-entity try/except."""
+    """A ``None`` slot from the embedder means no vector for that name. It is
+    left out of the similarity pass, since storage's Phase 2 needs a vector,
+    and takes the create path without one; the other name is unaffected. Same
+    skip semantic as the old per-entity try/except."""
     mock_resolve.return_value = _config()
     mock_extract.return_value = _graph([_entity("alice"), _entity("bob")])
 
-    # Make the second embed call raise.
-    mock_embed.side_effect = [
-        [0.1] * 10,
-        RuntimeError("simulated embed failure"),
-    ]
+    def alice_only(names, *_args, **_kwargs):
+        return [[0.1] * 10 if name == "alice" else None for name in names]
+
+    mock_embed.side_effect = alice_only
 
     sc = _build_sc_mock(
         resolve_returns=[None, None],
@@ -576,10 +604,18 @@ async def test_embedding_failure_yields_null_in_resolve_payload(
             memory_type="episodic",
         )
 
-    items = sc.bulk_resolve_entities.call_args.kwargs["items"]
+    sent = [
+        [
+            (it["canonical_name"], it["name_embedding"] is not None)
+            for it in c.kwargs["items"]
+        ]
+        for c in sc.bulk_resolve_entities.await_args_list
+    ]
+    assert sent == [[("alice", False), ("bob", False)], [("alice", True)]]
+    items = sc.bulk_upsert_entities.call_args.kwargs["items"]
     by_name = {it["canonical_name"]: it for it in items}
     assert by_name["alice"]["name_embedding"] is not None
-    assert by_name["bob"]["name_embedding"] is None  # embed failed → null
+    assert "name_embedding" not in by_name["bob"]  # embed failed → no vector
 
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
@@ -587,7 +623,8 @@ async def test_embedding_failure_yields_null_in_resolve_payload(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -610,7 +647,7 @@ async def test_link_role_binding_preserved_per_entity(
             _entity("carol", role="mentioned"),
         ]
     )
-    mock_embed.return_value = [0.1] * 10
+    mock_embed.side_effect = _vectors
 
     eids = [str(uuid4()) for _ in range(3)]
     sc = _build_sc_mock(
@@ -645,7 +682,8 @@ async def test_link_role_binding_preserved_per_entity(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -663,7 +701,7 @@ async def test_threshold_constant_passed_to_resolve(
 
     mock_resolve.return_value = _config()
     mock_extract.return_value = _graph([_entity("alice")])
-    mock_embed.return_value = [0.1] * 10
+    mock_embed.side_effect = _vectors
 
     sc = _build_sc_mock(
         resolve_returns=[None],

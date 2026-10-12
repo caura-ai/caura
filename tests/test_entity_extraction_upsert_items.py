@@ -34,6 +34,11 @@ _CONFIG = SimpleNamespace(
 )
 
 
+def _no_vectors(names, *_args, **_kwargs):
+    """``get_embeddings_batch`` for a provider that embeds nothing."""
+    return [None for _ in names]
+
+
 def _sc(resolved: list, upserted: list) -> MagicMock:
     sc = MagicMock()
     sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None})
@@ -60,7 +65,7 @@ async def _run(sc: MagicMock, graph: ExtractedGraph) -> SimpleNamespace:
             w, "extract_entities_from_content", new=AsyncMock(return_value=graph)
         ),
         patch.object(w, "get_storage_client", return_value=sc),
-        patch.object(w, "get_embedding", new=AsyncMock(return_value=None)),
+        patch.object(w, "get_embeddings_batch", new=AsyncMock(side_effect=_no_vectors)),
         patch.object(w, "log_action", new=seen.log),
         patch.object(w, "upsert_relation", new=seen.relation),
         patch("core_api.tasks.track_task", side_effect=close_scheduled_coro),

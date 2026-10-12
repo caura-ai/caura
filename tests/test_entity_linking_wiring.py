@@ -31,6 +31,16 @@ def _fake_config(**overrides):
     return cfg
 
 
+def _vectors(names, *_args, **_kwargs):
+    """``get_embeddings_batch``: one vector per name."""
+    return [[0.1] * 10 for _ in names]
+
+
+def _no_vectors(names, *_args, **_kwargs):
+    """``get_embeddings_batch`` for a provider that embeds nothing."""
+    return [None for _ in names]
+
+
 # ── entity_extraction_worker ─────────────────────────────────────────
 
 
@@ -44,7 +54,8 @@ def _fake_config(**overrides):
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -81,7 +92,7 @@ async def test_extraction_triggers_cross_links_when_enabled(
     sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None})
     mock_sc_factory.return_value = sc
 
-    mock_embed.return_value = [0.1] * 10
+    mock_embed.side_effect = _vectors
 
     # Plumb the post-P1 bulk flow: resolve returns ``None`` (no
     # existing match), so the worker takes the create path. The
@@ -122,7 +133,8 @@ async def test_extraction_triggers_cross_links_when_enabled(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -158,7 +170,7 @@ async def test_extraction_skips_cross_links_when_disabled(
     sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None})
     mock_sc_factory.return_value = sc
 
-    mock_embed.return_value = [0.1] * 10
+    mock_embed.side_effect = _vectors
 
     # Plumb the post-P1 bulk flow: resolve returns ``None`` (no
     # existing match), so the worker takes the create path. The
@@ -199,7 +211,8 @@ async def test_extraction_skips_cross_links_when_disabled(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -235,7 +248,7 @@ async def test_extraction_cross_link_failure_is_nonfatal(
     sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None})
     mock_sc_factory.return_value = sc
 
-    mock_embed.return_value = [0.1] * 10
+    mock_embed.side_effect = _vectors
 
     # Plumb the post-P1 bulk flow: resolve returns ``None`` (no
     # existing match), so the worker takes the create path. The
@@ -326,7 +339,8 @@ def _graph_sc(*, deleted_at):
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -351,7 +365,7 @@ async def test_a_memory_dropped_during_extraction_gets_no_entities(
     """
     mock_resolve.return_value = _fake_config()
     mock_extract.return_value = _one_entity_graph()
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
     sc = _graph_sc(deleted_at="2026-09-05T00:00:00Z")
     mock_sc_factory.return_value = sc
 
@@ -373,7 +387,8 @@ async def test_a_memory_dropped_during_extraction_gets_no_entities(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -391,7 +406,7 @@ async def test_the_liveness_check_reads_the_writer(
     """
     mock_resolve.return_value = _fake_config()
     mock_extract.return_value = _one_entity_graph()
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
     sc = _graph_sc(deleted_at=None)
     mock_sc_factory.return_value = sc
 
@@ -412,7 +427,8 @@ async def test_the_liveness_check_reads_the_writer(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -433,7 +449,7 @@ async def test_a_drop_landing_during_the_writes_purges_what_was_just_written(
     """
     mock_resolve.return_value = _fake_config()
     mock_extract.return_value = _one_entity_graph()
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
     sc = _graph_sc(deleted_at=None)
     # Live at the pre-write check, dropped by the post-write one.
     sc.get_memory = AsyncMock(
@@ -462,7 +478,8 @@ async def test_a_drop_landing_during_the_writes_purges_what_was_just_written(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -482,7 +499,7 @@ async def test_a_row_still_live_after_the_writes_is_not_purged(
     """
     mock_resolve.return_value = _fake_config()
     mock_extract.return_value = _one_entity_graph()
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
     sc = _graph_sc(deleted_at=None)
     mock_sc_factory.return_value = sc
 
@@ -509,7 +526,8 @@ async def test_a_row_still_live_after_the_writes_is_not_purged(
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -539,7 +557,7 @@ async def test_a_detected_drop_stops_the_writes_that_come_after_the_purge(
     """
     mock_resolve.return_value = _fake_config()
     mock_extract.return_value = _graph_with_relation()
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
     sc = _graph_sc(deleted_at=None)
     sc.get_memory = AsyncMock(
         side_effect=[
@@ -574,7 +592,8 @@ async def test_a_detected_drop_stops_the_writes_that_come_after_the_purge(
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -598,7 +617,7 @@ async def test_a_live_row_still_gets_its_relations_written(
     """
     mock_resolve.return_value = _fake_config()
     mock_extract.return_value = _graph_with_relation()
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
     sc = _graph_sc(deleted_at=None)
     mock_sc_factory.return_value = sc
 
@@ -626,7 +645,8 @@ async def test_a_live_row_still_gets_its_relations_written(
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -656,7 +676,7 @@ async def test_a_drop_landing_after_the_relation_write_is_still_purged(
     """
     mock_resolve.return_value = _fake_config()
     mock_extract.return_value = _graph_with_relation()
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
     sc = _graph_sc(deleted_at=None)
     # Live at the pre-write check AND at the post-link check; dropped only by the
     # final one, after the relation and cross-link writes.
@@ -694,7 +714,8 @@ async def test_a_drop_landing_after_the_relation_write_is_still_purged(
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -726,7 +747,7 @@ async def test_a_transient_liveness_read_failure_does_not_discard_the_audit_work
     """
     mock_resolve.return_value = _fake_config()
     mock_extract.return_value = _graph_with_relation()
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
     sc = _graph_sc(deleted_at=None)
     sc.get_memory = AsyncMock(
         side_effect=[
@@ -763,7 +784,8 @@ async def test_a_transient_liveness_read_failure_does_not_discard_the_audit_work
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -795,7 +817,7 @@ async def test_a_crash_after_the_writes_still_purges_a_dropped_row(
     """
     mock_resolve.return_value = _fake_config()
     mock_extract.return_value = _graph_with_relation()
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
     sc = _graph_sc(deleted_at=None)
     sc.get_memory = AsyncMock(
         side_effect=[
@@ -851,7 +873,8 @@ async def test_a_crash_after_the_writes_still_purges_a_dropped_row(
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -877,7 +900,7 @@ async def test_a_guarded_relation_failure_still_reaches_the_final_purge_check(
     """
     mock_resolve.return_value = _fake_config()
     mock_extract.return_value = _graph_with_relation()
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
     sc = _graph_sc(deleted_at=None)
     sc.get_memory = AsyncMock(
         side_effect=[
@@ -909,7 +932,8 @@ async def test_a_guarded_relation_failure_still_reaches_the_final_purge_check(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -933,7 +957,7 @@ async def test_a_crash_before_any_write_costs_no_extra_liveness_read(
     """
     mock_resolve.return_value = _fake_config()
     mock_extract.return_value = _one_entity_graph()
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
     sc = _graph_sc(deleted_at=None)
     sc.bulk_resolve_entities = AsyncMock(side_effect=RuntimeError("resolve failed"))
     mock_sc_factory.return_value = sc
@@ -990,7 +1014,8 @@ async def test_a_crash_before_the_storage_client_exists_does_not_raise(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -1016,7 +1041,7 @@ async def test_an_entity_upsert_that_raises_is_still_treated_as_maybe_written(
     """
     mock_resolve.return_value = _fake_config()
     mock_extract.return_value = _one_entity_graph()
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
     sc = _graph_sc(deleted_at=None)
     sc.bulk_upsert_entities = AsyncMock(
         side_effect=RuntimeError("timed out waiting for the upsert response")
@@ -1051,7 +1076,8 @@ async def test_an_entity_upsert_that_raises_is_still_treated_as_maybe_written(
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -1079,7 +1105,7 @@ async def test_cross_link_discovery_alone_still_owes_the_memory_a_liveness_check
     # whole persistence branch is skipped.
     mock_resolve.return_value = _fake_config(entity_blocklist=frozenset({"alice"}))
     mock_extract.return_value = _one_entity_graph()
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
     sc = _graph_sc(deleted_at=None)
     sc.get_memory = AsyncMock(
         side_effect=[
@@ -1114,7 +1140,8 @@ async def test_cross_link_discovery_alone_still_owes_the_memory_a_liveness_check
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -1148,7 +1175,7 @@ async def test_an_unreadable_purge_response_does_not_escape_the_except_handler(
     """
     mock_resolve.return_value = _fake_config()
     mock_extract.return_value = _graph_with_relation()
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
     sc = _graph_sc(deleted_at=None)
     sc.get_memory = AsyncMock(
         side_effect=[
@@ -1179,7 +1206,8 @@ async def test_an_unreadable_purge_response_does_not_escape_the_except_handler(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -1212,7 +1240,7 @@ async def test_entities_committed_without_their_links_are_named_in_the_log(
     """
     mock_resolve.return_value = _fake_config()
     mock_extract.return_value = _one_entity_graph()
-    mock_embed.return_value = None
+    mock_embed.side_effect = _no_vectors
     sc = _graph_sc(deleted_at=None)
     fresh = str(uuid.uuid4())
     sc.bulk_upsert_entities = AsyncMock(
