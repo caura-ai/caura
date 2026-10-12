@@ -135,6 +135,14 @@ jobs:
         # through every write path EXCEPT core-worker's, which would have left
         # every production row permanently at ``unknown_provenance``; it was
         # caught by human review because no automated check covered the tree.
+        #
+        # This union resolves every service's pyproject ranges afresh, in one
+        # environment, so it matches none of the four locks the images install
+        # (M-01). It runs the lint steps, the repo-level gates, the common/ and
+        # scripts/ type checks and the root suite, which runs core-api and
+        # core-storage-api in one process and so has no single lock to follow.
+        # Each service's own type check and test suite run from that service's
+        # lock instead: see the note above the mypy steps.
         run: |
           uv venv .venv
           source .venv/bin/activate
@@ -411,7 +419,19 @@ jobs:
           git fetch --no-tags --depth=1 origin "+${BASE_REF}:refs/remotes/origin/${BASE_REF}"
           uv run python scripts/tenant_scope_gate.py --base "origin/${BASE_REF}"
 
-      # The four steps below check each service against common/ as well as
+      # The four steps below, and each service's own test step further down,
+      # run in that service's OWN environment, built from its committed uv.lock
+      # (``uv run --frozen --extra dev``) — the versions its image installs. They
+      # used to run in the union venv above, which held neither shipped
+      # SQLAlchemy: core-api's lock pinned 2.0.50 and core-storage-api's 2.1.0,
+      # and the union settled on a 2.0.x that core-api's cap allowed. So storage
+      # was type-checked and tested against a version its image never installed,
+      # and the 13 annotations 2.1 rejects stayed unseen until a core-api bump
+      # moved the union onto 2.1 (M-01). ``--frozen`` because the lock step above
+      # already fails on a stale lock; core-worker adds ``--extra vertex`` because
+      # its image does.
+      #
+      # The four steps below also check each service against common/ as well as
       # against its own src/, because every service pyproject now carries
       # ``mypy_path = "src:.."`` — ``..`` being the repo root, where common/
       # lives. Before that, ``common.*`` resolved to nothing, and
@@ -438,22 +458,22 @@ jobs:
       # disagreeing with the gate — which is the shape of the failure this
       # closes, not a fix for it.
       - name: Run mypy (core-api)
-        run: cd core-api && uv run mypy src/
+        run: cd core-api && uv run --frozen --extra dev mypy src/
 
       - name: Run mypy (core-storage-api)
-        run: cd core-storage-api && uv run mypy src/
+        run: cd core-storage-api && uv run --frozen --extra dev mypy src/
 
       - name: Run mypy (core-operations)
         # core-operations/pyproject.toml carries a full [tool.mypy] block and
         # mypy as a dev dep, same as its two siblings above; only the CI step
         # was missing.
-        run: cd core-operations && uv run mypy src/
+        run: cd core-operations && uv run --frozen --extra dev mypy src/
 
       - name: Run mypy (core-worker)
         # core-worker/pyproject.toml already carries a [tool.mypy] block with
         # ``mypy_path = "src"`` and mypy as a dev dep — the config was there all
         # along, nothing ever ran it.
-        run: cd core-worker && uv run mypy src/
+        run: cd core-worker && uv run --frozen --extra dev --extra vertex mypy src/
 
       - name: Run mypy (common/)
         # common/ was type-checked by NOTHING before this step. Each mypy step
@@ -603,7 +623,7 @@ jobs:
         # settings), and the root pytest.ini — which pytest resolves for this
         # path, since core-api/pyproject.toml carries no pytest table — puts
         # core-api/src and the repo root on the path.
-        run: uv run pytest core-api/tests/ -v --tb=short
+        run: uv run --frozen --extra dev --project core-api pytest core-api/tests/ -v --tb=short
 
       - name: Create the storage-suite database
         # Its own database, NOT the one `tests/` uses. The two suites provision
@@ -629,7 +649,7 @@ jobs:
           SQL
 
       - name: Run core-storage-api integration tests
-        run: uv run pytest core-storage-api/tests/ -v --tb=short
+        run: uv run --frozen --extra dev --project core-storage-api pytest core-storage-api/tests/ -v --tb=short
         env:
           PYTHONPATH: core-api/src:core-storage-api/src:.
           POSTGRES_REQUIRE_SSL: "false"
@@ -663,7 +683,7 @@ jobs:
         # prints "Required test coverage of 50.0% reached" and fails below it.
         # Currently ~80%.
         run: |
-          uv run pytest core-operations/tests/ -v --tb=short \
+          uv run --frozen --extra dev --project core-operations pytest core-operations/tests/ -v --tb=short \
             --cov=core-operations/src/core_operations \
             --cov-config=core-operations/pyproject.toml \
             --cov-report=term-missing
@@ -699,7 +719,7 @@ jobs:
         # discovers config relative to the CWD, so without the flag the run
         # collects coverage while silently ignoring the floor. Currently ~70%.
         run: |
-          uv run pytest core-worker/tests/ -v --tb=short \
+          uv run --frozen --extra dev --extra vertex --project core-worker pytest core-worker/tests/ -v --tb=short \
             --cov=core-worker/src/core_worker \
             --cov-config=core-worker/pyproject.toml \
             --cov-report=term-missing

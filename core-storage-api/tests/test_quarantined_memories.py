@@ -26,7 +26,6 @@ from common.constants import (
     QUARANTINED_MEMORY_STATUS,
     SEARCH_KNOBS,
 )
-from common.enrichment.constants import MEMORY_STATUSES
 from core_storage_api.services.postgres_service import PostgresService, get_session
 
 pytestmark = pytest.mark.asyncio
@@ -102,12 +101,11 @@ def _ids(rows: Any) -> set[str]:
 
 
 async def test_the_held_status_is_outside_every_vocabulary_that_would_release_it() -> None:
-    """Not live, so recall and the list defaults leave it out; not in the
-    enrichment vocabulary, so a classifier status can never stand in for a
-    person's release; and spelt as raw SQL spells it."""
+    """Not live, so recall and the list defaults leave it out, and spelt as raw
+    SQL spells it. That the enrichment vocabulary leaves it out too is checked
+    in the root suite (``test_quarantined_memory_transitions.py``)."""
     assert QUARANTINED_MEMORY_STATUS == "quarantined"
     assert QUARANTINED_MEMORY_STATUS not in LIVE_MEMORY_STATUSES
-    assert QUARANTINED_MEMORY_STATUS not in MEMORY_STATUSES
     assert set(QUARANTINE_EXITS) == {"active", "cancelled"}
 
 

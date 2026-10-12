@@ -116,14 +116,18 @@ See `README.md` for more deployment options and environment variable details.
 5. **Run local checks.** With the pre-commit hook installed, ruff check +
    ruff format already ran on `git commit`, so you only need:
    ```bash
-   mypy core-api/src/ core-storage-api/src/
+   (cd core-api && uv run --frozen --extra dev mypy src/)
+   (cd core-storage-api && uv run --frozen --extra dev mypy src/)
    pytest tests/ core-api/tests/
    ```
-   Without the hook, also run ruff by hand:
+   Each service is type-checked as CI does it, in an environment built from
+   its own `uv.lock`: the venv above resolves the ranges afresh, so it can
+   hold versions no image ships. Without the hook, also run ruff by hand:
    ```bash
    ruff check core-api/src/ core-api/tests/ core-storage-api/src/
    ruff format --check core-api/src/ core-api/tests/ core-storage-api/src/
-   mypy core-api/src/ core-storage-api/src/
+   (cd core-api && uv run --frozen --extra dev mypy src/)
+   (cd core-storage-api && uv run --frozen --extra dev mypy src/)
    pytest tests/ core-api/tests/
    ```
 6. **Open a PR against `main`.** Fill out the PR template. Branch protection requires CI green, DCO check green, and ≥1 maintainer approval before merge.
