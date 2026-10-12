@@ -6,8 +6,12 @@ import shutil
 import sys
 from pathlib import Path
 
-# Background listener lifetime per arming. A Stop re-arms it after every turn.
-DEFAULT_LISTEN_SECONDS = 43200
+# Background listener lifetime per arming. A Stop re-arms it after every turn,
+# but an idle session has no turns: a short window left an open session deaf
+# after one quiet night. The listener already exits with its Claude Code
+# process, so the window only bounds a session left idle for a week.
+DEFAULT_LISTEN_SECONDS = 7 * 24 * 3600
+MAX_LISTEN_SECONDS = DEFAULT_LISTEN_SECONDS
 
 
 def install_hooks(

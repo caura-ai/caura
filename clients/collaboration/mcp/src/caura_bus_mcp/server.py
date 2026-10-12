@@ -245,7 +245,8 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
     discover: capability, available_only=true, fleet_id, cursor, limit=50 (1-100). Returns one
       page of agents with live skills/status, plus next_cursor and has_more.
       description is the registered expertise (kept while offline, may be null);
-      availability (ready/busy/offline) and sessions are live runtime state.
+      availability (ready/busy/not_listening/offline) and sessions are live runtime state;
+      not_listening = session open but nothing wakes it, so a request waits for its next turn.
     agents: fleet_id, cursor, limit=50 (1-100). Returns one page of registered peers, each with
       its registered description, plus next_cursor and has_more.
       Directory results may be INCOMPLETE: while has_more is true, repeat the same op with the

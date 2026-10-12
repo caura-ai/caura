@@ -16,7 +16,7 @@ from caura_bus_core import RESYNC_EVENT, Bus, PlatformError, ResponseCollector, 
 from caura_bus_core.config import CONFIG_ENV_VAR, DEFAULT_CONFIG_PATH
 
 from . import broker as broker_mod
-from .hooks import DEFAULT_LISTEN_SECONDS, install_hooks
+from .hooks import DEFAULT_LISTEN_SECONDS, MAX_LISTEN_SECONDS, install_hooks
 from .join import JoinError, JoinOptions, run_join
 from .runtime import CodexQueue, WakeState, listen, load_key, receive, state_path, supervise
 from .setup import Options, SetupError, run_setup
@@ -95,7 +95,7 @@ def recv(
     hook: str | None = None,
     config: Path | None = typer.Option(None),
     state: Path | None = typer.Option(None),
-    wait: float = typer.Option(0, min=0, max=86400),
+    wait: float = typer.Option(0, min=0, max=MAX_LISTEN_SECONDS),
     idle_listen_seconds: float = typer.Option(5, min=0, max=3600),
     key_file: Path | None = typer.Option(None, help="0600 file holding the agent key"),
 ):
@@ -154,7 +154,7 @@ def hooks_install(
     config: Path | None = typer.Option(None),
     state: Path | None = typer.Option(None),
     key_file: Path | None = typer.Option(None, help="0600 file holding the agent key"),
-    listen_seconds: int = typer.Option(DEFAULT_LISTEN_SECONDS, min=60, max=86400),
+    listen_seconds: int = typer.Option(DEFAULT_LISTEN_SECONDS, min=60, max=MAX_LISTEN_SECONDS),
     idle_listen_seconds: int = typer.Option(5, min=0, max=3600, hidden=True),
     shared: bool = typer.Option(False),
 ):

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from caura_bus_cli import runtime
-from caura_bus_cli.hooks import install_hooks, owned_command
+from caura_bus_cli.hooks import DEFAULT_LISTEN_SECONDS, install_hooks, owned_command
 from caura_bus_cli.main import app
 from caura_bus_core import AgentConfig, PlatformError
 from typer.testing import CliRunner
@@ -267,6 +267,19 @@ def test_hooks_merge_idempotently_preserve_settings_and_use_project_scope(tmp_pa
     assert not (project / ".claude/settings.json").exists()
     assert "CAURA_API_KEY" not in settings.read_text()
     assert (before_global.read_bytes() if before_global.exists() else None) == global_bytes
+
+
+def test_default_listener_outlasts_an_idle_weekend(tmp_path, monkeypatch):
+    # A 12-hour window left an idle open session deaf the next morning: no
+    # turn ran overnight, so no Stop re-armed the listener.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    install_hooks(project=tmp_path, config=tmp_path / "agent.toml")
+    saved = json.loads((tmp_path / ".claude/settings.local.json").read_text())
+    for event in ("Stop", "SessionStart"):
+        (listener,) = saved["hooks"][event][0]["hooks"]
+        wait = int(shlex.split(listener["command"])[-1])
+        assert wait == DEFAULT_LISTEN_SECONDS >= 3 * 24 * 3600
+        assert listener["timeout"] == wait + 60
 
 
 class FakeBus:

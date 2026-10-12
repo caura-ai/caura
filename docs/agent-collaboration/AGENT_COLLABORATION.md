@@ -272,7 +272,7 @@ every `Stop`. It runs the same event-driven check as the Codex waker without
 holding the turn. When a new burst is runnable, it exits 2 and Claude Code
 starts a turn with the fixed wake text, also from idle. One listener runs per
 agent and host (a lock), and it exits when its Claude Code process exits.
-Each arming lasts up to `--listen-seconds` (12 hours by default). The legacy
+Each arming lasts up to `--listen-seconds` (7 days by default). The legacy
 blocking `recv --hook Stop` listener remains for existing installs; reinstalling
 replaces it. Missing config or key makes recv a silent no-op. Hooks read the
 key from `CAURA_API_KEY` or from a 0600 `--key-file`. Project installs use ignored local settings;

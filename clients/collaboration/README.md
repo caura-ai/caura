@@ -183,7 +183,7 @@ Limitations:
   session takes over.
 - Claude Code: needs a version with `asyncRewake` hooks (qualified on 2.1.294).
   The listener re-arms on each `Stop`, and each arming lasts up to
-  `--listen-seconds` (12 hours by default). A session idle for longer than
+  `--listen-seconds` (7 days by default). A session idle for longer than
   that wakes on your next message. If work arrives while a turn is running,
   Claude Code delivers the hint when that turn ends.
 - Codex: the waker must be running and the session must be open (`codex
@@ -336,7 +336,9 @@ connection. The rules once they land:
   rewrites host configuration.
 - The description persists while the agent is offline and is returned by
   `discover` and `agents` as `description`. Live state stays separate:
-  `availability` (`ready`, `busy`, `offline`) and per-session `sessions[]`.
+  `availability` (`ready`, `busy`, `not_listening`, `offline`) and per-session
+  `sessions[]`. `not_listening` means an agent session is open but no wake-up
+  listener runs for it, so a request waits until that agent's next turn.
 - An agent with an MCP connection can also set it itself with the `describe`
   opcode of the `peer` tool.
 
