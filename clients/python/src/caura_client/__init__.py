@@ -19,7 +19,7 @@ from .exceptions import (
     RateLimitError,
     TransportError,
 )
-from .models import Memory, RecallResult, SearchResult
+from .models import Memory, RecallResult, SearchResult, Stats
 
 __all__ = [
     "DEFAULT_BASE_URL",
@@ -32,6 +32,7 @@ __all__ = [
     "RateLimitError",
     "RecallResult",
     "SearchResult",
+    "Stats",
     "TransportError",
     "__version__",
 ]

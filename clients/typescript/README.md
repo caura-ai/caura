@@ -55,6 +55,7 @@ network. Requests refuse redirects, so the key is never re-sent elsewhere: point
 | `recall(query, opts?)` | `POST /api/v1/recall` | `RecallResult` |
 | `getDocument(docId, opts)` | `GET /api/v1/documents/{docId}` | `object` |
 | `health()` | `GET /api/v1/health` | `object` |
+| `stats()` | `GET /api/v1/stats` | `Stats` |
 
 Failures throw `AuthError` (401/403), `NotFoundError` (404), or
 `CauraApiError` for HTTP errors. Network failures and timeouts while awaiting
@@ -98,6 +99,21 @@ required option, and a missing document raises `NotFoundError`:
 const doc = await mc.getDocument("doc-123", { collection: "interviews" });
 const record = doc.data; // the stored record lives under "data"
 ```
+
+### Deployment stats
+
+`stats()` returns three counters — `tenantCount`, `memoryCount`,
+`agentCount` — for the landing-page status bar:
+
+```ts
+const s = await mc.stats();
+console.log(s.tenantCount, s.memoryCount, s.agentCount);
+```
+
+These are **deployment-wide totals, not scoped to your `tenantId`** — the
+server counts across every tenant on the deployment. The underlying endpoint
+is unauthenticated (no key required to call it directly), but this method
+still sends your API key header for consistency with every other call.
 
 ### Unknown fields on writes are rejected
 

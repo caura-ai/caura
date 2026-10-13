@@ -62,6 +62,7 @@ To reach the same memory from an MCP client with no SDK, see the
 | `search(query, top_k=5, ...)` | `POST /api/v1/search` | `SearchResult` (a `list[Memory]`) |
 | `recall(query, top_k=5, ...)` | `POST /api/v1/recall` | `RecallResult` |
 | `health()` | `GET /api/v1/health` | `dict` |
+| `stats()` | `GET /api/v1/stats` | `Stats` |
 | `get_document(doc_id, *, collection, ...)` | `GET /api/v1/documents/{doc_id}` | `dict` |
 | `submit_interview(...)` | `POST /api/v1/interview/submit` | `dict` |
 | `close()` | — | `None` |
@@ -96,6 +97,22 @@ is new, and holds the read to the agent's fleet and trust level, so a trust-1
 agent reads its own fleet and is refused another. It is opt-in, never sent from
 `agent_id` alone. An agent-scoped key already reads as its agent, and may only
 name itself here.
+
+### Deployment stats
+
+`stats()` returns three counters — `tenant_count`, `memory_count`,
+`agent_count` — for the landing-page status bar:
+
+```python
+with Caura("mc_xxx", tenant_id="my-team") as mc:
+    s = mc.stats()
+    print(s.tenant_count, s.memory_count, s.agent_count)
+```
+
+These are **deployment-wide totals, not scoped to your `tenant_id`** — the
+server counts across every tenant on the deployment. The underlying endpoint
+is unauthenticated (no key required to call it directly), but this method
+still sends your API key header for consistency with every other call.
 
 ### Fetching a document
 
