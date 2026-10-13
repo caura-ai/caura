@@ -754,7 +754,8 @@ Content-hash rejects exact duplicates within a tenant + fleet + agent scope (HTT
 | All config issues | Use the "Fix Configuration" button in Fleet Browser Plugin Manager to auto-fix all settings |
 | `ECONNREFUSED` | Check `CAURA_API_URL`, ensure API is running |
 | API URL redirects | Set `CAURA_API_URL` to the final server URL. Credential-bearing plugin requests reject redirects so an API key cannot be forwarded to another host. |
-| Agent-key provisioning unavailable | Concurrent calls for one agent share one provisioning attempt. Failed attempts wait 60 seconds before retrying; a 404 disables provisioning until plugin restart. The existing tenant-key fallback remains, so this is not an agent-revocation control. |
+| Agent-key provisioning unavailable | Concurrent calls for one agent share one provisioning attempt. Failed attempts wait 60 seconds before retrying; a 404 disables provisioning until plugin restart. Meanwhile the agent's requests use the tenant key. |
+| `agent_key_revoked` | Managed platform: an admin revoked the agent, and none of its keys is live. The plugin refuses that agent's requests rather than send them with the tenant key, and asks again every 10 minutes. To turn the agent back on, issue it a key in the dashboard. This relies on the plugin: the tenant key can still act as any agent, so to stop an agent's writes outright, set its trust level to 0 |
 | 401 Unauthorized | Check `CAURA_API_KEY` env var on gateway |
 | 403 Forbidden | Key used for wrong tenant, or agent trust level too low |
 | 409 Conflict | Duplicate content — safe to ignore |
