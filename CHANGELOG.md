@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.33.0](https://github.com/caura-ai/caura/compare/backend-v3.32.0...backend-v3.33.0) (2026-10-13)
+
+
+### Features
+
+* memory map, usage metering and value metering — GET /memories/field, /spend and /value ([#2071](https://github.com/caura-ai/caura/issues/2071)) ([da9fc57](https://github.com/caura-ai/caura/commit/da9fc57796a4588ffc428670f9159653d109f481))
+
+
+### Documentation
+
+* **skill:** three lessons from real agents — a miss isn't proof, don't save found-nothing, leave memory_type to the server ([#2068](https://github.com/caura-ai/caura/issues/2068)) ([f6e7578](https://github.com/caura-ai/caura/commit/f6e75788b458dfa9bbca7e5e3d23528e12861cec))
+
 ## [3.32.0](https://github.com/caura-ai/caura/compare/backend-v3.31.0...backend-v3.32.0) (2026-10-13)
 
 
