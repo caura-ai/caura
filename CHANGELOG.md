@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.34.0](https://github.com/caura-ai/caura/compare/backend-v3.33.2...backend-v3.34.0) (2026-10-13)
+
+
+### Features
+
+* **storage:** split the entities the old nightly merge collapsed (H-05) ([#2078](https://github.com/caura-ai/caura/issues/2078)) ([6a7a2cb](https://github.com/caura-ai/caura/commit/6a7a2cbbaf12dbc040b29444c550f7def17a7ac0))
+
+
+### Dependencies
+
+* update cachetools requirement from &lt;8,&gt;=7.2.0 to &gt;=7.2.1,&lt;8 ([#2048](https://github.com/caura-ai/caura/issues/2048)) ([34b2acc](https://github.com/caura-ai/caura/commit/34b2acc0a2759f76411b70736402e04831e31ff3))
+* update pgvector requirement from &lt;1,&gt;=0.5.0 to &gt;=0.5.1,&lt;1 ([#2047](https://github.com/caura-ai/caura/issues/2047)) ([e4e1d6a](https://github.com/caura-ai/caura/commit/e4e1d6ab2f4edd7e806a7e73c9e1cd076479accb))
+
 ## [3.33.2](https://github.com/caura-ai/caura/compare/backend-v3.33.1...backend-v3.33.2) (2026-10-13)
 
 
