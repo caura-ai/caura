@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.33.2](https://github.com/caura-ai/caura/compare/backend-v3.33.1...backend-v3.33.2) (2026-10-13)
+
+
+### Dependencies
+
+* **actions:** bump the actions group across 1 directory with 5 updates ([#2049](https://github.com/caura-ai/caura/issues/2049)) ([69d76fe](https://github.com/caura-ai/caura/commit/69d76fe829a887bed688aa8431569e18d14e25d8))
+
 ## [3.33.1](https://github.com/caura-ai/caura/compare/backend-v3.33.0...backend-v3.33.1) (2026-10-13)
 
 
