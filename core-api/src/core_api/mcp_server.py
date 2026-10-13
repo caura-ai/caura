@@ -205,19 +205,14 @@ _install_uuid_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # The person the gateway vouched for (X-User-ID), for audit rows only: the twin
 # of ``AuthContext.user_id``, and set under the same stricter rule.
 _user_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("mcp_user_id", default=None)
-# Plan-limit read-only mode, computed by the platform from the persisted usage
-# counters and stamped as X-Org-Read-Only (see ``usage_service``'s module
-# docstring). REST reads it via ``AuthContext.is_read_only``. This middleware
-# reads it too, as of the commit that introduced this var — BEFORE that it did
-# not, which is the state caura-ai/caura#1205 describes and the reason that
-# issue reads as if the signal were still missing. It never was; the refusal
-# was, and it now exists behind a flag.
-#
-# ENFORCED ONLY WHEN ``enforce_mcp_plan_limits`` IS ON — off by default, in
-# which case ``_check_plan_limit`` logs and lets the write through exactly as
-# before. See that function and the setting's comment for why the capability is
-# available without being automatic.
+# Read-only verdicts from the platform auth/gateway. A verified reason always
+# enforces license or organization policy. Boolean-only legacy verdicts retain
+# the observe/enforce usage rollout flag.
 _org_read_only_var: contextvars.ContextVar[bool] = contextvars.ContextVar("mcp_org_read_only", default=False)
+# Auth-origin entitlement reason, independent of the legacy usage rollout flag.
+_org_read_only_reason_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "mcp_org_read_only_reason", default=None
+)
 # Set when the platform could not DETERMINE the read-only verdict, as opposed
 # to determining it is false. ``/_auth`` fails open on its own storage lookup,
 # which is correct for an auth path and wrong for a measurement one: the
@@ -600,6 +595,12 @@ class MCPAuthMiddleware:
             # header being present.
             _read_only_header = headers.get(b"x-org-read-only", b"").decode().lower() if via_gateway else ""
             _org_read_only_var.set(_read_only_header == "true")
+            reason = (
+                headers.get(b"x-org-read-only-reason", b"").decode().lower()
+                if via_gateway and settings.gateway_shared_secret and _read_only_header == "true"
+                else ""
+            )
+            _org_read_only_reason_var.set(reason if reason in {"license", "organization"} else None)
             # THREE-VALUED, not two. ``unknown`` is emitted by ``/_auth`` when
             # its storage lookup failed, and it is deliberately NOT "true":
             # auth must keep failing open, because refusing every write during a
@@ -695,7 +696,7 @@ def _is_org_read_only() -> bool:
 
     The MCP twin of ``AuthContext.is_read_only``. Read only by
     ``_check_plan_limit``, which refuses on it when
-    ``enforce_mcp_plan_limits`` is on and logs without refusing when it is off.
+    ``enforce_mcp_plan_limits`` is on or an auth-origin reason is verified.
     """
     return _org_read_only_var.get(False)
 
@@ -711,80 +712,17 @@ def _is_org_read_only_unknown() -> bool:
 
 
 def _check_plan_limit(op: MutatingOp, tenant_id: str) -> str | None:
-    """Refuse ``op`` when the org is over its plan limit — or just record it.
+    """Apply REST's quota policy to a trusted organization entitlement verdict.
 
-    Returns the canonical MCP error envelope when the write must be refused,
-    and ``None`` when it may proceed. Callers MUST return the envelope rather
-    than discard it; a dropped return here is a silent un-enforcement, which is
-    the failure this whole area keeps producing.
+    Auth-origin reasons are always enforced for policy-gated operations. An
+    expired/missing license is stricter: `_check_write_scope` blocks every
+    explicit mutating tool, including deletes and updates. An organization
+    cancellation follows REST's existing quota policy, so cleanup operations
+    and updates remain available where REST allows them.
 
-    WHICH IT DOES IS A FLAG. ``enforces_mcp_plan_limits()`` is off by default,
-    and while it is off this behaves exactly as it did before — log and let the
-    write through. That preserves the staging described below rather than
-    discarding it: enforcement becomes available without becoming automatic.
-
-    The refusal mirrors REST's ``AuthContext.enforce_usage_limits`` — same
-    error code (``PLAN_LIMIT_READ_ONLY``), same message, same carve-out that
-    deletes stay permitted so a tenant can get back under the limit. It cannot
-    reuse that method directly: it raises ``HTTPException``, and MCP tools
-    return envelopes.
-
-    Step one of caura-ai/caura#1205 was to observe rather than refuse,
-    which closes a real divergence — an over-plan org is refused a write on
-    REST and allowed the same write on MCP — but closes it in a direction that
-    takes capability AWAY from tenants who have it today. Enforcing in the same
-    change that first plumbs the signal would mean discovering the blast radius
-    from the support queue.
-
-    So: emit what WOULD be refused, ship it, read the logs, then enforce with
-    the number in hand.
-
-    THE GATEWAY QUESTION IS ANSWERED — IT IS YES. This docstring used to say the
-    log was the only way to learn "whether the gateway stamps
-    ``x-org-read-only`` on the ``/mcp`` route or only on ``/api/v1``", because
-    the header has no producer in OSS. It has one in caura-enterprise, and it
-    was read there at ``origin/dev`` ``13564142``:
-    ``gateway/nginx.conf.template`` gives both
-    ``location = /mcp`` and ``location /mcp/`` the same
-    ``auth_request_set $org_read_only`` / ``proxy_set_header X-Org-Read-Only``
-    pair the ``/api/v1/`` catch-all has, alongside ``X-Gateway-Secret`` — so
-    ``via_gateway`` is true and the header is honoured. The value originates in
-    ``platform-auth-api``'s ``/_auth``, which sets it on an expired license, a
-    cached read-only verdict, or a live storage lookup.
-
-    READ SILENCE CAREFULLY. Three of the four reasons a quiet log was not
-    evidence are now closed, and the fourth is the one that matters most.
-
-    * The gateway skipping this route: ruled out above.
-    * The batch path contributing nothing to the counters: closed in
-      caura-ai/caura#1638, which turned ``meters_mcp_bulk_write()`` on.
-    * ``/_auth`` failing open on its own storage lookup: it now reports
-      ``x-org-read-only: unknown`` instead of nothing, and this function emits
-      ``mcp_plan_limit_verdict_unknown`` for those requests. A blind sample is
-      no longer silence — count it, and treat an observation window with many
-      of them as not yet measured.
-    * NOTHING SETS THE FLAG FROM USAGE GROWTH, and this one is still open.
-      ``organizations.is_read_only`` in caura-enterprise is written to True by
-      exactly one thing, the Paddle ``subscription.canceled`` downgrade. No
-      sweep and no request-time check evaluates usage otherwise, and
-      ``check-read-only`` only ever lifts the flag. So a tenant over its plan on
-      a healthy subscription never gets stamped, and this log stays quiet no
-      matter how far over they go. Until that is fixed, a quiet log is evidence
-      about the STAMPING, not about the population — and flipping
-      ``enforce_mcp_plan_limits`` would enforce against a signal almost nobody
-      can currently receive. See the ``meter_mcp_bulk_writes`` comment in
-      ``config.py`` for the verification.
-
-    Logged at WARNING rather than INFO because a firing line means real money:
-    a write that the plan says should not have happened.
-
-    TWO EVENT NAMES, deliberately. Observing keeps emitting
-    ``mcp_plan_limit_would_refuse``; enforcing emits
-    ``mcp_plan_limit_refused``. Reusing one name and flipping the ``enforced``
-    field would leave every existing query silently counting refusals as
-    observations, and "did we actually refuse anyone" is the question the
-    rollout turns on. The ``enforced`` field is kept on both so a query written
-    against either name still resolves it.
+    Old gateways that send only the boolean retain the usage rollout flag:
+    off observes, on refuses. Missing/unknown verdicts retain their existing
+    behavior and unknown samples remain observable. No quota thresholds change.
     """
     if not plan_limit_gated(op):
         return None
@@ -799,7 +737,7 @@ def _check_plan_limit(op: MutatingOp, tenant_id: str) -> str | None:
                 extra={"tenant_id": tenant_id, "mcp_operation": op},
             )
         return None
-    enforcing = enforces_mcp_plan_limits()
+    enforcing = _org_read_only_reason_var.get() in {"license", "organization"} or enforces_mcp_plan_limits()
     logger.warning(
         "mcp_plan_limit_refused" if enforcing else "mcp_plan_limit_would_refuse",
         extra={
@@ -971,7 +909,7 @@ _READ_ONLY_ERROR = _as_error_result(
 
 def _check_write_scope() -> CallToolResult | None:
     """Return a pre-baked FORBIDDEN ``CallToolResult`` if the active
-    credential lacks the 'write' capability, ``None`` otherwise. Mirrors
+    license blocks mutations or the credential lacks write capability. Mirrors
     ``_check_auth()`` so write tools can guard themselves with:
 
         if err := _check_write_scope(): return err
@@ -980,6 +918,15 @@ def _check_write_scope() -> CallToolResult | None:
     (back-compat for credentials minted before scopes existed). Only an
     explicitly-set scope set without 'write' triggers the block.
     """
+    if _org_read_only_reason_var.get() == "license":
+        return _as_error_result(
+            _error_response(
+                AUTH_PLAN_LIMIT,
+                "The organization license is unavailable or expired; writes are disabled.",
+                remediation="Restore a valid license to resume writes.",
+                read_only_reason="license",
+            )
+        )
     if _is_write_allowed():
         return None
     return _READ_ONLY_ERROR

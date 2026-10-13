@@ -574,32 +574,12 @@ class Settings(BaseSettings):
     # decides whether MCP-first tenants were ever measured. Reversible by env
     # without a redeploy.
     meter_mcp_bulk_writes: bool = True
-    # Refuse MCP writes when the org is over its plan limit, as the ~22 REST
-    # write routes already do. Off by default, and this is the sharpest of the
-    # three flags above it: the other two change what is COUNTED, this one
-    # changes what is ALLOWED. Flipping it takes away a capability tenants have
-    # today — an over-plan org that can currently write over MCP stops being
-    # able to — so it is a deliberate, announced change, not a deploy side
-    # effect. Off = observe and log only (``_check_plan_limit``).
-    #
-    # It is a flag rather than a straight code change so the rollout is
-    # reversible without a redeploy: enable it, watch
-    # ``mcp_plan_limit_refused``, and turn it off again if the blast radius is
-    # wrong. A code-only change would need a rollback to undo.
-    #
-    # Read ``_check_plan_limit``'s docstring before enabling. A quiet
-    # observation log is STILL NOT evidence that nothing will be refused, but
-    # the reason changed with caura-ai/caura#1638 and the old one is gone:
-    # ``meter_mcp_bulk_writes`` above is now ON, so the batch path does move the
-    # counters over-plan mode is computed from, and MCP-first tenants are no
-    # longer invisible to them.
-    #
-    # WHAT REPLACES IT IS WORSE. Nothing stamps an org read-only from usage
-    # growth at all — see that flag's comment for the verification. So the
-    # observation log is quiet for reasons that have nothing to do with how many
-    # tenants are over plan, and enabling THIS would enforce against a signal
-    # almost nobody can currently receive. Settle what should set the flag
-    # before reading the log as a blast radius. See caura-ai/caura#1205.
+    # Legacy boolean-only gateway verdicts: off observes would-be refusals;
+    # on enforces REST's quota policy. This rollout flag does not control
+    # verified auth-origin reasons. License reasons block every explicit MCP
+    # mutation; organization reasons always enforce the existing quota policy,
+    # preserving its update/deletion exceptions. Counters/thresholds are not
+    # changed by this setting. See _check_plan_limit for legacy/unknown behavior.
     enforce_mcp_plan_limits: bool = False
     stm_backend: str = "memory"  # memory | redis
     # Worker processes serving this API (L-35). The image starts its workers
