@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.33.1](https://github.com/caura-ai/caura/compare/backend-v3.33.0...backend-v3.33.1) (2026-10-13)
+
+
+### Bug Fixes
+
+* **mcp:** enforce verified license and organization entitlement reasons ([#2073](https://github.com/caura-ai/caura/issues/2073)) ([27c116c](https://github.com/caura-ai/caura/commit/27c116c9ffe1aaeffb10b713842db826c676f32e))
+* **plugin:** a revoked agent stops instead of falling back to the tenant key (L-79) ([#2074](https://github.com/caura-ai/caura/issues/2074)) ([db7feca](https://github.com/caura-ai/caura/commit/db7feca4179d07beac0e49bfe47b4daf8f9ce71f))
+
+
+### Code Refactoring
+
+* enrichment events drop current_content_only (O20) ([#2066](https://github.com/caura-ai/caura/issues/2066)) ([6084cac](https://github.com/caura-ai/caura/commit/6084cacb0c935841f7f6848720fd7db71ee10e75))
+
 ## [3.33.0](https://github.com/caura-ai/caura/compare/backend-v3.32.0...backend-v3.33.0) (2026-10-13)
 
 
