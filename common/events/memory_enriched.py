@@ -50,7 +50,3 @@ class MemoryEnriched(BaseModel):
     # Empty string when the enricher produced no useful hint —
     # back-channel consumers should short-circuit on falsy.
     retrieval_hint: str = ""
-    # Always true, and read by no current core-api: since O19 the ENRICHED
-    # handler checks every run. core-api of backend-v3.30.13 (O16) checks a run
-    # only when this is set, so it stays on the wire, set, until none runs.
-    current_content_only: bool = True

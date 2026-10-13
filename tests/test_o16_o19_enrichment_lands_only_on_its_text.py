@@ -195,10 +195,10 @@ async def test_the_enriched_handler_skips_a_run_on_replaced_text(
 
 
 @pytest.mark.parametrize("model", [MemoryEnrichRequest, MemoryEnriched])
-async def test_every_event_still_asks_backend_v3_30_13_for_the_check(model):
-    """That release's worker names the text, and its core-api checks the row,
-    only for an event that sets ``current_content_only``. Set on every event, so
-    either service of that release checks every run whichever deploys first."""
+async def test_no_event_carries_the_retired_flag(model):
+    """O20: every run is checked since O19, so ``current_content_only`` decides
+    nothing. It stayed on the wire, set, for backend-v3.30.13, the one release
+    that read it, and goes once none of that release runs."""
     event = model(memory_id=uuid.uuid4(), tenant_id="tenant-o19", content=NEW)
 
-    assert event.model_dump(mode="json")["current_content_only"] is True
+    assert "current_content_only" not in event.model_dump(mode="json")

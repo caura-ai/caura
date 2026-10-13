@@ -177,9 +177,3 @@ class MemoryEnrichRequest(BaseModel):
     #
     # ``None`` = caller owns nothing here.
     caller_owned_metadata_keys: list[str] | None = None
-
-    # Always true, and read by no current worker: since O19 every run lands
-    # only on ``content``. The worker of backend-v3.30.13 (O16) sends
-    # ``content`` as its PATCH's ``expected_content`` only when this is set, so
-    # it stays on the wire, set, until no worker of that release runs.
-    current_content_only: bool = True
