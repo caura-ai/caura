@@ -292,6 +292,7 @@ async def test_a_run_resumes_after_the_id_it_is_given():
     tenant = _tenant()
     comet = await _entity(tenant, "Comet #0002", "Comet #0012")
     nova = await _entity(tenant, "Nova #0001", "Nova #0009")
+    split_off = {comet: "comet #0012", nova: "nova #0009"}
     named = {comet: await _memory(tenant, "comet #0012 log"), nova: await _memory(tenant, "nova #0009 log")}
     for entity, memory in named.items():
         await _link(memory, entity)
@@ -300,5 +301,8 @@ async def test_a_run_resumes_after_the_id_it_is_given():
     run = await _run(tenant, after_id=first)
 
     assert await _links(named[first]) == {first}
-    assert await _links(named[second]) != {second}
-    assert run.last_id == second
+    [made] = await _named(tenant, split_off[second])
+    assert await _links(named[second]) == {made.id}
+    # The walk goes on to the entity the run made, which has aliases too, when
+    # its random id sorts after ``second``.
+    assert run.last_id == max(second, made.id)
