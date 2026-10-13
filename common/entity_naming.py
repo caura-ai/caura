@@ -90,6 +90,11 @@ def qualifier_signature(name: str) -> frozenset[str]:
     )
 
 
+def identifier_tokens(name: str) -> frozenset[str]:
+    """Digit-bearing tokens in ``name``, such as the "0012" in "comet #0012"."""
+    return frozenset(re.findall(r"\d[\w.\-]*", name.lower()))
+
+
 def same_identifier_signature(a: str, b: str) -> bool:
     """Two names may only merge if nothing in them says they are different things.
 
@@ -111,9 +116,7 @@ def same_identifier_signature(a: str, b: str) -> bool:
     direction favours coalescence — an over-merge is visible and recoverable,
     whereas an entity that never coalesces fragments the graph silently.
     """
-    ta = set(re.findall(r"\d[\w.\-]*", a.lower()))
-    tb = set(re.findall(r"\d[\w.\-]*", b.lower()))
-    if ta != tb:
+    if identifier_tokens(a) != identifier_tokens(b):
         return False
     qa, qb = qualifier_signature(a), qualifier_signature(b)
     # Only a CONFLICT between two present qualifiers blocks the merge.
