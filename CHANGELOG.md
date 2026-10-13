@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.31.0](https://github.com/caura-ai/caura/compare/backend-v3.30.14...backend-v3.31.0) (2026-10-13)
+
+
+### Features
+
+* a backfill marks text-mined cross-links as extraction's (O13) ([#2064](https://github.com/caura-ai/caura/issues/2064)) ([606cbe1](https://github.com/caura-ai/caura/commit/606cbe17c16a68c345caf1ced9f9eda8e3d67695))
+
 ## [3.30.14](https://github.com/caura-ai/caura/compare/backend-v3.30.13...backend-v3.30.14) (2026-10-12)
 
 
