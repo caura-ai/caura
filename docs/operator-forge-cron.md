@@ -26,9 +26,10 @@ fanout pattern:
 The setting `org_settings.skills_factory.forge.cron_interval_hours`
 (default `6`) is **informational** — the actual cadence is set by
 whatever external system drives the fanout endpoint. Set the external
-schedule to match this value; the field is published in the audit row
-and the inbox-card metadata so an operator can see "this candidate
-was minted by the 06:00 UTC tick."
+schedule to match this value. Nothing reads the setting, and no tick or
+candidate records it: it notes the intended schedule for whoever reads
+the settings. To see which tick minted a candidate, read its
+`origin.run_id`, the tick's run label.
 
 ## Required external schedule entry
 

@@ -10,11 +10,13 @@ Public API:
     PIICategory, Severity, Finding   — result types
     scan(text, enabled_categories)   — find sensitive spans (validator-gated)
     mask(text, findings)             — redact spans, keep the rest
-    HIGH_RISK_CATEGORIES             — categories that drive fail-closed behavior
+
+Every category gets the tenant's one configured action. There is no fail-closed
+escalation by category: a ``HIGH_RISK_CATEGORIES`` set here claimed one, and
+nothing read it (L-200).
 """
 
 from common.governance.pii_patterns import (
-    HIGH_RISK_CATEGORIES,
     Finding,
     PIICategory,
     Severity,
@@ -23,7 +25,6 @@ from common.governance.pii_patterns import (
 )
 
 __all__ = [
-    "HIGH_RISK_CATEGORIES",
     "Finding",
     "PIICategory",
     "Severity",

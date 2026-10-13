@@ -10,6 +10,8 @@ import os
 import re
 import sys
 import urllib.parse
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -20,9 +22,7 @@ from .models import Memory, RecallResult, SearchResult, Stats
 
 DEFAULT_BASE_URL = "https://caura.ai"
 
-USER_AGENT = (
-    f"caura-client-python/{__version__} (python/{sys.version_info.major}.{sys.version_info.minor})"
-)
+USER_AGENT = f"caura-client-python/{__version__} (python/{sys.version_info.major}.{sys.version_info.minor})"
 """Sent on every request so a server can tell SDK families apart.
 
 It names the package, its version and the Python major.minor, nothing more;
@@ -206,7 +206,7 @@ class Caura:
         """Liveness probe (GET /api/v1/health)."""
         response = self._request("GET", "/api/v1/health")
         self._raise_for_status(response)
-        return response.json()
+        return self._json(response)
 
     def stats(self) -> Stats:
         """Deployment-wide counters for the landing-page status bar (GET /api/v1/stats).
@@ -246,7 +246,7 @@ class Caura:
             params={"tenant_id": tenant_id or self.tenant_id, "collection": collection},
         )
         self._raise_for_status(response)
-        return response.json()
+        return self._json(response)
 
     def submit_interview(
         self,
@@ -288,7 +288,7 @@ class Caura:
             body["command_id"] = command_id
         response = self._request("POST", "/api/v1/interview/submit", json=body, timeout=timeout)
         self._raise_for_status(response)
-        result = response.json()
+        result = self._json(response)
         if isinstance(result, dict):
             result["http_status"] = response.status_code
         return result
@@ -297,7 +297,7 @@ class Caura:
     def _post(self, path: str, body: dict[str, Any]) -> Any:
         response = self._request("POST", path, json=body)
         self._raise_for_status(response)
-        return response.json()
+        return self._json(response)
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         try:
@@ -330,8 +330,16 @@ class Caura:
         if response.status_code == 429:
             try:
                 retry_after = float(response.headers["Retry-After"])
-            except (KeyError, ValueError):
+            except KeyError:
                 retry_after = None
+            except ValueError:
+                try:
+                    deadline = parsedate_to_datetime(response.headers["Retry-After"])
+                    # The obsolete asctime HTTP-date form has no explicit zone; it is still GMT.
+                    deadline = deadline.replace(tzinfo=timezone.utc) if deadline.tzinfo is None else deadline
+                    retry_after = max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
+                except (TypeError, ValueError, OverflowError):
+                    retry_after = None
             raise RateLimitError(
                 response.status_code,
                 message or "rate limit exceeded",
@@ -339,6 +347,15 @@ class Caura:
                 retry_after=retry_after,
             )
         raise CauraAPIError(response.status_code, message or "request failed", details=details)
+
+    @staticmethod
+    def _json(response: httpx.Response) -> Any:
+        # A 2xx with a non-JSON body (captive portal, misconfigured proxy) must
+        # surface as a CauraError, not a bare JSONDecodeError.
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise CauraAPIError(response.status_code, "response was not valid JSON") from exc
 
     # ------------------------------------------------------------- lifecycle
     def close(self) -> None:

@@ -8,7 +8,7 @@
  * All implementation is in separate modules for maintainability:
  * - env.ts          — environment config, tenant resolution, constants
  * - transport.ts    — HTTP transport with default timeout
- * - validation.ts   — UUID, HTTPS, path, HMAC, prompt-length checks
+ * - validation.ts   — safe-ID, HTTPS, path, HMAC, prompt-length checks
  * - config.ts       — OpenClaw config helpers, auto-fix allowlist
  * - tool-specs.ts   — typed loader for plugin/tools.json (SoT)
  * - tool-definitions.ts — createToolFromSpec factory + endpoint dispatch

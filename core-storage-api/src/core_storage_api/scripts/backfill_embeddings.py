@@ -56,12 +56,15 @@ scan to one tenant — it does not change which embedding provider
 runs the call.
 
 Usage:
-    # Run inside the docker-compose stack so envs are wired up correctly.
-    docker compose run --rm core-storage-api \\
+    # Run inside the docker-compose stack, with ``--env-from-file .env``: the
+    # stock core-storage-api service does not load the provider settings, so
+    # without it the backfill sees only fake embeddings and refuses (L-144).
+    # The option needs Docker Compose 2.34+ (docs/upgrading-from-v1.md).
+    docker compose run --rm --env-from-file .env core-storage-api \\
         python -m core_storage_api.scripts.backfill_embeddings
 
     # Dry-run first to estimate scope (does not call OpenAI / write DB):
-    docker compose run --rm core-storage-api \\
+    docker compose run --rm --env-from-file .env core-storage-api \\
         python -m core_storage_api.scripts.backfill_embeddings --dry-run
 
     # Per-tenant phasing for prod cutover safety:

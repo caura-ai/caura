@@ -20,8 +20,10 @@ class CrystallizationReport(Base):
     status: Mapped[str] = mapped_column(
         Text, nullable=False, default="running"
     )  # running | completed | failed
+    # ``started_at`` and the six blobs below are nullable: migration 001 created
+    # them so and no migration tightened them (L-97).
     started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("now()")
+        DateTime(timezone=True), nullable=True, server_default=text("now()")
     )
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -30,12 +32,24 @@ class CrystallizationReport(Base):
     # These six are ``json``, not JSONB: migration 001 creates them that way
     # (CAURA-595), and ``test_models_match_the_migrated_schema`` holds the
     # models to the schema.
-    summary: Mapped[dict] = mapped_column(JSON, server_default=text("'{}'::jsonb"))
-    hygiene: Mapped[dict] = mapped_column(JSON, server_default=text("'{}'::jsonb"))
-    health: Mapped[dict] = mapped_column(JSON, server_default=text("'{}'::jsonb"))
-    usage_data: Mapped[dict] = mapped_column(JSON, server_default=text("'{}'::jsonb"))
-    issues: Mapped[list] = mapped_column(JSON, server_default=text("'[]'::jsonb"))
-    crystallization: Mapped[dict] = mapped_column(JSON, server_default=text("'{}'::jsonb"))
+    summary: Mapped[dict] = mapped_column(
+        JSON, nullable=True, server_default=text("'{}'::jsonb")
+    )
+    hygiene: Mapped[dict] = mapped_column(
+        JSON, nullable=True, server_default=text("'{}'::jsonb")
+    )
+    health: Mapped[dict] = mapped_column(
+        JSON, nullable=True, server_default=text("'{}'::jsonb")
+    )
+    usage_data: Mapped[dict] = mapped_column(
+        JSON, nullable=True, server_default=text("'{}'::jsonb")
+    )
+    issues: Mapped[list] = mapped_column(
+        JSON, nullable=True, server_default=text("'[]'::jsonb")
+    )
+    crystallization: Mapped[dict] = mapped_column(
+        JSON, nullable=True, server_default=text("'{}'::jsonb")
+    )
 
     __table_args__ = (
         Index("ix_analysis_reports_tenant_started", "tenant_id", started_at.desc()),

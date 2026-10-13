@@ -123,7 +123,7 @@ async def test_the_tenant_graph_hides_those_entities_and_every_edge_that_names_t
 
     await svc.memory_soft_delete_by_ids(tenant, [note.id])
 
-    entities, relations = await svc.entity_get_full_graph(tenant)
+    entities, relations, _truncated = await svc.entity_get_full_graph(tenant)
     assert mined.id not in {e.id for e in entities}
     edges = {r.id for r in relations}
     assert to_hidden_node not in edges
@@ -148,7 +148,7 @@ async def test_a_relation_with_no_live_evidence_is_hidden_from_every_reader() ->
 
     assert await _outgoing_ids(svc, hub.id, tenant) == {still_asserted, no_evidence}
     for caller in ({}, {"caller_agent_id": "m92-tester"}):
-        _entities, relations = await svc.entity_get_full_graph(tenant, **caller)
+        _entities, relations, _truncated = await svc.entity_get_full_graph(tenant, **caller)
         assert only_deleted not in {r.id for r in relations}, caller
 
 
@@ -167,7 +167,7 @@ async def test_undoing_the_delete_brings_the_entity_and_its_edges_back() -> None
 
     assert mined.id in {e.id for e in await svc.entity_list(tenant)}
     assert edge in await _outgoing_ids(svc, shared.id, tenant)
-    _entities, relations = await svc.entity_get_full_graph(tenant)
+    _entities, relations, _truncated = await svc.entity_get_full_graph(tenant)
     assert edge in {r.id for r in relations}
 
 

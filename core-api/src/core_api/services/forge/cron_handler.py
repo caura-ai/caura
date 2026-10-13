@@ -36,8 +36,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from common.events.base import PermanentOpError
-from core_api.clients.storage_client import get_storage_client
+from core_api.clients.storage_client import DocumentStatusChangedError, get_storage_client
 from core_api.services.forge.forge_service import (
+    CandidateSlugClaimedError,
     CandidateWriter,
     ForgeConfig,
     LlmFn,
@@ -80,10 +81,11 @@ async def _resolve_forge_config(org_id: str) -> ForgeConfig:
     # hardcoded literals so the dataclass remains the single source
     # of truth — bumping a default in ``forge_service.ForgeConfig``
     # automatically lands here for tenants without explicit overrides.
-    # Surfaces ALL configurable knobs (including
-    # ``cluster_entity_jaccard_threshold`` and ``memory_excerpt_char_cap``)
-    # so a tenant can tune any per-tenant Forge behavior via
-    # ``org_settings.skills_factory.forge.*``.
+    #
+    # Only keys ``PUT /settings`` accepts are read (L-210). It refuses
+    # ``cluster_entity_jaccard_threshold`` and ``memory_excerpt_char_cap``,
+    # so no tenant could set them, and Forge keeps the dataclass defaults
+    # for both (Eldad, 2026-10-11).
     _d = ForgeConfig()
     return ForgeConfig(
         min_cluster_size=int(forge.get("min_cluster_size", _d.min_cluster_size)),
@@ -93,10 +95,6 @@ async def _resolve_forge_config(org_id: str) -> ForgeConfig:
         max_clusters_per_run=int(forge.get("max_clusters_per_run", _d.max_clusters_per_run)),
         body_max_bytes=int(sf.get("body_max_bytes", _d.body_max_bytes)),
         description_max_bytes=int(sf.get("description_max_bytes", _d.description_max_bytes)),
-        cluster_entity_jaccard_threshold=float(
-            forge.get("cluster_entity_jaccard_threshold", _d.cluster_entity_jaccard_threshold)
-        ),
-        memory_excerpt_char_cap=int(forge.get("memory_excerpt_char_cap", _d.memory_excerpt_char_cap)),
     )
 
 
@@ -168,11 +166,20 @@ def _make_candidate_writer() -> CandidateWriter:
 
     Uses ``upsert_document`` so re-running the same cluster (same
     fingerprint → same slug) overwrites a prior candidate idempotently.
+
+    L-24: only over a ``candidate`` or no document. ``status_checker`` reads
+    the status first, but an operator can move the slug before the write
+    lands, and an unconditional write would put ``candidate`` over their
+    quarantine. Storage checks it in the write; a miss is
+    ``CandidateSlugClaimedError``, which the run skips.
     """
     sc = get_storage_client()
 
     async def _write(candidate_doc: dict[str, Any]) -> None:
-        await sc.upsert_document(candidate_doc)
+        try:
+            await sc.upsert_document(candidate_doc, expected_status=(None, "candidate"))
+        except DocumentStatusChangedError as exc:
+            raise CandidateSlugClaimedError(candidate_doc["doc_id"]) from exc
 
     return _write
 

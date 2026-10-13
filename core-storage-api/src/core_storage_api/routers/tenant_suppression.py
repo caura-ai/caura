@@ -23,7 +23,6 @@ core-api. Do NOT expose this surface to the public internet.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from typing import Literal
 
@@ -50,14 +49,9 @@ async def upsert_tenant_suppression(request: Request) -> dict:
     ``restore`` semantics — this router only validates the wire
     contract.
     """
-    try:
-        body = await request.json()
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        # ``UnicodeDecodeError`` fires when the request body contains
-        # invalid UTF-8 bytes — distinct from ``JSONDecodeError`` and
-        # NOT a subclass of it, so a single-class catch missed it and
-        # surfaced as 500. Bot review round 1 on PR #244 (🟢 Low).
-        raise HTTPException(status_code=422, detail="request body must be valid JSON") from exc
+    # Malformed JSON and a body that is not UTF-8 are both answered 422 by the
+    # app-wide handler in ``app.py`` (L-37).
+    body = await request.json()
     # A valid JSON body can also be an array / number / string — calling
     # ``.get`` on those raises ``AttributeError`` and 500s. Bot review
     # round 1 on PR #244 (🟡 Med).

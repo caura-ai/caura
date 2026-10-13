@@ -55,6 +55,12 @@ NULLABLE_UPDATE_FIELDS = (
 )
 
 
+# Nullable in the migrated schema, and so in the model, only because migration
+# 001 created it so (L-97). A row without a weight has nothing to rank by, so the
+# guard refuses an explicit null for it as it does for the NOT NULL fields.
+REQUIRED_THOUGH_NULLABLE = {"weight"}
+
+
 async def _write_memory(client, tenant_id: str, headers: dict) -> dict:
     tag = _uid()
     resp = await client.post(
@@ -166,7 +172,7 @@ def test_guard_list_matches_the_model():
         name
         for name in MemoryUpdate.model_fields
         if name in columns and not columns[name].nullable
-    }
+    } | REQUIRED_THOUGH_NULLABLE
 
     assert set(NON_NULLABLE_UPDATE_FIELDS) == expected, (
         "NON_NULLABLE_UPDATE_FIELDS has drifted from Memory's NOT NULL columns: "

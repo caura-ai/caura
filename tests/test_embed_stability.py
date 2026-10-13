@@ -173,6 +173,7 @@ async def test_atomic_fact_children_embed_raw_fact_content() -> None:
         "id": "m1",
         "deleted_at": None,
         "fleet_id": "f1",
+        "content": "parent content",
         "embedding": [0.0] * VECTOR_DIM,
         "memory_type": "fact",
         "weight": 0.5,

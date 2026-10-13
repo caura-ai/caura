@@ -142,7 +142,11 @@ async def get_graph(
     fleet_id: str | None = Query(default=None),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Return full knowledge graph (entities + relations) for a tenant.
+    """Return the knowledge graph (entities + relations) for a tenant.
+
+    Capped (L-176): past ``GRAPH_MAX_ENTITIES`` entities or
+    ``GRAPH_MAX_RELATIONS`` relations, the newest entities and the heaviest
+    relations among them come back and ``truncated`` is true.
 
     Matches the read-widening contract used by memory reads — cross-tenant
     credentials may inspect the graph of any tenant in
@@ -232,7 +236,7 @@ async def get_graph(
         for r in relations
     ]
 
-    return JSONResponse({"nodes": nodes, "edges": edges})
+    return JSONResponse({"nodes": nodes, "edges": edges, "truncated": bool(graph.get("truncated"))})
 
 
 @router.post("/entities/upsert", response_model=EntityOut, status_code=200)

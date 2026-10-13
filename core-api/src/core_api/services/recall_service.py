@@ -12,7 +12,6 @@ from core_api.constants import (
     MEMORY_RECALL_SUMMARY_TEMPERATURE,
 )
 from core_api.providers._retry import call_with_fallback
-from core_api.services.memory_service import search_memories
 from core_api.services.system_metadata import strip_platform_metadata
 
 logger = logging.getLogger(__name__)
@@ -416,74 +415,3 @@ async def summarize_memories(
         }
 
     return result
-
-
-async def recall(
-    tenant_id: str,
-    query: str,
-    fleet_ids: list[str] | None = None,
-    filter_agent_id: str | None = None,
-    caller_agent_id: str | None = None,
-    memory_type_filter: str | None = None,
-    status_filter: str | None = None,
-    top_k: int = DEFAULT_SEARCH_TOP_K,
-    valid_at: datetime | None = None,
-    diagnostic: bool = False,
-    readable_tenant_ids: list[str] | None = None,
-    min_similarity: float | None = None,
-    items_alias: bool = True,
-) -> dict:
-    """Search memories and synthesize a context summary.
-
-    Returns: {"query": ..., "summary": ..., "memory_count": ..., "memories": [...], "items": [...], "recall_ms": ...}
-
-    ``memories`` and ``items`` both reference the same list — the ``items``
-    alias was added by C4 so consumers built against ``/search``'s
-    response shape (which keys on ``items``) don't silently get zero
-    results when hitting ``/recall``. Pass ``items_alias=False`` to drop it;
-    that halves the payload (ax-0917-h-03) and is safe for any consumer that
-    reads ``memories``, which both first-party SDKs do.
-
-    Thin wrapper over ``search_memories`` + ``summarize_memories``. MCP
-    tool callers that already hold the search results and tenant config
-    should invoke ``summarize_memories`` directly so they can close
-    their DB session before the LLM round-trip (audit P3). This wrapper
-    is retained for the REST surface and other callers that prefer the
-    one-shot ergonomics.
-    """
-    t0 = time.perf_counter()
-
-    from core_api.services.organization_settings import resolve_config
-
-    config = await resolve_config(tenant_id)
-    diagnostic_ctx: dict = {} if diagnostic else {}
-    memories = await search_memories(
-        tenant_id=tenant_id,
-        query=query,
-        fleet_ids=fleet_ids,
-        filter_agent_id=filter_agent_id,
-        caller_agent_id=caller_agent_id,
-        memory_type_filter=memory_type_filter,
-        status_filter=status_filter,
-        top_k=top_k,
-        valid_at=valid_at,
-        recall_boost=config.recall_boost,
-        graph_expand=config.graph_expand,
-        entity_retrieval=config.entity_retrieval,
-        tenant_config=config,
-        diagnostic=diagnostic,
-        diagnostic_ctx=diagnostic_ctx if diagnostic else None,
-        readable_tenant_ids=readable_tenant_ids,
-        min_similarity=min_similarity,
-    )
-    return await summarize_memories(
-        memories,
-        query,
-        config,
-        valid_at=valid_at,
-        diagnostic=diagnostic,
-        diagnostic_ctx=diagnostic_ctx,
-        top_k=top_k,
-        t0=t0,
-        items_alias=items_alias,
-    )

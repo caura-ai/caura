@@ -352,8 +352,8 @@ EMBEDDING_BUDGET_MARGIN_S: float = read_float_env("EMBEDDING_BUDGET_MARGIN_S", 1
 # 32 and answers anything larger with
 # ``413 batch size N > maximum allowed batch size 32`` — while our bulk
 # write path sends up to ``BULK_MAX_ITEMS`` (100) texts in one call and
-# the re-embed path sends ``EMBEDDING_REEMBED_BATCH_SIZE`` (50). Neither
-# chunked, so both were rejected outright.
+# the bulk re-embed sends all of its items in one call. Neither chunked,
+# so both were rejected outright.
 #
 # That ran unnoticed in production for 30+ days: the failure cascades into
 # a per-item fallback that produces CORRECT embeddings, so the only

@@ -74,8 +74,9 @@ async def test_l38_another_tenants_agent_is_a_miss_too(client: AsyncClient) -> N
 async def test_l140_the_search_profile_patch_takes_the_agent_id_its_siblings_take(
     client: AsyncClient,
 ) -> None:
-    """GET and POST /reset under the same path read ``{agent_id}`` as the
-    agent's own id; PATCH read it as the row's primary key."""
+    """POST /reset under the same path, and GET /agents/{agent_id}, read
+    ``{agent_id}`` as the agent's own id; PATCH read it as the row's primary
+    key."""
     tenant = _tenant()
     agent_id = await _agent(client, tenant)
     profile = {"min_similarity": 0.4}
@@ -85,7 +86,7 @@ async def test_l140_the_search_profile_patch_takes_the_agent_id_its_siblings_tak
         json={"tenant_id": tenant, "search_profile": profile},
     )
     assert resp.status_code == 200, resp.text
-    got = await client.get(f"{PREFIX}/agents/{agent_id}/search-profile", params={"tenant_id": tenant})
+    got = await client.get(f"{PREFIX}/agents/{agent_id}", params={"tenant_id": tenant})
     assert got.json()["search_profile"] == profile
 
 
@@ -130,12 +131,6 @@ async def test_l40_a_bad_page_bound_in_a_body_is_a_422(client: AsyncClient, path
     """A negative LIMIT or OFFSET is a Postgres error (a 500), and a batch of 0
     makes a lifecycle sweep archive nothing while reporting success."""
     resp = await client.post(f"{PREFIX}{path}", json={"tenant_id": _tenant(), **body})
-    assert resp.status_code == 422, resp.text
-
-
-@pytest.mark.parametrize("path", ["/memories/recent", "/memories/dedup-reviews"])
-async def test_l40_a_bad_limit_in_a_query_is_a_422(client: AsyncClient, path: str) -> None:
-    resp = await client.get(f"{PREFIX}{path}", params={"tenant_id": _tenant(), "limit": -1})
     assert resp.status_code == 422, resp.text
 
 

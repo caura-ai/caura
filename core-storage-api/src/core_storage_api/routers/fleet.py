@@ -121,54 +121,13 @@ async def nodes_summary(
     """Recently-seen node count and their distinct plugin versions, one tenant.
 
     Backs ``counts.plugin_nodes_7d`` / ``counts.plugin_versions`` in the
-    anonymous heartbeat (core-api ``heartbeat/payload.py``). Declared before
-    ``/nodes/{node_name}`` so the literal segment wins the match.
+    anonymous heartbeat (core-api ``heartbeat/payload.py``).
     """
     if days < 1 or days > 365:
         raise HTTPException(status_code=422, detail="days must be between 1 and 365")
     since = datetime.now(UTC) - timedelta(days=days)
     nodes, versions = await _svc.fleet_nodes_summary(tenant_id=tenant_id, since=since)
     return {"nodes_7d": nodes, "plugin_versions": versions}
-
-
-@router.get("/nodes/{node_name}")
-async def get_node(
-    node_name: str,
-    tenant_id: str,
-) -> dict:
-    node_id = await _svc.fleet_get_node_id(tenant_id=tenant_id, node_name=node_name)
-    if node_id is None:
-        raise HTTPException(status_code=404, detail="Node not found")
-    node = await _svc.fleet_get_node_by_id(node_id=node_id, tenant_id=tenant_id)
-    if node is None:
-        raise HTTPException(status_code=404, detail="Node not found")
-    return orm_to_dict(node, FLEET_NODE_FIELDS)
-
-
-@router.delete("/nodes/{node_name}")
-async def delete_node(
-    node_name: str,
-    tenant_id: str,
-) -> dict:
-    node_id = await _svc.fleet_get_node_id(tenant_id=tenant_id, node_name=node_name)
-    if node_id is None:
-        raise HTTPException(status_code=404, detail="Node not found")
-    # Delete the NODE, which is what a caller asked for. This used to delete
-    # the node's commands and return ``{"ok": True}`` with the row still
-    # there — so the node kept reporting in, kept appearing in
-    # ``GET /nodes``, and a second DELETE succeeded just as loudly. The
-    # command cleanup was real but it was never the operation; the node row
-    # was the operation, and only the commands were ever touched.
-    #
-    # Deleting the commands was also conditional on the node having a
-    # ``fleet_id``, which nothing about a delete depends on: an unfleeted
-    # node's commands were left behind as well.
-    deleted = await _svc.fleet_delete_node(tenant_id=tenant_id, node_id=node_id)
-    if not deleted:
-        # Lost a race with a concurrent delete. The caller's intent holds
-        # either way, so this is not an error — but it is not "I deleted it".
-        raise HTTPException(status_code=404, detail="Node not found")
-    return {"ok": True}
 
 
 # ------------------------------------------------------------------

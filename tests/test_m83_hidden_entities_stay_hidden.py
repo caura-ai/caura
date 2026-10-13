@@ -70,14 +70,13 @@ async def _entity(sc, tenant: str, *, behind: str | None) -> str:
                 "visibility": behind,
             }
         )
-        await sc.create_entity_link(
-            tenant,
-            {
-                "memory_id": str(memory["id"]),
-                "entity_id": str(entity["id"]),
-                "role": "subject",
-            },
-        )
+        link = {
+            "input_idx": 0,
+            "memory_id": str(memory["id"]),
+            "entity_id": str(entity["id"]),
+            "role": "subject",
+        }
+        await sc.bulk_upsert_entity_links(tenant, [link])
     return str(entity["id"])
 
 

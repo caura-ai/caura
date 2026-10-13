@@ -86,6 +86,7 @@ Query parameters:
 | Param | Default | Notes |
 |---|---|---|
 | `limit` | `50` | 1–200. Additionally capped by `org_settings.skills_factory.inbox_max_pending`. |
+| `offset` | `0` | Where the page starts in the list's order. Pass the previous page's `next_offset` to read the next. |
 | `fleet_id` | – | Optional; narrow the list to one fleet. |
 | `tenant_id` | – | Required for an admin credential, optional (and must match) for a tenant-scoped one — see [Auth & prerequisites](#auth--prerequisites). |
 | `include_content` | `false` | Include the full SKILL.md body on each card. The default list is lean (`content: null`); the edit UI opts in. |
@@ -93,8 +94,10 @@ Query parameters:
 
 Returns the tenant's skill cards in `status`, newest first: by default
 the `staged` ones. Cards an operator has **deferred** carry a
-`deferred_at` timestamp and sort to the bottom of the page so fresh
-candidates always surface first.
+`deferred_at` timestamp and sort to the bottom of their page, so a
+page's fresh candidates surface first. Pages walk one order, so every
+card is on exactly one page; page with `offset` until `truncated` is
+`false`.
 
 `?status=quarantined` lists the skills Sentinel or a reviewer
 quarantined. Each card's `sentinel_scan.findings` says why it was held.
@@ -111,6 +114,7 @@ Response shape (this example was requested with
   "fleet_id": null,
   "count": 1,
   "truncated": false,
+  "next_offset": null,
   "items": [
     {
       "slug": "forge/summarize-oncall-handoff",
@@ -174,10 +178,11 @@ Field notes:
   WHY a scan tripped; the full list stays on the doc. The flat
   `scan_state` / `scan_critical` / `scan_warn` fields carry the same
   counts (kept for older consumers).
-- `truncated` (top-level) — `true` when more staged cards exist than
-  this page returned (the effective limit —
-  `min(limit, inbox_max_pending, 200)` — cut the list). Narrow by
-  `fleet_id` or raise `skills_factory.inbox_max_pending` to see more.
+- `truncated` (top-level) — `true` when more cards follow this page.
+  A page holds at most the effective limit,
+  `min(limit, inbox_max_pending, 200)`.
+- `next_offset` (top-level) — the `offset` of the next page when
+  `truncated`, else `null`.
 - `forge_evidence` — `{ cluster_size, distinct_agents }`: how many
   behavior traces the candidate was distilled from and how many
   distinct agents produced them. Only present on `source: "forge"`
@@ -191,7 +196,7 @@ Field notes:
 - `kind` / `target` — `create` for a brand-new skill; `update`
   candidates carry a `target` binding to the live skill they revise.
 - `deferred_at` — set when an operator deferred the card; deferred
-  cards sort to the bottom.
+  cards sort to the bottom of their page.
 
 ## Actions
 
@@ -254,8 +259,11 @@ or approving the card clears the defer marker.
 
 ### `edit` — revise content (staged only)
 
-Body: `{ "description"?, "summary"?, "content"? }` — at least one
-field required (`422` otherwise). Raw markdown only. The edit re-runs
+Body: `{ "description"?, "summary"?, "content"?, "force"? }` — at least
+one of the first three required (`422` otherwise). Raw markdown only.
+Storage refuses an edit that would shrink a large skill to under a tenth
+of its size, as a truncated payload would: the call returns `400`
+saying so. Resend with `"force": true` if the shrink is meant. The edit re-runs
 the same validator as the original write: the content is rehashed and
 **Sentinel rescans it**; if the scan finds critical content (prompt
 injection, shell injection, …) the doc is **quarantined** instead of
@@ -337,11 +345,11 @@ curl -X POST "$BASE/api/v1/skills-inbox/forge/abc-123/reject" \
 
 | Code | Meaning |
 |---|---|
-| `400` | An admin credential didn't say which inbox to open — add `?tenant_id=`. |
+| `400` | An admin credential didn't say which inbox to open — add `?tenant_id=`. On `edit`, storage refused to shrink a large skill to under a tenth of its size; resend with `"force": true` if that is meant. |
 | `401` | Missing/invalid credentials: the context has neither a tenant nor admin rights. An admin key that simply omitted `tenant_id` gets `400`, not this. |
 | `403` | `SKILLS_FACTORY_DISABLED` (feature flag off for the tenant), `SKILLS_INBOX_FORBIDDEN` (action attempted by a non-admin), or `TENANT_MISMATCH` (a tenant-scoped credential named a different tenant in `?tenant_id=`). |
 | `404` | No skill doc with that slug in the tenant's `skills` collection. Check slug encoding first — an over-encoded `%2F` routes to a nonexistent path. |
-| `409` | Action not permitted from the doc's current status (see matrix), or the doc was concurrently transitioned/edited while your call was in flight — reload the inbox and retry. On approve, also `SKILL_FOLDER_TAKEN`: another active skill installs as the same folder (`forge/X`, `agent/X` and `X` all install as `X`), and a plugin node cannot install both. `error.details` names the folder and the skill; move that skill out of `active` first, or reject the candidate. |
+| `409` | Action not permitted from the doc's current status (see matrix), or the doc was concurrently transitioned/edited while your call was in flight — reload the inbox and retry. Every action writes only over the status it was decided on, so a change that lands just before the write is a `409` too, and nothing is written. On approve, also `SKILL_FOLDER_TAKEN`: another active skill installs as the same folder (`forge/X`, `agent/X` and `X` all install as `X`), and a plugin node cannot install both. `error.details` names the folder and the skill; move that skill out of `active` first, or reject the candidate. |
 | `422` | Missing/invalid body field (e.g. `reject` or `quarantine` without `reason`, `edit` with no fields), an approve whose pre-apply rescan refused (a critical verdict without `override_quarantine`, or a fatal finding), an override without a `reason`, a list `status` other than `staged` or `quarantined`, or a malformed doc (no `content_hash`, or a Forge candidate whose cluster fingerprint disappeared during the reject). |
 
 ## Related

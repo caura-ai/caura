@@ -1,10 +1,11 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.constants import AGENT_NEXT_OFFSET_HEADER, MAX_AGENT_LIST_LIMIT
 from core_api.schemas import AgentFleetUpdate, AgentOut, AgentTrustUpdate, SearchProfileUpdate
 from core_api.services.agent_service import enforce_broker_agent_ownership, lookup_agent, update_trust_level
 from core_api.services.audit_service import log_action
@@ -13,17 +14,44 @@ from core_api.services.organization_settings import validate_knob_resets, valida
 router = APIRouter(tags=["Admin"])
 
 
-@router.get("/agents", response_model=list[AgentOut])
+@router.get(
+    "/agents",
+    response_model=list[AgentOut],
+    responses={
+        200: {
+            "headers": {
+                AGENT_NEXT_OFFSET_HEADER: {
+                    "description": (
+                        "Present when more agents follow this page: pass it back as "
+                        "``offset`` to read them. Absent on the last page."
+                    ),
+                    "schema": {"type": "integer"},
+                },
+            },
+        },
+    },
+)
 async def list_agents(
+    response: Response,
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),
+    limit: int = Query(default=MAX_AGENT_LIST_LIMIT, ge=1, le=MAX_AGENT_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """List all registered agents for a tenant with their trust levels."""
+    """List the tenant's registered agents with their trust levels, newest first.
+
+    Paged (L-186): it returned every agent, uncapped. At most ``limit`` now come
+    back, by default as many as a page holds; ``X-Next-Offset`` says where the
+    next page starts when there is one.
+    """
     auth.enforce_tenant(tenant_id)
     sc = get_storage_client()
-    agents = await sc.list_agents(tenant_id, fleet_id=fleet_id)
-    return [AgentOut.model_validate(a) for a in agents]
+    # One past the page, to know whether another follows.
+    agents = await sc.list_agents(tenant_id, fleet_id=fleet_id, limit=limit + 1, offset=offset)
+    if len(agents) > limit:
+        response.headers[AGENT_NEXT_OFFSET_HEADER] = str(offset + limit)
+    return [AgentOut.model_validate(a) for a in agents[:limit]]
 
 
 @router.get("/agents/{agent_id}", response_model=AgentOut)

@@ -7,7 +7,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from common.constants import (
     CONTRADICTION_CANDIDATE_WINDOW,
@@ -126,8 +126,7 @@ async def create_memories_bulk(request: Request) -> list[dict]:
         # ``tenant_id`` / ``fleet_id``). Unwrapped it escaped as a 500 — a
         # server-fault code for what is squarely a bad request, which pages
         # and lands in the DLQ instead of being fixed by the caller. Same
-        # 4xx-at-the-edge convention as ``_parse_datetimes`` above and
-        # ``dedup_review_enqueue`` below.
+        # 4xx-at-the-edge convention as ``_parse_datetimes`` above.
         #
         # Catches the dedicated subclass, NOT bare ``ValueError``: those three
         # guards all run before ``memory_add_all`` opens its session, but the
@@ -1198,16 +1197,6 @@ async def get_audit_usage(tenant_id: str) -> dict:
     return await _svc.memory_audit_usage_stats(tenant_id)
 
 
-@router.get("/recent")
-async def get_recent_memories(
-    tenant_id: str,
-    fleet_id: str | None = None,
-    limit: int = Query(default=20, ge=1),
-) -> list[dict]:
-    memories = await _svc.memory_list_recent(tenant_id, fleet_id, limit=limit)
-    return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
-
-
 @router.get("/lifecycle-candidates")
 async def get_lifecycle_candidates(tenant_id: str, fleet_id: str | None = None) -> dict:
     """Id lists for the crystallizer's lifecycle hygiene checks.
@@ -1431,31 +1420,6 @@ async def count_distinct_tenants() -> dict:
     return {"count": count}
 
 
-# ------------------------------------------------------------------
-# A1 #18 — Dedup review queue
-# ------------------------------------------------------------------
-
-
-_DEDUP_REVIEW_FIELDS = [
-    "id",
-    "tenant_id",
-    "fleet_id",
-    "agent_id",
-    "new_memory_id",
-    "candidate_memory_id",
-    "new_content",
-    "candidate_content",
-    "similarity",
-    "judge_verdict",
-    "judge_confidence",
-    "decision_band",
-    "status",
-    "decided_at",
-    "decided_by",
-    "created_at",
-]
-
-
 _MEMORY_CONFLICT_FIELDS = [
     "id",
     "tenant_id",
@@ -1588,58 +1552,6 @@ async def resolve_memory_conflict(conflict_id: str, request: Request) -> dict:
         )
     row = await _svc.memory_conflict_get(UUID(str(conflict_id)), tenant_id)
     return orm_to_dict(row, _MEMORY_CONFLICT_FIELDS)
-
-
-@router.post("/dedup-reviews")
-async def enqueue_dedup_review(request: Request) -> dict:
-    body: dict = await request.json()
-    try:
-        review = await _svc.dedup_review_enqueue(body)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return orm_to_dict(review, _DEDUP_REVIEW_FIELDS)
-
-
-@router.get("/dedup-reviews")
-async def list_dedup_reviews(
-    tenant_id: str,
-    status: str = "pending",
-    limit: int = Query(default=50, ge=1),
-) -> list[dict]:
-    reviews = await _svc.dedup_review_list(tenant_id, status=status, limit=limit)
-    return [orm_to_dict(r, _DEDUP_REVIEW_FIELDS) for r in reviews]
-
-
-@router.post("/dedup-reviews/{review_id}/decision")
-async def decide_dedup_review(review_id: UUID, request: Request) -> dict:
-    body: dict = await request.json()
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=422, detail="request body must be a JSON object")
-    tenant_id = body.get("tenant_id")
-    if not isinstance(tenant_id, str) or not tenant_id:
-        raise HTTPException(
-            status_code=422,
-            detail="'tenant_id' is required and must be a non-empty string",
-        )
-    status = body.get("status")
-    if not isinstance(status, str):
-        raise HTTPException(status_code=400, detail="status (string) required")
-    if "decided_by" in body:
-        raise HTTPException(
-            status_code=422,
-            detail="'decided_by' cannot be supplied at the storage boundary",
-        )
-    try:
-        review = await _svc.dedup_review_decide(
-            review_id,
-            tenant_id=tenant_id,
-            status=status,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    if review is None:
-        raise HTTPException(status_code=404, detail="Review not found")
-    return orm_to_dict(review, _DEDUP_REVIEW_FIELDS)
 
 
 # ------------------------------------------------------------------
@@ -2249,13 +2161,25 @@ async def update_memory(memory_id: UUID, request: Request) -> dict:
     if isinstance(derived, dict):
         _parse_datetimes(derived)
     derived_deleted: list[dict] = []
+    # O16: the text this patch was computed from, popped like ``tenant_id``
+    # because it conditions the write rather than landing as a column. A
+    # mismatch is a 409 ``MEMORY_CONTENT_CHANGED`` (see ``app``).
+    expected_content = body.pop("expected_content", None)
+    if expected_content is not None and not isinstance(expected_content, str):
+        raise HTTPException(status_code=422, detail="expected_content must be a string")
     # No empty-body short-circuit here: ``memory_update`` runs the
     # existence check first and returns False for absent/soft-deleted
     # rows regardless of whether the body has actionable columns. An
     # earlier short-circuit would let a PATCH ``{}`` on a deleted row
     # answer 200 — inconsistent with the 404 the same row gets on a
     # non-empty PATCH.
-    found = await _svc.memory_update(memory_id, tenant_id, body or {}, derived_deleted=derived_deleted)
+    found = await _svc.memory_update(
+        memory_id,
+        tenant_id,
+        body or {},
+        derived_deleted=derived_deleted,
+        expected_content=expected_content,
+    )
     if not found:
         # Pre-this-fix the route returned ``200 {"ok": True}`` regardless
         # of whether the row was missing or soft-deleted, so a PATCH on

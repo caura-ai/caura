@@ -13,6 +13,7 @@ from uuid import UUID
 import httpx
 
 from common import permanent_failure
+from common.constants import DOCUMENT_STATUS_CHANGED
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from common.http_retry import CONNECT_PHASE_MAX_ATTEMPTS, with_connect_phase_retry, with_retry
 from common.settings_version import SETTINGS_CHANGED
@@ -148,6 +149,30 @@ def _storage_settings_changed(response: httpx.Response) -> StorageSettingsChange
     message = detail.get("message")
     return StorageSettingsChangedError(
         message if isinstance(message, str) and message else "the organization settings changed"
+    )
+
+
+class DocumentStatusChangedError(Exception):
+    """Storage refused a document write: the stored document was not in a status
+    the write named in ``expected_status`` (L-24).
+
+    The caller read the document, decided on its status, and another writer
+    moved it before the write. Nothing was written; the caller reloads and
+    decides again.
+    """
+
+
+def _storage_document_status_changed(response: httpx.Response) -> DocumentStatusChangedError | None:
+    """The typed error for storage's ``DOCUMENT_STATUS_CHANGED`` 409, or ``None``."""
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(detail, dict) or detail.get("error") != DOCUMENT_STATUS_CHANGED:
+        return None
+    message = detail.get("message")
+    return DocumentStatusChangedError(
+        message if isinstance(message, str) and message else "the document's status changed"
     )
 
 
@@ -1110,38 +1135,11 @@ class CoreStorageClient:
         # through. See bulk_find_by_content_hashes for the same reasoning.
         return await self._post_optional("/memories/semantic-duplicate", data, read=False)
 
-    # ------------------------------------------------------------------
-    # A1 #18 — Dedup review queue
-    # ------------------------------------------------------------------
-
-    async def enqueue_dedup_review(self, payload: dict) -> dict:
-        """Append a row to the ambiguous-dedup review queue. Caller-side
-        wraps this in ``track_task`` to keep the write path off the
-        queue's failure modes."""
-        return await self._post("/memories/dedup-reviews", payload, read=False)  # type: ignore[return-value]
-
     async def record_memory_conflict(self, payload: dict) -> dict:
         """A55 — persist a ``memory_conflicts`` classification record. Additive:
         the memory-row status/supersedes effect is applied separately, so this
         never changes retrieval behaviour."""
         return await self._post("/memories/conflicts", payload, read=False)  # type: ignore[return-value]
-
-    async def list_dedup_reviews(self, params: dict) -> list[dict]:
-        """List reviews for a tenant, default ``status='pending'``."""
-        return await self._get(  # type: ignore[return-value]
-            "/memories/dedup-reviews",
-            read=True,
-            **{k: v for k, v in params.items() if v is not None},
-        )
-
-    async def decide_dedup_review(self, review_id, status: str, *, tenant_id: str) -> dict:
-        """Record a terminal decision (confirmed_duplicate /
-        override_not_duplicate / dismissed) on a review row."""
-        return await self._post(  # type: ignore[return-value]
-            f"/memories/dedup-reviews/{review_id}/decision",
-            {"status": status, "tenant_id": tenant_id},
-            read=False,
-        )
 
     async def find_entity_overlap_candidates(self, data: dict) -> list[dict]:
         # Called from contradiction_detector.py as a *post-commit* async
@@ -1537,17 +1535,6 @@ class CoreStorageClient:
             read=False,
         )
         return result.get("rows", []) if isinstance(result, dict) else []
-
-    async def get_recent_memories(
-        self,
-        tenant_id: str,
-        fleet_id: str | None = None,
-        limit: int = 10,
-    ) -> list[dict]:
-        params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit}
-        if fleet_id is not None:
-            params["fleet_id"] = fleet_id
-        return await self._get_list("/memories/recent", **params)
 
     async def get_lifecycle_candidates(self, tenant_id: str, fleet_id: str | None = None) -> dict:
         params: dict[str, Any] = {"tenant_id": tenant_id}
@@ -2043,12 +2030,6 @@ class CoreStorageClient:
     async def create_relation(self, data: dict) -> dict:
         return await self._post("/entities/relations", data)  # type: ignore[return-value]
 
-    async def create_entity_link(self, tenant_id: str, data: dict) -> dict:
-        # The link is addressed by two bare UUIDs, so the tenant has to travel
-        # with them: storage scopes both ends to it. The explicit arg wins over
-        # any ``tenant_id`` in ``data``.
-        return await self._post("/entities/links", {**data, "tenant_id": tenant_id})  # type: ignore[return-value]
-
     async def bulk_upsert_entity_links(self, tenant_id: str, items: list[dict]) -> list[dict]:
         """Idempotently create many memory→entity links in one round-trip.
 
@@ -2246,10 +2227,17 @@ class CoreStorageClient:
         self,
         tenant_id: str,
         fleet_id: str | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[dict]:
+        """Every agent of the tenant, newest first, or one page with ``limit``."""
         params: dict[str, Any] = {"tenant_id": tenant_id}
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
+        if limit is not None:
+            params["limit"] = limit
+            params["offset"] = offset
         return await self._get_list("/agents", **params)
 
     async def update_trust_level(self, agent_id: str, data: dict) -> dict | None:
@@ -2276,16 +2264,6 @@ class CoreStorageClient:
             {"tenant_id": tenant_id},
         )
 
-    async def get_search_profile(
-        self,
-        agent_id: str,
-        tenant_id: str,
-    ) -> dict | None:
-        return await self._get(
-            f"{_agent_path(agent_id)}/search-profile",
-            tenant_id=tenant_id,
-        )
-
     async def backfill_from_memories(self, tenant_id: str) -> dict:
         return await self._post(  # type: ignore[return-value]
             "/agents/backfill-from-memories",
@@ -2302,8 +2280,24 @@ class CoreStorageClient:
     # Documents
     # =====================================================================
 
-    async def upsert_document(self, data: dict) -> dict:
-        return await self._post("/documents", data)  # type: ignore[return-value]
+    async def upsert_document(
+        self, data: dict, *, expected_status: Sequence[str | None] | None = None
+    ) -> dict:
+        """Write a whole document.
+
+        ``expected_status`` (L-24) lists the ``data.status`` values the stored
+        document may hold for the write to land, ``None`` among them meaning it
+        may not exist yet. Otherwise storage writes nothing and this raises
+        ``DocumentStatusChangedError``. Without it the write replaces whatever
+        is stored.
+        """
+        body = data if expected_status is None else {**data, "expected_status": list(expected_status)}
+        try:
+            return await self._post("/documents", body)  # type: ignore[return-value]
+        except httpx.HTTPStatusError as exc:
+            if (changed := _storage_document_status_changed(exc.response)) is not None:
+                raise changed from exc
+            raise
 
     async def upsert_document_xmax(self, data: dict) -> dict:
         return await self._post("/documents/upsert-xmax", data, read=False)  # type: ignore[return-value]
@@ -3013,12 +3007,6 @@ class CoreStorageClient:
             params["fleet_id"] = fleet_id
         return await self._get("/fleet/stats", **params) or {}
 
-    async def get_node(self, tenant_id: str, node_name: str) -> dict | None:
-        return await self._get(f"/fleet/nodes/{node_name}", tenant_id=tenant_id)
-
-    async def delete_node(self, tenant_id: str, node_name: str) -> bool:
-        return await self._delete(f"/fleet/nodes/{node_name}", tenant_id=tenant_id)
-
     async def release_node(
         self, tenant_id: str, node_id: str, owner_principal: str | None = None
     ) -> dict | None:
@@ -3347,9 +3335,9 @@ class CoreStorageClient:
     async def verify_audit_chain(self, tenant_id: str, limit: int = 100_000, start_seq: int = 1) -> dict:
         """Verify a tenant's tamper-evident audit hash chain.
 
-        Returns ``{valid, verified_count, head_seq, truncated}`` (or
-        ``first_broken`` on a detected break). Used by the enterprise
-        governance UI's "chain intact" check.
+        Returns ``{tenant_id, valid, verified_count, head_seq, truncated}``
+        (or ``first_broken`` on a detected break). Backs ``GET
+        /api/v1/audit-log/verify`` (L-207).
 
         **``valid: true`` alone does not mean the chain is intact.** A result
         with ``truncated: true`` covers only ``limit`` rows starting at

@@ -136,7 +136,7 @@ def inbox_app(monkeypatch):
         ):
             return staged_doc
 
-        async def upsert_document(self, payload):
+        async def upsert_document(self, payload, *, expected_status=None):
             return None
 
     monkeypatch.setattr(si, "get_storage_client", lambda: _Storage())

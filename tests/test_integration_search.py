@@ -121,14 +121,13 @@ async def _insert_entity(tenant_id, name, entity_type="concept", fleet_id=None):
 
 async def _link_memory_entity(tenant_id, memory_id, entity_id, role="mentioned"):
     sc = get_storage_client()
-    await sc.create_entity_link(
-        tenant_id,
-        {
-            "memory_id": str(memory_id),
-            "entity_id": str(entity_id),
-            "role": role,
-        },
-    )
+    link = {
+        "input_idx": 0,
+        "memory_id": str(memory_id),
+        "entity_id": str(entity_id),
+        "role": role,
+    }
+    await sc.bulk_upsert_entity_links(tenant_id, [link])
 
 
 # ---------------------------------------------------------------------------

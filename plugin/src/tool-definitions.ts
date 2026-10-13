@@ -14,7 +14,7 @@
  * `tools.json` until the live fetch completes.
  *
  * Security properties preserved:
- * - UUID/safe-ID validation on all path-interpolated parameters
+ * - Safe-ID validation (`assertSafePathSegment`) on all path-interpolated parameters
  * - encodeURIComponent on all ID path segments
  * - Signal forwarding to apiCall
  */

@@ -48,7 +48,8 @@ curl -s -X POST "$CAURA_API_URL/api/v1/install-plugin" \
 The installer:
 - Downloads the current plugin source from `/api/v1/plugin-source?file=…`
 - Writes `.env` with the values you passed
-- Runs `npm install && npm run build` to compile `dist/`
+- Installs the plugin's build toolchain from its lockfile (`npm ci`), the versions CI builds with, and stops if that fails
+- Runs `npm run build` to compile `dist/`
 - Re-runs are safe — same command works for first install and re-install
 
 ### Identity-preserving — re-install over an existing node

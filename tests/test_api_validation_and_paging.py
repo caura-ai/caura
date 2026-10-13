@@ -60,7 +60,6 @@ _ESCAPED = "bot%3Fv2%23x"
     ("call", "transport", "path"),
     [
         (lambda sc: sc.get_agent(_ODD, "t"), "_get", ""),
-        (lambda sc: sc.get_search_profile(_ODD, "t"), "_get", "/search-profile"),
         (lambda sc: sc.update_trust_level(_ODD, {}), "_patch", "/trust-level"),
         (lambda sc: sc.update_agent_fleet(_ODD, {}), "_patch", "/fleet"),
         (
@@ -75,7 +74,7 @@ _ESCAPED = "bot%3Fv2%23x"
         ),
         (lambda sc: sc.delete_agent(_ODD, "t"), "_delete", ""),
     ],
-    ids=["get", "get-profile", "trust", "fleet", "tune", "reset", "delete"],
+    ids=["get", "trust", "fleet", "tune", "reset", "delete"],
 )
 async def test_m13_an_agent_id_is_escaped_in_its_storage_path(call, transport, path):
     """Unescaped, httpx reads ``?`` as the start of the query and ``#`` as a

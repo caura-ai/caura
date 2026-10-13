@@ -167,6 +167,17 @@ StatusChecker = Callable[[str, str, str], Awaitable[str | None]]
 _PROGRAMMING_ERRORS = (TypeError, AttributeError)
 
 
+class CandidateSlugClaimedError(Exception):
+    """Raised by a ``CandidateWriter`` whose write found the slug no longer a
+    ``candidate``: it moved after ``status_checker`` read it (L-24).
+
+    The check and the write are two calls, so an operator's quarantine, or any
+    other move, can land between them. A writer that makes the write
+    conditional raises this on a miss, and the run skips the slug as it skips
+    one the check caught, rather than counting an I/O failure.
+    """
+
+
 # ── Run summary ───────────────────────────────────────────────────
 
 
@@ -218,8 +229,9 @@ class ForgeRunResult:
     candidates_skipped_internal_error: int
     # Candidates where ``status_checker`` reported the target doc_id
     # already exists with a non-``candidate`` status (active, rejected,
-    # quarantined, stale, deprecated). Forge skips the write to avoid
-    # clobbering operator-curated state.
+    # quarantined, stale, deprecated), or the writer found it moved there
+    # after the check (``CandidateSlugClaimedError``, L-24). Forge skips the
+    # write to avoid clobbering operator-curated state.
     candidates_skipped_existing: int
     started_at: datetime
     run_label: str
@@ -281,7 +293,9 @@ async def run_forge_distill(
     a re-mining run from silently clobbering operator-approved or
     operator-rejected state. Re-mining over an existing
     ``candidate`` IS allowed — that's the legitimate refine-the-
-    candidate path. None disables the check (e.g. eval harness)."""
+    candidate path. None disables the check (e.g. eval harness).
+    A writer whose write finds the slug moved after the check raises
+    ``CandidateSlugClaimedError``, skipped the same way (L-24)."""
 
     cfg = config or ForgeConfig()
     # Stamp the start of the run BEFORE the first await. Anything
@@ -452,6 +466,13 @@ async def run_forge_distill(
 
         try:
             await candidate_writer(candidate_doc)
+        except CandidateSlugClaimedError:
+            logger.info(
+                "forge: skipping write for slug=%s — it stopped being a candidate after the status check",
+                candidate_doc["data"]["slug"],
+            )
+            skipped_existing += 1
+            continue
         except _PROGRAMMING_ERRORS:
             # A writer with the wrong signature would otherwise read as a
             # UNIQUE-violation or a network drop.

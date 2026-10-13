@@ -36,12 +36,13 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
 
 from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
-from core_api.clients.storage_client import get_storage_client
+from core_api.clients.storage_client import DocumentStatusChangedError, get_storage_client
 from core_api.errors import (
     AUTH_SKILLS_FACTORY_DISABLED,
     AUTH_SKILLS_INBOX_FORBIDDEN,
@@ -308,13 +309,14 @@ class InboxListResponse(BaseModel):
     tenant_id: str
     fleet_id: str | None
     count: int
-    # True when more staged cards exist than this page returned (the
-    # effective limit — min(limit, inbox_max_pending, 200) — cut the
-    # list, or the oversample window saturated). Lets the UI say
-    # "there's more" instead of guessing from page fullness: a page of
-    # exactly ``count`` items is indistinguishable from a capped one
+    # True when more cards follow this page in the list's order. Lets the
+    # UI say "there's more" instead of guessing from page fullness: a page
+    # of exactly ``count`` items is indistinguishable from a capped one
     # without this flag.
     truncated: bool = False
+    # The ``offset`` of the next page when ``truncated``, else ``None``
+    # (L-25).
+    next_offset: int | None = None
     items: list[InboxCard]
 
 
@@ -352,6 +354,10 @@ class EditRequest(BaseModel):
     content: str | None = None
     description: str | None = None
     summary: str | None = None
+    # L-26 — storage refuses a write that would shrink a large document to a
+    # tenth of its size, as a truncated payload would (C34). ``force`` says
+    # the shrink is meant, as it does on ``POST /documents``.
+    force: bool = False
 
     def has_changes(self) -> bool:
         return any(v is not None for v in (self.content, self.description, self.summary))
@@ -631,6 +637,60 @@ async def _reload_and_assert_status(
     return doc
 
 
+def _storage_reason(response: httpx.Response) -> object:
+    """What storage said about a refused write: its ``detail``, or the body."""
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text
+    return body.get("detail", body) if isinstance(body, dict) else body
+
+
+async def _write_skill(
+    *,
+    tenant_id: str,
+    fleet_id: str | None,
+    slug: str,
+    data: dict,
+    decided_on: str,
+    force: bool = False,
+) -> None:
+    """Write the whole skill doc, but only over the status the handler decided on.
+
+    L-24: the reloads catch a writer that landed before them. One that lands
+    after the last reload, a concurrent action or a Forge re-mine, was
+    silently replaced. Storage checks ``decided_on`` in the write itself and
+    writes nothing on a miss, answered 409 like the reloads.
+
+    L-26: a refusal storage explains, C34's shrink guard among them, reaches
+    the caller with its status and reason, as ``POST /documents`` passes it,
+    instead of an opaque 500. A 5xx still goes to the upstream handler.
+    """
+    try:
+        await get_storage_client().upsert_document(
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "collection": SKILLS_COLLECTION,
+                "doc_id": slug,
+                "data": data,
+                "force": force,
+            },
+            expected_status=[decided_on],
+        )
+    except DocumentStatusChangedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"skill {slug!r} was concurrently moved out of status={decided_on!r}; reload and retry",
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        if not exc.response.is_client_error:
+            raise
+        raise HTTPException(
+            status_code=exc.response.status_code, detail=_storage_reason(exc.response)
+        ) from exc
+
+
 async def _persist_status_transition(
     *,
     tenant_id: str,
@@ -641,8 +701,9 @@ async def _persist_status_transition(
     extra_data_patches: dict | None = None,
     remove_keys: tuple[str, ...] = (),
 ) -> tuple[str, dict]:
-    """Patch ``data.status`` (plus any extras) and upsert. Returns
-    ``(previous_status, new_data)`` for audit + response shaping.
+    """Patch ``data.status`` (plus any extras) and write it over the status
+    ``doc`` holds. Returns ``(previous_status, new_data)`` for audit +
+    response shaping.
 
     ``remove_keys`` drops the named keys from ``data`` before the
     upsert — useful for clearing transient markers (e.g. clearing
@@ -665,15 +726,8 @@ async def _persist_status_transition(
         data.update(extra_data_patches)
     for key in remove_keys:
         data.pop(key, None)
-    sc = get_storage_client()
-    await sc.upsert_document(
-        {
-            "tenant_id": tenant_id,
-            "fleet_id": fleet_id,
-            "collection": SKILLS_COLLECTION,
-            "doc_id": slug,
-            "data": data,
-        }
+    await _write_skill(
+        tenant_id=tenant_id, fleet_id=fleet_id, slug=slug, data=data, decided_on=previous_status
     )
     return previous_status, data
 
@@ -700,6 +754,9 @@ async def list_inbox(
     # default would 200 on any non-negative input — including ``limit=0``
     # (silently empty list) and ``limit=10_000`` (DoS via wide query).
     limit: int = Query(50, ge=1, le=200),
+    # L-25 — where this page starts in the list's order. The list read a fixed
+    # window from 0, so a card past it could not be listed at all.
+    offset: int = Query(default=0, ge=0),
     # Full SKILL.md bodies are heavy (body_max_bytes times the page limit); the
     # list stays lean by default and the edit UI opts in explicitly.
     include_content: bool = Query(False),
@@ -714,6 +771,10 @@ async def list_inbox(
     Caps default to ``org_settings.skills_factory.inbox_max_pending``;
     beyond that, auto-defer is the relief valve (Phase 2 worker
     enforces).
+
+    Pages walk one order, newest first, from ``offset``; ``next_offset``
+    says where the next starts. Each page lists its fresh cards before its
+    deferred ones (Eldad, 2026-10-11).
     """
     tenant_id = _require_tenant(auth, tenant_id)
     settings = await _require_skills_factory_enabled(tenant_id)
@@ -737,68 +798,30 @@ async def list_inbox(
     # column directly.
     where: dict = {"status": status}
 
-    # The storage layer's ``where`` is JSONB scalar equality and does
-    # NOT support an ``IS NULL`` predicate (see ``document_query`` in
-    # core-storage's postgres_service), so we can't ask the DB to
-    # split deferred vs non-deferred for us. To avoid the prior bug --
-    # an older deferred doc consuming a page slot ahead of a fresh
-    # candidate -- we OVERSAMPLE in a single query (capped at 2x the
-    # effective limit, hard-capped at 400), partition in Python, and
-    # take up-to-limit non-deferred FIRST, then fill remaining slots
-    # with deferred. The deferred-at-bottom invariant holds for the
-    # 2x window; an explicit DB-side priority sort would require
-    # extending storage's ``order_by`` shape and is out of scope here.
-    oversample_limit = min(effective_limit * 2, 400)
-    query_body: dict = {
-        "tenant_id": tenant_id,
-        "collection": SKILLS_COLLECTION,
-        "where": where,
-        "limit": oversample_limit,
-        "offset": 0,
-        "order_by": "created_at",
-        # DESC so fresh candidates land at the front of the
-        # oversample window. ASC would let an old deferred
-        # backlog fill the window first and starve the page of
-        # fresh items.
-        "order": "desc",
-    }
-    if fleet_id is not None:
-        query_body["fleet_id"] = fleet_id
-    sc = get_storage_client()
-    rows = await sc.query_documents(query_body)
+    # One row past the page says whether another follows. A muted inbox
+    # (``inbox_max_pending=0``) reads nothing.
+    rows: list[dict] = []
+    if effective_limit > 0:
+        query_body: dict = {
+            "tenant_id": tenant_id,
+            "collection": SKILLS_COLLECTION,
+            "where": where,
+            "limit": effective_limit + 1,
+            "offset": offset,
+            "order_by": "created_at",
+            "order": "desc",
+        }
+        if fleet_id is not None:
+            query_body["fleet_id"] = fleet_id
+        rows = await get_storage_client().query_documents(query_body) or []
 
-    all_cards = [_card_from_doc(r) for r in rows or []]
-    # Guard against ``oversample_limit == 0`` (tenant explicitly muted
-    # the inbox via ``inbox_max_pending=0``); otherwise we'd log a
-    # spurious "cap hit" warning on every empty list call.
-    if oversample_limit > 0 and len(all_cards) >= oversample_limit:
-        # The oversample window saturated -- there are more staged
-        # candidates than the partition pass can see. We won't 500,
-        # but the page is missing the tail; operators should narrow
-        # by fleet or raise inbox_max_pending.
-        logger.warning(
-            "skill_inbox list: oversample cap hit (tenant=%s fleet=%s oversample_limit=%d); "
-            "some staged candidates may not appear in this page",
-            tenant_id,
-            fleet_id,
-            oversample_limit,
-        )
-    active = [c for c in all_cards if not c.deferred_at]
-    deferred = [c for c in all_cards if c.deferred_at]
-    # Take non-deferred first up to effective_limit; backfill remaining
-    # slots with deferred. This is the page the operator actually
-    # works through — fresh candidates always surface before stashed
-    # ones, regardless of which set is older by ``created_at``.
-    items = active[:effective_limit]
-    remaining = effective_limit - len(items)
-    if remaining > 0:
-        items.extend(deferred[:remaining])
-
-    # More staged cards exist than this page shows when either the
-    # effective limit cut the fetched set, or the oversample window
-    # itself saturated (in which case even ``all_cards`` is missing
-    # the tail — see the warning above).
-    truncated = len(all_cards) > len(items) or (oversample_limit > 0 and len(all_cards) >= oversample_limit)
+    cards = [_card_from_doc(r) for r in rows]
+    page = cards[:effective_limit]
+    truncated = len(cards) > effective_limit
+    # Fresh cards before deferred ones, each newest first. Within the page
+    # only: paging needs one order across pages, and storage's ``where``
+    # cannot tell a deferred card from a fresh one (it has no ``IS NULL``).
+    items = [c for c in page if not c.deferred_at] + [c for c in page if c.deferred_at]
 
     if not include_content:
         # Lean default: drop the SKILL.md bodies from the page. The edit
@@ -811,6 +834,7 @@ async def list_inbox(
         fleet_id=fleet_id,
         count=len(items),
         truncated=truncated,
+        next_offset=offset + len(items) if truncated else None,
         items=items,
     )
 
@@ -1281,15 +1305,8 @@ async def defer(
     # Stamp it here so a Deferred-but-not-status-changed doc still
     # surfaces correctly in sort-by-modified-time queries.
     new_data["updated_at"] = new_data["deferred_at"]
-    sc = get_storage_client()
-    await sc.upsert_document(
-        {
-            "tenant_id": tenant_id,
-            "fleet_id": doc.get("fleet_id"),
-            "collection": SKILLS_COLLECTION,
-            "doc_id": slug,
-            "data": new_data,
-        }
+    await _write_skill(
+        tenant_id=tenant_id, fleet_id=doc.get("fleet_id"), slug=slug, data=new_data, decided_on="staged"
     )
     # Best-effort audit; defer mark already persisted.
     try:
@@ -1469,17 +1486,15 @@ async def edit(
     # this reload, edit's upsert would silently revert a freshly-
     # ``active`` doc back to ``staged``.
     doc = await _reload_and_assert_status(tenant_id=tenant_id, slug=slug, expected_statuses={"staged"})
-    sc = get_storage_client()
-    await sc.upsert_document(
-        {
-            "tenant_id": tenant_id,
-            "fleet_id": doc.get("fleet_id"),
-            "collection": SKILLS_COLLECTION,
-            "doc_id": slug,
-            "data": normalized,
-        }
+    await _write_skill(
+        tenant_id=tenant_id,
+        fleet_id=doc.get("fleet_id"),
+        slug=slug,
+        data=normalized,
+        decided_on="staged",
+        force=body.force,
     )
-    # Best-effort audit; edit already persisted via the upsert above.
+    # Best-effort audit; edit already persisted via the write above.
     try:
         await log_action(
             tenant_id=tenant_id,

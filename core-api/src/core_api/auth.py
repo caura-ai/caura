@@ -12,7 +12,7 @@ from core_api.constants import API_KEY_HEADER
 from core_api.errors import coded_detail
 from core_api.heartbeat.clients import record as _record_client_family
 from core_api.suppression import is_tenant_suppressed
-from core_api.tenant_context import set_current_tenant, set_readable_tenants
+from core_api.tenant_context import set_current_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -512,29 +512,6 @@ class AuthContext:
                 ),
             )
 
-    def enforce_write_scope(self) -> None:
-        """Raise 403 if this credential's capabilities exclude ``write``.
-
-        No-op for credentials without an explicit capability set (legacy
-        + admin paths keep working unchanged). Standalone helper for
-        the niche case where a handler wants a finer-grained check than
-        ``enforce_read_only`` (which also covers ``is_demo``).
-        """
-        if self.capabilities is None:
-            return
-        if "write" not in self.capabilities:
-            raise HTTPException(
-                status_code=403,
-                detail=coded_detail(
-                    errors.AUTH_READ_ONLY_KEY,
-                    "This API key is read-only and cannot perform write operations.",
-                    remediation=(
-                        "A property of the credential, not of the endpoint — mint a key "
-                        "with the 'write' capability and retry."
-                    ),
-                ),
-            )
-
 
 def _parse_csv_header(value: str | None) -> list[str]:
     """Parse a comma-separated header value into a stripped, non-empty list."""
@@ -828,17 +805,6 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
         user_id = ((request.headers.get("x-user-id") or "").strip() or None) if gw_secret else None
         set_current_tenant(tenant_id)
         _stash_request_tenant(request, tenant_id)
-        # When the gateway plumbs a multi-tenant read set, expose it to the
-        # DB layer so reads (and downstream RLS policies, when configured)
-        # can widen. The home tenant is prepended to keep the set complete.
-        if readable_tenants:
-            combined: list[str] = [tenant_id]
-            for t in readable_tenants:
-                if t != tenant_id:
-                    combined.append(t)
-            set_readable_tenants(combined)
-        else:
-            set_readable_tenants(None)
         return AuthContext(
             tenant_id=tenant_id,
             user_id=user_id,

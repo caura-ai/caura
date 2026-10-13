@@ -204,6 +204,16 @@ async def handle_memory_enriched(event: Event) -> None:
             },
         )
         return
+    # O16, O19: an edit has replaced the text this run judged. Nothing here
+    # describes the new text: storage refused this run's PATCH if the edit
+    # landed first, and the edit cleared the PATCH's verdicts if it landed after.
+    # The edit's own run, when the tenant enriches, governs the new text.
+    if memory.get("content") != payload.content:
+        logger.info(
+            "memory-enriched: an edit replaced the text this run judged; ack-skipping",
+            extra={"memory_id": str(payload.memory_id), "tenant_id": payload.tenant_id},
+        )
+        return
 
     # Fast-mode governance remediation: the worker just PATCHed the LLM's
     # contains_pii / business_relevance onto the row; apply the tenant's

@@ -15,7 +15,6 @@ import pytest
 
 from common.llm._credentials import (
     _env_key,
-    has_credentials,
     resolve_openai_compatible,
 )
 from common.llm.constants import ATLASCLOUD_CHAT_BASE_URL, ATLASCLOUD_DEFAULT_MODEL
@@ -83,16 +82,6 @@ class TestAtlasCloudCredentials:
     def test_env_key_missing(self, monkeypatch):
         monkeypatch.delenv("ATLASCLOUD_API_KEY", raising=False)
         assert _env_key(ProviderName.ATLASCLOUD) == ""
-
-    def test_has_credentials_from_tenant_config(self):
-        config = MagicMock()
-        config.atlascloud_api_key = "apikey-tenant"
-        assert has_credentials("atlascloud", config) is True
-
-    def test_has_credentials_without_key(self):
-        config = MagicMock()
-        config.atlascloud_api_key = None
-        assert has_credentials("atlascloud", config) is False
 
     def test_resolve_prefers_tenant_config(self, monkeypatch):
         monkeypatch.setenv("ATLASCLOUD_API_KEY", "apikey-from-env")

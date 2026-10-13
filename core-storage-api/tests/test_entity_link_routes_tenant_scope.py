@@ -1,7 +1,7 @@
-"""``POST /entities/links`` and ``/links/bulk`` must be told which tenant they link for.
+"""``POST /entities/links/bulk`` must be told which tenant it links for.
 
-Both handlers accepted only caller-supplied ``memory_id``, ``entity_id`` and
-``role``. Neither read a tenant, and ``memory_entity_links``' foreign keys prove
+The handler accepted only caller-supplied ``memory_id``, ``entity_id`` and
+``role``. It read no tenant, and ``memory_entity_links``' foreign keys prove
 only that the two UUIDs exist — not that they belong to the same tenant, nor to
 the caller. On a service that authenticates no request (GHSA-wgvw-28pq-jc36),
 published by docker-compose on 0.0.0.0:8002, that made knowing two UUIDs
@@ -13,16 +13,18 @@ makes an existence check on the two ends sufficient and a schema change
 unnecessary.
 
 **Both ends are load-bearing and neither implies the other**, so each has its own
-case on each route: skip the entity check and a caller staples a foreign entity
+case: skip the entity check and a caller staples a foreign entity
 onto their own memory, pulling another tenant's graph node into their namespace;
 skip the memory check and they staple their own entity onto a foreign memory.
 Reverting one predicate fails only that direction's tests.
 
-The refusals are deliberately indistinguishable from "that row does not exist" —
-409 with a fixed message on the single route, ``error="fk_violation"`` on the
-bulk route. Distinguishing them would answer as an existence oracle for two id
-spaces, which is what ``test_a_foreign_pair_is_indistinguishable_from_a_ghost``
-pins on each route.
+The refusals are deliberately indistinguishable from "that row does not exist":
+``error="fk_violation"``. Distinguishing them would answer as an existence
+oracle for two id spaces, which is what
+``test_a_foreign_pair_is_indistinguishable_from_a_ghost`` pins.
+
+The single-link ``POST /entities/links`` had the same guard and no production
+caller, and was deleted (L-205).
 """
 
 from __future__ import annotations
@@ -105,128 +107,6 @@ async def _links(client: AsyncClient, memory_id: str) -> list[dict]:
             )
         ).all()
     return [{"entity_id": str(entity_id), "role": role} for entity_id, role in rows]
-
-
-class TestSingleLinkRouteTenantScope:
-    """``POST /entities/links``."""
-
-    async def test_foreign_memory_is_not_linked(self, client: AsyncClient) -> None:
-        """Memory side: the attacker's own entity, hung off someone else's memory."""
-        victim, attacker = _tenant(), _tenant()
-        victim_memory = await _memory(client, victim)
-        attacker_entity = await _entity(client, attacker)
-
-        resp = await client.post(
-            f"{PREFIX}/entities/links",
-            json={
-                "tenant_id": attacker,
-                "memory_id": victim_memory,
-                "entity_id": attacker_entity,
-                "role": "subject",
-            },
-        )
-
-        assert resp.status_code == 409, resp.text
-        assert await _links(client, victim_memory) == [], "an edge was written onto a foreign memory"
-
-    async def test_foreign_entity_is_not_linked(self, client: AsyncClient) -> None:
-        """Entity side: someone else's entity, hung off the attacker's own memory.
-
-        The memory here belongs to the caller, so only the entity end is out of
-        tenant — this is the case the entity half of the predicate exists for.
-        """
-        victim, attacker = _tenant(), _tenant()
-        attacker_memory = await _memory(client, attacker)
-        victim_entity = await _entity(client, victim)
-
-        resp = await client.post(
-            f"{PREFIX}/entities/links",
-            json={
-                "tenant_id": attacker,
-                "memory_id": attacker_memory,
-                "entity_id": victim_entity,
-                "role": "subject",
-            },
-        )
-
-        assert resp.status_code == 409, resp.text
-        assert await _links(client, attacker_memory) == [], (
-            "a foreign entity was pulled into the caller's graph"
-        )
-
-    async def test_omitted_tenant_id_is_rejected(self, client: AsyncClient) -> None:
-        """No tenant used to mean "link by primary key"; it is now a 422."""
-        tenant = _tenant()
-        memory_id = await _memory(client, tenant)
-        entity_id = await _entity(client, tenant)
-
-        resp = await client.post(
-            f"{PREFIX}/entities/links",
-            json={"memory_id": memory_id, "entity_id": entity_id, "role": "subject"},
-        )
-
-        assert resp.status_code == 422, resp.text
-        assert "tenant_id" in resp.text
-        assert await _links(client, memory_id) == []
-
-    async def test_own_link_is_created(self, client: AsyncClient) -> None:
-        """The supported call still works, and ``tenant_id`` does not reach the row.
-
-        ``MemoryEntityLink`` has no ``tenant_id`` column — the join table being
-        tenantless is the whole difficulty — so the route must consume the field
-        rather than pass it through to ``MemoryEntityLink(**data)``.
-        """
-        tenant = _tenant()
-        memory_id = await _memory(client, tenant)
-        entity_id = await _entity(client, tenant)
-
-        resp = await client.post(
-            f"{PREFIX}/entities/links",
-            json={
-                "tenant_id": tenant,
-                "memory_id": memory_id,
-                "entity_id": entity_id,
-                "role": "subject",
-            },
-        )
-
-        assert resp.status_code == 200, resp.text
-        assert "tenant_id" not in resp.json()
-        assert await _links(client, memory_id) == [{"entity_id": entity_id, "role": "subject"}]
-
-    async def test_a_foreign_pair_is_indistinguishable_from_a_ghost(self, client: AsyncClient) -> None:
-        """A real row you don't own answers exactly like a row that isn't there.
-
-        Checked on each end in turn. If the tenant refusal carried its own status
-        or message, the route would confirm which UUIDs exist in other tenants.
-        """
-        victim, attacker = _tenant(), _tenant()
-        attacker_memory = await _memory(client, attacker)
-        attacker_entity = await _entity(client, attacker)
-
-        async def _post(memory_id: str, entity_id: str) -> tuple[int, str]:
-            resp = await client.post(
-                f"{PREFIX}/entities/links",
-                json={
-                    "tenant_id": attacker,
-                    "memory_id": memory_id,
-                    "entity_id": entity_id,
-                    "role": "subject",
-                },
-            )
-            return resp.status_code, resp.json()["detail"]
-
-        foreign_entity = await _post(attacker_memory, await _entity(client, victim))
-        ghost_entity = await _post(attacker_memory, str(uuid.uuid4()))
-        foreign_memory = await _post(await _memory(client, victim), attacker_entity)
-        ghost_memory = await _post(str(uuid.uuid4()), attacker_entity)
-
-        assert foreign_entity == ghost_entity, "the entity end leaks which ids exist elsewhere"
-        assert foreign_memory == ghost_memory, "the memory end leaks which ids exist elsewhere"
-        # And all four are the same answer, so the caller cannot even tell which
-        # END of the link was refused.
-        assert foreign_entity == foreign_memory
-        assert foreign_entity[0] == 409
 
 
 class TestBulkLinkRouteTenantScope:

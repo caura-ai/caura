@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Database backup: pg_dump (custom format) → optional GCS upload
 # Usage: ./backup-db.sh [gcs-bucket-name]
+# Connection: POSTGRES_HOST/PORT/USER/PASSWORD/DB from the environment or .env
 # Restore: pg_restore -h HOST -U USER -d DB --no-owner --no-privileges FILE
 set -euo pipefail
 
@@ -16,10 +17,16 @@ if [ -f "${PROJECT_DIR}/.env" ]; then
     set +a
 fi
 
-DB_HOST="${ALLOYDB_HOST:-127.0.0.1}"
-DB_PORT="${ALLOYDB_PORT:-5432}"
-DB_USER="${ALLOYDB_USER:-memclaw}"  # legacy-name-ok: preserve the established fallback for existing deployments
-DB_NAME="${ALLOYDB_DATABASE:-memclaw}"  # legacy-name-ok: preserve the established fallback for existing deployments
+# POSTGRES_HOST/PORT/USER/PASSWORD/DB, as docker-compose.yml and .env.example
+# name them, then the legacy ALLOYDB_* names a hosted environment may still
+# set, then the shipped stack's own defaults. Reading only ALLOYDB_*, with a
+# role and database the stack no longer creates, failed on a fresh install
+# and took no backup (L-59).
+DB_HOST="${POSTGRES_HOST:-${ALLOYDB_HOST:-127.0.0.1}}"
+DB_PORT="${POSTGRES_PORT:-${ALLOYDB_PORT:-5432}}"
+DB_USER="${POSTGRES_USER:-${ALLOYDB_USER:-caura}}"
+DB_NAME="${POSTGRES_DB:-${ALLOYDB_DATABASE:-caura}}"
+DB_PASSWORD="${POSTGRES_PASSWORD:-${ALLOYDB_PASSWORD:-changeme}}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 # ``.dump``, not ``.sql.gz``. ``-Fc`` is pg_dump's custom format: already
 # compressed, and NOT SQL. The old name promised something ``gunzip | psql``
@@ -36,7 +43,7 @@ PARTIAL="${BACKUP_FILE}.partial"
 trap 'rm -f "$PARTIAL"' EXIT
 
 echo "=== Backing up ${DB_NAME}@${DB_HOST}:${DB_PORT} ==="
-PGPASSWORD="${ALLOYDB_PASSWORD:-changeme}" pg_dump \
+PGPASSWORD="$DB_PASSWORD" pg_dump \
     -h "$DB_HOST" \
     -p "$DB_PORT" \
     -U "$DB_USER" \

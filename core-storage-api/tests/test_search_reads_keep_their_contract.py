@@ -92,11 +92,10 @@ async def test_l13_l195_links_come_newest_live_first_and_capped(client: AsyncCli
     async def linked(created: datetime) -> str:
         mid = await _memory(client, tenant)
         await _set("memories", mid, "created_at", created)
-        resp = await client.post(
-            f"{PREFIX}/entities/links",
-            json={"tenant_id": tenant, "memory_id": mid, "entity_id": entity, "role": "subject"},
-        )
+        item = {"input_idx": 0, "memory_id": mid, "entity_id": entity, "role": "subject"}
+        resp = await client.post(f"{PREFIX}/entities/links/bulk", json={"tenant_id": tenant, "items": [item]})
         assert resp.status_code == 200, resp.text
+        assert resp.json()[0].get("error") is None, resp.text
         return mid
 
     # Created out of order, so insertion order cannot pass for recency.

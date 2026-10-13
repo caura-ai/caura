@@ -177,7 +177,9 @@ class BlankQuery(ValueError):
 
 
 # ``MemoryUpdate`` fields whose backing column on ``Memory`` is NOT NULL, so an
-# explicit ``null`` in a PATCH body has no way to be honoured. Kept as a literal
+# explicit ``null`` in a PATCH body has no way to be honoured. ``weight`` too: its
+# column is nullable only because migration 001 created it so (L-97), and a row
+# without a weight has nothing to rank by. Kept as a literal
 # rather than derived from ``Memory.__table__`` at import time: the schema field
 # names and column names coincide for these five but not in general (``metadata``
 # maps to ``metadata_``), so a derivation would need its own mapping table and
@@ -2795,7 +2797,6 @@ async def _schedule_enrich_or_inline(
     caller_owned_metadata_keys: list[str] | None = None,
     reference_datetime: datetime | None = None,
     run_governance_remediation: bool = False,
-    current_content_only: bool = False,
 ) -> None:
     """Enrichment counterpart of :func:`_schedule_embed_or_reembed`.
 
@@ -2843,7 +2844,6 @@ async def _schedule_enrich_or_inline(
             caller_owned_metadata_keys=caller_owned_metadata_keys,
             governance_config=tenant_config,
             run_governance_remediation=run_governance_remediation,
-            current_content_only=current_content_only,
         )
         # H-18 governance (the LLM verdict) is applied INSIDE
         # ``_enrich_memory_background``, not here.
@@ -3842,7 +3842,6 @@ async def _enrich_memory_background(
     caller_owned_metadata_keys: list[str] | None = None,
     governance_config: object | None = None,
     run_governance_remediation: bool = False,
-    current_content_only: bool = False,
 ) -> dict | None:
     """Background task: run LLM enrichment on a fast-path memory, then patch the row.
 
@@ -3890,9 +3889,6 @@ async def _enrich_memory_background(
     ``publish_memory_enrich_request``. An edit (``update_memory``, H-07) also
     pins ``title`` and the dates when the row holds one or the PATCH names one.
 
-    ``current_content_only`` is an edit's: the run does nothing once the row no
-    longer holds ``content``, because a later edit has scheduled its own.
-
     CAURA-716: this parameter previously did not exist, and the inline path
     instead inferred caller intent by comparing the row's current value against
     the schema default (``mem["memory_type"] == "fact"``, ``mem["status"] ==
@@ -3904,6 +3900,9 @@ async def _enrich_memory_background(
     ``decision``/``confirmed`` seconds later. The default-comparison is retained
     as a fallback for callers that pass no list (``None``), so behaviour is
     unchanged for them.
+
+    The run does nothing once the row no longer holds ``content``: an edit
+    replaced it, and the result would describe text that is gone (H-07, O19).
     """
     from core_api.services.memory_enrichment import enrich_memory
     from core_api.services.organization_settings import resolve_config
@@ -3969,18 +3968,16 @@ async def _enrich_memory_background(
 
     try:
         sc = get_storage_client()
-        mem = await sc.get_memory(str(memory_id), tenant_id, read=not current_content_only)
+        mem = await sc.get_memory(str(memory_id), tenant_id, read=False)
         if mem is None or mem.get("deleted_at") is not None:
             return None
-        # H-07: an edit's run is stale once a later edit replaced the text it
-        # judged. That edit scheduled its own run; this one would write the old
-        # text's verdicts over the new and remediate on text the row no longer
-        # holds. Read from the writer for this, or replica lag could make the
-        # NEWEST run look stale and skip it.
-        if current_content_only and mem.get("content") != content:
-            logger.info(
-                "Background enrichment of memory %s skipped: a later edit changed its content", memory_id
-            )
+        # H-07, O19: a run is stale once an edit replaced the text it judged, a
+        # create's run as much as an edit's. It would write the old text's
+        # verdicts over the new and remediate on text the row no longer holds.
+        # Read from the writer for this, or replica lag could make the NEWEST
+        # run look stale and skip it.
+        if mem.get("content") != content:
+            logger.info("Background enrichment of memory %s skipped: an edit changed its content", memory_id)
             return None
 
         # Build update patch.
@@ -5077,9 +5074,6 @@ async def update_memory(
                         agent_provided_fields=sorted(pins),
                         caller_owned_metadata_keys=sorted(caller_owned_keys(row_meta)),
                         run_governance_remediation=True,
-                        # Inline only: the deferred worker receives no such
-                        # check, so a superseded run can still land there.
-                        current_content_only=True,
                     ),
                     "background_enrichment",
                     memory_id,

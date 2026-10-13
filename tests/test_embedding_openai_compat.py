@@ -222,7 +222,7 @@ async def test_embed_batch_splits_requests_above_max_batch(
     provider, _, create = _patched_provider(monkeypatch, max_batch=32)
     _size_matched_create(create)
 
-    # 50 is the incident's exact batch size (EMBEDDING_REEMBED_BATCH_SIZE).
+    # 50 is the incident's exact batch size.
     result = await provider.embed_batch([f"t{i}" for i in range(50)])
 
     assert len(result) == 50, "chunking must not drop or duplicate texts"
@@ -366,8 +366,8 @@ def test_dedup_scope_distinguishes_backends_sharing_a_model(
 def test_embed_batch_default_cap_matches_tei_default() -> None:
     """The default must not exceed a stock TEI sidecar's own cap.
 
-    ``BULK_MAX_ITEMS`` (100) and ``EMBEDDING_REEMBED_BATCH_SIZE`` (50)
-    both exceed TEI's default of 32, so a default above 32 reintroduces
+    ``BULK_MAX_ITEMS`` (100) and the incident's batch of 50 both
+    exceed TEI's default of 32, so a default above 32 reintroduces
     the incident for any deployment that does not pass
     ``--max-client-batch-size`` — including the docker-compose
     local-embedder stack.

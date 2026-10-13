@@ -175,6 +175,32 @@ async def test_every_json_column_is_the_json_type_its_model_declares() -> None:
     assert not wrong, "model and migrated schema disagree on JSON type:\n" + "\n".join(wrong)
 
 
+def _nullable(flag: bool) -> str:
+    return "NULL" if flag else "NOT NULL"
+
+
+async def test_every_column_is_as_nullable_as_its_model_declares() -> None:
+    """L-97, the half the JSON check above left: seventeen columns migration 001
+    created nullable were declared NOT NULL by their models.
+
+    Autogenerate compares nullability unconditionally, so it proposed ``SET NOT
+    NULL`` for every one, which fails the deploy on a table holding a NULL; the
+    storage bulk route stores one for ``memories.weight`` when a direct caller
+    sends it. And ``tests/conftest.py`` builds its schema with ``create_all``,
+    which refused that row while production kept it. ``compare_metadata`` groups
+    a column's changes in a list, unlike the table and index tuples ``_named``
+    reads.
+    """
+    differ = sorted(
+        f"{change[2]}.{change[3]}: schema {_nullable(change[5])}, model {_nullable(change[6])}"
+        for diff in await _diffs()
+        if isinstance(diff, list)
+        for change in diff
+        if change[0] == "modify_nullable"
+    )
+    assert not differ, "model and migrated schema disagree on NULL:\n" + "\n".join(differ)
+
+
 async def test_the_schema_really_has_no_row_level_security() -> None:
     """The ground truth the prose was wrong about, asked of the database.
 

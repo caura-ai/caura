@@ -160,6 +160,7 @@ from tests.test_p1_entity_extraction_bulk import (  # noqa: E402
     _config,
     _entity,
     _graph,
+    _vectors,
 )
 
 
@@ -194,7 +195,9 @@ def _sc():
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
+    side_effect=_vectors,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(
@@ -240,7 +243,9 @@ async def test_one_failing_relation_does_not_abort_the_others(
     "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
 )
 @patch(
-    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.get_embeddings_batch",
+    new_callable=AsyncMock,
+    side_effect=_vectors,
 )
 @patch("core_api.services.entity_extraction_worker.get_storage_client")
 @patch(

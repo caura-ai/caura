@@ -59,11 +59,11 @@ class TestInitPlatformProviders:
         # Re-instantiate settings to pick up env changes
         self._reinit_settings(monkeypatch)
 
+        from common.llm.providers.vertex import VertexLLMProvider
         from core_api.providers._platform import (
             get_platform_llm,
             init_platform_providers,
         )
-        from core_api.providers.vertex_provider import VertexLLMProvider
 
         init_platform_providers()
         llm = get_platform_llm()
@@ -183,11 +183,11 @@ class TestInitPlatformProviders:
         monkeypatch.setenv("PLATFORM_LLM_MODEL", "gpt-4o-mini")
         self._reinit_settings(monkeypatch)
 
+        from common.llm.providers.openai import OpenAILLMProvider
         from core_api.providers._platform import (
             get_platform_llm,
             init_platform_providers,
         )
-        from core_api.providers.openai_provider import OpenAILLMProvider
 
         init_platform_providers()
         llm = get_platform_llm()
@@ -350,8 +350,8 @@ class TestLLMTierResolution:
         """Tenant with API key gets their own provider, not platform."""
         self._setup_platform_llm(monkeypatch)
 
+        from common.llm.providers.openai import OpenAILLMProvider
         from core_api.providers._registry import get_llm_provider
-        from core_api.providers.openai_provider import OpenAILLMProvider
 
         provider = get_llm_provider(
             "openai", _FakeTenantConfig(openai_api_key="sk-tenant-key")
@@ -372,8 +372,8 @@ class TestLLMTierResolution:
         """No tenant key, no platform → FakeLLMProvider."""
         self._ensure_no_platform(monkeypatch)
 
+        from common.llm.providers.fake import FakeLLMProvider
         from core_api.providers._registry import get_llm_provider
-        from core_api.providers.fake_provider import FakeLLMProvider
 
         provider = get_llm_provider("openai", _FakeTenantConfig(openai_api_key=""))
         assert isinstance(provider, FakeLLMProvider)
@@ -410,8 +410,8 @@ class TestLLMTierResolution:
         ``call_with_fallback``'s short-circuit at line 148 effective."""
         self._ensure_no_platform(monkeypatch)
 
+        from common.llm.providers.fake import FakeLLMProvider
         from core_api.providers._registry import get_llm_provider
-        from core_api.providers.fake_provider import FakeLLMProvider
 
         provider = get_llm_provider(None, _FakeTenantConfig())
         assert isinstance(provider, FakeLLMProvider)
@@ -574,27 +574,6 @@ class TestPlatformSecurity:
         # ResolvedConfig.openai_api_key reads tenant settings then global settings
         # Platform keys must not appear in either path
         assert config.openai_api_key != "sk-platform-secret"
-
-
-# ---------------------------------------------------------------------------
-# Group 5: has_credentials unchanged
-# ---------------------------------------------------------------------------
-
-
-class TestHasCredentialsUnchanged:
-    """has_credentials must not report platform keys as tenant credentials."""
-
-    def test_has_credentials_false_with_platform(self, monkeypatch):
-        monkeypatch.setenv("PLATFORM_EMBEDDING_PROVIDER", "openai")
-        monkeypatch.setenv("PLATFORM_EMBEDDING_API_KEY", "sk-platform")
-        import core_api.config as cfg
-
-        monkeypatch.setattr(cfg, "settings", cfg.Settings())
-        monkeypatch.setattr(cfg.settings, "openai_api_key", None)
-
-        from core_api.providers._credentials import has_credentials
-
-        assert has_credentials("openai", None) is False
 
 
 # ---------------------------------------------------------------------------

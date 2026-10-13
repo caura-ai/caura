@@ -9,7 +9,7 @@ peer's ``memory_id`` (e.g. via search) could read or mutate a row outside its
 fleet/agent scope.
 
 The fix routes every by-id handler through
-``agent_service.authorize_memory_access`` (and ``enforce_memory_read``). These
+``agent_service.authorize_memory_access``. These
 tests lock the contract at three levels: the helper itself (unit), the
 agent-facing MCP surface, and the REST endpoint.
 """

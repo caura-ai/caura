@@ -169,7 +169,7 @@ def _build_ctx(*, content: str):
 @pytest.mark.asyncio
 async def test_check_semantic_duplicate_skips_when_identifier_bearing():
     """Identifier-bearing content → step returns SKIPPED before the
-    SQL similarity query runs. No 409, no LLM, no review queue entry."""
+    SQL similarity query runs. No 409, no LLM."""
     from unittest.mock import AsyncMock, patch
 
     from core_api.pipeline.step import StepOutcome
@@ -180,7 +180,6 @@ async def test_check_semantic_duplicate_skips_when_identifier_bearing():
     ctx = _build_ctx(content="Build pr-456 deployed to staging.")
     find = AsyncMock()
     judge = AsyncMock()
-    enqueue = AsyncMock()
     with (
         patch(
             "core_api.pipeline.steps.write.check_semantic_duplicate._find_semantic_duplicate",
@@ -190,10 +189,6 @@ async def test_check_semantic_duplicate_skips_when_identifier_bearing():
             "core_api.pipeline.steps.write.check_semantic_duplicate._llm_dedup_check",
             new=judge,
         ),
-        patch(
-            "core_api.pipeline.steps.write.check_semantic_duplicate._enqueue_dedup_review",
-            new=enqueue,
-        ),
     ):
         step = CheckSemanticDuplicate()
         result = await step.execute(ctx)
@@ -202,7 +197,6 @@ async def test_check_semantic_duplicate_skips_when_identifier_bearing():
     assert result.outcome == StepOutcome.SKIPPED
     find.assert_not_called()
     judge.assert_not_called()
-    enqueue.assert_not_called()
 
 
 @pytest.mark.asyncio

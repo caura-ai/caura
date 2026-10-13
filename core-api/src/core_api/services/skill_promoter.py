@@ -16,11 +16,14 @@ Plan §15 Phase 2 deliverable:
    candidate → staged when all 6 gates pass."
 
 The companion pre-apply hook (``rescan_before_apply``) is also here:
-right before an operator-driven ``staged → active`` transition, we
-re-run the Sentinel scan against the *current* doc body. This catches
-the case where the lake state changed between propose-time and
-apply-time (e.g. a new prompt-injection marker appeared in a cited
-memory's content, and the scan would now flag it).
+right before an auto-promotion skips review and goes ``candidate →
+active`` (M-91), we re-run the Sentinel scan against the *current* doc
+body. This catches the case where the lake state changed between
+propose-time and apply-time (e.g. a new prompt-injection marker appeared
+in a cited memory's content, and the scan would now flag it). The
+operator's approve in ``routes/skills_inbox`` runs the same rescan
+inline, because it also persists the full ``ScanResult`` and can lift a
+critical verdict with ``override_quarantine`` (L-213).
 
 External callable injection (mirrors Forge's pattern):
 

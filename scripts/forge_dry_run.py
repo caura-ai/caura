@@ -271,46 +271,35 @@ async def _wire_poison_checker(sc, tenant_id: str, fleet_id: str | None):
 
 
 async def _wire_candidate_writer():
-    """Persist a Forge-generated candidate via the SF-002
-    ``caura_doc`` write path so all 7 adjustments + Sentinel scan
-    + audit fire as they would for an external write."""
-    # We use the underlying storage client directly here because the
-    # Forge worker is internal (not an HTTP caller); the SF-002
-    # validator's checks that pertain to internal callers are
-    # already satisfied by the doc shape Forge builds.
-    #
-    # 09/02 M-07: this helper took a ``db`` parameter it never used — it was
-    # already storage-routed. Dropped, so the signature stops implying a DB
-    # dependency the body does not have.
-    from core_api.clients.storage_client import get_storage_client
+    """Persist a Forge-generated candidate the way the cron does.
 
-    sc = get_storage_client()
+    L-60: the cron's own writer, which writes only over a ``candidate`` or no
+    document (L-24). This script is not dry: it writes candidates for real,
+    so a writer of its own replaced an operator's approve or quarantine that
+    landed after the status check.
 
-    async def writer(candidate_doc: dict) -> None:
-        await sc.upsert_document(candidate_doc)
+    09/02 M-07: this helper took a ``db`` parameter it never used — it was
+    already storage-routed. Dropped, so the signature stops implying a DB
+    dependency the body does not have.
+    """
+    from core_api.services.forge.cron_handler import _make_candidate_writer
 
-    return writer
+    return _make_candidate_writer()
 
 
 async def _wire_status_checker():
     """No-overwrite guard wiring. Returns the current ``data.status``
     of an existing doc, or ``None`` if no doc with that id exists.
     Forge skips persistence when the target slug already exists
-    with a non-``candidate`` status (operator-curated state)."""
-    from core_api.clients.storage_client import get_storage_client
+    with a non-``candidate`` status (operator-curated state).
 
-    sc = get_storage_client()
+    L-60: the cron's own checker, which reads the primary (L-33). This one
+    read the replica, where a status an operator just set may not have
+    arrived, so the guard passed the write it exists to stop.
+    """
+    from core_api.services.forge.cron_handler import _make_status_checker
 
-    async def checker(tenant_id: str, collection: str, doc_id: str) -> str | None:
-        doc = await sc.get_document(
-            tenant_id=tenant_id, collection=collection, doc_id=doc_id
-        )
-        if not doc:
-            return None
-        data = doc.get("data") or {}
-        return data.get("status")
-
-    return checker
+    return _make_status_checker()
 
 
 # ── Entry point ───────────────────────────────────────────────────

@@ -83,6 +83,13 @@ _plugin_root_files = {
     "openclaw.plugin.json",
 }
 
+# Files only the generated installer fetches (L-71). Served by
+# ``/plugin-source`` but deliberately outside ``_plugin_root_files``: those make
+# up the deploy manifest and its hash, so adding the lockfile there would
+# redeploy every node on each dependency bump. A deployed node keeps the
+# compiler it installed with.
+_plugin_install_files = {"package-lock.json"}
+
 # Direct-MCP skill adapter. Lives under the repo-root ``static/`` tree
 # rather than ``plugin/`` — it is NOT an OpenClaw plugin artifact; it is
 # served to Claude Code / Codex users who connect to Caura directly via
@@ -146,7 +153,7 @@ def _read_combined_plugin_source() -> tuple[str, list[str], list[str]]:
 @router.get("/plugin-source", response_class=PlainTextResponse)
 async def plugin_source(file: str = Query(default="index.ts")):
     """Serve plugin source files. Use ?file=prompt-section.ts for other files."""
-    if file in _plugin_root_files:
+    if file in _plugin_root_files or file in _plugin_install_files:
         path = _plugin_dir.parent / file
     elif file in _plugin_files:
         path = _plugin_dir / file
@@ -290,6 +297,28 @@ def _generate_install_script(
     safe_version = shlex.quote(_plugin_version())
     safe_tls_bootstrap = shlex.quote(tls_bootstrap)
     api_key_preview = api_key[:6] + "..." if len(api_key) > 6 else "(not set)"
+    # The node builds with what CI builds with (L-71, Eldad 2026-10-11): the
+    # plugin's own devDependencies and tsconfig, installed from its lockfile
+    # below. The installer wrote caret ranges that had drifted to TypeScript 5
+    # and a tsconfig without ``types``, which TypeScript 7 no longer fills in.
+    plugin_package = json.loads((_plugin_dir.parent / "package.json").read_text(encoding="utf-8"))
+    package_json = json.dumps(
+        {
+            "name": plugin_package["name"],
+            "version": plugin_package["version"],
+            "description": plugin_package["description"],
+            "private": True,
+            "type": "module",
+            "main": plugin_package["main"],
+            "openclaw": plugin_package["openclaw"],
+            # Not the plugin's own scripts: its ``prebuild`` runs a monorepo
+            # script a flat install does not have.
+            "scripts": {"build": "tsc", "dev": "tsc --watch"},
+            "devDependencies": plugin_package["devDependencies"],
+        },
+        indent=2,
+    )
+    tsconfig_json = (_plugin_dir.parent / "tsconfig.json").read_text(encoding="utf-8").rstrip("\n")
 
     return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -397,46 +426,17 @@ esac
 echo "[1/7] Creating plugin directory..."
 mkdir -p "$PLUGIN_DIR/src"
 
-# 2. Write package.json
+# 2. Write package.json (the plugin's own devDependencies, matching the
+# lockfile fetched in step 5)
 echo "[2/7] Writing package.json..."
-cat > "$PLUGIN_DIR/package.json" << PACKAGE_EOF
-{{
-  "name": "@caura/plugin",
-  "version": "$CAURA_PLUGIN_VERSION",
-  "description": "OpenClaw plugin for Caura central memory",
-  "private": true,
-  "type": "module",
-  "main": "dist/index.js",
-  "openclaw": {{
-    "extensions": ["./dist/index.js"]
-  }},
-  "scripts": {{
-    "build": "tsc",
-    "dev": "tsc --watch"
-  }},
-  "devDependencies": {{
-    "@types/node": "^25.4.0",
-    "typescript": "^5.4"
-  }}
-}}
+cat > "$PLUGIN_DIR/package.json" << 'PACKAGE_EOF'
+{package_json}
 PACKAGE_EOF
 
-# 3. Write tsconfig.json
+# 3. Write tsconfig.json (the plugin's own)
 echo "[3/7] Writing tsconfig.json..."
 cat > "$PLUGIN_DIR/tsconfig.json" << 'TSCONFIG_EOF'
-{{
-  "compilerOptions": {{
-    "target": "ES2022",
-    "module": "Node16",
-    "moduleResolution": "Node16",
-    "outDir": "dist",
-    "rootDir": "src",
-    "strict": true,
-    "esModuleInterop": true,
-    "declaration": true
-  }},
-  "include": ["src"]
-}}
+{tsconfig_json}
 TSCONFIG_EOF
 
 # 4. Fetch plugin manifest from the server (single source of truth).
@@ -469,7 +469,7 @@ fi
 if [ -z "$SRC_FILES" ] || [ -z "$ROOT_FILES" ]; then
   echo "WARNING: Could not fetch/parse /api/v1/plugin-manifest (python3 missing or endpoint unreachable). Falling back to hardcoded file list."
   SRC_FILES="index.ts prompt-section.ts tools.ts tool-specs.ts version.ts env.ts transport.ts validation.ts config.ts paths.ts logger.ts resolve-agent.ts tool-definitions.ts deploy.ts heartbeat.ts educate.ts context-engine.ts context-engine.internal.ts agent-auth.ts health.ts install-id.ts identity.ts reconcile-skills.ts keystones.ts openclaw-sdk-bridge.ts interview-buffer.ts task-trail.ts user-agent.ts"
-  ROOT_FILES="openclaw.plugin.json tools.json skills/memclaw/SKILL.md"  # legacy-name-ok: fallback preserves the shipped dual-path skill manifest
+  ROOT_FILES="openclaw.plugin.json tools.json skills/memclaw/SKILL.md skills/caura/SKILL.md"  # legacy-name-ok: fallback preserves the shipped dual-path skill manifest
 fi
 
 # SECURITY: validate every manifest-supplied filename BEFORE any disk
@@ -519,6 +519,12 @@ for rootfile in $ROOT_FILES; do
     exit 1
   }}
 done
+# The lockfile the plugin is built with in CI (L-71): ``npm ci`` below installs
+# exactly its versions, integrity-checked, or stops.
+curl $CURL_INSECURE -sf "$CAURA_API_URL/api/plugin-source?file=package-lock.json" > "$PLUGIN_DIR/package-lock.json" || {{
+  echo "ERROR: Could not fetch package-lock.json from $CAURA_API_URL/api/plugin-source?file=package-lock.json"
+  exit 1
+}}
 echo "    Downloaded all plugin source files"
 
 # Generate version.ts (imported by index.ts)
@@ -540,7 +546,14 @@ chmod 600 "$PLUGIN_DIR/.env"
 # 6. Install dependencies and build
 echo "[6/7] Installing dependencies and building..."
 cd "$PLUGIN_DIR"
-npm install --silent --no-optional --no-fund --no-audit 2>&1 || true
+# ``npm ci`` installs the lockfile's versions or fails, and the install stops
+# with it: ``npm install ... || true`` resolved floating ranges and carried on
+# past a failure (L-71). Optional packages stay in, because TypeScript 7 ships
+# its compiler as a platform-specific optional dependency.
+npm ci --loglevel=error --no-fund --no-audit 2>&1 || {{
+  echo "ERROR: npm ci could not install the plugin's toolchain from package-lock.json"
+  exit 1
+}}
 npm run build 2>&1
 echo "    Build successful"
 

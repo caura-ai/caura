@@ -55,8 +55,9 @@ class Agent(Base):
         Text, nullable=False, server_default=text("'service'")
     )
     owner_ref: Mapped[str | None] = mapped_column(Text)
+    # Nullable: migration 001 created it so and no migration tightened it (L-97).
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=text("now()")
+        DateTime(timezone=True), nullable=True, server_default=text("now()")
     )
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

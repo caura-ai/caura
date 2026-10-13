@@ -3822,7 +3822,6 @@ async def detect_contradictions_by_entities_async(
 
 
 # Backward-compat re-exports for tests
-from core_api.providers._credentials import has_credentials as _has_api_key  # noqa: F401
 from core_api.providers._credentials import (
     resolve_openai_compatible as _resolve_openai_compatible,  # noqa: F401
 )

@@ -369,14 +369,10 @@ export async function fetchToolDescriptions(): Promise<void> {
       toolDescriptions = (await res.json()) as Record<string, string>;
     }
   } catch {
-    console.warn("[caura] Failed to fetch tool descriptions, using defaults");
-    toolDescriptions = {
-      remember: "Store a memory for future retrieval",
-      recall: "Search and retrieve relevant memories",
-      forget: "Delete a specific memory",
-      search: "Search memories by query",
-      ingest: "Ingest content from a URL or document",
-    };
+    // Every tool falls back to its description in tools.json. A table here was
+    // keyed by pre-v1 tool names no tool has, so it never matched (L-218).
+    console.warn("[caura] Failed to fetch tool descriptions, using the ones in tools.json");
+    toolDescriptions = {};
   }
 }
 

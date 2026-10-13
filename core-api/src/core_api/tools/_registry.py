@@ -40,22 +40,6 @@ def all_specs() -> list[ToolSpec]:
     return list(REGISTRY.values())
 
 
-def required_trust(tool_name: str, op: str | None = None) -> int:
-    """Required trust level for a given tool (and optional op).
-
-    Falls back to 0 (no MCP-level gate) for unknown tools so this is safe
-    to call from existing `agent_service.enforce_*` shims as a soft lookup.
-    """
-    spec = REGISTRY.get(tool_name)
-    if spec is None:
-        return 0
-    if op is not None:
-        for op_spec in spec.ops:
-            if op_spec.name == op and op_spec.trust_required > 0:
-                return op_spec.trust_required
-    return spec.trust_required
-
-
 def _autoload_specs() -> None:
     """Import every `caura_*` module in this package; each registers its spec."""
     package_name = __name__.rsplit(".", 1)[0]  # "core_api.tools"

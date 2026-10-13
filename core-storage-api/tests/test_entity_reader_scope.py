@@ -43,11 +43,10 @@ async def _entity(client: AsyncClient, tenant: str, name: str) -> str:
 
 
 async def _link(client: AsyncClient, tenant: str, memory_id: str, entity_id: str) -> None:
-    resp = await client.post(
-        f"{PREFIX}/entities/links",
-        json={"tenant_id": tenant, "memory_id": memory_id, "entity_id": entity_id, "role": "mentions"},
-    )
+    item = {"input_idx": 0, "memory_id": memory_id, "entity_id": entity_id, "role": "mentions"}
+    resp = await client.post(f"{PREFIX}/entities/links/bulk", json={"tenant_id": tenant, "items": [item]})
     assert resp.status_code == 200, resp.text
+    assert resp.json()[0].get("error") is None, resp.text
 
 
 @pytest.fixture

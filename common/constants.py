@@ -165,6 +165,12 @@ GRAPH_MAX_HOPS = 2  # max relation hops to expand during search
 GRAPH_MAX_EXPANDED_ENTITIES = (
     200  # cap on entity IDs in the IN clause after graph expansion
 )
+# L-176. ``GET /graph`` read every entity and relation of a tenant, uncapped.
+# Past these caps the newest entities, and the heaviest relations among them,
+# come back and the response says ``truncated``. The defaults are meant to sit
+# above any tenant's graph; a deployment whose graph outgrows them raises them.
+GRAPH_MAX_ENTITIES = read_int_env("GRAPH_MAX_ENTITIES", 10_000)
+GRAPH_MAX_RELATIONS = read_int_env("GRAPH_MAX_RELATIONS", 50_000)
 
 # Relation-type weights: strong semantic relations boost more than structural ones.
 RELATION_TYPE_WEIGHTS: dict[str, float] = {
@@ -870,3 +876,23 @@ NODE_PRINCIPAL_TENANT = "tenant"
 # (``enc:v1:<Fernet token>``). Here so storage can tell a legacy plaintext key
 # from an encrypted one without holding the key (M-99).
 ENCRYPTED_SETTING_PREFIX = "enc:v1:"
+
+
+# ---------------------------------------------------------------------------
+# Document writes
+# ---------------------------------------------------------------------------
+
+# ``detail.error`` on storage's 409 when a document write that named the
+# statuses it may replace (``expected_status``) found the stored document in
+# another, or found none where one had to exist. Nothing was written (L-24).
+DOCUMENT_STATUS_CHANGED = "document_status_changed"
+
+
+# ---------------------------------------------------------------------------
+# Memory writes
+# ---------------------------------------------------------------------------
+
+# ``detail.error`` on storage's 409 when a memory PATCH that named the text it
+# was computed from (``expected_content``) found the row holding other text: a
+# later edit replaced it. Nothing was written (O16).
+MEMORY_CONTENT_CHANGED = "memory_content_changed"
