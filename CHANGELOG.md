@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.32.0](https://github.com/caura-ai/caura/compare/backend-v3.31.0...backend-v3.32.0) (2026-10-13)
+
+
+### Features
+
+* **clients:** add stats() to the Python and TypeScript clients ([#2035](https://github.com/caura-ai/caura/issues/2035)) ([cce0602](https://github.com/caura-ai/caura/commit/cce0602022d3b4fa35f6b5913bb7db103d450da4))
+
 ## [3.31.0](https://github.com/caura-ai/caura/compare/backend-v3.30.14...backend-v3.31.0) (2026-10-13)
 
 
