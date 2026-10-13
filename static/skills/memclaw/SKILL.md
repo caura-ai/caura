@@ -68,6 +68,11 @@ actually needs (don't make all four calls by reflex).
 3. **Write** — record what matters (§3).
 4. **Evolve** — report how the memories you acted on turned out (§4).
 
+**A miss isn't proof.** If a recall comes back empty or off-topic, try once
+more with the concrete nouns a teammate would have written (the service, the
+error, the ticket, the version) before you conclude the fleet doesn't know.
+Say in your answer what you searched for.
+
 **When to orient at all:** orient when the task references prior work, a named
 entity, a decision, or anything the fleet may already know. Skip it for
 self-contained mechanical turns — recalling on every trivial ping is noise and
@@ -81,8 +86,9 @@ wasted tokens.
 - a rule or constraint you learned;
 - the end of a meaningful task.
 
-**Don't write the noise.** Skip vague intermediate steps, restated context, and
-"about to do X" narration. Ephemeral within-session state belongs in your
+**Don't write the noise.** Skip vague intermediate steps, restated context,
+"about to do X" narration, and "I searched and found nothing": a miss isn't
+knowledge, and it outranks the real answer the next time someone searches. Ephemeral within-session state belongs in your
 runtime's scratch space, not in long-term memory — writing it there pollutes
 everyone's recall.
 
@@ -351,7 +357,7 @@ parameter list.
 ### Behaviors the schema won't tell you
 
 - **`caura_recall`** excludes superseded memories (`status` ∈ {outdated, conflicted}) by default — pass `status` explicitly to walk the chain.
-- **`caura_write`** can't write `insight` / `outcome` / `rule` types — those are server-generated (via `caura_insights` / `caura_evolve`). `write_mode`: `fast` skips embedding → keyword-only recall afterwards; `strong` forces full LLM enrichment; `auto` is usually right.
+- **`caura_write`** — leave `memory_type` out: the server classifies the prose. If you set it, use one of `fact` · `episode` · `decision` · `preference` · `task` · `plan` · `action`. Anything else (`guideline`, `action_item`, `explanation`, …) is rejected with `INVALID_ARGUMENTS`, and `insight` / `outcome` / `rule` are server-generated (via `caura_insights` / `caura_evolve`). `write_mode`: `fast` skips embedding → keyword-only recall afterwards; `strong` forces full LLM enrichment; `auto` is usually right.
 - **`caura_manage op=transition`** targets: `active · pending · confirmed · cancelled · outdated · conflicted · archived · deleted`.
 - **`caura_doc`** — `where` is scalar exact-match only (no array descent). A doc is invisible to `op=search` unless it has a `data["summary"]` (the only embedded field); re-write with one to index it retroactively. Scope the search to a collection when you know it; omit `collection` to return up to `top_k` matches across the tenant (default 5).
 - **`caura_tune`** persists and reshapes every later recall — change one or two knobs at a time; call with no arguments to read your current profile (`fts_weight` 0 = pure semantic, 1 = pure keyword).
