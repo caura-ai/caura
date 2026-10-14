@@ -169,10 +169,15 @@ def latest_codex_thread(directory, home=None):
 
     Codex writes a session's rollout once its first turn starts, so a session
     that has not yet received a message has no thread to queue into.
+
+    Newest means most recently started: rollout names begin with the start
+    time. Not the most recently written: a queued wake runs a turn on its
+    thread, so ordering by write time kept waking a closed session after Codex
+    was restarted, while the open one never saw the request.
     """
     directory = Path(directory).resolve()
     sessions = (Path(home) if home else codex_home()) / "sessions"
-    rollouts = sorted(sessions.rglob("rollout-*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    rollouts = sorted(sessions.rglob("rollout-*.jsonl"), key=lambda p: p.name, reverse=True)
     for rollout in rollouts:
         try:
             with rollout.open() as stream:

@@ -207,6 +207,10 @@ def test_latest_codex_thread_is_the_newest_session_in_the_directory(tmp_path):
     rollout(home, "c", "elsewhere", other, 300)
     (home / "sessions" / "rollout-broken-x.jsonl").write_text("not json\n")
     assert runtime.latest_codex_thread(project, home) == "newer"
+    # A wake turn on a closed, older session writes to its rollout last; the
+    # session started most recently (the open one) still wins.
+    os.utime(rollout(home, "a", "older", project, 100), (900, 900))
+    assert runtime.latest_codex_thread(project, home) == "newer"
 
 
 async def test_codex_queue_latest_resolves_at_wake_time(tmp_path, monkeypatch):
