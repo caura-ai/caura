@@ -574,6 +574,51 @@ async def test_delivery_burst_across_turns_and_restarts_queues_only_one_hint(tmp
     assert len(queued) == 2
 
 
+async def test_new_arrival_rearms_without_an_empty_wait(tmp_path):
+    # The QA simulation: agents ended turns with work still open (a collected
+    # reply, a reply without a final empty wait), so the drain generation never
+    # moved and later requests were treated as the already-announced burst.
+    state = runtime.WakeState(tmp_path / "arrival.json")
+    queued = []
+
+    async def emit(message=runtime.WAKE_TEXT):
+        queued.append(message)
+
+    snapshot = {
+        "pending": True,
+        "active": False,
+        "wait_generation": 3,
+        "drain_generation": 3,
+        "newest_open": 40,
+    }
+    assert await state.notify(snapshot, emit)
+    # Old work left open, a busy turn or many waits never re-arm.
+    assert not await state.notify({**snapshot, "wait_generation": 9}, emit)
+    assert not await state.notify({**snapshot, "active": True}, emit)
+    assert not await runtime.WakeState(state.path).notify({**snapshot, "newest_open": 12}, emit)
+    # A request that arrives later is a new burst, also across restarts.
+    later = {**snapshot, "wait_generation": 9, "newest_open": 57}
+    assert await runtime.WakeState(state.path).notify(later, emit)
+    assert not await runtime.WakeState(state.path).notify(later, emit)
+    # Acking the open work lowers newest_open; that is not an arrival either.
+    assert not await state.notify({**later, "newest_open": 41}, emit)
+    assert len(queued) == 2
+
+
+async def test_server_without_arrival_marker_keeps_drain_only_rearm(tmp_path):
+    state = runtime.WakeState(tmp_path / "legacy.json")
+    queued = []
+
+    async def emit(message=runtime.WAKE_TEXT):
+        queued.append(message)
+
+    snapshot = {"pending": True, "wait_generation": 1, "drain_generation": 1}
+    assert await state.notify(snapshot, emit)
+    assert not await state.notify({**snapshot, "wait_generation": 4}, emit)
+    assert await state.notify({**snapshot, "wait_generation": 5, "drain_generation": 4}, emit)
+    assert len(queued) == 2
+
+
 @pytest.mark.parametrize("key", ["resume:case-1", "retry:delivery-1:1", "retry:delivery-1:2"])
 async def test_recovery_rearms_without_an_empty_wait(tmp_path, key):
     state = runtime.WakeState(tmp_path / "recovery.json")

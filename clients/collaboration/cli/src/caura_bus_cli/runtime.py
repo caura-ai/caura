@@ -113,7 +113,12 @@ class WakeState:
                 saved = {**saved, marker: generation, "recovery_key": recovery}
                 self.save(saved)
                 return False
-            same_burst = saved.get(marker) == generation
+            # A delivery that arrived after the last hint is new work even when the
+            # inbox never drained: an agent can end its turn with a collected reply
+            # or an ignored request still open. Old work alone never re-arms.
+            newest = snapshot.get("newest_open")
+            arrived = newest is not None and newest > saved.get("newest_open", 0)
+            same_burst = saved.get(marker) == generation and not arrived
             recovering = recovery is not None and recovery != saved.get("recovery_key")
             if same_burst and not recovering:
                 return False
@@ -144,6 +149,7 @@ class WakeState:
                     **current,
                     marker: generation,
                     "recovery_key": recovery or saved.get("recovery_key"),
+                    "newest_open": max(newest or 0, saved.get("newest_open", 0)),
                     "last_wake_at": datetime.now(UTC).isoformat(),
                 }
             )
