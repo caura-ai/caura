@@ -257,7 +257,7 @@ Once connected via MCP or the OpenClaw plugin, you have these tools:
 |---|---|
 | `caura_write` | Store a memory — send `content` (single) or `items` (batch ≤100). Everything else is auto-inferred |
 | `caura_recall` | Hybrid semantic + keyword search. Set `include_brief=true` to get the LLM's answer to the query alongside the matching memories |
-| `caura_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete` |
+| `caura_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete`, `bulk_delete`, `lineage` (the OpenClaw plugin exposes only the first four) |
 | `caura_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet` on your own fleet trust ≥ 1, another fleet or `scope=all` trust ≥ 2 |
 | `caura_doc` | Document CRUD, op-dispatched: `write`, `read`, `query`, `delete`, `list_collections`, `search` (semantic) on named JSON collections |
 | `caura_entity_get` | Look up an entity with linked memories and relations |
