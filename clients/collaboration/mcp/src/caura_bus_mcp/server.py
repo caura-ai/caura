@@ -26,7 +26,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import ConfigDict, Field
 
 from .delivery import DeliverySession
-from .presence import PRESENCE_ENV_VAR, PresenceHeartbeat, presence_enabled, presence_profile
+from .presence import PRESENCE_ENV_VAR, PresenceHeartbeat, presence_enabled, presence_profile, waiting_file
 
 
 @dataclass
@@ -63,7 +63,9 @@ async def lifespan(_server: MCPServer) -> AsyncIterator[AppContext]:
     config = load_config()
     async with Bus(config) as bus:
         app = AppContext(config, bus)
-        presence = PresenceHeartbeat(bus, presence_profile(config)) if presence_enabled() else None
+        presence = (
+            PresenceHeartbeat(bus, presence_profile(config), waiting_file()) if presence_enabled() else None
+        )
         if presence:
             presence.start()
         try:
@@ -245,7 +247,8 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
     discover: capability, available_only=true, fleet_id, cursor, limit=50 (1-100). Returns one
       page of agents with live skills/status, plus next_cursor and has_more.
       description is the registered expertise (kept while offline, may be null);
-      availability (ready/busy/not_listening/offline) and sessions are live runtime state;
+      availability (ready/busy/waiting_for_user/not_listening/offline) and sessions are live
+      runtime state; waiting_for_user = held at a prompt only its person can answer;
       not_listening = session open but nothing wakes it, so a request waits for its next turn.
     agents: fleet_id, cursor, limit=50 (1-100). Returns one page of registered peers, each with
       its registered description, plus next_cursor and has_more.

@@ -10,6 +10,7 @@
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -251,6 +252,61 @@ async def test_heartbeat_repeats_ready_then_goes_offline(monkeypatch):
     assert set(bus.adverts[:-1]) == {"ready"} and bus.adverts[-1] == "offline"
     assert sleeps and set(sleeps) == {15}
     assert heartbeat.task is not None and heartbeat.task.done()
+
+
+async def test_heartbeat_advertises_waiting_for_user_while_marked(monkeypatch, tmp_path):
+    """A session held at a permission prompt is shown as waiting for its user."""
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_seconds):
+        await real_sleep(0)
+
+    monkeypatch.setattr(presence_module.asyncio, "sleep", fast_sleep)
+    mark = tmp_path / "waiting.json"
+    bus = FakePresenceBus()
+    heartbeat = PresenceHeartbeat(bus, Presence(session_id="mcp-1", display_name="a"), str(mark))
+    heartbeat.start()
+
+    async def until(status):
+        async with asyncio.timeout(5):
+            while not bus.adverts or bus.adverts[-1] != status:
+                await real_sleep(0)
+
+    await until("ready")
+    mark.write_text('{"status":"waiting_for_user"}')
+    await until("waiting_for_user")
+    mark.unlink()
+    await until("ready")
+    await heartbeat.stop()
+    assert bus.adverts[-1] == "offline"
+    assert presence_module.waiting_file({"CAURA_BUS_WAITING_FILE": str(mark)}) == str(mark)
+    assert presence_module.waiting_file({}) is None
+
+
+async def test_waiting_mark_from_an_earlier_session_is_ignored(tmp_path):
+    mark = tmp_path / "waiting.json"
+    mark.write_text("{}")
+    heartbeat = PresenceHeartbeat(
+        FakePresenceBus(), Presence(session_id="mcp-1", display_name="a"), str(mark)
+    )
+    os.utime(mark, (heartbeat.started - 60, heartbeat.started - 60))
+    assert heartbeat.current().status == "ready"
+    mark.touch()
+    assert heartbeat.current().status == "waiting_for_user"
+    assert Presence(session_id="s", display_name="a", status="waiting_for_user").status == "waiting_for_user"
+
+
+async def test_older_server_rejecting_waiting_for_user_keeps_presence(tmp_path):
+    mark = tmp_path / "waiting.json"
+    bus = FakePresenceBus([PlatformError(422, "status: input should be 'ready', 'busy' or 'offline'")])
+    heartbeat = PresenceHeartbeat(bus, Presence(session_id="mcp-1", display_name="a"), str(mark))
+    mark.write_text("{}")
+    heartbeat.start()
+    while len(bus.adverts) < 2:
+        await asyncio.sleep(0)
+    await heartbeat.stop()
+    assert bus.adverts == ["waiting_for_user", "ready", "offline"]
+    assert not heartbeat.revoked
 
 
 async def test_heartbeat_retries_transient_failures(monkeypatch):

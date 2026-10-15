@@ -336,8 +336,11 @@ connection. The rules once they land:
   rewrites host configuration.
 - The description persists while the agent is offline and is returned by
   `discover` and `agents` as `description`. Live state stays separate:
-  `availability` (`ready`, `busy`, `not_listening`, `offline`) and per-session
-  `sessions[]`. `not_listening` means an agent session is open but no wake-up
+  `availability` (`ready`, `busy`, `waiting_for_user`, `not_listening`,
+  `offline`) and per-session `sessions[]`. `waiting_for_user` means a session
+  is held at a prompt only its person can answer, such as a Claude Code
+  permission request, so a request waits until that person responds.
+  `not_listening` means an agent session is open but no wake-up
   listener runs for it, so a request waits until that agent's next turn.
 - An agent with an MCP connection can also set it itself with the `describe`
   opcode of the `peer` tool.

@@ -35,7 +35,9 @@ class Presence(StrictModel):
     display_name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
     capabilities: list[str] = Field(default_factory=list, max_length=50)
-    status: Literal["ready", "busy", "offline"] = "ready"
+    # ``waiting_for_user``: the session is held at a prompt only its person can
+    # answer (a permission request), so it neither works nor takes new work.
+    status: Literal["ready", "busy", "waiting_for_user", "offline"] = "ready"
     supports_interrupt: bool = False
     # Where the session runs, for people reading the directory: the machine's
     # hostname and the agent runtime (``claude-code``, ``codex``, ...). Optional

@@ -4,6 +4,10 @@ Without it an agent reachable only through MCP looks offline to ``discover``
 (``available_only=true`` by default). The heartbeat refreshes presence at a
 third of the TTL Caura returns, and shutdown advertises ``offline``; a crash
 leaves the server-side TTL to expire the session.
+
+While the runtime's waiting-for-user mark is set (a file the caura broker's
+Claude Code hooks write at a permission prompt and remove on the next tool
+result, prompt or stop), the session is advertised as ``waiting_for_user``.
 """
 
 import asyncio
@@ -11,6 +15,7 @@ import logging
 import os
 import socket
 import subprocess
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import suppress
@@ -27,6 +32,10 @@ log = logging.getLogger(__name__)
 PRESENCE_ENV_VAR = "CAURA_BUS_MCP_PRESENCE"
 DEFAULT_TTL_SECONDS = 45.0
 OFFLINE_TIMEOUT_SECONDS = 5.0
+WAITING_FILE_ENV_VAR = "CAURA_BUS_WAITING_FILE"
+WAITING_STATUS = "waiting_for_user"
+# How soon a set or cleared mark reaches the platform.
+WAITING_POLL_SECONDS = 1.0
 
 
 def presence_enabled(environ=None) -> bool:
@@ -130,12 +139,47 @@ def heartbeat_interval(result) -> float:
     return max(1.0, ttl / 3)
 
 
+def waiting_file(environ: Mapping[str, str] | None = None) -> str | None:
+    return (os.environ if environ is None else environ).get(WAITING_FILE_ENV_VAR) or None
+
+
 class PresenceHeartbeat:
-    def __init__(self, bus, profile: Presence):
+    def __init__(self, bus, profile: Presence, waiting_file: str | None = None):
         self.bus = bus
         self.profile = profile
+        self.waiting_file = waiting_file
+        # A mark older than this server was left by an earlier session. Whole
+        # seconds: some file systems store mtime at one-second resolution.
+        self.started = float(int(time.time()))
+        self.waiting_supported = True
         self.task: asyncio.Task | None = None
         self.revoked = False
+
+    def waiting(self) -> bool:
+        if not self.waiting_file or not self.waiting_supported:
+            return False
+        try:
+            return os.stat(self.waiting_file).st_mtime >= self.started
+        except OSError:
+            return False
+
+    def current(self) -> Presence:
+        if self.waiting():
+            return self.profile.model_copy(update={"status": WAITING_STATUS})
+        return self.profile
+
+    async def pause(self, seconds: float) -> None:
+        """Sleep until the next heartbeat, or until the waiting mark changes."""
+        if not self.waiting_file:
+            await asyncio.sleep(seconds)
+            return
+        advertised = self.waiting()
+        loop = asyncio.get_running_loop()
+        end = loop.time() + seconds
+        while (left := end - loop.time()) > 0:
+            await asyncio.sleep(min(WAITING_POLL_SECONDS, left))
+            if self.waiting() != advertised:
+                return
 
     def start(self) -> None:
         self.task = asyncio.create_task(self.run())
@@ -143,9 +187,15 @@ class PresenceHeartbeat:
     async def run(self) -> None:
         backoff = Backoff()
         while True:
+            profile = self.current()
             try:
-                result = await self.bus.advertise(self.profile)
+                result = await self.bus.advertise(profile)
             except (httpx.TransportError, PlatformError) as exc:
+                if isinstance(exc, PlatformError) and exc.status == 422 and profile.status == WAITING_STATUS:
+                    # A server that predates waiting_for_user rejects it; keep plain presence.
+                    log.debug("Caura presence rejected waiting_for_user; advertising without it")
+                    self.waiting_supported = False
+                    continue
                 if (
                     isinstance(exc, PlatformError)
                     and exc.status == 422
@@ -164,7 +214,7 @@ class PresenceHeartbeat:
                 await backoff.sleep()
                 continue
             backoff.reset()
-            await asyncio.sleep(heartbeat_interval(result))
+            await self.pause(heartbeat_interval(result))
 
     async def stop(self) -> None:
         if self.task:
