@@ -252,8 +252,10 @@ def _enrich(stack: ExitStack, storage: MagicMock, enrich: AsyncMock, cfg: Any = 
     stack.enter_context(
         patch("core_api.services.memory_enrichment.enrich_memory", new=enrich)
     )
+    # ``body``: the text ``_storage``'s row holds, which the run checks it still
+    # does before writing (O19).
     return memory_service._schedule_enrich_or_inline(
-        uuid.uuid4(), "c", TENANT, "f1", "a", _config()
+        uuid.uuid4(), "body", TENANT, "f1", "a", _config()
     )
 
 

@@ -265,6 +265,90 @@ describe("apiCall — rejected agent key fallback", () => {
   });
 });
 
+describe("apiCall — a revoked agent stops (L-79)", () => {
+  // A managed-platform server answers a revoked agent with this code, from
+  // the gateway on a request (401) and from the mint route on provisioning
+  // (403). Anything sent with the tenant key would still act as the agent.
+  const json = (status: number, payload: unknown) => new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+  const keyOf = (call: MockCall) => (call.init?.headers as Record<string, string>)["X-API-Key"];
+  const resourceKeys = () => calls.filter((call) => call.url.endsWith("/memories")).map(keyOf);
+  const provisions = () => calls.filter((call) => call.url.endsWith("/agent-keys/provision")).length;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    calls = [];
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("a revoked key is not retried with the tenant key, and the agent is not re-minted", async () => {
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url.endsWith("/agent-keys/provision")) {
+        const agent = (JSON.parse(String(init?.body)) as { agent_id: string }).agent_id;
+        return json(201, { raw_key: `${agent}-key`, key_prefix: "agent" });
+      }
+      if (keyOf({ url, init }) === "revoked-agent-key") {
+        return json(401, {
+          detail: "agent_key_revoked",
+          error: { code: "UNAUTHORIZED", message: "agent_key_revoked" },
+        });
+      }
+      return json(200, { ok: true });
+    }) as typeof fetch;
+
+    const body = { agent_id: "revoked-agent", content: "remember this" };
+    await assert.rejects(apiCall("POST", "/memories", body), /agent_key_revoked/);
+    await assert.rejects(apiCall("POST", "/memories", body), /agent_key_revoked/);
+    assert.deepEqual(resourceKeys(), ["revoked-agent-key"], "nothing goes out with the tenant key");
+    assert.equal(provisions(), 1, "the revoked agent is not minted a new key");
+
+    await apiCall("POST", "/memories", { agent_id: "other-agent", content: "and this" });
+    assert.deepEqual(resourceKeys(), ["revoked-agent-key", "other-agent-key"], "other agents carry on");
+  });
+
+  test("a refused mint sends nothing, and the agent is asked about again after its cooldown", async () => {
+    const realNow = Date.now;
+    let now = realNow();
+    let refuse = true;
+    Date.now = () => now;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url.endsWith("/agent-keys/provision")) {
+        return refuse
+          ? json(403, { detail: "agent_key_revoked" })
+          : json(201, { raw_key: "returning-agent-key", key_prefix: "agent" });
+      }
+      return json(200, { ok: true });
+    }) as typeof fetch;
+
+    try {
+      const body = { agent_id: "returning-agent", content: "remember this" };
+      await assert.rejects(apiCall("POST", "/memories", body), /agent_key_revoked/);
+      now += 9 * 60_000;
+      await assert.rejects(apiCall("POST", "/memories", body), /agent_key_revoked/);
+      assert.equal(provisions(), 1, "the agent is not asked about again inside its cooldown");
+      assert.deepEqual(resourceKeys(), [], "nothing goes out with the tenant key");
+
+      // An admin issues the agent a key in the dashboard, which turns it back on.
+      refuse = false;
+      now += 2 * 60_000;
+      await apiCall("POST", "/memories", body);
+      assert.equal(provisions(), 2);
+      assert.deepEqual(resourceKeys(), ["returning-agent-key"]);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+});
+
 test("real fetch never sends the API key to a redirect destination", async () => {
   const realFetch = globalThis.fetch;
   let sourceHits = 0;

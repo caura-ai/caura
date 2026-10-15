@@ -41,6 +41,7 @@ from common.constants import SEMANTIC_DEDUP_JUDGE_THRESHOLD, SINGLE_VALUE_PREDIC
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
 from core_api.services.dedup_identifier_filter import _content_is_identifier_bearing
+from core_api.services.ingest_chunking import doc_token_count
 from core_api.services.memory_service import _find_semantic_duplicate
 from core_api.services.system_metadata import set_system_value
 
@@ -196,6 +197,9 @@ class DetectNearDuplicate:
             return None
 
         ctx.data["merge_supersedes_id"] = str(candidate_id)
+        # Usage metering: the size of what the merge would retire, while the
+        # row is in hand, so the merge does not read it again to record it.
+        ctx.data["merge_supersedes_tokens"] = doc_token_count((sem_dup_dict or {}).get("content") or "")
         # L-17: the decision, not the outcome. ``_merge_near_duplicate`` sets
         # ``near_duplicate_merged`` once the merge has landed and clears this;
         # a held write keeps it until a release replays the merge.

@@ -174,12 +174,17 @@ FLEET_SCOPED_READS: dict[str, dict[str, object]] = {
     "memory_list_by_filters": {"strict": True, "include_org_visibility": False},
     "memory_stats_breakdown": {"strict": True, "include_org_visibility": False},
     "memory_quality_metrics": {"strict": True, "include_org_visibility": False},
+    # The memory field's reads (``/memories/field-page`` and
+    # ``/field-signature``) — held to ``memory_list_by_filters`` because the
+    # field draws exactly what the list would show.
+    "_field_scope_filters": {"strict": True, "include_org_visibility": False},
 }
 
 PINNED_FILTER_READS = {
     "memory_list_by_filters",
     "memory_stats_breakdown",
     "memory_quality_metrics",
+    "_field_scope_filters",
 }
 
 

@@ -44,6 +44,7 @@ import { getTenantPrefix, getSessionKey } from "./context-engine.internal.js";
 import { logError, logErrorCritical } from "./logger.js";
 import { fetchKeystonesBlock, sanitizePromptField } from "./keystones.js";
 import { getOpenClawSdk } from "./openclaw-sdk-bridge.js";
+import { recordTurn, sessionHeader, takeOrigin } from "./origin-usage.js";
 
 // --- Typed interfaces for ContextEngine hooks ---
 
@@ -66,6 +67,13 @@ export interface CompactContext {
 export interface AfterTurnContext {
   messages?: Array<{ role: string; content: string | unknown }>;
   [key: string]: unknown;
+}
+
+/** OpenClaw's session for a hook call: ``sessionKey``, else ``sessionId``. */
+function sessionKeyOf(context: unknown): string | undefined {
+  const c = context as { sessionKey?: unknown; sessionId?: unknown } | null;
+  const key = c?.sessionKey ?? c?.sessionId;
+  return typeof key === "string" && key ? key : undefined;
 }
 
 // --- Session message buffer (LRU, per-session) ---
@@ -1058,6 +1066,9 @@ export class CauraContextEngine {
           searchBody,
           undefined,
           controller.signal,
+          undefined,
+          // Value metering: this recall belongs to the OpenClaw session.
+          sessionHeader(sessionKey),
         )) as Record<string, unknown> | Record<string, unknown>[];
         recallBlock = formatRecallBlock(parseSearchItems(sr));
         if (recallBlock) {
@@ -1198,15 +1209,26 @@ export class CauraContextEngine {
           context as Record<string, unknown>,
           this.config,
         );
-        await apiCall("POST", "/memories", {
-          tenant_id: tid,
-          agent_id: agentId,
-          fleet_id: CAURA_FLEET_ID || undefined,
-          content: summary,
-          memory_type: "episode",
-          // SAFE-01 — see the bootstrap smoke-test write above.
-          metadata: { tags: ["auto-compaction"] },
-        });
+        const compactSession = sessionKeyOf(context);
+        const origin = takeOrigin(compactSession);
+        await apiCall(
+          "POST",
+          "/memories",
+          {
+            tenant_id: tid,
+            agent_id: agentId,
+            fleet_id: CAURA_FLEET_ID || undefined,
+            content: summary,
+            memory_type: "episode",
+            // SAFE-01 — see the bootstrap smoke-test write above.
+            metadata: { tags: ["auto-compaction"] },
+            ...(origin ? { origin } : {}),
+          },
+          undefined,
+          undefined,
+          undefined,
+          sessionHeader(compactSession),
+        );
       } catch (e: unknown) {
         logError("Failed to persist compaction summary", e);
       }
@@ -1370,6 +1392,10 @@ export class CauraContextEngine {
 
   /** afterTurn — auto-write turn summary. Enabled by default; opt out with CAURA_AUTO_WRITE_TURNS=false. */
   async afterTurn(context: AfterTurnContext): Promise<void> {
+    // Value metering: count the turn's provider-reported usage whether or not
+    // this turn writes, so the next write carries the work behind it.
+    const sessionKey = sessionKeyOf(context);
+    recordTurn(sessionKey, context?.messages as Array<{ role: string } & Record<string, unknown>> | undefined);
     if (!CAURA_AUTO_WRITE_TURNS) return;
 
     const lastAssistant = context?.messages
@@ -1393,15 +1419,25 @@ export class CauraContextEngine {
         content.length > MAX_TURN_SUMMARY_LENGTH
           ? content.slice(0, MAX_TURN_SUMMARY_LENGTH) + "..."
           : content;
-      await apiCall("POST", "/memories", {
-        tenant_id: tid,
-        agent_id: agentId,
-        fleet_id: CAURA_FLEET_ID || undefined,
-        content: turnSummary,
-        memory_type: "episode",
-        // SAFE-01 — see the bootstrap smoke-test write above.
-        metadata: { tags: ["auto-turn-summary"] },
-      });
+      const origin = takeOrigin(sessionKey);
+      await apiCall(
+        "POST",
+        "/memories",
+        {
+          tenant_id: tid,
+          agent_id: agentId,
+          fleet_id: CAURA_FLEET_ID || undefined,
+          content: turnSummary,
+          memory_type: "episode",
+          // SAFE-01 — see the bootstrap smoke-test write above.
+          metadata: { tags: ["auto-turn-summary"] },
+          ...(origin ? { origin } : {}),
+        },
+        undefined,
+        undefined,
+        undefined,
+        sessionHeader(sessionKey),
+      );
     } catch (e: unknown) {
       // 409 dedup rejection is expected when the same agent emits identical
       // content twice (very common for short replies). The existing memory

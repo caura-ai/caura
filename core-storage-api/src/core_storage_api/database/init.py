@@ -40,8 +40,12 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # 063's checks stay with it. 065 adds ``ix_memories_contradicted_window``,
 # ``ix_memories_expires_at`` and ``ix_memories_valid_end`` (all three valid, as
 # one build can stop between them) and drops ``ix_memories_status_changed_at``,
-# last; both join the probe.
-_HEAD_FINGERPRINT_REVISION = "065"
+# last; both join the probe. 066 creates the usage-metering tables
+# (``llm_usage_minutes``, ``value_usage_minutes``, ``usage_flush_batches``) in
+# one transaction, so the last of them joins the probe. 067 adds the value
+# metering tables (``agent_sessions``, ``memory_origins``, ``memory_reuse``),
+# also in one transaction; the last joins the probe.
+_HEAD_FINGERPRINT_REVISION = "067"
 _HEAD_FINGERPRINT_SQL: str | None = (
     "SELECT (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -51,7 +55,11 @@ _HEAD_FINGERPRINT_SQL: str | None = (
     "AND NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' "
     "AND indexname IN ('ix_memories_recall_count', 'ix_memories_status_changed_at')) "
     "AND EXISTS (SELECT 1 FROM information_schema.columns "
-    "WHERE table_schema = 'public' AND table_name = 'background_task_log' AND column_name = 'handled_at')"
+    "WHERE table_schema = 'public' AND table_name = 'background_task_log' AND column_name = 'handled_at') "
+    "AND EXISTS (SELECT 1 FROM information_schema.tables "
+    "WHERE table_schema = 'public' AND table_name = 'usage_flush_batches') "
+    "AND EXISTS (SELECT 1 FROM information_schema.tables "
+    "WHERE table_schema = 'public' AND table_name = 'memory_reuse')"
 )
 
 _engine: AsyncEngine | None = None
@@ -144,8 +152,19 @@ def _build_engine(url: str) -> AsyncEngine:
 
 
 def get_engine() -> AsyncEngine:
-    """Return the writer engine (primary DB), creating on first call."""
+    """Return the writer engine (primary DB), creating on first call.
+
+    On a reader given ``read_database_url`` this is the read engine (L-139). A
+    reader serves no writes and runs no migrations, and ``config.py`` says it
+    uses the read pool as its primary connection. The SaaS reader does that by
+    setting ``DATABASE_URL`` to the read pool. A reader set up from the README
+    sets ``READ_DATABASE_URL`` and leaves ``DATABASE_URL`` on the primary, and
+    there every ``get_session`` call site, about two thirds of them, used to
+    read from the primary.
+    """
     global _engine
+    if settings.core_storage_role == "reader" and settings.read_database_url.get_secret_value():
+        return get_read_engine()
     if _engine is None:
         _engine = _build_engine(settings.database_url.get_secret_value())
     return _engine
@@ -163,6 +182,18 @@ def get_read_engine() -> AsyncEngine:
     if _read_engine is None:
         _read_engine = _build_engine(read_database_url)
     return _read_engine
+
+
+async def dispose_engines() -> None:
+    """Close every engine this process built, whatever its role (L-139).
+
+    Shutdown used to dispose only the writer engine, and on a reader nothing,
+    so the read engine's pool was never closed, nor the writer engine a reader's
+    ``get_session`` call sites built. An engine never built is not built here.
+    """
+    for engine in (_engine, _read_engine):
+        if engine is not None:
+            await engine.dispose()
 
 
 async def get_session():

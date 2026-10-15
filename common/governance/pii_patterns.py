@@ -37,20 +37,6 @@ class Severity(str, Enum):
     HIGH = "high"
 
 
-# Categories whose presence under detection-uncertainty should trigger the
-# fail-closed (safe) action — PCI, credentials and national IDs are the
-# high-blast-radius leaks.
-HIGH_RISK_CATEGORIES: frozenset[PIICategory] = frozenset(
-    {
-        PIICategory.CREDIT_CARD,
-        PIICategory.IBAN,
-        PIICategory.NATIONAL_ID,
-        PIICategory.API_KEY,
-        PIICategory.SECRET,
-    }
-)
-
-
 @dataclass(frozen=True)
 class Finding:
     """One detected sensitive span. Carries NO raw text — only the category,

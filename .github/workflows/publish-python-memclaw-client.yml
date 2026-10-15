@@ -82,7 +82,7 @@ jobs:
           pip install --require-hashes -r "${GITHUB_WORKSPACE}/.github/pypi-build/requirements.txt"
           python -m build --no-isolation
         working-directory: clients/memclaw-client-shim # legacy-name-ok: the redirect shell this workflow publishes
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist
           path: clients/memclaw-client-shim/dist/ # legacy-name-ok: the redirect shell this workflow publishes
@@ -107,7 +107,7 @@ jobs:
             exit 1
           fi
           echo "OIDC token-request context is present"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist
           path: dist/

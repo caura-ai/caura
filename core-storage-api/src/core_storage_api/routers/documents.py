@@ -27,6 +27,9 @@ async def upsert_document(request: Request) -> dict:
             agent_id=body.get("agent_id"),
             # C34 — explicit opt-out of the catastrophic-shrink guard.
             force=bool(body.get("force")),
+            # L-24 — the statuses this write may replace; ``app`` answers a
+            # miss 409.
+            expected_status=body.get("expected_status"),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

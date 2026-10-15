@@ -10,8 +10,9 @@ The deterministic ``GovernanceScanContent`` step already masked pattern-matched
 PII pre-hash; this handles only what patterns can't: the LLM's free-form PII
 judgement (no span offsets, so mask-mode falls back to flagging the row) and the
 business-vs-personal disposition. Under LLM uncertainty (enrichment unavailable
-/ heuristic fallback) it takes no destructive action — the deterministic step is
-the high-risk fail-closed backstop — and records the uncertainty for audit.
+/ heuristic fallback) it takes no destructive action — the deterministic step
+has already applied the tenant's action to every pattern match — and records the
+uncertainty for audit.
 """
 
 from __future__ import annotations
@@ -56,8 +57,9 @@ class GovernanceDecision:
         write_mode = ctx.data.get("resolved_write_mode")
 
         # Uncertain signal (enrichment unavailable or heuristic fallback): the
-        # deterministic step already handled high-risk patterns; record the
-        # uncertainty and take no destructive action on an absent signal.
+        # deterministic step already applied the tenant's action to pattern
+        # matches; record the uncertainty and take no destructive action on an
+        # absent signal.
         if enr is None or getattr(enr, "llm_ms", 0) == 0:
             metadata["governance_llm_uncertain"] = True
             return None

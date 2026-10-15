@@ -21,6 +21,7 @@ from common.embedding.constants import (
     OPENAI_REQUEST_TIMEOUT_SECONDS,
 )
 from common.env_utils import read_float_env
+from common.usage import record_model_call
 
 # Opaque per-instance identity for ``dedup_scope``. A counter beats deriving
 # the scope from the backend config twice over: no credential ever enters the
@@ -250,12 +251,22 @@ class OpenAIEmbeddingProvider:
             )
         return emb
 
+    def _record(self, response: object) -> None:
+        """Meter one embeddings request; a sidecar that reports no usage counts as a call with 0 tokens."""
+        usage = getattr(response, "usage", None)
+        try:
+            tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            tokens = 0
+        record_model_call(kind="embedding", provider=self.provider_name, model=self._model, tokens_in=tokens, operation="embed")
+
     async def embed(self, text: str) -> list[float]:
         """Generate an embedding vector for a single text (document/ingest path)."""
         kwargs: dict = {"model": self._model, "input": text}
         if self._send_dimensions:
             kwargs["dimensions"] = VECTOR_DIM
         response = await self._client.embeddings.create(**kwargs)
+        self._record(response)
         return self._postprocess(response.data[0].embedding)
 
     async def _embed_batch_chunk(self, texts: list[str]) -> list[list[float]]:
@@ -264,6 +275,7 @@ class OpenAIEmbeddingProvider:
         if self._send_dimensions:
             kwargs["dimensions"] = VECTOR_DIM
         response = await self._client.embeddings.create(**kwargs)
+        self._record(response)
         # OpenAI returns embeddings sorted by index
         sorted_data = sorted(response.data, key=lambda x: x.index)
         return [self._postprocess(item.embedding) for item in sorted_data]

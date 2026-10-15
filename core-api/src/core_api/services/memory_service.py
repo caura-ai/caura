@@ -46,6 +46,7 @@ from common.embedding import (
 )
 from common.events import publish_memory_embed_request, publish_memory_enrich_request
 from common.governance import mask, scan
+from common.usage import scoped
 from core_api.constants import (
     ANN_POOL_SHADOW,
     ANN_POOL_SIZE,
@@ -177,7 +178,9 @@ class BlankQuery(ValueError):
 
 
 # ``MemoryUpdate`` fields whose backing column on ``Memory`` is NOT NULL, so an
-# explicit ``null`` in a PATCH body has no way to be honoured. Kept as a literal
+# explicit ``null`` in a PATCH body has no way to be honoured. ``weight`` too: its
+# column is nullable only because migration 001 created it so (L-97), and a row
+# without a weight has nothing to rank by. Kept as a literal
 # rather than derived from ``Memory.__table__`` at import time: the schema field
 # names and column names coincide for these five but not in general (``metadata``
 # maps to ``metadata_``), so a derivation would need its own mapping table and
@@ -861,6 +864,12 @@ def _memory_to_out(
     )
 
 
+@scoped(
+    "write",
+    tenant=lambda a: a["data"].tenant_id,
+    agent=lambda a: a["data"].agent_id,
+    fleet=lambda a: a["data"].fleet_id,
+)
 async def create_memory(data: MemoryCreate, *, is_inferred: bool = False) -> MemoryOut:
     """Create one memory.
 
@@ -894,7 +903,12 @@ async def create_memory(data: MemoryCreate, *, is_inferred: bool = False) -> Mem
     # needs its own call and its own route-level test.
     if data.metadata:
         data.metadata = sanitize_caller_metadata(data.metadata)
-    return await _run_write_pipeline(data, is_inferred=is_inferred)
+    out = await _run_write_pipeline(data, is_inferred=is_inferred)
+    # Value metering: where this memory came from (its session's work), once.
+    from core_api.services.value_ledger import schedule_origin
+
+    schedule_origin(out, origin=data.origin.model_dump() if getattr(data, "origin", None) else None)
+    return out
 
 
 def _memory_out_with_created_links(ctx, memory: dict) -> MemoryOut:
@@ -1530,6 +1544,12 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
     return _memory_out_with_created_links(ctx, memory)
 
 
+@scoped(
+    "write",
+    tenant=lambda a: a["data"].tenant_id,
+    agent=lambda a: a["data"].agent_id,
+    fleet=lambda a: a["data"].fleet_id,
+)
 async def create_memories_bulk(
     data: BulkMemoryCreate,
     *,
@@ -2629,6 +2649,11 @@ async def create_memories_bulk(
     final_results = cast("list[BulkItemResult]", results)
 
     bulk_ms = round((time.perf_counter() - t0) * 1000)
+    # Value metering: where each newly created memory came from. The broker
+    # writes through here, stamping its session on every item's metadata.
+    from core_api.services.value_ledger import schedule_bulk_origins
+
+    schedule_bulk_origins(data, final_results)
     return BulkMemoryResponse(
         created=created_count,
         duplicates=dup_count,
@@ -2795,7 +2820,6 @@ async def _schedule_enrich_or_inline(
     caller_owned_metadata_keys: list[str] | None = None,
     reference_datetime: datetime | None = None,
     run_governance_remediation: bool = False,
-    current_content_only: bool = False,
 ) -> None:
     """Enrichment counterpart of :func:`_schedule_embed_or_reembed`.
 
@@ -2843,7 +2867,6 @@ async def _schedule_enrich_or_inline(
             caller_owned_metadata_keys=caller_owned_metadata_keys,
             governance_config=tenant_config,
             run_governance_remediation=run_governance_remediation,
-            current_content_only=current_content_only,
         )
         # H-18 governance (the LLM verdict) is applied INSIDE
         # ``_enrich_memory_background``, not here.
@@ -2955,6 +2978,7 @@ async def _record_stranded(
     )
 
 
+@scoped("reembed", tenant="tenant_id")
 async def _reembed_memory(
     memory_id: UUID,
     content: str,
@@ -3117,6 +3141,7 @@ async def _reembed_memory(
     )
 
 
+@scoped("reembed", tenant="tenant_id", fleet="fleet_id")
 async def _reembed_memories_bulk(
     items: list[tuple[UUID, str]],
     tenant_id: str,
@@ -3831,6 +3856,7 @@ def _merged_metadata(stored: dict, metadata_patch: dict) -> dict:
     return merged
 
 
+@scoped("enrichment", tenant="tenant_id", agent="agent_id", fleet="fleet_id")
 async def _enrich_memory_background(
     memory_id: UUID,
     content: str,
@@ -3842,7 +3868,6 @@ async def _enrich_memory_background(
     caller_owned_metadata_keys: list[str] | None = None,
     governance_config: object | None = None,
     run_governance_remediation: bool = False,
-    current_content_only: bool = False,
 ) -> dict | None:
     """Background task: run LLM enrichment on a fast-path memory, then patch the row.
 
@@ -3890,9 +3915,6 @@ async def _enrich_memory_background(
     ``publish_memory_enrich_request``. An edit (``update_memory``, H-07) also
     pins ``title`` and the dates when the row holds one or the PATCH names one.
 
-    ``current_content_only`` is an edit's: the run does nothing once the row no
-    longer holds ``content``, because a later edit has scheduled its own.
-
     CAURA-716: this parameter previously did not exist, and the inline path
     instead inferred caller intent by comparing the row's current value against
     the schema default (``mem["memory_type"] == "fact"``, ``mem["status"] ==
@@ -3904,6 +3926,9 @@ async def _enrich_memory_background(
     ``decision``/``confirmed`` seconds later. The default-comparison is retained
     as a fallback for callers that pass no list (``None``), so behaviour is
     unchanged for them.
+
+    The run does nothing once the row no longer holds ``content``: an edit
+    replaced it, and the result would describe text that is gone (H-07, O19).
     """
     from core_api.services.memory_enrichment import enrich_memory
     from core_api.services.organization_settings import resolve_config
@@ -3969,18 +3994,16 @@ async def _enrich_memory_background(
 
     try:
         sc = get_storage_client()
-        mem = await sc.get_memory(str(memory_id), tenant_id, read=not current_content_only)
+        mem = await sc.get_memory(str(memory_id), tenant_id, read=False)
         if mem is None or mem.get("deleted_at") is not None:
             return None
-        # H-07: an edit's run is stale once a later edit replaced the text it
-        # judged. That edit scheduled its own run; this one would write the old
-        # text's verdicts over the new and remediate on text the row no longer
-        # holds. Read from the writer for this, or replica lag could make the
-        # NEWEST run look stale and skip it.
-        if current_content_only and mem.get("content") != content:
-            logger.info(
-                "Background enrichment of memory %s skipped: a later edit changed its content", memory_id
-            )
+        # H-07, O19: a run is stale once an edit replaced the text it judged, a
+        # create's run as much as an edit's. It would write the old text's
+        # verdicts over the new and remediate on text the row no longer holds.
+        # Read from the writer for this, or replica lag could make the NEWEST
+        # run look stale and skip it.
+        if mem.get("content") != content:
+            logger.info("Background enrichment of memory %s skipped: an edit changed its content", memory_id)
             return None
 
         # Build update patch.
@@ -4402,6 +4425,7 @@ _EDIT_PINNED_ENRICHMENT_FIELDS: frozenset[str] = frozenset({"memory_type", "weig
 _EDIT_KEPT_IF_SET_FIELDS: frozenset[str] = frozenset({"title", "ts_valid_start", "ts_valid_end"})
 
 
+@scoped("update", tenant="tenant_id", agent="agent_id")
 async def update_memory(
     memory_id: UUID,
     tenant_id: str,
@@ -5077,9 +5101,6 @@ async def update_memory(
                         agent_provided_fields=sorted(pins),
                         caller_owned_metadata_keys=sorted(caller_owned_keys(row_meta)),
                         run_governance_remediation=True,
-                        # Inline only: the deferred worker receives no such
-                        # check, so a superseded run can still land there.
-                        current_content_only=True,
                     ),
                     "background_enrichment",
                     memory_id,
@@ -5786,6 +5807,7 @@ def _extract_temporal_date_range(
     return None
 
 
+@scoped(None, tenant="tenant_id", agent="caller_agent_id")
 async def search_memories(
     tenant_id: str,
     query: str,
@@ -5892,6 +5914,11 @@ async def search_memories(
     )
     if recall_ctx is not None:
         recall_ctx["recall_tracked"] = bool(legacy_results) and allow_recall_bump
+    # The pipeline records this in RecordRecallValue; wired here too so the
+    # hotfix lever does not silently stop the savings figures.
+    from core_api.pipeline.steps.search.record_recall_value import schedule_recall_value
+
+    schedule_recall_value(legacy_results, tenant_id=tenant_id, caller_agent_id=caller_agent_id, source=source)
     return legacy_results
 
 

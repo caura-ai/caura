@@ -55,14 +55,13 @@ async def _link_memory_to_entity(
     sc, memory_id: str, entity_id: str, role: str = "subject"
 ) -> None:
     """Wire memory→entity in memory_entity_links so the SQL JOIN finds overlap."""
-    await sc.create_entity_link(
-        TENANT_ID,
-        {
-            "memory_id": memory_id,
-            "entity_id": entity_id,
-            "role": role,
-        },
-    )
+    link = {
+        "input_idx": 0,
+        "memory_id": memory_id,
+        "entity_id": entity_id,
+        "role": role,
+    }
+    await sc.bulk_upsert_entity_links(TENANT_ID, [link])
 
 
 async def _make_shared_entity(sc) -> dict:

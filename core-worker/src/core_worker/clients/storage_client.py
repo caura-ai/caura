@@ -27,9 +27,10 @@ from uuid import UUID
 
 import httpx
 
-from common.constants import LIFECYCLE_STALE_ARCHIVE_WEIGHT
+from common.constants import LIFECYCLE_STALE_ARCHIVE_WEIGHT, MEMORY_CONTENT_CHANGED
 from common.http_retry import with_connect_phase_retry, with_retry
 from common.storage_auth import is_storage_shared_secret_rejection
+from common.usage import per_tenant
 from core_worker.clients.identity_token import evict as _evict_id_token
 from core_worker.clients.identity_token import fetch_auth_header
 from core_worker.config import settings
@@ -470,6 +471,25 @@ async def upsert_tenant_suppression(
     resp.raise_for_status()
 
 
+async def flush_usage(client: httpx.AsyncClient, batch: dict) -> None:
+    """Send one usage-metering batch (``common.usage.UsageAggregator``), a flush per tenant.
+
+    Storage binds each flush to one tenant (``per_tenant``). Each part is
+    idempotent by its derived ``batch_id`` (storage claims it once, migration
+    066), so this opts into the full transient retry set like
+    ``update_lifecycle_audit_row``: a replay is recognised, never double-counted.
+    """
+    for tenant_id, part in per_tenant(batch):
+        resp = await _signed_call(
+            client.post,
+            f"{_PREFIX}/usage/flush",
+            retry=with_retry,
+            params={"tenant_id": tenant_id},
+            json=part,
+        )
+        resp.raise_for_status()
+
+
 async def update_lifecycle_audit_row(
     client: httpx.AsyncClient,
     audit_id: int,
@@ -523,12 +543,22 @@ async def update_lifecycle_audit_row(
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _error_code(resp: httpx.Response) -> str | None:
+    """``detail.error`` of a storage refusal that names its case, or ``None``."""
+    try:
+        detail = resp.json().get("detail")
+    except (ValueError, AttributeError):
+        return None
+    return detail.get("error") if isinstance(detail, dict) else None
+
+
 async def update_memory_enrichment(
     client: httpx.AsyncClient,
     *,
     memory_id: UUID,
     tenant_id: str,
     fields: dict,
+    expected_content: str | None = None,
 ) -> bool:
     """PATCH enrichment-output fields onto the memory row; return whether it landed.
 
@@ -549,21 +579,36 @@ async def update_memory_enrichment(
     Same 404/422 short-circuits as :func:`update_memory_embedding`, which
     answer False. No fields answers True: nothing was refused, and the row is
     as enriched as this result makes it.
+
+    ``expected_content`` is the text the enrichment judged (O16, O19). Storage
+    applies the PATCH only while the row still holds it, and otherwise answers
+    409 ``MEMORY_CONTENT_CHANGED``: an edit replaced the text, so the result
+    describes text the row no longer holds. That answers False too, without a
+    retry.
     """
     if not fields:
         # Defensive — heuristic fallback may produce an all-defaults
         # result; an empty PATCH is wasted work and noisy in storage logs.
         logger.debug("skipping empty enrichment PATCH for memory %s", memory_id)
         return True
+    body = {"tenant_id": tenant_id, **fields}
+    if expected_content is not None:
+        body["expected_content"] = expected_content
     resp = await _signed_call(
         client.patch,
         f"{_PREFIX}/memories/{memory_id}",
-        json={"tenant_id": tenant_id, **fields},
+        json=body,
     )
     if resp.status_code == 404:
         logger.warning(
             "memory %s not found in storage; ack-dropping enrich-request "
             "(row deleted between publish and processing)",
+            memory_id,
+        )
+        return False
+    if resp.status_code == 409 and _error_code(resp) == MEMORY_CONTENT_CHANGED:
+        logger.info(
+            "memory %s was edited before its enrichment landed; ack-dropping the superseded run",
             memory_id,
         )
         return False

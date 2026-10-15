@@ -23,7 +23,6 @@ legitimate write — only a confident "this IS a duplicate" call does.
 
 from __future__ import annotations
 
-import logging
 import time
 
 from fastapi import HTTPException
@@ -33,7 +32,6 @@ from common.constants import (
     SEMANTIC_DEDUP_AUTO_THRESHOLD,
     SEMANTIC_DEDUP_JUDGE_THRESHOLD,
 )
-from core_api.clients.storage_client import get_storage_client
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
 from core_api.pipeline.steps.write.emit_memory_triple import PENDING_SUBJECT
@@ -45,54 +43,6 @@ from core_api.services.dedup_judge import (
 from core_api.services.memory_service import _find_semantic_duplicate
 from core_api.services.subject_preflight import _subjects_differ_with_certainty
 from core_api.services.system_metadata import set_system_value
-
-logger = logging.getLogger(__name__)
-
-
-async def _enqueue_dedup_review(
-    *,
-    tenant_id: str,
-    fleet_id: str | None,
-    agent_id: str,
-    new_memory_id: str | None,
-    candidate_memory_id: str,
-    new_content: str,
-    candidate_content: str,
-    similarity: float,
-    judge_verdict: bool | None,
-    judge_confidence: float | None,
-    decision_band: str,
-) -> None:
-    """Enqueue an ambiguous-dedup decision for human review (A1 #18).
-
-    Best-effort: any storage failure is logged and swallowed. The write
-    path (accept or 409) is the authoritative path; the queue is purely
-    advisory.
-    """
-    sc = get_storage_client()
-    try:
-        await sc.enqueue_dedup_review(
-            {
-                "tenant_id": tenant_id,
-                "fleet_id": fleet_id,
-                "agent_id": agent_id,
-                "new_memory_id": new_memory_id,
-                "candidate_memory_id": candidate_memory_id,
-                "new_content": new_content,
-                "candidate_content": candidate_content,
-                "similarity": similarity,
-                "judge_verdict": judge_verdict,
-                "judge_confidence": judge_confidence,
-                "decision_band": decision_band,
-            }
-        )
-    except Exception:
-        logger.warning(
-            "dedup review enqueue failed (band=%s, candidate=%s)",
-            decision_band,
-            candidate_memory_id,
-            exc_info=True,
-        )
 
 
 class CheckSemanticDuplicate:
@@ -148,8 +98,7 @@ class CheckSemanticDuplicate:
                 # CAURA-721 — this is the step that 409s, so it is the one the
                 # missing owner actually cost: a candidate from another agent
                 # in the same fleet rejected a write whose author could not
-                # then read the surviving row. The same ``agent_id`` already
-                # goes to ``_enqueue_dedup_review`` further down this method.
+                # then read the surviving row.
                 agent_id=getattr(data, "agent_id", None),
             )
         )
@@ -168,19 +117,6 @@ class CheckSemanticDuplicate:
             # are a stronger signal than the entity extractor's subject
             # assignment, so we don't second-guess auto-reject on the
             # basis of subject_entity_id disagreement.
-            await _enqueue_dedup_review(
-                tenant_id=data.tenant_id,
-                fleet_id=data.fleet_id,
-                agent_id=getattr(data, "agent_id", ""),
-                new_memory_id=None,  # write rejected; row never persisted
-                candidate_memory_id=str(candidate_id) if candidate_id else "",
-                new_content=getattr(data, "content", "") or "",
-                candidate_content=(sem_dup_dict.get("content", "") if sem_dup_dict else ""),
-                similarity=similarity,
-                judge_verdict=None,
-                judge_confidence=None,
-                decision_band="auto_reject",
-            )
             raise HTTPException(
                 status_code=409,
                 detail=duplicate_memory.core_api_detail(
@@ -225,19 +161,6 @@ class CheckSemanticDuplicate:
         metadata["dedup_candidate_similarity"] = similarity
 
         if is_dup and confidence >= DEDUP_JUDGE_CONFIDENCE_THRESHOLD:
-            await _enqueue_dedup_review(
-                tenant_id=data.tenant_id,
-                fleet_id=data.fleet_id,
-                agent_id=getattr(data, "agent_id", ""),
-                new_memory_id=None,
-                candidate_memory_id=str(candidate_id) if candidate_id else "",
-                new_content=new_content,
-                candidate_content=candidate_content,
-                similarity=similarity,
-                judge_verdict=True,
-                judge_confidence=confidence,
-                decision_band="judge_band_reject",
-            )
             raise HTTPException(
                 status_code=409,
                 detail=duplicate_memory.core_api_detail(
@@ -249,23 +172,6 @@ class CheckSemanticDuplicate:
                         similarity=similarity,
                     ),
                 ),
-            )
-
-        # Low-confidence "is duplicate" → write accepted, but the
-        # near-miss is worth a human look (A1 #18).
-        if is_dup:
-            await _enqueue_dedup_review(
-                tenant_id=data.tenant_id,
-                fleet_id=data.fleet_id,
-                agent_id=getattr(data, "agent_id", ""),
-                new_memory_id=None,  # row will persist downstream; ID not known here
-                candidate_memory_id=str(candidate_id) if candidate_id else "",
-                new_content=new_content,
-                candidate_content=candidate_content,
-                similarity=similarity,
-                judge_verdict=True,
-                judge_confidence=confidence,
-                decision_band="judge_low_conf_accept",
             )
 
         # Either judge said not a duplicate, or said duplicate at low

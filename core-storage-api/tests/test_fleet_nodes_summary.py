@@ -84,12 +84,3 @@ async def test_summary_requires_a_tenant(client: AsyncClient) -> None:
 async def test_summary_rejects_out_of_range_windows(client: AsyncClient, days: int) -> None:
     resp = await client.get(f"{PREFIX}/fleet/nodes/summary", params={"tenant_id": "t", "days": days})
     assert resp.status_code == 422
-
-
-async def test_summary_does_not_shadow_get_node(client: AsyncClient) -> None:
-    """``/nodes/summary`` is a literal segment; ``/nodes/{node_name}`` still resolves."""
-    tenant = f"hb-s-{uuid.uuid4().hex[:8]}"
-    await _node(client, tenant, "summary-lookalike", plugin_version="1.0.0", seen_ago=timedelta(0))
-    resp = await client.get(f"{PREFIX}/fleet/nodes/summary-lookalike", params={"tenant_id": tenant})
-    assert resp.status_code == 200
-    assert resp.json()["node_name"] == "summary-lookalike"

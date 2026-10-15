@@ -60,6 +60,9 @@ class MemoryEnrichRequest(BaseModel):
 
     memory_id: UUID
     tenant_id: str
+    # The text to enrich, and the text the result may land on: the worker sends
+    # it as its PATCH's ``expected_content``, and storage refuses the write once
+    # an edit has replaced it (O16, O19).
     content: str = Field(min_length=1)
 
     # Reference datetime used as ``today`` in the prompt's

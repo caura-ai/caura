@@ -73,7 +73,6 @@ IDENTITY_SINKS: dict[str, str] = {
     "enforce_fleet_read": "agent_id",
     "enforce_fleet_read_many": "agent_id",
     "enforce_delete": "agent_id",
-    "enforce_memory_read": "caller_agent_id",
     "authorize_memory_access": "caller_agent_id",
     "memory_access_allowed_for_agent": "caller_agent_id",
 }

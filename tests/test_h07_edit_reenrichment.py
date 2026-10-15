@@ -144,7 +144,6 @@ async def test_an_edit_is_re_enriched_and_governed(row, named, pins):
     assert args[1] == NEW
     assert kwargs["run_governance_remediation"] is True
     assert kwargs["agent_provided_fields"] == pins
-    assert kwargs["current_content_only"] is True
 
 
 async def test_no_re_enrichment_for_a_tenant_without_enrichment():
@@ -213,7 +212,8 @@ async def test_an_edits_inline_enrichment_derives_children_and_keeps_its_title(
     pins, title
 ):
     tenant = _tenant()
-    memory_id = await _memory(tenant, title="Caller title")
+    # The row holds the edited text, which the run checks before writing (O19).
+    memory_id = await _memory(tenant, title="Caller title", content=NEW)
     enrichment = SimpleNamespace(
         memory_type="decision",
         weight=0.9,
@@ -299,7 +299,6 @@ async def test_an_edits_enrichment_of_superseded_text_writes_nothing(enriched, w
             None,
             "h07-agent",
             agent_provided_fields=EDIT_PINS,
-            current_content_only=True,
         )
 
     md = (await _stored(tenant, memory_id))["metadata_"]

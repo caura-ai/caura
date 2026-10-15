@@ -259,6 +259,12 @@ DEFAULT_SETTINGS: dict = {
         # candidate-row volume on the bulk path. Capped at the same
         # ``_NEAR_MISS_LIMIT`` per sampled event as ``mcp_recall``.
         "search_recall_near_miss_sample_rate": None,
+        # On by default. Per-minute totals of this workspace's model calls
+        # (tokens in, out and reasoning per agent, operation and model) and
+        # recall savings, kept in its own database (``llm_usage_minutes`` /
+        # ``value_usage_minutes``). Counts only, never content; nothing is
+        # sent anywhere. False stops recording from the next flush.
+        "usage_metering_enabled": None,
     },
     "chunking": {
         "auto_chunk_enabled": None,
@@ -403,6 +409,9 @@ DEFAULT_SETTINGS: dict = {
         # ``min_cluster_size`` default 3 is the demo value (plan §5);
         # production tenants flip to 10 once outcome volume justifies.
         "forge": {
+            # Informational: the cadence is whatever drives the fanout
+            # endpoint, and nothing reads or stamps this (L-211; kept as the
+            # operator's note of that schedule, Eldad, 2026-10-11).
             "cron_interval_hours": 6,
             "min_cluster_size": 3,
             "min_distinct_agents": 3,
@@ -428,11 +437,8 @@ DEFAULT_SETTINGS: dict = {
             # ``memory_excerpt_char_cap`` and ``min_cluster_size``.
             "max_clusters_per_run": 0,
         },
-        # OpenClaw PROPOSAL.md bridge (Phase 5). Default OFF — turning
-        # it on only matters once the OpenClaw workspace emitter ships.
-        "openclaw_bridge": {
-            "enabled": False,
-        },
+        # An ``openclaw_bridge.enabled`` toggle used to sit here for a Phase 5
+        # emitter that never shipped, so turning it on changed nothing (L-211).
     },
     # Interviewer (Phase 1) — scheduled reflective work-reports ingested as
     # typed memories (docs/plans/interviewer-phase1-decisions.md). Default
@@ -821,6 +827,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "insights.auto_insights_enabled": bool,
     "observability.recall_logging_enabled": bool,
     "observability.search_recall_logging_enabled": bool,
+    "observability.usage_metering_enabled": bool,
     "observability.search_recall_near_miss_sample_rate": (int, float),
     "chunking.auto_chunk_enabled": bool,
     "agents.require_agent_approval": bool,
@@ -844,7 +851,6 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "skills_factory.forge.freshness_window_days": int,
     "skills_factory.forge.max_writes_per_run": int,
     "skills_factory.forge.max_clusters_per_run": int,
-    "skills_factory.openclaw_bridge.enabled": bool,
     # Interviewer Phase 1.
     "interviewer.enabled": bool,
     "interviewer.period_hours": int,
@@ -1421,6 +1427,12 @@ class ResolvedConfig:
         val = self._ts.get("observability", {}).get("recall_logging_enabled")
         return val if val is not None else False
 
+    # Usage metering — on by default (see the defaults above).
+    @property
+    def usage_metering_enabled(self) -> bool:
+        val = self._ts.get("observability", {}).get("usage_metering_enabled")
+        return val if val is not None else True
+
     # Search-path recall logging — opt-in (default False). When on, the
     # automatic ``/search`` path is logged too (lighter: returned-only, no
     # near-misses). Independent of ``recall_logging_enabled``.
@@ -1736,12 +1748,14 @@ def _is_display_mask(value: object) -> bool:
 
 
 #: Keys a tenant could once store and nothing reads: ``fail_on_critical``
-#: (M-114) and ``llm_tokens_per_run`` (oss-0922-l-05). ``PUT`` refuses them now,
-#: but a value written before that is still in the tenant's row, and showing it
-#: would present a control that does nothing.
+#: (M-114), ``llm_tokens_per_run`` (oss-0922-l-05) and the ``openclaw_bridge``
+#: block (L-211). ``PUT`` refuses them now, but a value written before that is
+#: still in the tenant's row, and showing it would present a control that does
+#: nothing.
 _RETIRED_KEYS: tuple[tuple[str, ...], ...] = (
     ("skills_factory", "sentinel", "fail_on_critical"),
     ("skills_factory", "forge", "llm_tokens_per_run"),
+    ("skills_factory", "openclaw_bridge"),
 )
 
 

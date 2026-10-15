@@ -13,6 +13,7 @@ from uuid import UUID
 from fastapi import HTTPException
 
 from common import duplicate_memory
+from common.usage import scoped
 from core_api.constants import (
     EVOLVE_FAILURE_DELTA,
     EVOLVE_MAX_RELATED_IDS,
@@ -789,6 +790,13 @@ async def report_outcome(
     if scope == "fleet" and not fleet_id:
         raise ValueError("fleet_id is required when scope is 'fleet'.")
 
+    # Value metering: confirm this session's reuse of the memories it named,
+    # from the ids as given — the scope filter below is about whose weights
+    # may move, and other agents' memories are exactly the reused ones.
+    from core_api.services.value_ledger import schedule_outcome
+
+    schedule_outcome(tenant_id, related_ids, outcome_type)
+
     from core_api.services.organization_settings import resolve_config
 
     # Phase 0: Filter related_ids by scope. Runs before rule generation so the
@@ -868,6 +876,7 @@ async def report_outcome(
     )
 
 
+@scoped("evolve", tenant="tenant_id", agent="agent_id", fleet="fleet_id")
 async def _maybe_generate_rule(
     tenant_id: str,
     outcome: str,

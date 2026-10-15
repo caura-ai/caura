@@ -55,6 +55,7 @@ network. Requests refuse redirects, so the key is never re-sent elsewhere: point
 | `recall(query, opts?)` | `POST /api/v1/recall` | `RecallResult` |
 | `getDocument(docId, opts)` | `GET /api/v1/documents/{docId}` | `object` |
 | `health()` | `GET /api/v1/health` | `object` |
+| `stats()` | `GET /api/v1/stats` | `Stats` |
 
 Failures throw `AuthError` (401/403), `NotFoundError` (404), or
 `CauraApiError` for HTTP errors. Network failures and timeouts while awaiting
@@ -99,6 +100,21 @@ const doc = await mc.getDocument("doc-123", { collection: "interviews" });
 const record = doc.data; // the stored record lives under "data"
 ```
 
+### Deployment stats
+
+`stats()` returns three counters — `tenantCount`, `memoryCount`,
+`agentCount` — for the landing-page status bar:
+
+```ts
+const s = await mc.stats();
+console.log(s.tenantCount, s.memoryCount, s.agentCount);
+```
+
+These are **deployment-wide totals, not scoped to your `tenantId`** — the
+server counts across every tenant on the deployment. The underlying endpoint
+is unauthenticated (no key required to call it directly), but this method
+still sends your API key header for consistency with every other call.
+
 ### Unknown fields on writes are rejected
 
 `write()` spreads any unrecognised option into the request body. The API
@@ -122,6 +138,26 @@ fields, deliberately. See
 For credentials, scopes, and the full API surface, see the
 [Caura docs](https://caura.ai/docs). Production fleets should use
 [per-agent keys](https://caura.ai/docs/integrations/per-agent-keys).
+
+## Sessions and the work behind a memory
+
+Caura's value report counts per agent session: a memory is reused once per
+session that recalls it, and its origin is the work its session did before
+writing it. Put calls in a session, and pass the provider usage you already
+have:
+
+```ts
+const mc = new Caura("mc_xxx", { tenantId: "my-team", agentId: "my-agent", sessionId: "run-a" });
+
+// Sum `usage` from your model provider's responses since the last write.
+await mc.write("Staging resets every Saturday at 23:00 UTC.", {
+  origin: { tokensIn: 18400, tokensOut: 1250, turns: 6 },
+});
+
+mc.setSession("run-b"); // a new conversation or task run
+```
+
+`origin` is sent as SDK-reported. Leave it out rather than estimate.
 
 ## Request headers
 

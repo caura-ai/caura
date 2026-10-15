@@ -12,12 +12,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from common import permanent_failure
+from common.constants import DOCUMENT_STATUS_CHANGED, MEMORY_CONTENT_CHANGED
 from common.settings_version import SETTINGS_CHANGED
 from common.structlog_config import configure_logging
 from core_storage_api.config import settings
 from core_storage_api.services.postgres_service import (
     BulkRowShapeError,
+    DocumentStatusChangedError,
     DuplicateContentHashError,
+    MemoryContentChangedError,
     PointerNotInTenantError,
     SettingsChangedError,
 )
@@ -35,7 +38,7 @@ configure_logging(
 
 from sqlalchemy import text
 
-from core_storage_api.database.init import get_engine, init_database
+from core_storage_api.database.init import dispose_engines, get_engine, init_database
 from core_storage_api.database.migration_postconditions import MIGRATION_POSTCONDITIONS
 from core_storage_api.middleware import (
     RejectWritesOnReaderMiddleware,
@@ -65,9 +68,22 @@ from core_storage_api.routers import (
     tenant_suppression_router,
     tenant_usage_router,
     tenants_router,
+    usage_router,
+    value_router,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _raised_parsing_the_body(exc: BaseException) -> bool:
+    """Whether ``exc`` was raised inside ``Request.json``, parsing the request body."""
+    tb = exc.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_code is Request.json.__code__:
+            return True
+        tb = tb.tb_next
+    return False
+
 
 _INVALID_INDEXES = text(
     """
@@ -165,11 +181,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await report_schema_drift()
     yield
     logger.info("Shutting down core-storage-api")
-    # Don't spin up a writer engine just to tear it down — reader-role
-    # services never touch the primary DB URL, and the read-pool engine
-    # lives in postgres_service.py's own factory.
-    if settings.core_storage_role != "reader":
-        await get_engine().dispose()
+    await dispose_engines()
 
 
 def create_app() -> FastAPI:
@@ -216,6 +228,28 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=409,
             content={"detail": {"error": SETTINGS_CHANGED, "message": str(exc)}},
+        )
+
+    @app.exception_handler(DocumentStatusChangedError)
+    async def _document_status_changed_handler(
+        request: Request, exc: DocumentStatusChangedError
+    ) -> JSONResponse:
+        # L-24. Shaped like ``SETTINGS_CHANGED``: a 409 whose ``detail`` names
+        # the case, so core-api tells it from any other refusal of the write.
+        return JSONResponse(
+            status_code=409,
+            content={"detail": {"error": DOCUMENT_STATUS_CHANGED, "message": str(exc)}},
+        )
+
+    @app.exception_handler(MemoryContentChangedError)
+    async def _memory_content_changed_handler(
+        request: Request, exc: MemoryContentChangedError
+    ) -> JSONResponse:
+        # O16. Shaped like ``DOCUMENT_STATUS_CHANGED``, so core-worker tells a
+        # superseded enrichment from any other refusal of its PATCH.
+        return JSONResponse(
+            status_code=409,
+            content={"detail": {"error": MEMORY_CONTENT_CHANGED, "message": str(exc)}},
         )
 
     @app.exception_handler(BulkRowShapeError)
@@ -274,6 +308,17 @@ def create_app() -> FastAPI:
         # malformed JSON would otherwise surface as an unhandled 500. Convert it
         # to a fail-closed 422 app-wide so the body-validation contract holds at
         # the transport layer too (rather than guarding 100+ call sites).
+        return JSONResponse(status_code=422, content={"detail": "request body must be valid JSON"})
+
+    @app.exception_handler(UnicodeDecodeError)
+    async def _undecodable_body_handler(request: Request, exc: UnicodeDecodeError) -> JSONResponse:
+        # A body that is not valid UTF-8 fails before JSON parsing, with
+        # ``UnicodeDecodeError``, which is not a ``JSONDecodeError``, so every
+        # router parsing inline answered 500 (L-37). Only that decode is the
+        # caller's: one raised anywhere else is the server's, and is re-raised to
+        # stay the 500 it was rather than a 422 core-api would not retry.
+        if not _raised_parsing_the_body(exc):
+            raise exc
         return JSONResponse(status_code=422, content={"detail": "request body must be valid JSON"})
 
     # Order matters: Starlette executes middlewares in reverse registration
@@ -368,6 +413,13 @@ def create_app() -> FastAPI:
     # aggregator POSTs here on its flush interval via the storage_client.
     app.include_router(capability_usage_router, prefix=prefix)
     app.include_router(tenant_usage_router, prefix=prefix)
+    # Usage metering (migration 066): per-minute model-call and savings
+    # totals, flushed by core-api and core-worker. Cross-tenant / RLS-free
+    # like the two above; each row names its tenant.
+    app.include_router(usage_router, prefix=prefix)
+    # Value metering (migration 067): sessions, memory origins and reuse.
+    # Every route is bound to one tenant.
+    app.include_router(value_router, prefix=prefix)
 
     return app
 

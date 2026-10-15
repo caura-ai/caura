@@ -84,6 +84,7 @@ _SPEC = ToolSpec(
         "MISSING_AGENT_ID",
         "NOT_FOUND",
         "PERMISSION_DENIED",
+        "PLAN_LIMIT_READ_ONLY",
         "REQUEST_BUDGET_EXCEEDED",
         "UNAUTHORIZED",
     ),

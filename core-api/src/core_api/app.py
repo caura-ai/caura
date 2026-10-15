@@ -79,6 +79,9 @@ from core_api.routes.skills_inbox import router as skills_inbox_router
 from core_api.routes.stats import router as stats_router
 from core_api.routes.stm import router as stm_router
 from core_api.routes.telemetry import router as telemetry_router
+from core_api.routes.usage import router as usage_router
+from core_api.routes.value import router as value_router
+from core_api.session_context import SessionHeaderMiddleware
 from core_api.tasks import cancel_all_tasks
 
 # CAURA-631: sentinel bucket for audit events that arrive without a
@@ -327,7 +330,15 @@ async def _flush_one_tenant(tid: str, tevs: list[dict]) -> None:
         raise
 
 
-async def _shut_down(event_bus: EventBus, *, audit_queue, capability_usage_agg, usage_meter) -> None:
+async def _shut_down(
+    event_bus: EventBus,
+    *,
+    audit_queue,
+    capability_usage_agg,
+    usage_meter,
+    usage_ledger=None,
+    session_tracker=None,
+) -> None:
     """core-api's shutdown steps, in order. Out of ``lifespan`` so the order
     can be tested."""
     # Each shutdown step is independent — a failure in one (a
@@ -400,6 +411,15 @@ async def _shut_down(event_bus: EventBus, *, audit_queue, capability_usage_agg, 
     # client, so it has to run before that client closes below. Without it
     # a clean shutdown would discard up to one flush interval of counts.
     shutdown_steps.append(usage_meter.stop(timeout=5.0))
+    # Usage metering's last flush, for the same reason.
+    if usage_ledger is not None:
+        from core_api.services.usage_ledger import uninstall as uninstall_usage_ledger
+
+        shutdown_steps.append(uninstall_usage_ledger(usage_ledger))
+    if session_tracker is not None:
+        from core_api.services.session_tracker import uninstall as uninstall_session_tracker
+
+        shutdown_steps.append(uninstall_session_tracker(session_tracker))
     shutdown_steps.extend(
         [
             event_bus.stop(),
@@ -501,6 +521,16 @@ async def lifespan(app):
         # arrive out-of-band via ``x-org-read-only`` (see ``usage_service``).
         usage_meter = UsageMeter()
         usage_meter.start()
+
+        # Usage metering (common.usage): per-minute totals of every model call
+        # and of recall savings, flushed through this process's storage client.
+        from core_api.services.usage_ledger import install as install_usage_ledger
+
+        usage_ledger = install_usage_ledger()
+        # Value metering: agent sessions seen, flushed per tenant.
+        from core_api.services.session_tracker import install as install_session_tracker
+
+        session_tracker = install_session_tracker()
         configure_hooks(ServiceHooks(audit_log=log_action, usage_meter=usage_meter.record))
 
         # Anonymous daily heartbeat (docs/telemetry.md). ``install`` evaluates
@@ -711,6 +741,8 @@ async def lifespan(app):
             audit_queue=audit_queue,
             capability_usage_agg=capability_usage_agg,
             usage_meter=usage_meter,
+            usage_ledger=usage_ledger,
+            session_tracker=session_tracker,
         )
         executor.shutdown(wait=False)
 
@@ -1064,6 +1096,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # readable. Trade-off: it no longer wraps RequestTimeout/SlowAPI, so 504s/429s
 # aren't observed — fine, those requests didn't execute a capability anyway.
 app.add_middleware(RequestObservationMiddleware)
+# The agent session a REST call belongs to (X-Caura-Session-Id), for value metering.
+app.add_middleware(SessionHeaderMiddleware)
 
 app.add_middleware(SlowAPIMiddleware)
 
@@ -1245,6 +1279,8 @@ app.include_router(conflicts_router, prefix="/api/v1")
 app.include_router(lifecycle_router, prefix="/api/v1")
 app.include_router(scheduler_lease_router, prefix="/api/v1")
 app.include_router(org_deletion_router, prefix="/api/v1")
+app.include_router(usage_router, prefix="/api/v1")
+app.include_router(value_router, prefix="/api/v1")
 
 # Test-only endpoints (time-warp, etc.) — only registered when TESTING=1
 if _os.getenv("TESTING") == "1":

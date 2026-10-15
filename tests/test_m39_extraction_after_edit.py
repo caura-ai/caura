@@ -48,6 +48,11 @@ _CONFIG = SimpleNamespace(
 )
 
 
+def _no_vectors(names, *_args, **_kwargs):
+    """``get_embeddings_batch`` for a provider that embeds nothing."""
+    return [None for _ in names]
+
+
 def _graph(content: str) -> ExtractedGraph:
     person, place = _NAMES[content]
     return ExtractedGraph(
@@ -108,7 +113,7 @@ async def _extract(
             new=AsyncMock(return_value=_CONFIG),
         ),
         patch.object(w, "extract_entities_from_content", new=extract),
-        patch.object(w, "get_embedding", new=AsyncMock(return_value=None)),
+        patch.object(w, "get_embeddings_batch", new=AsyncMock(side_effect=_no_vectors)),
         patch.object(w, "log_action", new=AsyncMock()),
         patch("core_api.tasks.track_task", side_effect=close_scheduled_coro),
     ):

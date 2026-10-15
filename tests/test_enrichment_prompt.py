@@ -183,16 +183,17 @@ class TestEnrichmentPromptVocabularySync:
                 f"{name!r} description first clause not found in prompt: {first_clause!r}"
             )
 
-    def test_pattern_matches_every_memory_type(self):
-        import re
+    def test_the_write_schema_accepts_every_memory_type(self):
+        """The write schema takes every type the prompt can classify into
+        (L-208: this checked an unread regex)."""
+        from pydantic import TypeAdapter
 
         from common.enrichment.constants import MEMORY_TYPES
-        from core_api.constants import MEMORY_TYPES_PATTERN
+        from core_api.schemas import MemoryCreate
 
+        memory_type = TypeAdapter(MemoryCreate.model_fields["memory_type"].annotation)
         for t in MEMORY_TYPES:
-            assert re.match(MEMORY_TYPES_PATTERN, t), (
-                f"{t!r} not accepted by MEMORY_TYPES_PATTERN — pattern drifted"
-            )
+            assert memory_type.validate_python(t) == t, f"{t!r} not accepted"
 
 
 @pytest.mark.unit

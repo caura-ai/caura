@@ -10,6 +10,7 @@ from core_api.pipeline.steps.search import (
     LogRecallEvent,
     ParallelEmbedAndEntityBoost,
     PostFilterResults,
+    RecordRecallValue,
     RerankResults,
     ResolveSearchProfile,
     TrackRecalls,
@@ -31,5 +32,6 @@ def build_search_pipeline() -> Pipeline:
             InjectSTMContext(),
             TrackRecalls(),
             LogRecallEvent(),
+            RecordRecallValue(),
         ],
     )

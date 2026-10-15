@@ -545,6 +545,7 @@ async def test_enrich_no_contradiction_when_no_prior_embedding() -> None:
         "id": "m1",
         "deleted_at": None,
         "fleet_id": "f1",
+        "content": "hello",
         "embedding": None,  # _reembed hasn't run yet
         "memory_type": "fact",
         "weight": 0.5,

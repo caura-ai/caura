@@ -5,14 +5,16 @@ import logging
 import random
 import re
 import traceback
+from collections.abc import Sequence
 from typing import Any, Final, Literal
 from uuid import UUID
 
 from common import entity_naming as _entity_naming
 from common.constants import SINGLE_VALUE_PREDICATES
-from common.embedding import get_embedding
+from common.embedding import get_embedding, get_embeddings_batch
 from common.entity_naming import canonical_match_key
 from common.llm.constants import LLM_RETRY_JITTER_FRACTION
+from common.usage import scoped
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
     CROSS_LINK_MEMORY_BATCH_SIZE,
@@ -490,6 +492,90 @@ async def _record_degraded(memory_id: UUID, tenant_id: str, exc: ProvidersUnavai
     )
 
 
+async def _resolve_entities(
+    sc: Any,
+    tenant_id: str,
+    fleet_id: str | None,
+    entities: list[tuple[str, str, str]],
+    embeddings: Sequence[list[float] | None],
+) -> list[dict | None]:
+    """``bulk_resolve_entities`` for *entities*: one slot each, ``None`` for no match.
+
+    Storage's contract is one slot per input item. A shorter answer is a
+    storage-layer partial failure, so it is logged rather than read as "no match"
+    in silence; the missing slots still come back ``None``, which sends those
+    names down the create path.
+    """
+    resolved = await sc.bulk_resolve_entities(
+        tenant_id=tenant_id,
+        items=[
+            {
+                "input_idx": i,
+                "fleet_id": fleet_id,
+                "canonical_name": name,
+                "entity_type": entity_type,
+                "name_embedding": embedding,
+            }
+            for i, ((name, entity_type, _role), embedding) in enumerate(zip(entities, embeddings))
+        ],
+        threshold=ENTITY_RESOLUTION_THRESHOLD,
+    )
+    if len(resolved) != len(entities):
+        logger.warning(
+            "bulk_resolve_entities returned %d result(s) for %d input(s); "
+            "items beyond index %d treated as no-match (create path) — "
+            "check for storage-layer partial failures",
+            len(resolved),
+            len(entities),
+            # ``max(0, ...)`` avoids a confusing "beyond index -1" when storage
+            # returns an empty list (every item a no-match from index 0).
+            max(0, len(resolved) - 1),
+        )
+    return [resolved[i] if i < len(resolved) else None for i in range(len(entities))]
+
+
+async def _embed_names(names: list[str], tenant_cfg: Any) -> list[list[float] | None]:
+    """One vector per name, ``None`` for a name that could not be embedded (L-181).
+
+    One ``get_embeddings_batch`` call for all of them. That call raises on any
+    provider error where ``get_embedding`` retries and returns ``None``, so a
+    failed batch falls back to one call per name, and one bad name still costs
+    only its own vector.
+    """
+    try:
+        vectors = await get_embeddings_batch(names, tenant_cfg, background=True)
+    except Exception:
+        logger.warning(
+            "Embedding %d entity names in one batch failed; embedding each alone",
+            len(names),
+            exc_info=True,
+        )
+    else:
+        if len(vectors) == len(names):
+            return vectors
+        logger.warning(
+            "Batch embedding returned %d vectors for %d entity names; embedding each alone",
+            len(vectors),
+            len(names),
+        )
+    results = await asyncio.gather(
+        *(get_embedding(name, tenant_cfg, background=True) for name in names),
+        return_exceptions=True,
+    )
+    embedded: list[list[float] | None] = []
+    for name, result in zip(names, results):
+        # ``BaseException``: ``gather(return_exceptions=True)`` hands back a
+        # ``CancelledError`` as a value too, and one stored as a vector would
+        # corrupt the payload. Dropped to ``None`` like any other failure.
+        if isinstance(result, BaseException):
+            logger.debug("Failed to embed entity name '%s', skipping fuzzy resolution", name)
+            embedded.append(None)
+        else:
+            embedded.append(result)
+    return embedded
+
+
+@scoped("entity-extraction", tenant="tenant_id", agent="agent_id", fleet="fleet_id")
 async def process_entity_extraction(
     memory_id: UUID,
     tenant_id: str,
@@ -630,89 +716,45 @@ async def process_entity_extraction(
             # zero-entity memory still records the run.
             name_to_id: dict[str, UUID] = {}
         else:
-            # ---- Step 1: parallel embeddings (audit P1) ----
+            # ---- Step 1: resolve by name ----
             #
-            # Replaces the per-entity ``await get_embedding(...)`` loop
-            # with one ``asyncio.gather`` round. ``return_exceptions=True``
-            # carries the prior skip-on-failure semantics — a single
-            # entity that fails to embed becomes ``None`` in its slot
-            # rather than aborting the whole batch.
+            # One HTTP replaces N x (find_exact + optional similarity).
+            # Storage-side ``/entities/bulk-resolve`` mirrors the
+            # ``upsert_entity`` precedence: exact match, then the normalised
+            # match, then cosine similarity (Phase 2) only for an item that
+            # carries a ``name_embedding``.
+            #
+            # L-181: so this first call carries none. Every name used to be
+            # embedded first, one provider call each, though a name that
+            # matches by name needs no vector to resolve and its row keeps the
+            # vector it has: ``entity_merge`` only fills a row with none, and
+            # the nightly ``BackfillEntityEmbeddings`` fills the rest.
+            resolved = await _resolve_entities(sc, tenant_id, fleet_id, filtered, [None] * len(filtered))
+
+            # ---- Step 2a: embed what that left, then resolve it by similarity ----
+            #
             # ``tenant_cfg`` (resolved above for the extraction call) also
             # routes the embeds: tenant provider/key overrides apply, and
             # resolution can't fall to the raw env default — entity vectors
             # must live in the same space as this tenant's memory vectors.
-            embed_results = await asyncio.gather(
-                *(get_embedding(name, tenant_cfg, background=True) for name, _et, _role in filtered),
-                return_exceptions=True,
-            )
+            # A name that fails to embed stays unmatched and is created
+            # without a vector, as before.
+            unmatched = [i for i, match in enumerate(resolved) if match is None]
             name_embeddings: dict[str, list[float] | None] = {}
-            for (name, _et, _role), emb in zip(filtered, embed_results):
-                # ``BaseException`` — ``asyncio.gather(return_exceptions=
-                # True)`` captures ALL ``BaseException`` subclasses as
-                # result values, not just ``Exception``. The narrower
-                # ``isinstance(emb, Exception)`` check would silently
-                # store ``CancelledError`` (and other ``BaseException``
-                # subclasses) as if it were a valid embedding, since
-                # ``CancelledError`` inherits directly from
-                # ``BaseException`` in Python 3.8+. Trade-off vs the
-                # pre-P1 per-entity ``try/except Exception`` shape: we
-                # now drop cancellations to ``None`` and continue
-                # instead of letting them propagate; preferable to
-                # corrupting the embedding payload with an exception
-                # instance.
-                if isinstance(emb, BaseException):
-                    logger.debug(
-                        "Failed to embed entity name '%s', skipping fuzzy resolution",
-                        name,
+            if unmatched:
+                vectors = await _embed_names([filtered[i][0] for i in unmatched], tenant_cfg)
+                name_embeddings = {filtered[i][0]: vector for i, vector in zip(unmatched, vectors)}
+                embedded = [i for i in unmatched if name_embeddings[filtered[i][0]] is not None]
+                if embedded:
+                    similar = await _resolve_entities(
+                        sc,
+                        tenant_id,
+                        fleet_id,
+                        [filtered[i] for i in embedded],
+                        [name_embeddings[filtered[i][0]] for i in embedded],
                     )
-                    name_embeddings[name] = None
-                else:
-                    name_embeddings[name] = emb
-
-            # ---- Step 2a: bulk resolve ----
-            #
-            # One HTTP replaces N x (find_exact + optional similarity).
-            # Storage-side ``/entities/bulk-resolve`` mirrors the
-            # ``upsert_entity`` precedence: exact match first, then
-            # cosine similarity (Phase 2) only when ``name_embedding``
-            # is non-null and no exact match was found.
-            resolve_items = [
-                {
-                    "input_idx": i,
-                    "fleet_id": fleet_id,
-                    "canonical_name": name,
-                    "entity_type": entity_type,
-                    "name_embedding": name_embeddings.get(name),
-                }
-                for i, (name, entity_type, _role) in enumerate(filtered)
-            ]
-            resolved = await sc.bulk_resolve_entities(
-                tenant_id=tenant_id,
-                items=resolve_items,
-                threshold=ENTITY_RESOLUTION_THRESHOLD,
-            )
-
-            # Storage-side contract: ``bulk_resolve_entities`` returns
-            # one slot per input item (``None`` for no-match,
-            # match-dict otherwise). A shorter response indicates a
-            # storage-layer partial failure — surface it explicitly so
-            # the implicit "items beyond ``len(resolved)`` fall through
-            # to the create branch" behaviour below isn't a silent
-            # data-divergence path. The ``resolved[i] if i <
-            # len(resolved) else None`` guard a few lines down still
-            # carries the safe default.
-            if len(resolved) != len(filtered):
-                logger.warning(
-                    "bulk_resolve_entities returned %d result(s) for %d input(s); "
-                    "items beyond index %d treated as no-match (create path) — "
-                    "check for storage-layer partial failures",
-                    len(resolved),
-                    len(filtered),
-                    # ``max(0, ...)`` avoids a confusing "beyond index -1"
-                    # when storage returns an empty list (all items
-                    # treated as no-match starting from index 0).
-                    max(0, len(resolved) - 1),
-                )
+                    for i, match in zip(embedded, similar):
+                        resolved[i] = match
 
             # ---- Step 2b: client-side merge — first-seen-wins canonical ----
             #
@@ -732,7 +774,7 @@ async def process_entity_extraction(
             upsert_names: list[list[str]] = []
             entity_id_to_item: dict[str, int] = {}
             for i, (name, entity_type, _role) in enumerate(filtered):
-                match = resolved[i] if i < len(resolved) else None
+                match = resolved[i]
                 # CAURA graph-build fix (B): reject a similarity-merge when the two
                 # names carry DIFFERENT identifier tokens (e.g. "#0002" vs "#0012").
                 # Forces the create path so suffix-distinct entities stay separate.
@@ -926,8 +968,7 @@ async def process_entity_extraction(
             # ---- Step 3: bulk entity-link upsert ----
             #
             # Idempotent (memory_id, entity_id) writes — pre-existing
-            # rows have their role preserved, matching today's
-            # ``find_entity_link → skip-if-exists`` flow.
+            # rows have their role preserved.
             # ``input_idx`` must be contiguous in ``[0, len(link_items))``
             # for the storage-side ``_validate_input_idxs`` check —
             # otherwise gaps in the source ``filtered`` list (entries

@@ -77,10 +77,13 @@ async def _tenant_with_notes(sc, visibilities) -> tuple[str, str, dict[str, str]
             }
         )
         notes[visibility] = str(memory["id"])
-        await sc.create_entity_link(
-            tenant,
-            {"memory_id": notes[visibility], "entity_id": entity, "role": "subject"},
-        )
+        link = {
+            "input_idx": 0,
+            "memory_id": notes[visibility],
+            "entity_id": entity,
+            "role": "subject",
+        }
+        await sc.bulk_upsert_entity_links(tenant, [link])
         await sc.create_relation(
             {
                 "tenant_id": tenant,

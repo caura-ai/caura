@@ -16,6 +16,9 @@ agent.
   what to expect in your own system, and what the numbers cannot tell you.
 - [`operator-forge-cron.md`](operator-forge-cron.md) — driving the Skill
   Factory's Forge and promoter ticks from an external scheduler.
+- [`usage-metering.md`](usage-metering.md) — what each workspace's model calls
+  cost in tokens and what its memory saved, kept in its own database; how it
+  is counted and how to turn it off.
 
 ## Building against the API
 

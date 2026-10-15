@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import pytest
 
+from common.llm.providers.fake import FakeLLMProvider
+from common.llm.providers.gemini import GeminiLLMProvider
 from core_api.constants import GEMINI_DEFAULT_MODEL
 from core_api.protocols import LLMProvider
-from core_api.providers._credentials import has_credentials, resolve_gemini_config
+from core_api.providers._credentials import resolve_gemini_config
 from core_api.providers._registry import get_llm_provider
-from core_api.providers.fake_provider import FakeLLMProvider
-from core_api.providers.gemini_provider import GeminiLLMProvider
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -64,19 +64,6 @@ class TestGeminiProtocol:
 
 
 class TestGeminiCredentials:
-    def test_has_credentials_global_fallback(self, monkeypatch):
-        monkeypatch.setenv("GEMINI_API_KEY", "AIza-global")
-        assert has_credentials("gemini") is True
-
-    def test_has_credentials_false_when_empty(self, monkeypatch):
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        assert has_credentials("gemini") is False
-
-    def test_has_credentials_tenant_overrides(self, monkeypatch):
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        tc = _FakeTenantConfig(gemini_api_key="AIza-tenant")
-        assert has_credentials("gemini", tc) is True
-
     def test_resolve_gemini_config_tenant_wins(self, monkeypatch):
         monkeypatch.setenv("GEMINI_API_KEY", "AIza-global")
         tc = _FakeTenantConfig(

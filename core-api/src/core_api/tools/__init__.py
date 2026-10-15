@@ -7,7 +7,7 @@ populates `REGISTRY`. Use `get_spec(name)` for typed lookup.
 from __future__ import annotations
 
 from ._builders import extract_param_descriptors, mcp_register, to_descriptor_json
-from ._registry import REGISTRY, all_specs, get_spec, register, required_trust
+from ._registry import REGISTRY, all_specs, get_spec, register
 from ._types import HandlerFn, ImplStatus, OpSpec, ToolSpec
 
 __all__ = [
@@ -21,6 +21,5 @@ __all__ = [
     "get_spec",
     "mcp_register",
     "register",
-    "required_trust",
     "to_descriptor_json",
 ]

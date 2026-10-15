@@ -29,6 +29,11 @@ from tests.conftest import close_scheduled_coro
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
+def _vectors(names, *_args, **_kwargs):
+    """``get_embeddings_batch``: one vector per name."""
+    return [[0.1] * 8 for _ in names]
+
+
 def _config(**overrides):
     cfg = MagicMock()
     cfg.auto_entity_linking_enabled = False
@@ -92,8 +97,8 @@ async def _run(mock_extract_graph, sc, memory_id=None):
             return_value=sc,
         ),
         patch(
-            "core_api.services.entity_extraction_worker.get_embedding",
-            new=AsyncMock(return_value=[0.1] * 8),
+            "core_api.services.entity_extraction_worker.get_embeddings_batch",
+            new=AsyncMock(side_effect=_vectors),
         ),
         patch("core_api.services.entity_extraction_worker.log_action", new=AsyncMock()),
         patch("core_api.tasks.track_task", side_effect=close_scheduled_coro),

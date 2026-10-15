@@ -233,6 +233,19 @@
           "default": null,
           "description": "Required when scope='fleet'.",
           "title": "Fleet Id"
+        },
+        "idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A retry with the same key replays the first answer.",
+          "title": "Idempotency Key"
         }
       },
       "required": [

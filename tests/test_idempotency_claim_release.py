@@ -49,7 +49,8 @@ async def test_single_write_failure_releases_the_claim(client, sc, monkeypatch):
 
     first = await client.post("/api/v1/memories", json=body, headers=h)
     assert first.status_code == 422, first.text
-    assert await sc.get_idempotency(tenant_id, f"header:{key}") is None
+    stored = idem_mod.stored_key("header", body["agent_id"], key)
+    assert await sc.get_idempotency(tenant_id, stored) is None
 
     # The retry runs the handler again and sees the real error.
     second = await client.post("/api/v1/memories", json=body, headers=h)

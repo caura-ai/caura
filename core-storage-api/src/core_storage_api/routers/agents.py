@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from core_storage_api.schemas import AGENT_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import PostgresService
@@ -49,10 +49,16 @@ async def get_agent(agent_id: str, tenant_id: str) -> dict:
 
 
 @router.get("")
-async def list_agents(tenant_id: str, fleet_id: str | None = None) -> list[dict]:
-    agents = await _svc.agent_list_by_tenant(tenant_id)
-    if fleet_id:
-        agents = [a for a in agents if getattr(a, "fleet_id", None) == fleet_id]
+async def list_agents(
+    tenant_id: str,
+    fleet_id: str | None = None,
+    limit: int | None = Query(default=None, ge=1),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict]:
+    """The tenant's agents, newest first. A page when ``limit`` is given (L-186):
+    core-api's public list caps it, while internal readers (reports, the agent
+    digest) still take every agent."""
+    agents = await _svc.agent_list_by_tenant(tenant_id, fleet_id=fleet_id, limit=limit, offset=offset)
     return [orm_to_dict(a, AGENT_FIELDS) for a in agents]
 
 
@@ -111,14 +117,6 @@ async def update_search_profile(agent_id: str, request: Request) -> dict:
         search_profile=body["search_profile"],
     )
     return {"ok": True}
-
-
-@router.get("/{agent_id}/search-profile")
-async def get_search_profile(agent_id: str, tenant_id: str) -> dict:
-    agent = await _svc.agent_get_by_id(agent_id, tenant_id)
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    return {"search_profile": getattr(agent, "search_profile", None)}
 
 
 @router.post("/{agent_id}/search-profile/reset")

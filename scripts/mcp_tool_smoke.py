@@ -42,8 +42,6 @@ def load_env(path: Path) -> dict[str, str]:
 
 FLEET = "smoke-fleet"
 
-GATEWAY = "http://localhost"  # nginx
-
 
 def http(method: str, url: str, body=None, headers=None):
     h = {
@@ -70,6 +68,34 @@ def http(method: str, url: str, body=None, headers=None):
             return e.code, json.loads(e.read().decode() or "{}")
         except Exception:
             return e.code, {}
+    except urllib.error.URLError as e:
+        # Nothing answered (refused, unresolvable, timed out). Status 0, so the
+        # caller reports it like any other failure instead of a traceback
+        # (L-61). ``HTTPError`` is a ``URLError``, so it is caught first.
+        return 0, {"error": str(e.reason)}
+
+
+def _seeded(what: str, status: int, body) -> None:
+    """Stop the run when a seed did not land.
+
+    Every tool case below reads what seeding wrote, so a failed seed would
+    surface as a tool failure with the wrong cause, or a case run with an empty
+    id (L-61).
+    """
+    if not 200 <= status < 300:
+        sys.exit(f"ERROR: seeding {what} failed: HTTP {status} {body}")
+
+
+def _already_seeded(status: int, body) -> bool:
+    """A re-run against the same tenant writes the same seed content, which
+    core-api answers 409 DUPLICATE_MEMORY. The memory is there, which is all
+    seeding needs; any other 409 still stops the run."""
+    error = body.get("error") if isinstance(body, dict) else None
+    return (
+        status == 409
+        and isinstance(error, dict)
+        and error.get("code") == "DUPLICATE_MEMORY"
+    )
 
 
 def mcp_call(tool: str, args: dict):
@@ -102,17 +128,22 @@ def mcp_call(tool: str, args: dict):
 
 
 def seed_fleet_and_memories() -> dict:
-    """Seed data the tools can actually operate on."""
+    """Seed data the tools can actually operate on, on the stack under test.
+
+    Every seed goes to ``--url``. The memories went to a hardcoded
+    ``http://localhost`` gateway, so any other target was seeded somewhere else,
+    or not at all when nothing listened there (L-61).
+    """
     agent = "smoke-main"
-    # Seed memory via gateway write (auto-provisions the agent).
+    # The write auto-provisions the agent.
     for content in [
         "We run PostgreSQL 16 with pgvector in production.",
         "Redis 7 is used for session caching.",
         "The team ships a release every two weeks on Thursdays.",
     ]:
-        http(
+        status, resp = http(
             "POST",
-            f"{GATEWAY}/api/memories",
+            f"{CORE_API}/api/v1/memories",
             body={
                 "tenant_id": TENANT,
                 "content": content,
@@ -120,17 +151,20 @@ def seed_fleet_and_memories() -> dict:
                 "fleet_id": FLEET,
                 "memory_type": "fact",
             },
-            headers={"X-API-Key": KEY},
+            headers={"X-Tenant-ID": TENANT},
         )
+        if not _already_seeded(status, resp):
+            _seeded("a memory", status, resp)
     # Promote agent to trust=3 so every tool is exercised at max privilege.
-    http(
+    status, resp = http(
         "PATCH",
         f"{CORE_API}/api/v1/agents/{agent}/trust?tenant_id={TENANT}",
         body={"trust_level": 3},
         headers={"X-Tenant-ID": TENANT},
     )
+    _seeded("the agent's trust", status, resp)
     # Seed one entity so caura_entity_get has something to find.
-    _, ent = http(
+    status, ent = http(
         "POST",
         f"{CORE_API}/api/v1/entities/upsert",
         body={
@@ -140,9 +174,10 @@ def seed_fleet_and_memories() -> dict:
         },
         headers={"X-Tenant-ID": TENANT},
     )
+    _seeded("an entity", status, ent)
     entity_id = ent.get("id") or ent.get("entity_id") or ""
     # Seed one doc so caura_doc read/query hits data.
-    http(
+    status, resp = http(
         "POST",
         f"{CORE_API}/api/v1/documents",
         body={
@@ -154,14 +189,18 @@ def seed_fleet_and_memories() -> dict:
         },
         headers={"X-Tenant-ID": TENANT},
     )
+    _seeded("a document", status, resp)
     # Capture a seeded memory_id for caura_manage.
-    _, listing = http(
+    status, listing = http(
         "GET",
         f"{CORE_API}/api/v1/memories?tenant_id={TENANT}&agent_id={agent}&limit=1",
         headers={"X-Tenant-ID": TENANT},
     )
+    _seeded("the memory listing", status, listing)
     items = listing.get("items") or []
-    memory_id = items[0]["id"] if items else ""
+    if not items:
+        sys.exit("ERROR: seeding wrote memories the listing does not return")
+    memory_id = items[0]["id"]
     return {"agent": agent, "entity_id": entity_id, "memory_id": memory_id}
 
 
@@ -305,6 +344,5 @@ if __name__ == "__main__":
     CORE_API = args.url.rstrip("/")
     env = load_env(args.env_file)
     TENANT = env["TENANT_ID"]
-    KEY = env["KEY"]
 
     main()

@@ -77,8 +77,8 @@ export class TransportError extends CauraError {
 export class CauraApiError extends CauraError {
   readonly statusCode: number;
   readonly details: unknown;
-  constructor(statusCode: number, message: string, details?: unknown) {
-    super(`[${statusCode}] ${message}`);
+  constructor(statusCode: number, message: string, details?: unknown, options?: ErrorOptions) {
+    super(`[${statusCode}] ${message}`, options);
     this.name = "CauraApiError";
     this.statusCode = statusCode;
     this.details = details;
@@ -138,6 +138,20 @@ export interface RecallResult {
   raw: Record<string, unknown>;
 }
 
+/**
+ * Public deployment counters, as returned by `stats()`. These are
+ * deployment-wide totals, **not** scoped to your `tenantId` — the server
+ * counts across every tenant. The endpoint degrades rather than fails: if a
+ * storage query stalls or errors, that counter comes back `0` rather than
+ * throwing, so a zero may mean "none" or "unavailable".
+ */
+export interface Stats {
+  tenantCount: number;
+  memoryCount: number;
+  agentCount: number;
+  raw: Record<string, unknown>;
+}
+
 export interface CauraOptions {
   tenantId: string;
   baseUrl?: string;
@@ -151,6 +165,19 @@ export interface CauraOptions {
    * `CAURA_ALLOW_INSECURE_HTTP` (`true` or `1`); an explicit `false` beats it.
    */
   allowInsecureHttp?: boolean;
+  /**
+   * The agent session later calls belong to (`X-Caura-Session-Id`). Caura's
+   * value report counts per session: a memory is reused once per session that
+   * recalls it. Change it with `setSession` per conversation or task run.
+   */
+  sessionId?: string;
+}
+
+/** The work behind a memory, from your model provider's own usage since the session's previous write. */
+export interface Origin {
+  tokensIn?: number;
+  tokensOut?: number;
+  turns?: number;
 }
 
 export interface WriteOptions {
@@ -158,6 +185,8 @@ export interface WriteOptions {
   memoryType?: string;
   fleetId?: string;
   metadata?: Record<string, unknown>;
+  /** Read it from the provider's responses; leave it out rather than estimate. */
+  origin?: Origin;
   [extra: string]: unknown;
 }
 
@@ -230,17 +259,31 @@ export class Caura {
     const f = options.fetch ?? globalThis.fetch;
     if (!f) throw new Error("global fetch is unavailable; pass options.fetch or use Node 18+");
     this.fetchImpl = f;
+    this.setSession(options.sessionId);
+  }
+
+  /** Put later calls in an agent session (`X-Caura-Session-Id`), or in none. */
+  setSession(sessionId: string | undefined | null): void {
+    if (sessionId) this.headers["X-Caura-Session-Id"] = sessionId;
+    else delete this.headers["X-Caura-Session-Id"];
   }
 
   /** Persist a memory. POST /api/v1/memories */
   async write(content: string, options: WriteOptions = {}): Promise<Memory> {
-    const { agentId, memoryType, fleetId, metadata, ...extra } = options;
+    const { agentId, memoryType, fleetId, metadata, origin, ...extra } = options;
     const body: Record<string, unknown> = { tenant_id: this.tenantId, content };
     const resolvedAgent = agentId ?? this.agentId;
     if (resolvedAgent) body.agent_id = resolvedAgent;
     if (memoryType) body.memory_type = memoryType;
     if (fleetId) body.fleet_id = fleetId;
     if (metadata !== undefined) body.metadata = metadata;
+    if (origin) {
+      const o: Record<string, unknown> = { source: "sdk" };
+      if (origin.tokensIn !== undefined) o.tokens_in = origin.tokensIn;
+      if (origin.tokensOut !== undefined) o.tokens_out = origin.tokensOut;
+      if (origin.turns !== undefined) o.turns = origin.turns;
+      body.origin = o;
+    }
     Object.assign(body, extra);
     return toMemory(await this.request("POST", "/api/v1/memories", body));
   }
@@ -338,6 +381,24 @@ export class Caura {
     return this.request("GET", "/api/v1/health");
   }
 
+  /**
+   * Deployment-wide counters for the landing-page status bar.
+   * GET /api/v1/stats
+   *
+   * These counts span the whole deployment — they are **not** scoped to
+   * `this.tenantId`. The endpoint is unauthenticated, but the API key header
+   * is still sent for consistency with every other call this client makes.
+   */
+  async stats(): Promise<Stats> {
+    const data = await this.request("GET", "/api/v1/stats");
+    return {
+      tenantCount: data?.tenant_count ?? 0,
+      memoryCount: data?.memory_count ?? 0,
+      agentCount: data?.agent_count ?? 0,
+      raw: data ?? {},
+    };
+  }
+
   private async request(method: string, path: string, body?: unknown): Promise<any> {
     const serializedBody = body !== undefined ? JSON.stringify(body) : undefined;
     const controller = new AbortController();
@@ -358,7 +419,16 @@ export class Caura {
         throw new TransportError(cause);
       }
       await raiseForStatus(res);
-      return await readResponseJson(res);
+      try {
+        return await readResponseJson(res);
+      } catch (cause) {
+        // readResponseJson rethrows SyntaxError for raiseForStatus; on a 2xx
+        // (a captive portal or proxy page) it must still be a Caura error.
+        if (cause instanceof SyntaxError) {
+          throw new CauraApiError(res.status, "response was not valid JSON", undefined, { cause });
+        }
+        throw cause;
+      }
     } finally {
       clearTimeout(timer);
     }
@@ -401,7 +471,12 @@ async function raiseForStatus(res: Response): Promise<void> {
   }
   if (res.status === 429) {
     const retryAfter = res.headers.get("retry-after");
-    const parsed = retryAfter === null ? Number.NaN : Number(retryAfter);
+    let parsed = retryAfter === null ? Number.NaN : Number(retryAfter);
+    if (!Number.isFinite(parsed) && retryAfter !== null) {
+      // All HTTP-date forms use GMT, including asctime without an explicit zone.
+      const deadline = Date.parse(retryAfter.endsWith("GMT") ? retryAfter : `${retryAfter} GMT`);
+      parsed = Math.max(0, (deadline - Date.now()) / 1000);
+    }
     throw new RateLimitError(
       res.status,
       message || "rate limit exceeded",

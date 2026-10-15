@@ -16,6 +16,7 @@ import pytest
 from fastapi import HTTPException
 
 from common.constants import QUARANTINED_MEMORY_STATUS
+from common.enrichment.constants import MEMORY_STATUSES
 from core_api.auth import AuthContext
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.steps.write import schedule_background_tasks as background
@@ -283,3 +284,11 @@ async def test_a_held_writes_chunk_moves_only_with_it(storage, replays):
     assert refused.value.status_code == 409
     storage["update"].assert_not_awaited()
     replays["replay"].assert_not_called()
+
+
+async def test_a_classifier_status_cannot_stand_in_for_a_release():
+    """The enrichment vocabulary has no held status, so a status the classifier
+    picks can never stand in for a person's release. Checked here rather than in
+    core-storage-api's suite: its environment, built from its own lock, has no
+    python-dateutil, which importing the enrichment package needs."""
+    assert QUARANTINED_MEMORY_STATUS not in MEMORY_STATUSES

@@ -44,6 +44,11 @@ _DEGRADED_LINE = "entity_extraction_degraded_to_heuristic"
 _REQUEST = httpx.Request("POST", "https://llm.invalid/v1")
 
 
+def _no_vectors(names, *_args, **_kwargs):
+    """``get_embeddings_batch`` for a provider that embeds nothing."""
+    return [None for _ in names]
+
+
 def _vertex(code: int) -> genai_errors.APIError:
     """What google-genai raises for Vertex and Gemini: staging's was the 429."""
     cls = genai_errors.ClientError if code < 500 else genai_errors.ServerError
@@ -249,7 +254,7 @@ async def _run(extract: AsyncMock, sc: MagicMock, content: str) -> SimpleNamespa
         ),
         patch.object(w, "extract_entities_from_content", new=extract),
         patch.object(w, "get_storage_client", return_value=sc),
-        patch.object(w, "get_embedding", new=AsyncMock(return_value=None)),
+        patch.object(w, "get_embeddings_batch", new=AsyncMock(side_effect=_no_vectors)),
         patch.object(w, "log_action", new=seen.log),
         patch.object(w, "record_task_failure", new=seen.record),
         patch.object(w, "upsert_relation", new=AsyncMock()),

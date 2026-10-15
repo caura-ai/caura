@@ -30,6 +30,7 @@ _SPEC = ToolSpec(
     trust_required=1,
     impl_status="live",
     error_codes=(
+        "BAD_REQUEST",
         "CONFLICT",
         "DUPLICATE_MEMORY",
         "FLEET_SCOPE_FORBIDDEN",

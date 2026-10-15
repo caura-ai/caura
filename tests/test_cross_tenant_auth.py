@@ -16,7 +16,6 @@ import pytest
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings
-from core_api.tenant_context import get_readable_tenants
 from tests._legacy_contracts import LEGACY_API_KEY_FIELD
 
 
@@ -50,9 +49,6 @@ async def test_single_tenant_key_readable_defaults_to_home(_disable_standalone):
     assert ctx.readable_tenant_ids == ["home-tenant"]
     assert ctx.is_cross_tenant_read is False
     assert ctx.scopes is None
-    # Context var defaults to empty (single-tenant); the DB session
-    # plumbs it as an empty CSV.
-    assert get_readable_tenants() == []
 
 
 # ── Cross-tenant key: readable set parsing ───────────────────────────
@@ -76,14 +72,6 @@ async def test_cross_tenant_readable_set_parsed(_disable_standalone):
         "tenant-c",
     ]
     assert ctx.is_cross_tenant_read is True
-    # The DB-session context var carries the union with the home tenant
-    # prepended so writes still target ``tenant-admin``.
-    assert get_readable_tenants() == [
-        "tenant-admin",
-        "tenant-a",
-        "tenant-b",
-        "tenant-c",
-    ]
 
 
 @pytest.mark.unit
@@ -130,19 +118,20 @@ async def test_scopes_parsed_from_header(_disable_standalone):
 
 @pytest.mark.unit
 async def test_no_scope_header_means_full_scope(_disable_standalone):
-    """Absent X-Key-Scopes leaves ``scopes=None`` so enforce_write_scope
-    is a no-op — single-tenant keys keep their pre-feature behaviour."""
+    """Absent X-Key-Scopes leaves ``scopes=None`` so the write gate
+    (enforce_read_only) passes — single-tenant keys keep their pre-feature
+    behaviour."""
     request = _request({"X-Tenant-ID": "home"})
     ctx = await get_auth_context(request, key=None)
 
     assert ctx.scopes is None
-    ctx.enforce_write_scope()  # no raise
+    ctx.enforce_read_only()  # no raise
 
 
 @pytest.mark.unit
 async def test_read_only_scopes_block_writes(_disable_standalone):
-    """A credential whose scope set lacks ``write`` is rejected by
-    enforce_write_scope before any mutating handler runs."""
+    """A credential whose scope set lacks ``write`` is rejected by the write
+    gate (enforce_read_only) before any mutating handler runs."""
     request = _request(
         {
             "X-Tenant-ID": "home",
@@ -154,7 +143,7 @@ async def test_read_only_scopes_block_writes(_disable_standalone):
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc_info:
-        ctx.enforce_write_scope()
+        ctx.enforce_read_only()
     assert exc_info.value.status_code == 403
 
 

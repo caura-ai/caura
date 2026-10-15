@@ -39,6 +39,7 @@ from common.llm.providers._truncation import raise_if_truncated
 from common.llm.providers._unsupported import (
     UnsupportedStructuredOutputError,
 )
+from common.usage import record_model_call
 
 logger = logging.getLogger(__name__)
 
@@ -292,6 +293,15 @@ class OpenAILLMProvider:
         response = await self._client.chat.completions.create(**create_kwargs)
         llm_ms = int((time.perf_counter() - t0) * 1000)
         tokens_in, tokens_out, tokens_reasoning = _usage_tokens(response)
+        # Billed once the response is back, before any shape check can reject it.
+        record_model_call(
+            kind="llm",
+            provider=self._provider_name,
+            model=self._model,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            tokens_reasoning=tokens_reasoning,
+        )
         logger.info(
             "OpenAI-compatible complete_json (%s) took %dms "
             "tokens_in=%d tokens_out=%d tokens_reasoning=%d service=%s",
@@ -333,6 +343,15 @@ class OpenAILLMProvider:
         )
         llm_ms = int((time.perf_counter() - t0) * 1000)
         tokens_in, tokens_out, tokens_reasoning = _usage_tokens(response)
+        # Billed once the response is back, before any shape check can reject it.
+        record_model_call(
+            kind="llm",
+            provider=self._provider_name,
+            model=self._model,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            tokens_reasoning=tokens_reasoning,
+        )
         logger.info(
             "OpenAI-compatible complete_text (%s) took %dms "
             "tokens_in=%d tokens_out=%d tokens_reasoning=%d service=%s",

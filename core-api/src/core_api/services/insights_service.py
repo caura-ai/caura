@@ -26,6 +26,7 @@ from core_api.constants import (
     INSIGHTS_STALE_WINDOW_DAYS,
     INSIGHTS_TEMPERATURE,
 )
+from core_api.services.kmeans import numpy_kmeans
 from core_api.utils.sanitize import sanitize_content as _sanitize_content
 
 logger = logging.getLogger(__name__)
@@ -407,40 +408,9 @@ async def _query_patterns(tenant_id, fleet_id, agent_id, scope) -> list[dict]:
     )
 
 
-def _numpy_kmeans(data, k, max_iters=20):
-    """Simple k-means clustering using only numpy."""
-    import numpy as np
-
-    n = data.shape[0]
-    # Initialize centroids via random sampling
-    rng = np.random.default_rng(42)  # deterministic for reproducibility
-    indices = rng.choice(n, size=k, replace=False)
-    centroids = data[indices].copy()
-
-    # Initialize to -1 (sentinel) so the convergence check on the first
-    # iteration doesn't false-positive when all points happen to be assigned
-    # to cluster 0.
-    labels = np.full(n, -1, dtype=np.int32)
-    for _ in range(max_iters):
-        # Assign each point to nearest centroid (squared-distance, no huge intermediate)
-        data_sq = np.sum(data**2, axis=1, keepdims=True)
-        cent_sq = np.sum(centroids**2, axis=1)[None, :]
-        dists = data_sq + cent_sq - 2.0 * (data @ centroids.T)
-        new_labels = np.argmin(dists, axis=1).astype(np.int32)
-
-        if np.array_equal(labels, new_labels):
-            break
-        labels = new_labels
-
-        # Update centroids
-        for j in range(k):
-            mask = labels == j
-            if mask.any():
-                centroids[j] = data[mask].mean(axis=0)
-            else:
-                centroids[j] = data[rng.integers(n)]
-
-    return labels, centroids
+# Moved to ``core_api.services.kmeans`` so the memory field layout can share
+# it; the private name stays importable for existing callers and tests.
+_numpy_kmeans = numpy_kmeans
 
 
 async def _query_discover(tenant_id, fleet_id, agent_id, scope) -> _DiscoverResult:

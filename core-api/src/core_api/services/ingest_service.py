@@ -19,6 +19,7 @@ from fastapi import HTTPException
 from common.embedding import get_embedding
 from common.enrichment.constants import DEFAULT_MEMORY_TYPE
 from common.provider_names import ProviderName
+from common.usage import scoped
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.constants import BULK_MAX_ITEMS, MEMORY_TYPES, MEMORY_TYPES_WRITE
@@ -1028,6 +1029,12 @@ async def _find_prior_ingest_by_doc_hash(
     )
 
 
+@scoped(
+    "ingest",
+    tenant=lambda a: a["request"].tenant_id,
+    agent=lambda a: a["request"].agent_id,
+    fleet=lambda a: a["request"].fleet_id,
+)
 async def ingest_preview(request: IngestRequest) -> dict:
     """Preview mode: extract facts from URL or text without writing anything.
 

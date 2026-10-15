@@ -33,6 +33,7 @@ from common.llm.constants import (
 )
 from common.llm.providers._unsupported import UnsupportedStructuredOutputError
 from common.provider_names import ProviderName
+from common.usage import record_model_call
 
 logger = logging.getLogger(__name__)
 
@@ -411,6 +412,32 @@ def deliberate_fake_provider(provider_name: str | None) -> bool:
     return provider_name == ProviderName.FAKE
 
 
+def _metered(
+    call_fn: Callable[..., Coroutine[Any, Any, T]], provider: Any
+) -> Callable[[], Coroutine[Any, Any, T]]:
+    """``call_fn(provider)`` for the retry loop, counting each attempt that fails.
+
+    A provider records its own billed responses (with their tokens); this
+    counts the attempts that raised, timeouts included, as failures with no
+    tokens. A response that was billed and then rejected by a shape check is
+    one billed call and one failure, never two calls.
+    """
+
+    async def attempt() -> T:
+        try:
+            return await call_fn(provider)
+        except (Exception, asyncio.CancelledError):
+            record_model_call(
+                kind="llm",
+                provider=str(getattr(provider, "provider_name", "") or ""),
+                model=str(getattr(provider, "model", "") or ""),
+                ok=False,
+            )
+            raise
+
+    return attempt
+
+
 async def call_with_fallback(
     primary_provider_name: str,
     call_fn: Callable[..., Coroutine[Any, Any, T]],
@@ -501,7 +528,7 @@ async def call_with_fallback(
         )
         if not getattr(provider, "is_fake", False):
             return await call_with_retry(
-                lambda: call_fn(provider),
+                _metered(call_fn, provider),
                 label=f"{label}-primary",
                 max_attempts=max_attempts,
                 timeout=timeout,
@@ -576,7 +603,7 @@ async def call_with_fallback(
                         fb_provider_name,
                     )
                     return await call_with_retry(
-                        lambda: call_fn(fb_provider),
+                        _metered(call_fn, fb_provider),
                         label=f"{label}-fallback-{fb_provider_name}",
                         max_attempts=max_attempts,
                         timeout=timeout,

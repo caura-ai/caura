@@ -10,6 +10,146 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.34.0](https://github.com/caura-ai/caura/compare/backend-v3.33.2...backend-v3.34.0) (2026-10-13)
+
+
+### Features
+
+* **storage:** split the entities the old nightly merge collapsed (H-05) ([#2078](https://github.com/caura-ai/caura/issues/2078)) ([6a7a2cb](https://github.com/caura-ai/caura/commit/6a7a2cbbaf12dbc040b29444c550f7def17a7ac0))
+
+
+### Dependencies
+
+* update cachetools requirement from &lt;8,&gt;=7.2.0 to &gt;=7.2.1,&lt;8 ([#2048](https://github.com/caura-ai/caura/issues/2048)) ([34b2acc](https://github.com/caura-ai/caura/commit/34b2acc0a2759f76411b70736402e04831e31ff3))
+* update pgvector requirement from &lt;1,&gt;=0.5.0 to &gt;=0.5.1,&lt;1 ([#2047](https://github.com/caura-ai/caura/issues/2047)) ([e4e1d6a](https://github.com/caura-ai/caura/commit/e4e1d6ab2f4edd7e806a7e73c9e1cd076479accb))
+
+## [3.33.2](https://github.com/caura-ai/caura/compare/backend-v3.33.1...backend-v3.33.2) (2026-10-13)
+
+
+### Dependencies
+
+* **actions:** bump the actions group across 1 directory with 5 updates ([#2049](https://github.com/caura-ai/caura/issues/2049)) ([69d76fe](https://github.com/caura-ai/caura/commit/69d76fe829a887bed688aa8431569e18d14e25d8))
+
+## [3.33.1](https://github.com/caura-ai/caura/compare/backend-v3.33.0...backend-v3.33.1) (2026-10-13)
+
+
+### Bug Fixes
+
+* **mcp:** enforce verified license and organization entitlement reasons ([#2073](https://github.com/caura-ai/caura/issues/2073)) ([27c116c](https://github.com/caura-ai/caura/commit/27c116c9ffe1aaeffb10b713842db826c676f32e))
+* **plugin:** a revoked agent stops instead of falling back to the tenant key (L-79) ([#2074](https://github.com/caura-ai/caura/issues/2074)) ([db7feca](https://github.com/caura-ai/caura/commit/db7feca4179d07beac0e49bfe47b4daf8f9ce71f))
+
+
+### Code Refactoring
+
+* enrichment events drop current_content_only (O20) ([#2066](https://github.com/caura-ai/caura/issues/2066)) ([6084cac](https://github.com/caura-ai/caura/commit/6084cacb0c935841f7f6848720fd7db71ee10e75))
+
+## [3.33.0](https://github.com/caura-ai/caura/compare/backend-v3.32.0...backend-v3.33.0) (2026-10-13)
+
+
+### Features
+
+* memory map, usage metering and value metering — GET /memories/field, /spend and /value ([#2071](https://github.com/caura-ai/caura/issues/2071)) ([da9fc57](https://github.com/caura-ai/caura/commit/da9fc57796a4588ffc428670f9159653d109f481))
+
+
+### Documentation
+
+* **skill:** three lessons from real agents — a miss isn't proof, don't save found-nothing, leave memory_type to the server ([#2068](https://github.com/caura-ai/caura/issues/2068)) ([f6e7578](https://github.com/caura-ai/caura/commit/f6e75788b458dfa9bbca7e5e3d23528e12861cec))
+
+## [3.32.0](https://github.com/caura-ai/caura/compare/backend-v3.31.0...backend-v3.32.0) (2026-10-13)
+
+
+### Features
+
+* **clients:** add stats() to the Python and TypeScript clients ([#2035](https://github.com/caura-ai/caura/issues/2035)) ([cce0602](https://github.com/caura-ai/caura/commit/cce0602022d3b4fa35f6b5913bb7db103d450da4))
+
+## [3.31.0](https://github.com/caura-ai/caura/compare/backend-v3.30.14...backend-v3.31.0) (2026-10-13)
+
+
+### Features
+
+* a backfill marks text-mined cross-links as extraction's (O13) ([#2064](https://github.com/caura-ai/caura/issues/2064)) ([606cbe1](https://github.com/caura-ai/caura/commit/606cbe17c16a68c345caf1ced9f9eda8e3d67695))
+
+## [3.30.14](https://github.com/caura-ai/caura/compare/backend-v3.30.13...backend-v3.30.14) (2026-10-12)
+
+
+### Bug Fixes
+
+* every enrichment run lands only on its text (O19) ([#2062](https://github.com/caura-ai/caura/issues/2062)) ([900fae8](https://github.com/caura-ai/caura/commit/900fae86426e38fda6e6fe6ec0d499c6cd820853))
+
+## [3.30.13](https://github.com/caura-ai/caura/compare/backend-v3.30.12...backend-v3.30.13) (2026-10-12)
+
+
+### Bug Fixes
+
+* an edit's deferred enrichment lands only on its text (O16) ([#2060](https://github.com/caura-ai/caura/issues/2060)) ([d094098](https://github.com/caura-ai/caura/commit/d094098cc913bcb61f1c15b35ddb49b769c16cc6))
+
+## [3.30.12](https://github.com/caura-ai/caura/compare/backend-v3.30.11...backend-v3.30.12) (2026-10-12)
+
+
+### Bug Fixes
+
+* the root SQLAlchemy cap follows the services to 2.1 (L-166) ([#2058](https://github.com/caura-ai/caura/issues/2058)) ([cd76a3a](https://github.com/caura-ai/caura/commit/cd76a3ae547bb57f1c067e62236656d700842e90))
+
+
+### Dependencies
+
+* bump the uv-minor-patch group across 4 directories with 9 updates ([#2050](https://github.com/caura-ai/caura/issues/2050)) ([64db83d](https://github.com/caura-ai/caura/commit/64db83d4d29755a060db2cdc05b9af41462ee509))
+
+## [3.30.11](https://github.com/caura-ai/caura/compare/backend-v3.30.10...backend-v3.30.11) (2026-10-12)
+
+
+### Bug Fixes
+
+* entity names are embedded only when they need a vector (L-181) ([#2055](https://github.com/caura-ai/caura/issues/2055)) ([7a152c7](https://github.com/caura-ai/caura/commit/7a152c7bd0698a214f75a627c8f130aa8baf269f))
+* the graph and the agent list are capped, and say so (L-176, L-186) ([#2056](https://github.com/caura-ai/caura/issues/2056)) ([3ca7ebb](https://github.com/caura-ai/caura/commit/3ca7ebb18859226dadfa1ddd01a9f6f30ff8d35d))
+
+
+### Dependencies
+
+* bump types-croniter from 6.2.4.20260711 to 6.2.4.20261006 in /core-api ([#2052](https://github.com/caura-ai/caura/issues/2052)) ([6aa7d5e](https://github.com/caura-ai/caura/commit/6aa7d5ef56097a240d9ec245d0b87c9c9eb88d51))
+* update sqlalchemy[asyncio] requirement from &lt;2.1,&gt;=2.0 to &gt;=2.0,&lt;2.2 in /core-api ([#2051](https://github.com/caura-ai/caura/issues/2051)) ([24ccd65](https://github.com/caura-ai/caura/commit/24ccd65cf17e1ec6a13f07c9d82170c7b67b78e3))
+
+## [3.30.10](https://github.com/caura-ai/caura/compare/backend-v3.30.9...backend-v3.30.10) (2026-10-12)
+
+
+### Bug Fixes
+
+* shipped code with no caller is gone (B38) ([#2042](https://github.com/caura-ai/caura/issues/2042)) ([ae79c13](https://github.com/caura-ai/caura/commit/ae79c137e03b4d94694dbb1b38ad9587ed3ee8d0))
+
+## [3.30.9](https://github.com/caura-ai/caura/compare/backend-v3.30.8...backend-v3.30.9) (2026-10-11)
+
+
+### Bug Fixes
+
+* Forge and the skills inbox keep their contracts (B32) ([#2039](https://github.com/caura-ai/caura/issues/2039)) ([90796fb](https://github.com/caura-ai/caura/commit/90796fb1d5b2459a0d4b35efa5f79b95408e8f98))
+
+## [3.30.8](https://github.com/caura-ai/caura/compare/backend-v3.30.7...backend-v3.30.8) (2026-10-11)
+
+
+### Bug Fixes
+
+* install and operator tooling keep their contracts (B34) ([#2037](https://github.com/caura-ai/caura/issues/2037)) ([31bd7a9](https://github.com/caura-ai/caura/commit/31bd7a92f279df1e8a698f72df41d69360a1df91))
+
+## [3.30.7](https://github.com/caura-ai/caura/compare/backend-v3.30.6...backend-v3.30.7) (2026-10-11)
+
+
+### Bug Fixes
+
+* a bulk item's null weight gets the column default (L-97) ([#2036](https://github.com/caura-ai/caura/issues/2036)) ([25bc89e](https://github.com/caura-ai/caura/commit/25bc89ee4712fb67ce108338612a174c2c9bcc47))
+* **client-python:** raise CauraAPIError for non-JSON 2xx bodies ([#2013](https://github.com/caura-ai/caura/issues/2013)) ([d6580f7](https://github.com/caura-ai/caura/commit/d6580f765a964a7b686d73b9abedc672301aad94))
+* **client-typescript:** raise CauraApiError for a non-JSON 2xx body ([#2014](https://github.com/caura-ai/caura/issues/2014)) ([9ba140d](https://github.com/caura-ai/caura/commit/9ba140ddeec4837f3636a3fe858ce107030e4b12))
+* **clients:** parse HTTP-date Retry-After values ([#2010](https://github.com/caura-ai/caura/issues/2010)) ([f575803](https://github.com/caura-ai/caura/commit/f575803feaeb3f08771e134bd2aa57bd5a8db842))
+* **events:** type pull_executor concretely in _hold_leases ([#1596](https://github.com/caura-ai/caura/issues/1596)) ([#1698](https://github.com/caura-ai/caura/issues/1698)) ([45dff80](https://github.com/caura-ai/caura/commit/45dff808bc39391d41277c29a20817ff7f08e47f))
+* **release:** keep the core-operations version in sync ([#1717](https://github.com/caura-ai/caura/issues/1717)) ([96a7907](https://github.com/caura-ai/caura/commit/96a790739c66f54efd9aa5e8194645a78fcfa9b1))
+* storage answers for the database it has (B28) ([#2033](https://github.com/caura-ai/caura/issues/2033)) ([67a0a57](https://github.com/caura-ai/caura/commit/67a0a579660dd69159a995257ac672f30ea527b0))
+
+## [3.30.6](https://github.com/caura-ai/caura/compare/backend-v3.30.5...backend-v3.30.6) (2026-10-11)
+
+
+### Bug Fixes
+
+* idempotency keys replay what they promise (B31) ([#2031](https://github.com/caura-ai/caura/issues/2031)) ([0d2a7a1](https://github.com/caura-ai/caura/commit/0d2a7a17e0506072796d82b4d91403bbf605b91f))
+
 ## [3.30.5](https://github.com/caura-ai/caura/compare/backend-v3.30.4...backend-v3.30.5) (2026-10-11)
 
 

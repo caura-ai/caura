@@ -43,7 +43,9 @@ class MemoryEnriched(BaseModel):
     tenant_id: str
     # Carried so the back-channel consumer doesn't need a storage GET
     # round trip just to dispatch contradiction detection. Same trade
-    # we made for ``MemoryEmbedRequest.content``.
+    # we made for ``MemoryEmbedRequest.content``. It is also the text the
+    # enrichment judged: core-api acts on the event only while the row still
+    # holds it (O19).
     content: str = Field(min_length=1)
     # Empty string when the enricher produced no useful hint —
     # back-channel consumers should short-circuit on falsy.

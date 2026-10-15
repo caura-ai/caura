@@ -17,13 +17,11 @@ stays settings-free — see ``.env``-loaded values too.
 from __future__ import annotations
 
 from common.llm._credentials import (
-    has_credentials,
     resolve_gemini_config,
     resolve_openai_compatible,
 )
 
 __all__ = [
-    "has_credentials",
     "resolve_gemini_config",
     "resolve_openai_compatible",
 ]

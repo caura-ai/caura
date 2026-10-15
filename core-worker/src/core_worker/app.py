@@ -40,7 +40,8 @@ from common.events.lifecycle_handlers import (
 )
 from common.llm import init_platform_providers
 from common.structlog_config import configure_logging
-from core_worker.clients.storage_client import close_storage_client, get_storage_client
+from common.usage import UsageAggregator, set_usage_sink
+from core_worker.clients.storage_client import close_storage_client, flush_usage, get_storage_client
 from core_worker.config import Settings
 from core_worker.consumer import configure as configure_consumer
 from core_worker.consumer import register_consumers
@@ -115,12 +116,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     await _event_bus.start()
 
+    # Usage metering (common.usage): per-minute totals of the embedding and
+    # enrichment calls this worker makes, flushed through its storage client.
+    # The handlers name their tenant (``@scoped`` in consumer.py).
+    usage = UsageAggregator(lambda batch: flush_usage(get_storage_client(), batch))
+    set_usage_sink(usage)
+    usage.start()
+
     yield
 
     logger.info("Shutting down core-worker")
     if _event_bus is not None:
         await _event_bus.stop()
         _event_bus = None
+    # After the bus, so work it settled is counted; before the client closes.
+    await usage.stop()
+    set_usage_sink(None)
     await close_storage_client()
 
 

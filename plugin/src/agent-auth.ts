@@ -14,6 +14,9 @@
  *   4. Stores the raw key and returns it
  *   5. On 401, transport evicts the key and retries that request once with
  *      the tenant key; a later agent request may provision a replacement
+ *   6. Unless the server names the agent revoked (``agent_key_revoked``, L-79):
+ *      then its requests are refused, not sent with the tenant key, until a
+ *      later provisioning attempt finds it turned back on
  */
 
 import { readFileSync, writeFileSync, existsSync, chmodSync } from "fs";
@@ -42,6 +45,16 @@ const PROVISION_RETRY_DELAY_MS = 60_000;
 // stops the repeat request and warning on every cold resolution. Resets on
 // restart, so a server that gains the route is picked up then.
 let provisioningUnavailable = false;
+
+// The managed platform's answer for a revoked agent: none of its keys is live
+// and at least one was revoked rather than rotated (L-79). The gateway sends it
+// on a request (401) and the mint route on provisioning (403). The tenant key
+// would still act as the agent, so its requests are refused instead, and the
+// server is asked again only after REVOKED_RECHECK_MS: an admin turns the agent
+// back on by issuing it a key in the dashboard.
+export const AGENT_KEY_REVOKED = "agent_key_revoked";
+const REVOKED_RECHECK_MS = 10 * 60_000;
+const revokedAgents = new Set<string>();
 
 // --- Secrets file I/O ---
 
@@ -92,6 +105,10 @@ async function provisionAgentKey(
       body: JSON.stringify({ agent_id: agentId }),
       signal: AbortSignal.timeout(10_000),
     });
+    if (res.status === 403 && (await isRevocation(res))) {
+      markAgentRevoked(agentId);
+      return null;
+    }
     if (res.status === 404) {
       provisioningUnavailable = true;
       console.info(
@@ -118,6 +135,30 @@ async function provisionAgentKey(
 
 // --- Public API ---
 
+/** True when ``res`` carries the server's ``agent_key_revoked`` code. */
+export async function isRevocation(res: Response): Promise<boolean> {
+  try {
+    const body = (await res.clone().json()) as { detail?: unknown } | null;
+    return body?.detail === AGENT_KEY_REVOKED;
+  } catch {
+    return false;
+  }
+}
+
+export function isAgentRevoked(agentId: string): boolean {
+  return revokedAgents.has(agentId);
+}
+
+/** Stop using a revoked agent until a later provisioning attempt succeeds. */
+export function markAgentRevoked(agentId: string): void {
+  revokedAgents.add(agentId);
+  provisioningRetryAfter.set(agentId, Date.now() + REVOKED_RECHECK_MS);
+  evictAgentKey(agentId);
+  console.warn(
+    `[caura] Agent '${agentId}' was revoked; its requests are refused until an admin issues it a key`,
+  );
+}
+
 /**
  * Resolve the API key for a specific agent.
  *
@@ -135,16 +176,20 @@ export async function resolveAgentKey(
     return null;
   }
 
-  // 1. In-memory cache
-  const cached = keyCache.get(agentId);
-  if (cached) return cached;
+  // A revoked agent's keys were evicted, and one found on disk later may be
+  // another process's: only provisioning (step 3) can turn it back on.
+  if (!revokedAgents.has(agentId)) {
+    // 1. In-memory cache
+    const cached = keyCache.get(agentId);
+    if (cached) return cached;
 
-  // 2. Secrets file
-  const secrets = readSecretsFile();
-  const entry = secrets.keys[agentId];
-  if (entry?.key) {
-    keyCache.set(agentId, entry.key);
-    return entry.key;
+    // 2. Secrets file
+    const secrets = readSecretsFile();
+    const entry = secrets.keys[agentId];
+    if (entry?.key) {
+      keyCache.set(agentId, entry.key);
+      return entry.key;
+    }
   }
 
   // 3. Coalesce cold requests for this agent and cool down failed attempts.
@@ -164,9 +209,11 @@ export async function resolveAgentKey(
 async function provisionAndCacheAgentKey(agentId: string): Promise<string | null> {
   const result = await provisionAgentKey(agentId);
   if (!result) {
-    provisioningRetryAfter.set(agentId, Date.now() + PROVISION_RETRY_DELAY_MS);
+    const delay = revokedAgents.has(agentId) ? REVOKED_RECHECK_MS : PROVISION_RETRY_DELAY_MS;
+    provisioningRetryAfter.set(agentId, Date.now() + delay);
     return null;
   }
+  revokedAgents.delete(agentId);
   provisioningRetryAfter.delete(agentId);
 
   // Re-read after the network await: another agent may have persisted a key

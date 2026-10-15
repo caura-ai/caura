@@ -139,7 +139,14 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # surface could undo one knob's tuning without discarding the others. About +55
 # counted by hand, not measured (tiktoken was not available where this was
 # written), so the next entry should measure the fixture. Ceiling 5510 -> 5570.
-CEILING_TOKENS = 5570
+#
+# 2026-10-11 (L-30): ``caura_evolve.idempotency_key``, so a retried report
+# replays the first answer instead of adjusting the weights again, as REST
+# ``POST /evolve/report`` now does with ``Idempotency-Key``. An MCP caller
+# cannot pass a key the schema does not list. About +47 counted by hand on top
+# of L-119's unmeasured +55; tiktoken was again not available, so the next
+# entry should measure the fixture. Ceiling 5570 -> 5620.
+CEILING_TOKENS = 5620
 
 
 def _count(path: Path) -> int:

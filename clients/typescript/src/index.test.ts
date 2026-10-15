@@ -270,6 +270,33 @@ test("getDocument maps 404 to NotFoundError", async () => {
   await assert.rejects(client.getDocument("missing-id", { collection: "interviews" }), NotFoundError);
 });
 
+test("stats hits /stats and parses deployment totals", async () => {
+  const client = makeClient((url, init) => {
+    assert.equal(new URL(url).pathname, "/api/v1/stats");
+    assert.equal(new URL(url).search, "");
+    assert.equal((init.headers as Record<string, string>)["X-API-Key"], "mc_test");
+    return jsonResponse(200, { tenant_count: 12, memory_count: 345, agent_count: 7 });
+  });
+
+  const stats = await client.stats();
+  assert.equal(stats.tenantCount, 12);
+  assert.equal(stats.memoryCount, 345);
+  assert.equal(stats.agentCount, 7);
+});
+
+test("stats defaults missing keys to zero", async () => {
+  const client = makeClient(() => jsonResponse(200, {}));
+  const stats = await client.stats();
+  assert.equal(stats.tenantCount, 0);
+  assert.equal(stats.memoryCount, 0);
+  assert.equal(stats.agentCount, 0);
+});
+
+test("stats raises on 503", async () => {
+  const client = makeClient(() => jsonResponse(503, { message: "degraded" }));
+  await assert.rejects(client.stats(), CauraApiError);
+});
+
 test("403 maps to AuthError and parses the error envelope", async () => {
   const client = makeClient(() =>
     jsonResponse(403, { error: { message: "cross-fleet", details: { x: 1 } } }),
@@ -314,6 +341,42 @@ test("429 without retry-after has null retryAfter", async () => {
     (err: unknown) => err instanceof RateLimitError && err.retryAfter === null,
   );
 });
+
+for (const dateFormat of ["imf", "rfc850", "asctime"]) {
+  test(`429 parses an HTTP-date retry-after (${dateFormat})`, async () => {
+    const deadline = new Date(Date.now() + 120000);
+    const imf = deadline.toUTCString();
+    const weekday = deadline.toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
+    const value =
+      dateFormat === "rfc850"
+        ? imf.replace(/^(\w+), (\d+) (\w+) (\d{2})(\d{2})/, `${weekday}, $2-$3-$5`)
+        : dateFormat === "asctime"
+          ? imf.replace(/^(\w+), (\d+) (\w+) (\d+) (\S+) GMT$/, "$1 $3 $2 $5 $4")
+          : imf;
+    const client = makeClient(() => new Response("{}", { status: 429, headers: { "retry-after": value } }));
+    await assert.rejects(
+      client.health(),
+      (err: unknown) =>
+        err instanceof RateLimitError &&
+        err.retryAfter !== null &&
+        err.retryAfter >= 115 &&
+        err.retryAfter <= 120,
+    );
+  });
+}
+
+for (const [value, expected] of [
+  ["Sun, 06 Nov 1994 08:49:37 GMT", 0],
+  ["not a date", null],
+] as const) {
+  test(`429 handles a past or invalid retry-after (${value})`, async () => {
+    const client = makeClient(() => new Response("{}", { status: 429, headers: { "retry-after": value } }));
+    await assert.rejects(
+      client.health(),
+      (err: unknown) => err instanceof RateLimitError && err.retryAfter === expected,
+    );
+  });
+}
 
 test("500 maps to CauraApiError", async () => {
   const client = makeClient(() => jsonResponse(500, { message: "boom" }));
@@ -397,9 +460,29 @@ test("transport mapping does not wrap serialization errors", async () => {
   await assert.rejects(client.write("hello", { metadata: circular }), TypeError);
 });
 
-test("transport mapping does not wrap invalid JSON", async () => {
-  const client = makeClient(() => new Response("not json"));
-  await assert.rejects(client.health(), SyntaxError);
+test("a 2xx response that is not JSON is a CauraApiError, not a bare SyntaxError", async () => {
+  const client = makeClient(() => new Response("<html>login</html>", { status: 200 }));
+  for (const call of [() => client.health(), () => client.write("x")]) {
+    await assert.rejects(call(), (error: unknown) => {
+      assert.ok(error instanceof CauraApiError);
+      assert.ok(error instanceof CauraError);
+      assert.ok(!(error instanceof TransportError));
+      assert.equal(error.statusCode, 200);
+      assert.equal(error.message, "[200] response was not valid JSON");
+      assert.ok(error.cause instanceof SyntaxError);
+      return true;
+    });
+  }
+});
+
+test("a non-JSON error body still maps by status", async () => {
+  const client = makeClient(() => new Response("<html>bad gateway</html>", { status: 502 }));
+  await assert.rejects(client.health(), (error: unknown) => {
+    assert.ok(error instanceof CauraApiError);
+    assert.equal(error.statusCode, 502);
+    assert.equal(error.message, "[502] request failed");
+    return true;
+  });
 });
 
 // L-66: the key never crosses the network in cleartext unless the caller opts in.
@@ -572,3 +655,31 @@ for (const method of ["search", "recall"] as const) {
     assert.equal("callerAgentId" in bodies[1], false);
   });
 }
+
+test("a session rides every call until changed", async () => {
+  const seen: (string | undefined)[] = [];
+  const client = makeClient(
+    (_url, init) => {
+      seen.push((init.headers as Record<string, string>)["X-Caura-Session-Id"]);
+      return jsonResponse(201, { id: "m1", content: "x" });
+    },
+    { agentId: "a1", sessionId: "run-1" },
+  );
+  await client.write("x");
+  client.setSession("run-2");
+  await client.write("x");
+  client.setSession(undefined);
+  await client.write("x");
+  assert.deepEqual(seen, ["run-1", "run-2", undefined]);
+});
+
+test("origin is sent as sdk-reported, with only what was given", async () => {
+  const client = makeClient(
+    (_url, init) => {
+      assert.deepEqual(JSON.parse(init.body as string).origin, { source: "sdk", tokens_in: 1200, turns: 4 });
+      return jsonResponse(201, { id: "m1", content: "x" });
+    },
+    { agentId: "a1" },
+  );
+  await client.write("x", { origin: { tokensIn: 1200, turns: 4 } });
+});

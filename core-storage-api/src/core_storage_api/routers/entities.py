@@ -404,7 +404,7 @@ async def get_full_graph(
     caller_fleet_ids: list[str] | None = Query(default=None),
     caller_fleet_bound: bool = False,
 ) -> dict:
-    entities, relations = await _svc.entity_get_full_graph(
+    entities, relations, truncated = await _svc.entity_get_full_graph(
         tenant_id,
         fleet_id,
         caller_agent_id=caller_agent_id,
@@ -414,6 +414,8 @@ async def get_full_graph(
     return {
         "entities": [orm_to_dict(e, ENTITY_FIELDS) for e in entities],
         "relations": [orm_to_dict(r, RELATION_FIELDS) for r in relations],
+        # L-176: the graph is capped; True when a cap cut it short.
+        "truncated": truncated,
     }
 
 
@@ -430,9 +432,8 @@ async def create_relation(request: Request) -> dict:
     except ValueError as e:
         # M-64. Without this the service's endpoint-ownership refusal would
         # surface as a 500 — indistinguishable from storage being broken, which
-        # is the same conflation ``entity_add`` and ``create_memory_entity_link``
-        # already resolved as 409. A caller naming an entity it does not own is
-        # a client error.
+        # is the same conflation ``entity_add`` already resolved as 409. A caller
+        # naming an entity it does not own is a client error.
         raise HTTPException(status_code=409, detail=str(e))
     except PermissionError as e:
         # M-84: an agent's relation reaching outside its fleet. Nothing else
@@ -444,29 +445,6 @@ async def create_relation(request: Request) -> dict:
 # ------------------------------------------------------------------
 # Memory-entity links
 # ------------------------------------------------------------------
-
-
-@router.post("/links")
-async def create_memory_entity_link(request: Request) -> dict:
-    body: dict = await request.json()
-    # Tenant guard, same shape as ``PATCH /entities/{entity_id}``: the body
-    # supplied only bare ``memory_id`` / ``entity_id`` / ``role``, so knowing two
-    # UUIDs was enough to create a graph edge across a tenant boundary (#1124).
-    # Removed from the body as well as read, because ``MemoryEntityLink`` has no
-    # ``tenant_id`` column — the join table is tenantless, which is the whole
-    # difficulty — and ``MemoryEntityLink(**data)`` would raise TypeError on it.
-    tenant_id = _require(body, "tenant_id")
-    del body["tenant_id"]
-    try:
-        link = await _svc.entity_add_entity_link(tenant_id, body)
-    except ValueError as e:
-        # H-05 follow-up: a caller-supplied memory_id/entity_id that does not
-        # exist, or a pair already linked, is a client error. It used to escape as
-        # an IntegrityError → 500, which core-api could not tell apart from
-        # storage being unreachable — so a bad id and an outage degraded
-        # identically. Same 409 mapping ``create_entity`` above already uses.
-        raise HTTPException(status_code=409, detail=str(e))
-    return orm_to_dict(link, MEMORY_ENTITY_LINK_FIELDS)
 
 
 @router.post("/links/bulk")

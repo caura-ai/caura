@@ -4,6 +4,40 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.25.1](https://github.com/caura-ai/caura/compare/plugin-v2.25.0...plugin-v2.25.1) (2026-10-13)
+
+
+### Bug Fixes
+
+* **mcp:** enforce verified license and organization entitlement reasons ([#2073](https://github.com/caura-ai/caura/issues/2073)) ([27c116c](https://github.com/caura-ai/caura/commit/27c116c9ffe1aaeffb10b713842db826c676f32e))
+* **plugin:** a revoked agent stops instead of falling back to the tenant key (L-79) ([#2074](https://github.com/caura-ai/caura/issues/2074)) ([db7feca](https://github.com/caura-ai/caura/commit/db7feca4179d07beac0e49bfe47b4daf8f9ce71f))
+
+## [2.25.0](https://github.com/caura-ai/caura/compare/plugin-v2.24.7...plugin-v2.25.0) (2026-10-13)
+
+
+### Features
+
+* memory map, usage metering and value metering — GET /memories/field, /spend and /value ([#2071](https://github.com/caura-ai/caura/issues/2071)) ([da9fc57](https://github.com/caura-ai/caura/commit/da9fc57796a4588ffc428670f9159653d109f481))
+
+
+### Documentation
+
+* **skill:** three lessons from real agents — a miss isn't proof, don't save found-nothing, leave memory_type to the server ([#2068](https://github.com/caura-ai/caura/issues/2068)) ([f6e7578](https://github.com/caura-ai/caura/commit/f6e75788b458dfa9bbca7e5e3d23528e12861cec))
+
+## [2.24.7](https://github.com/caura-ai/caura/compare/plugin-v2.24.6...plugin-v2.24.7) (2026-10-12)
+
+
+### Bug Fixes
+
+* shipped code with no caller is gone (B38) ([#2042](https://github.com/caura-ai/caura/issues/2042)) ([ae79c13](https://github.com/caura-ai/caura/commit/ae79c137e03b4d94694dbb1b38ad9587ed3ee8d0))
+
+## [2.24.6](https://github.com/caura-ai/caura/compare/plugin-v2.24.5...plugin-v2.24.6) (2026-10-11)
+
+
+### Bug Fixes
+
+* idempotency keys replay what they promise (B31) ([#2031](https://github.com/caura-ai/caura/issues/2031)) ([0d2a7a1](https://github.com/caura-ai/caura/commit/0d2a7a17e0506072796d82b4d91403bbf605b91f))
+
 ## [2.24.5](https://github.com/caura-ai/caura/compare/plugin-v2.24.4...plugin-v2.24.5) (2026-10-11)
 
 

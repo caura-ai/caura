@@ -10,19 +10,19 @@ import os
 import re
 import sys
 import urllib.parse
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
 
 from ._version import __version__
 from .exceptions import AuthError, CauraAPIError, NotFoundError, RateLimitError, TransportError
-from .models import Memory, RecallResult, SearchResult
+from .models import Memory, RecallResult, SearchResult, Stats
 
 DEFAULT_BASE_URL = "https://caura.ai"
 
-USER_AGENT = (
-    f"caura-client-python/{__version__} (python/{sys.version_info.major}.{sys.version_info.minor})"
-)
+USER_AGENT = f"caura-client-python/{__version__} (python/{sys.version_info.major}.{sys.version_info.minor})"
 """Sent on every request so a server can tell SDK families apart.
 
 It names the package, its version and the Python major.minor, nothing more;
@@ -88,6 +88,7 @@ class Caura:
         timeout: float = 30.0,
         transport: httpx.BaseTransport | None = None,
         allow_insecure_http: bool | None = None,
+        session_id: str | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("api_key is required")
@@ -106,6 +107,20 @@ class Caura:
             timeout=timeout,
             transport=transport,
         )
+        self.set_session(session_id)
+
+    def set_session(self, session_id: str | None) -> None:
+        """Put later calls in an agent session (``X-Caura-Session-Id``), or in none.
+
+        Caura's value report counts per session: a memory is reused once per
+        session that recalls it, and its origin is the work its session did
+        before writing it. Start a new one per conversation or task run.
+        """
+        self.session_id = session_id
+        if session_id:
+            self._http.headers["X-Caura-Session-Id"] = session_id
+        else:
+            self._http.headers.pop("X-Caura-Session-Id", None)
 
     # ------------------------------------------------------------------ ops
     def write(
@@ -116,9 +131,16 @@ class Caura:
         memory_type: str | None = None,
         fleet_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        origin: dict[str, int] | None = None,
         **extra: Any,
     ) -> Memory:
-        """Persist a memory. Returns the enriched ``Memory`` (POST /api/v1/memories)."""
+        """Persist a memory. Returns the enriched ``Memory`` (POST /api/v1/memories).
+
+        ``origin``: the work behind this memory, from your model provider's own
+        usage since the session's previous write — ``tokens_in``,
+        ``tokens_out``, ``turns``. Read it from the provider's responses; leave
+        it out rather than estimate.
+        """
         body: dict[str, Any] = {"tenant_id": self.tenant_id, "content": content}
         resolved_agent = agent_id or self.agent_id
         if resolved_agent:
@@ -129,6 +151,8 @@ class Caura:
             body["fleet_id"] = fleet_id
         if metadata is not None:
             body["metadata"] = metadata
+        if origin:
+            body["origin"] = {**{k: origin[k] for k in ("tokens_in", "tokens_out", "turns") if k in origin}, "source": "sdk"}
         body.update(extra)
         return Memory.from_dict(self._post("/api/v1/memories", body))
 
@@ -206,7 +230,23 @@ class Caura:
         """Liveness probe (GET /api/v1/health)."""
         response = self._request("GET", "/api/v1/health")
         self._raise_for_status(response)
-        return response.json()
+        return self._json(response)
+
+    def stats(self) -> Stats:
+        """Deployment-wide counters for the landing-page status bar (GET /api/v1/stats).
+
+        These counts span the whole deployment — they are **not** scoped to
+        ``self.tenant_id``. The endpoint is unauthenticated, but the API key
+        header is still sent for consistency with every other call this
+        client makes.
+
+        A bad ``base_url`` or an old deployment without this route answers
+        non-2xx, which ``_raise_for_status`` turns into a ``CauraAPIError``
+        rather than letting a bare ``.json()`` fail on an HTML body.
+        """
+        response = self._request("GET", "/api/v1/stats")
+        self._raise_for_status(response)
+        return Stats.from_dict(response.json())
 
     def get_document(
         self,
@@ -230,7 +270,7 @@ class Caura:
             params={"tenant_id": tenant_id or self.tenant_id, "collection": collection},
         )
         self._raise_for_status(response)
-        return response.json()
+        return self._json(response)
 
     def submit_interview(
         self,
@@ -272,7 +312,7 @@ class Caura:
             body["command_id"] = command_id
         response = self._request("POST", "/api/v1/interview/submit", json=body, timeout=timeout)
         self._raise_for_status(response)
-        result = response.json()
+        result = self._json(response)
         if isinstance(result, dict):
             result["http_status"] = response.status_code
         return result
@@ -281,7 +321,7 @@ class Caura:
     def _post(self, path: str, body: dict[str, Any]) -> Any:
         response = self._request("POST", path, json=body)
         self._raise_for_status(response)
-        return response.json()
+        return self._json(response)
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         try:
@@ -314,8 +354,16 @@ class Caura:
         if response.status_code == 429:
             try:
                 retry_after = float(response.headers["Retry-After"])
-            except (KeyError, ValueError):
+            except KeyError:
                 retry_after = None
+            except ValueError:
+                try:
+                    deadline = parsedate_to_datetime(response.headers["Retry-After"])
+                    # The obsolete asctime HTTP-date form has no explicit zone; it is still GMT.
+                    deadline = deadline.replace(tzinfo=timezone.utc) if deadline.tzinfo is None else deadline
+                    retry_after = max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
+                except (TypeError, ValueError, OverflowError):
+                    retry_after = None
             raise RateLimitError(
                 response.status_code,
                 message or "rate limit exceeded",
@@ -323,6 +371,15 @@ class Caura:
                 retry_after=retry_after,
             )
         raise CauraAPIError(response.status_code, message or "request failed", details=details)
+
+    @staticmethod
+    def _json(response: httpx.Response) -> Any:
+        # A 2xx with a non-JSON body (captive portal, misconfigured proxy) must
+        # surface as a CauraError, not a bare JSONDecodeError.
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise CauraAPIError(response.status_code, "response was not valid JSON") from exc
 
     # ------------------------------------------------------------- lifecycle
     def close(self) -> None:

@@ -119,6 +119,7 @@ from core_api.services.ingest_service import (
     ingest_commit,
     ingest_preview,
 )
+from core_api.services.memory_field import FIELD_DEFAULT_LIMIT, FIELD_MAX_LIMIT, get_memory_field
 from core_api.services.memory_service import (
     _memory_to_out,
     create_memories_bulk,
@@ -900,6 +901,57 @@ async def memory_count(
     return {"count": count}
 
 
+@router.get("/memories/field", responses={200: {"model": _oar.MemoryFieldResponse}})
+async def memory_field(
+    tenant_id: str = Query(..., min_length=1),
+    fleet_id: str | None = Query(default=None),
+    agent_id: str | None = Query(
+        default=None,
+        description=(
+            "Visibility identity for a tenant credential, as on `GET /memories`. "
+            "An agent credential always reads as itself."
+        ),
+    ),
+    limit: int = Query(
+        default=FIELD_DEFAULT_LIMIT,
+        ge=1,
+        le=FIELD_MAX_LIMIT,
+        description=f"Most recent memories to place, 1-{FIELD_MAX_LIMIT}.",
+    ),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """A 2D map layout of the caller's memories, computed from their embeddings.
+
+    Each point carries normalised ``x``/``y`` in ``[0, 1]``, its ``cluster``
+    (``-1`` when the memory has no embedding yet; those sit near the centre),
+    and the list fields a map needs. ``clusters`` carries an anchor, a size and
+    a short label per cluster; ``entities`` resolves the ``entity_ids`` on the
+    returned points. Superseded and archived memories are included (as on
+    ``GET /memories``); deleted ones are not. ``total`` is how many memories
+    the caller can see; ``points`` holds the newest ``limit`` of them.
+
+    Same tenant check, fleet-read gate and visibility scoping as
+    ``GET /memories``, so the map never places a memory the caller's list would
+    not show. Results are cached in-process for a few minutes and recomputed
+    when a memory is written, embedded, deleted or changes status. Declared
+    before ``/memories/{memory_id}`` so ``field`` is not parsed as an id.
+    """
+    auth.enforce_readable_tenant(tenant_id)
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
+    # Same identity resolution and fleet gate as ``list_memories``.
+    caller_agent_id = auth.effective_agent_id(agent_id)
+    await _gate_fleet_read(auth, tenant_id, caller_agent_id, fleet_id)
+    scope_body = {
+        "tenant_id": tenant_id,
+        "caller_agent_id": None if auth.is_person else caller_agent_id,
+        "include_scope_agent": auth.is_person,
+        "caller_tenant_id": auth.tenant_id,
+        "fleet_id": fleet_id,
+    }
+    return await get_memory_field(scope_body, limit=limit)
+
+
 def _require_person(auth: AuthContext, what: str) -> None:
     """Held memories and their review are a person's (g2.7, g2.9): 403 to anyone else."""
     if not auth.is_person:
@@ -1223,7 +1275,7 @@ async def get_memory(
         # Fleet/agent-scope authorization: a by-id read must honor the same
         # scope_agent + cross-fleet trust ladder the list/search paths enforce,
         # so a same-tenant agent credential can't read a peer's scoped row by id.
-        # 404 (not 403) mirrors ``enforce_memory_read`` — out-of-scope rows
+        # 404 (not 403), as on the list and search paths — out-of-scope rows
         # simply don't exist for the caller. ``authorize_memory_access`` no
         # longer issues a DB query (its agent lookup routes through the storage
         # client), so ``db`` is threaded through but unused here; the ``get_db``
@@ -1523,14 +1575,17 @@ async def write_memory(
     # tenant retry storm starves its own legitimate new writes.
     # ``idempotency_for`` handles transport-prefixing (``header:`` /
     # ``body:``) and length validation; each transport gets a disjoint
-    # cache namespace.
+    # cache namespace, and each writing agent its own (L-12).
     if idempotency_key:
-        _idem = await idempotency_for(request, body.tenant_id, idempotency_key, source="header")
+        _idem = await idempotency_for(
+            request, body.tenant_id, idempotency_key, agent_id=chosen_agent_id, source="header"
+        )
     else:
         _idem = await idempotency_for(
             request,
             body.tenant_id,
             idempotency_key_from_metadata(body.metadata),
+            agent_id=chosen_agent_id,
             source="body",
         )
     if _idem and (_replay := _idem.cached_replay):
@@ -1762,8 +1817,19 @@ async def write_memories_bulk(
     body.agent_id = chosen_agent_id
 
     # Idempotency replay short-circuits BEFORE the per-tenant slot — a
-    # cached retry must not consume a write-concurrency slot.
-    _idem = await idempotency_for(request, body.tenant_id, idempotency_key)
+    # cached retry must not consume a write-concurrency slot. The claim
+    # outlasts the bulk budget, which is armed only after the agent and fleet
+    # checks below: an expired claim let a same-key retry run the bulk a second
+    # time, metered twice, while the first was still in flight (L-07).
+    _idem = await idempotency_for(
+        request,
+        body.tenant_id,
+        idempotency_key,
+        agent_id=chosen_agent_id,
+        pending_ttl_seconds=(
+            app_settings.bulk_request_timeout_seconds + app_settings.idempotency_pending_ttl_seconds
+        ),
+    )
     if _idem and (_replay := _idem.cached_replay):
         _body, _status = _replay
         # Replays bypass the per-tenant slot and the bulk

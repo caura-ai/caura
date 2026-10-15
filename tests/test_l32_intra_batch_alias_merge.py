@@ -45,6 +45,7 @@ from tests.test_p1_entity_extraction_bulk import (
     _config,
     _entity,
     _graph,
+    _vectors,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
@@ -92,8 +93,9 @@ def _worker_patches(fn):
         ),
         patch("core_api.services.entity_extraction_worker.get_storage_client"),
         patch(
-            "core_api.services.entity_extraction_worker.get_embedding",
+            "core_api.services.entity_extraction_worker.get_embeddings_batch",
             new_callable=AsyncMock,
+            side_effect=_vectors,
         ),
         patch(
             "core_api.services.entity_extraction_worker.log_action",

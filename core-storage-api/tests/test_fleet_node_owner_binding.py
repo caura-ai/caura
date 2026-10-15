@@ -39,9 +39,10 @@ async def _heartbeat(client: AsyncClient, tenant: str, name: str, principal: str
 
 
 async def _row(client: AsyncClient, tenant: str, name: str) -> dict:
-    resp = await client.get(f"{PREFIX}/fleet/nodes/{name}", params={"tenant_id": tenant})
+    resp = await client.get(f"{PREFIX}/fleet/nodes", params={"tenant_id": tenant})
     assert resp.status_code == 200, resp.text
-    return resp.json()
+    (row,) = [node for node in resp.json() if node["node_name"] == name]
+    return row
 
 
 async def _command(client: AsyncClient, tenant: str, node_id: str) -> str:

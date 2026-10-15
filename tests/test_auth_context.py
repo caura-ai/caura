@@ -114,26 +114,26 @@ def test_enforce_readable_tenant_admin_bypass():
     ctx.enforce_readable_tenant("anything")  # no raise
 
 
-# ── enforce_write_scope ──────────────────────────────────────────────
+# ── the write gate's capability check (enforce_read_only) ────────────
 
 
-def test_enforce_write_scope_noop_when_scopes_unset():
+def test_write_gate_noop_when_scopes_unset():
     ctx = AuthContext(tenant_id="t1")
-    ctx.enforce_write_scope()  # no raise — legacy/full-scope path
+    ctx.enforce_read_only()  # no raise — legacy/full-scope path
 
 
-def test_enforce_write_scope_allows_when_write_in_scopes():
+def test_write_gate_allows_when_write_in_scopes():
     ctx = AuthContext(tenant_id="t1", scopes={"recall", "search", "write"})
-    ctx.enforce_write_scope()
+    ctx.enforce_read_only()
 
 
-def test_enforce_write_scope_blocks_read_only_scopes():
+def test_write_gate_blocks_read_only_scopes():
     ctx = AuthContext(
         tenant_id="t1",
         scopes={"recall", "search", "memories_read", "documents_read"},
     )
     with pytest.raises(HTTPException) as exc_info:
-        ctx.enforce_write_scope()
+        ctx.enforce_read_only()
     assert exc_info.value.status_code == 403
     assert "read-only" in exc_info.value.detail["message"].lower()
     assert exc_info.value.detail["code"] == errors.AUTH_READ_ONLY_KEY

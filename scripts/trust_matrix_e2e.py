@@ -20,10 +20,12 @@ Reads ``KEY`` and ``TENANT_ID`` from ``/tmp/e2e.env``::
 
 import argparse
 import json
+import sys
 import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 DEFAULT_ENV_FILE = Path("/tmp/e2e.env")
 DEFAULT_CORE_API = (
@@ -31,6 +33,10 @@ DEFAULT_CORE_API = (
 )
 
 RUN = uuid.uuid4().hex[:8]  # nonce so re-runs don't hit write-dedup
+
+# Where the matrix runs and as whom: ``main`` sets it from ``--url`` and the env
+# file before any request goes out.
+TARGET = SimpleNamespace(core=DEFAULT_CORE_API, key="", tenant="default")
 
 
 def load_env(path: Path):
@@ -51,7 +57,7 @@ def http(method, url, body=None):
     h = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
-        "X-API-Key": KEY,
+        "X-API-Key": TARGET.key,
     }
     data = json.dumps(body).encode() if body else None
     req = urllib.request.Request(url, data=data, headers=h, method=method)
@@ -68,21 +74,21 @@ def http(method, url, body=None):
 def seed(agent_id, fleet_id):
     """Seed one memory (auto-provisions the agent at trust 0). Returns its id."""
     body = {
-        "tenant_id": TENANT,
+        "tenant_id": TARGET.tenant,
         "content": f"seed memory for {agent_id} {RUN}",
         "agent_id": agent_id,
         "memory_type": "fact",
     }
     if fleet_id:
         body["fleet_id"] = fleet_id
-    _, b = http("POST", f"{CORE}/api/v1/memories", body)
+    _, b = http("POST", f"{TARGET.core}/api/v1/memories", body)
     return b.get("id")
 
 
 def set_trust(agent_id, level):
     s, b = http(
         "PATCH",
-        f"{CORE}/api/v1/agents/{agent_id}/trust?tenant_id={TENANT}",
+        f"{TARGET.core}/api/v1/agents/{agent_id}/trust?tenant_id={TARGET.tenant}",
         {"trust_level": level},
     )
     return s, b.get("trust_level"), b.get("fleet_id")
@@ -96,10 +102,10 @@ def mcp(agent_id, tool, args):
         "method": "tools/call",
         "params": {
             "name": tool,
-            "arguments": {"tenant_id": TENANT, "agent_id": agent_id, **args},
+            "arguments": {"tenant_id": TARGET.tenant, "agent_id": agent_id, **args},
         },
     }
-    _, resp = http("POST", f"{CORE}/mcp/", body)
+    _, resp = http("POST", f"{TARGET.core}/mcp/", body)
     if resp.get("error"):
         return "ERROR", str(resp["error"])[:120]
     result = resp.get("result", {})
@@ -209,7 +215,12 @@ def run_read_liveness(ids):
     return status == "OK"
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
+    """Run the matrix; 0 when every expectation held, 1 on any mismatch.
+
+    The verdict was only printed, so a run that found a broken trust gate
+    exited 0 and any wrapper or ``&&`` chain took it for a pass (L-62).
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--url",
@@ -222,22 +233,21 @@ if __name__ == "__main__":
         default=DEFAULT_ENV_FILE,
         help=f"Credentials environment file (default: {DEFAULT_ENV_FILE})",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    CORE = args.url.rstrip("/")
-    ENV = load_env(args.env_file)
-    KEY = ENV["KEY"]
-    TENANT = ENV.get("TENANT_ID", "default")
+    env = load_env(args.env_file)
+    TARGET.core = args.url.rstrip("/")
+    TARGET.key = env["KEY"]
+    TARGET.tenant = env.get("TENANT_ID", "default")
 
     ids = provision()
     ok1 = run_grid(ids)
     ok2 = run_fleetless()
     ok3 = run_read_liveness(ids)
-    print(
-        "\n"
-        + (
-            "ALL EXPECTATIONS MET"
-            if (ok1 and ok2 and ok3)
-            else "MISMATCHES FOUND (see !BAD)"
-        )
-    )
+    met = ok1 and ok2 and ok3
+    print("\n" + ("ALL EXPECTATIONS MET" if met else "MISMATCHES FOUND (see !BAD)"))
+    return 0 if met else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

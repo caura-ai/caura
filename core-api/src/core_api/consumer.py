@@ -40,6 +40,7 @@ from common.events.memory_embedded import MemoryEmbedded
 from common.events.memory_enriched import MemoryEnriched
 from common.events.org_settings_changed_event import OrgSettingsChangedEvent
 from common.events.topics import Topics
+from common.usage import scoped
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.contradiction import Trigger, run_contradiction_detection
 from core_api.services.governance_remediation import (
@@ -151,6 +152,11 @@ async def _fan_out_persisted_atomic_facts(sc, memory: dict, payload, outcome) ->
         )
 
 
+@scoped(
+    "contradiction",
+    tenant=lambda a: (a["event"].payload or {}).get("tenant_id"),
+    fleet=lambda a: (a["event"].payload or {}).get("fleet_id"),
+)
 async def handle_memory_enriched(event: Event) -> None:
     """Process one ``Topics.Memory.ENRICHED`` event.
 
@@ -202,6 +208,16 @@ async def handle_memory_enriched(event: Event) -> None:
                 "memory_id": str(payload.memory_id),
                 "tenant_id": payload.tenant_id,
             },
+        )
+        return
+    # O16, O19: an edit has replaced the text this run judged. Nothing here
+    # describes the new text: storage refused this run's PATCH if the edit
+    # landed first, and the edit cleared the PATCH's verdicts if it landed after.
+    # The edit's own run, when the tenant enriches, governs the new text.
+    if memory.get("content") != payload.content:
+        logger.info(
+            "memory-enriched: an edit replaced the text this run judged; ack-skipping",
+            extra={"memory_id": str(payload.memory_id), "tenant_id": payload.tenant_id},
         )
         return
 
@@ -296,6 +312,11 @@ async def handle_memory_enriched(event: Event) -> None:
     )
 
 
+@scoped(
+    "contradiction",
+    tenant=lambda a: (a["event"].payload or {}).get("tenant_id"),
+    fleet=lambda a: (a["event"].payload or {}).get("fleet_id"),
+)
 async def handle_memory_embedded(event: Event) -> None:
     """Process one ``Topics.Memory.EMBEDDED`` event.
 

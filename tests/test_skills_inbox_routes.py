@@ -28,11 +28,12 @@ import logging
 
 import pytest
 from fastapi import FastAPI, HTTPException
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, HTTPStatusError, Request, Response
 
 from core_api import errors
 from core_api.app import http_exception_handler as _http_exception_handler
 from core_api.auth import AuthContext, get_auth_context
+from core_api.clients import storage_client
 from core_api.routes import skills_inbox as si
 from core_api.services.forge.sentinel_scan import ScanFinding, ScanResult
 
@@ -135,12 +136,20 @@ class FakeStorage:
     TOCTOU-race tests) when non-empty, else from the ``docs`` map.
     ``upsert_document`` records the payload AND updates ``docs`` so
     post-upsert reloads observe the write.
+
+    It also holds a write to its ``expected_status`` as storage does (L-24):
+    the stored status must be one of them, ``None`` standing for no document,
+    or nothing is written and ``DocumentStatusChangedError`` is raised.
+    ``moved_to`` is the status a concurrent writer left behind, which the
+    handler's own loads did not see.
     """
 
     def __init__(self):
         self.docs: dict[str, dict] = {}
         self.doc_sequence: list[dict | None] = []
         self.upserts: list[dict] = []
+        self.expected_statuses: list[list | None] = []
+        self.moved_to: str | None = None
         self.query_rows: list[dict] = []
         self.queries: list[dict] = []
         self.get_reads: list[bool] = []
@@ -161,7 +170,17 @@ class FakeStorage:
             return self.doc_sequence.pop(0)
         return self.docs.get(doc_id)
 
-    async def upsert_document(self, payload: dict):
+    async def upsert_document(self, payload: dict, *, expected_status=None):
+        self.expected_statuses.append(
+            None if expected_status is None else list(expected_status)
+        )
+        if expected_status is not None:
+            stored = self.docs.get(payload["doc_id"])
+            status = self.moved_to or (stored and stored["data"].get("status"))
+            if status not in expected_status:
+                raise storage_client.DocumentStatusChangedError(
+                    f"{payload['doc_id']} is {status!r}"
+                )
         self.upserts.append(payload)
         self.docs[payload["doc_id"]] = {
             "doc_id": payload["doc_id"],
@@ -1219,7 +1238,7 @@ async def test_reject_without_a_fingerprint_failed_flip_reports_no_poison_row(
     was would send an operator looking for a row that doesn't exist."""
     storage.seed(agent_doc())
 
-    async def fail(payload):
+    async def fail(payload, **_):
         raise RuntimeError("storage down")
 
     monkeypatch.setattr(storage, "upsert_document", fail)
@@ -1444,12 +1463,12 @@ async def test_truncated_true_when_cap_cuts_the_page(storage, settings):
     assert body["truncated"] is True
 
 
-async def test_truncated_true_when_oversample_saturates(storage, settings):
-    """The oversample window (2x effective limit) filled — even the
-    fetched set may be missing the tail."""
+async def test_truncated_true_when_a_page_of_deferred_cards_has_more_behind_it(
+    storage, settings
+):
+    """A page is cut by the effective limit whatever its cards are: deferred
+    cards fill it like fresh ones, and more still follow (L-25)."""
     settings["skills_factory"]["inbox_max_pending"] = 2
-    # oversample = min(2*2, 400) = 4; return exactly 4 rows, but make
-    # them all deferred so the page itself isn't even full.
     storage.query_rows = [
         forge_doc(slug=f"s{i}", deferred_at="2026-07-19T00:00:00+00:00")
         for i in range(4)
@@ -1467,3 +1486,118 @@ async def test_truncated_false_on_partial_page(storage, settings):
     body = r.json()
     assert body["count"] == 1
     assert body["truncated"] is False
+
+
+# ---------------------------------------------------------------------------
+# B32: a write lands only over the status it was decided on (L-24), the list
+# pages (L-25), and an edit storage refuses says why and can be forced (L-26)
+# ---------------------------------------------------------------------------
+
+_BODIES = dict(_ACTIONS)
+
+
+@pytest.mark.parametrize("action", sorted(_BODIES))
+async def test_l24_every_inbox_write_names_the_status_it_replaces(
+    storage, settings, side_effects, action
+):
+    """Each action loads a staged skill, decides, and writes the whole
+    document back. The write has to say what it was decided on, or storage
+    replaces whatever a concurrent writer left there."""
+    storage.seed(forge_doc())
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/{action}", json=_BODIES[action])
+    assert r.status_code == 200, r.text
+    assert storage.expected_statuses == [["staged"]]
+
+
+@pytest.mark.parametrize("action", sorted(_BODIES))
+async def test_l24_a_write_whose_skill_moved_after_the_last_reload_answers_409(
+    storage, settings, side_effects, action
+):
+    """The reloads only see writers that landed before them. One that lands
+    after the last reload, here a concurrent approve, must not be overwritten."""
+    storage.seed(forge_doc())
+    storage.moved_to = "active"
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/{action}", json=_BODIES[action])
+    assert r.status_code == 409, r.text
+    assert "reload and retry" in r.json()["detail"]
+    assert storage.upserts == []
+
+
+async def test_l25_the_list_pages_from_the_offset(storage, settings):
+    """The list read a fixed window from offset 0, so a staged card past it
+    could not be listed at all (Eldad, 2026-10-11: one order, paged by
+    ``offset``). One row past the page says whether another follows."""
+    async with make_client() as client:
+        r = await client.get(f"{BASE}?limit=50&offset=100")
+    assert r.status_code == 200, r.text
+    query = storage.queries[0]
+    assert (query["offset"], query["limit"]) == (100, 51)
+
+
+async def test_l25_a_page_says_where_the_next_one_starts(storage, settings):
+    settings["skills_factory"]["inbox_max_pending"] = 2
+    storage.query_rows = [forge_doc(slug=f"s{i}") for i in range(3)]
+    async with make_client() as client:
+        r = await client.get(f"{BASE}?offset=4")
+    body = r.json()
+    assert body["count"] == 2
+    assert body["truncated"] is True
+    assert body["next_offset"] == 6
+
+
+async def test_l25_the_last_page_has_no_next_one(storage, settings):
+    settings["skills_factory"]["inbox_max_pending"] = 2
+    storage.query_rows = [forge_doc(slug=f"s{i}") for i in range(2)]
+    async with make_client() as client:
+        r = await client.get(f"{BASE}?offset=4")
+    body = r.json()
+    assert body["truncated"] is False
+    assert body["next_offset"] is None
+
+
+_SHRINK_REFUSAL = (
+    "refusing to shrink document 'skills/forge/summarize-oncall-handoff' from "
+    "30000 to 300 bytes (1.0% of the stored size). A truncated payload from a "
+    "failed read looks exactly like this. Retry with force=true if the shrink "
+    "is intended."
+)
+
+
+async def test_l26_an_edit_storage_refuses_as_a_shrink_says_why(
+    storage, settings, side_effects, monkeypatch
+):
+    """Storage's C34 guard answers 400. The inbox let it reach the generic
+    handler as an opaque 500; ``POST /documents`` passes it through."""
+    storage.seed(forge_doc())
+
+    async def refuse(payload, **_):
+        request = Request("POST", "http://storage/api/v1/storage/documents")
+        response = Response(400, json={"detail": _SHRINK_REFUSAL}, request=request)
+        raise HTTPStatusError("400", request=request, response=response)
+
+    monkeypatch.setattr(storage, "upsert_document", refuse)
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/edit", json={"content": "# stub"})
+    assert r.status_code == 400, r.text
+    assert "force=true" in r.text
+
+
+async def test_l26_an_edit_can_force_the_shrink(storage, settings, side_effects):
+    storage.seed(forge_doc())
+    async with make_client() as client:
+        r = await client.post(
+            f"{BASE}/{SLUG}/edit", json={"content": "# stub", "force": True}
+        )
+    assert r.status_code == 200, r.text
+    assert storage.upserts[-1]["force"] is True
+
+
+async def test_l26_an_edit_does_not_force_unless_asked(storage, settings, side_effects):
+    """The control: the guard still covers an ordinary edit."""
+    storage.seed(forge_doc())
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/edit", json={"content": "# stub"})
+    assert r.status_code == 200, r.text
+    assert storage.upserts[-1].get("force") is not True

@@ -151,7 +151,7 @@ class TestRelationWriteTenantScope:
 
         If "that entity is another tenant's" answered differently from "no such
         entity", the route would confirm the existence of any UUID a caller cared
-        to guess — the reason ``_LINK_REJECTED`` is one message for both, per
+        to guess — the reason ``_RELATION_REJECTED`` is one message for both, per
         GHSA-wgvw-28pq-jc36.
         """
         attacker, victim = _tenant(), _tenant()

@@ -8,10 +8,26 @@
  */
 
 import { CAURA_API_PREFIX, CAURA_API_URL, CAURA_API_KEY, assertKeyTransportAllowed } from "./env.js";
-import { resolveAgentKey, evictAgentKey } from "./agent-auth.js";
+import {
+  AGENT_KEY_REVOKED,
+  evictAgentKey,
+  isAgentRevoked,
+  isRevocation,
+  markAgentRevoked,
+  resolveAgentKey,
+} from "./agent-auth.js";
 import { withUserAgent } from "./user-agent.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+
+// Shaped like the other errors here, so a revoked agent counts as a refusal
+// (a 4xx), not as the backend being unreachable.
+function revokedAgentError(agentId: string): Error {
+  return new Error(
+    `Caura API 401: ${AGENT_KEY_REVOKED} (agent '${agentId}' was revoked; ` +
+      "an admin turns it back on by issuing it a key)",
+  );
+}
 
 export async function apiCall(
   method: string,
@@ -55,6 +71,8 @@ export async function apiCall(
   if (effectiveAgentId) {
     const agentKey = await resolveAgentKey(effectiveAgentId);
     if (agentKey) effectiveKey = agentKey;
+    // The tenant key would still act as a revoked agent (L-79).
+    else if (isAgentRevoked(effectiveAgentId)) throw revokedAgentError(effectiveAgentId);
   }
 
   const headers: Record<string, string> = withUserAgent();
@@ -92,8 +110,13 @@ export async function apiCall(
 
     // A rejected agent credential gets exactly one fallback attempt with the
     // tenant key. Retrying in this frame avoids re-deriving ``agent_id`` from
-    // the body/query and recursively provisioning the same rejected key.
+    // the body/query and recursively provisioning the same rejected key. A
+    // revoked agent gets none: the tenant key would still act as it (L-79).
     if (res.status === 401 && effectiveKey !== CAURA_API_KEY && effectiveAgentId) {
+      if (await isRevocation(res)) {
+        markAgentRevoked(effectiveAgentId);
+        throw revokedAgentError(effectiveAgentId);
+      }
       evictAgentKey(effectiveAgentId);
       console.warn(`[caura] Agent key rejected for '${effectiveAgentId}', retrying with tenant key`);
       const retryHeaders = { ...headers };

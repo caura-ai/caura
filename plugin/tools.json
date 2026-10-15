@@ -205,6 +205,7 @@
   {
     "description": "Report what happened after acting on memories. related_ids = the memory UUIDs that influenced the action (use IDs from your most recent caura_recall). scope: agent (default, trust \u2265 1)|fleet|all (trust \u2265 2; fleet_id required when scope='fleet'). Weight adjustments and rule generation are scoped \u2014 agents can only evolve memories they own (scope=agent), their fleet (scope=fleet), or any (scope=all).",
     "error_codes": [
+      "BAD_REQUEST",
       "CONFLICT",
       "DUPLICATE_MEMORY",
       "FLEET_SCOPE_FORBIDDEN",
@@ -259,6 +260,13 @@
         "default": null,
         "description": "Required when scope='fleet'.",
         "name": "fleet_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "A retry with the same key replays the first answer.",
+        "name": "idempotency_key",
         "required": false,
         "type": "str | None"
       }
@@ -594,6 +602,7 @@
       "MISSING_AGENT_ID",
       "NOT_FOUND",
       "PERMISSION_DENIED",
+      "PLAN_LIMIT_READ_ONLY",
       "REQUEST_BUDGET_EXCEEDED",
       "UNAUTHORIZED"
     ],
@@ -897,6 +906,7 @@
       "INVALID_ARGUMENTS",
       "MISSING_AGENT_ID",
       "NOT_FOUND",
+      "PLAN_LIMIT_READ_ONLY",
       "REQUEST_BUDGET_EXCEEDED",
       "UNAUTHORIZED"
     ],
