@@ -34,6 +34,11 @@ class Caura:
         self.ids = itertools.count(1)
         self.messages: dict[str, dict] = {}
         self.deliveries: list[dict] = []
+        # Seconds Caura's clock is ahead of this client's (negative: behind).
+        self.clock_skew = 0.0
+
+    def now(self):
+        return datetime.now(UTC) + timedelta(seconds=self.clock_skew)
 
     def _send(self, sender, to, body, kind, thread_id=None, correlation_id=None):
         message_id = f"msg_{next(self.ids)}"
@@ -69,11 +74,12 @@ class Caura:
 
     def _claim(self, row):
         row["state"] = "leased"
-        due = datetime.now(UTC) + timedelta(seconds=60)
+        now = self.now()
+        due = now + timedelta(seconds=60)
         return {
             "delivery_id": row["id"],
             "lease_token": "token",
-            "lease_expires_at": due.isoformat(),
+            "lease_expires_at": (now + timedelta(seconds=30)).isoformat(),
             "attempt": 1,
             "envelope": self.messages[row["message_id"]],
             "state": "leased",
@@ -129,7 +135,8 @@ class Caura:
             if action == "observe":
                 return httpx.Response(200, json={"delivery": self._claim(row) | {"state": row["state"]}})
             if action == "renew":
-                return httpx.Response(200, json={"lease_expires_at": "2030-01-01T00:00:00Z"})
+                expires = self.now() + timedelta(seconds=30)
+                return httpx.Response(200, json={"lease_expires_at": expires.isoformat()})
             return httpx.Response(404, json={"detail": path})
 
         return httpx.MockTransport(handle)
@@ -251,6 +258,21 @@ async def test_collect_is_clamped_to_the_remaining_consultation_time(network):
     await a("send", {"to": ["b"], "body": "q", "kind": "request", "idempotency_key": "k"})
     with pytest.raises(ToolError, match="consultation"):
         await a("send", {"to": ["b"], "body": "q2", "kind": "request", "idempotency_key": "k2"})
+
+
+@pytest.mark.parametrize("skew", [-700, 700])
+async def test_processing_deadline_is_measured_on_cauras_clock(network, skew):
+    caura, agent = network
+    # The client's wall clock is off by more than the whole processing window, as a
+    # Docker VM clock is after the host slept; Caura leaves 60 s on the delivery.
+    caura.clock_skew = skew
+    b = agent("b", max_requests=2, deadline_seconds=300)
+    caura._send("a", ["b"], "q", "request")
+    claimed = (await b("wait", {"timeout": 0}))["delivery"]
+    assert claimed["state"] == "leased"
+    receipt = await b("send", {"to": ["c"], "body": "q", "kind": "request", "idempotency_key": "k"})
+    result = await b("collect", {"message_id": receipt["message_id"], "timeout": 0})
+    assert 55 < result["consultation_seconds_left"] <= 60
 
 
 def test_budget_scopes_count_deadline_release_and_root_window():

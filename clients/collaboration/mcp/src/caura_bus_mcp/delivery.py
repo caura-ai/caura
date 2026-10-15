@@ -4,13 +4,18 @@ import asyncio
 import logging
 import secrets
 from contextlib import suppress
+from datetime import datetime, timedelta
+from time import monotonic
 
 import httpx
 from caura_bus_core.bus import PlatformError
 from caura_bus_core.consult import PresentedResponses
-from caura_bus_core.protocol import Claim
+from caura_bus_core.protocol import Claim, WaitRequest
 
 log = logging.getLogger(__name__)
+
+# wait sends no lease length, so Caura grants its request default.
+LEASE_SECONDS = WaitRequest.model_fields["lease_seconds"].default
 
 ALREADY_PRESENTED = (
     "This response was already shown in this session (collect or recent). Do not act on it "
@@ -28,6 +33,8 @@ class DeliverySession:
         self.bus = bus
         self.session_id = secrets.token_urlsafe(32)
         self.current: Claim | None = None
+        # Monotonic time Caura last reported the current claim's lease_expires_at.
+        self.lease_seen: float | None = None
         self.lock = asyncio.Lock()
         self.renewal: asyncio.Task | None = None
         self.reply_keys: set[tuple[str, str]] = set()
@@ -58,12 +65,18 @@ class DeliverySession:
 
     async def wait(self, timeout=50):
         async with self.lock:
-            # Notices held from a guard refresh must not wait behind a long poll.
-            result = await self.bus.wait_result(self.session_id, 0 if self.notices else timeout)
-            claim = await self._adopt(result)
+            deadline = monotonic() + timeout
+            while True:
+                # Notices held from a guard refresh must not wait behind a long poll.
+                remaining = 0 if self.notices else max(0.0, deadline - monotonic())
+                result = await self.bus.wait_result(self.session_id, remaining)
+                claim = await self._adopt(result)
+                self.notices.extend(result.get("notices", []))
+                if not await self._settle_presented(claim):
+                    break
             if claim and claim.resume_context:
                 self.surfaced.add(str(claim.resume_context.get("intervention_id")))
-            notices, self.notices = [*self.notices, *result.get("notices", [])], []
+            notices, self.notices = self.notices, []
             delivery = self.public(claim)
             if claim and claim.envelope.kind == "response":
                 delivery["correlation"] = self.correlation(claim.envelope.correlation_id)
@@ -77,6 +90,29 @@ class DeliverySession:
                     delivery["note"] = UNMATCHED_RESPONSE
             return {"delivery": delivery, "notices": notices}
 
+    async def _settle_presented(self, claim):
+        """ACK a claimed response this session already presented, so the inbox drains.
+
+        collect and recent(reply_to) read responses without a lease, and Caura only
+        accepts an ACK from the session holding one, so the queued delivery is settled
+        here, when wait claims it. Returns False to hand the claim to the model instead.
+        """
+        if not (
+            claim
+            and claim.state == "leased"
+            and claim.lease_token
+            and claim.envelope.kind == "response"
+            and claim.envelope.id in self.presented
+        ):
+            return False
+        try:
+            await self.bus.delivery_action(claim.delivery_id, "ack", claim.lease_token)
+        except (PlatformError, httpx.TransportError) as exc:
+            log.debug("Could not settle an already presented response: %s", exc)
+            return False
+        self.completed(claim.delivery_id)
+        return True
+
     def correlation(self, reply_to):
         """Which request a response answers, and whether this session sent that request."""
         return {
@@ -87,6 +123,7 @@ class DeliverySession:
 
     async def _adopt(self, result):
         claim = Claim.model_validate(result["delivery"]) if result["delivery"] else None
+        self._track_lease(claim)
         self.current = claim
         if claim:
             self.reply_deliveries[claim.envelope.id] = (
@@ -136,6 +173,7 @@ class DeliverySession:
                     return
             else:
                 claim = Claim.model_validate(result["delivery"])
+                self._track_lease(claim)
                 self.current = claim
         if claim.state == "paused":
             await self._observe_pause(claim)
@@ -190,6 +228,42 @@ class DeliverySession:
             return False
         return context.get("action") != "approve" or bool(str(context.get("instructions") or "").strip())
 
+    def _track_lease(self, claim):
+        # A re-read of an unchanged lease (observe, wait on the held claim) reports
+        # Caura's older grant time; only a new lease_expires_at restarts the count.
+        previous = self.current
+        if not (
+            previous
+            and claim
+            and previous.delivery_id == claim.delivery_id
+            and previous.lease_expires_at == claim.lease_expires_at
+        ):
+            self.lease_seen = monotonic()
+
+    def processing_seconds_left(self) -> float | None:
+        """Seconds left before the current claim's processing deadline, on Caura's clock.
+
+        Both timestamps come from Caura's database clock: lease_expires_at was its "now"
+        plus LEASE_SECONDS when it last granted or renewed the lease, so the deadline
+        minus that instant is what was left then; a monotonic clock measures time since.
+        The local wall clock is never read, so client clock skew cannot move the deadline.
+        """
+        claim = self.current
+        if (
+            not claim
+            or not claim.processing_deadline
+            or not claim.lease_expires_at
+            or self.lease_seen is None
+        ):
+            return None
+        try:
+            due = datetime.fromisoformat(claim.processing_deadline.replace("Z", "+00:00"))
+            expires = datetime.fromisoformat(claim.lease_expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        granted = expires - timedelta(seconds=LEASE_SECONDS)
+        return (due - granted).total_seconds() - (monotonic() - self.lease_seen)
+
     def token(self, delivery_id):
         if self.current and self.current.delivery_id == delivery_id:
             return self.current.lease_token
@@ -210,6 +284,7 @@ class DeliverySession:
                 try:
                     result = await self.bus.delivery_action(claim.delivery_id, "renew", claim.lease_token)
                     claim.lease_expires_at = result["lease_expires_at"]
+                    self.lease_seen = monotonic()
                 except PlatformError as exc:
                     log.debug("Lease renewal stopped or deferred after platform status %s", exc.status)
                     if exc.status == 409:

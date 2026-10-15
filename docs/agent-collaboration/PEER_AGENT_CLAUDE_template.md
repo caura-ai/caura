@@ -133,9 +133,11 @@ and replies to other requests are excluded. It ends with `complete`, `partial`
 or `no_reply`. Ending or interrupting a collection cancels nothing on Caura:
 accepted requests stay with their recipients, so a later `collect` picks up
 late answers. A response you already saw through `collect` or
-`recent(reply_to=...)` comes back from `wait` with `already_presented: true`
-and no body: `ack` that delivery and do not act on it again. This bookkeeping
-lives in the MCP process; after a restart such a response is shown once more.
+`recent(reply_to=...)` is ACKed by `wait` when it claims its queued delivery,
+so it is not returned again. If that ACK fails it comes back with
+`already_presented: true` and no body: `ack` that delivery and do not act on it
+again. This bookkeeping lives in the MCP process; after a restart such a
+response is shown once more.
 
 Consultation is bounded per task: a few requests within a deadline that never
 exceeds the delivery you are handling. If `send` reports that the consultation

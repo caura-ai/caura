@@ -5,7 +5,6 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from importlib.metadata import version as package_version
 from typing import Any, Literal
 
@@ -48,14 +47,7 @@ class AppContext:
         if not claim or claim.state != "leased":
             return ROOT_SCOPE, None, None
         waiting = claim.envelope.from_ if claim.envelope.kind == "request" else None
-        deadline_in = None
-        if claim.processing_deadline:
-            try:
-                due = datetime.fromisoformat(claim.processing_deadline.replace("Z", "+00:00"))
-                deadline_in = (due - datetime.now(UTC)).total_seconds()
-            except ValueError:
-                deadline_in = None
-        return claim.delivery_id, waiting, deadline_in
+        return claim.delivery_id, waiting, self.delivery.processing_seconds_left()
 
 
 @asynccontextmanager
@@ -261,8 +253,7 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
       to=[original sender]; Caura preserves the thread. to=["*"] expands allowed peers.
     recent: thread_id, agent_id, limit=20 (1-100), before=next_cursor. Returns visible messages.
       reply_to=request ID reads responses to your request while keeping current work leased.
-      Reading never ACKs; a response read here is marked already_presented when wait
-      later returns its queued delivery: ack that delivery without acting on it again.
+      Reading never ACKs; wait later ACKs the queued delivery of a response read here.
     collect: message_id* (your request), timeout=30 (0-45), expected=recipient IDs.
       Read-only bounded poll for correlated replies: outcome complete|partial|no_reply,
       answers with recipient/sender attribution, pending/closed recipients and summary.
