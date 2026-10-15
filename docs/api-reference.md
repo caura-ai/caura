@@ -134,7 +134,8 @@ routes expose generic software or identity-probe data, not tenant data.
 | Header | Effect |
 |---|---|
 | `X-Agent-ID` | Scopes the request to this agent |
-| `X-Org-Read-Only: true` | Plan-limit read-only mode — creates and other writes that grow the store return 403 `PLAN_LIMIT_READ_ONLY`. Deletes, memory status transitions, agent trust changes and `PUT /settings` stay allowed so an over-limit org can get back under its plan |
+| `X-Org-Read-Only: true` | Plan-limit read-only mode — creates and other writes that grow the store return 403 `PLAN_LIMIT_READ_ONLY`. Deletes, memory status transitions, agent trust changes and `PUT /settings` stay allowed, though deletes do not lower the month's operation count the mode compares |
+| `X-Org-Read-Only-Reason` | Why the org is read-only: `license` (an on-prem licence is missing or expired) or `organization` (the plan's monthly usage). Read only with `X-Org-Read-Only: true`, and changes only the 403's message |
 | `X-Tenant-ID` | Tenant identity when using the shared `CAURA_API_KEY` gate |
 | `X-User-ID` | The person behind a dashboard session or JWT; the gateway sends none for an API key. Recorded in the audit trail only (see **Audit attribution** below), and read only when `GATEWAY_SHARED_SECRET` is set |
 

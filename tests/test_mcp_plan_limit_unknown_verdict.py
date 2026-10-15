@@ -98,8 +98,8 @@ def test_a_real_over_plan_verdict_wins_over_unknown(caplog):
 def test_an_ungated_op_is_not_counted_as_blind(caplog, op):
     """Blindness only matters where the verdict would have been used.
 
-    Deletes and updates are never gated — they are the carve-out that lets a
-    tenant get back under their limit — so counting blind samples on them would
+    Deletes and updates are never gated — read-only mode stops the store
+    growing, and neither grows it — so counting blind samples on them would
     make an observation window look far more unmeasured than it is, and the
     delete path is a busy one.
     """

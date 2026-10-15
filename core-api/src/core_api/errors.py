@@ -196,3 +196,32 @@ def coded_detail(code: str, message: str, **details: object) -> dict:
     indistinguishable: it collapses into the status-derived code above.
     """
     return {"code": code, "message": message, "details": dict(details)}
+
+
+# Why an organization is read-only, as platform-auth names it in
+# ``X-Org-Read-Only-Reason``.
+READ_ONLY_REASONS = frozenset({"license", "organization"})
+
+
+def read_only_refusal(reason: str | None) -> tuple[str, dict[str, str]]:
+    """The message and details of a write refused for a read-only organization.
+
+    One text for REST and MCP, by the cause platform-auth names: ``license`` for
+    an on-prem licence that is missing or expired, otherwise the plan's monthly
+    usage (``organization``, or no reason from an older gateway). Deleting data
+    is not offered as the way back: read-only mode compares the month's
+    operation counters, which deletes do not lower (ENT2-095).
+    """
+    if reason == "license":
+        return (
+            "The organization license is unavailable or expired; writes are disabled.",
+            {"remediation": "Restore a valid license to resume writes.", "read_only_reason": "license"},
+        )
+    details = {"remediation": "Reads and deletes still work; deleting data does not lower the month's count."}
+    if reason == "organization":
+        details["read_only_reason"] = "organization"
+    return (
+        "Organization is in read-only mode: monthly operation usage exceeds plan limits. "
+        "Upgrade your plan, or retry after the next monthly quota reset at 00:00 UTC.",
+        details,
+    )

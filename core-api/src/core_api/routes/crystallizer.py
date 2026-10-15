@@ -80,9 +80,8 @@ async def trigger_crystallization(
     # happen later in a worker that holds no ``AuthContext``. Gating here would
     # gate the TRIGGER, not the writes.
     #
-    # And a run is a reduction path, which is the case ``enforce_usage_limits``
-    # explicitly carves out ("users in read-only mode must be able to delete
-    # data to get back under limits"): each cluster archives its members —
+    # And a run is a reduction path, the kind ``enforce_usage_limits`` leaves
+    # open by allowing deletes in read-only mode: each cluster archives its members —
     # ``batch_update_status`` to ``archived``, a status change, not a delete —
     # and emits fewer crystallized facts than the ``CRYSTALLIZER_MIN_CLUSTER_SIZE``
     # (3) rows it consumed. Blocking an over-quota org here would deny it the
