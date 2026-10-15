@@ -55,6 +55,7 @@ class AuthContext:
         agent_id: AgentIdentity | None = None,
         agent_id_verified: bool = False,
         is_read_only: bool = False,
+        read_only_reason: str | None = None,
         is_install_credential: bool = False,
         install_uuid: str | None = None,
         readable_tenant_ids: list[str] | None = None,
@@ -116,8 +117,11 @@ class AuthContext:
         self.agent_id_verified = agent_id_verified
         # Set by the enterprise gateway when the org has exceeded plan limits
         # after a subscription cancellation. Blocks creates/updates but allows
-        # deletes (so users can reduce usage) and reads.
+        # deletes and reads.
         self.is_read_only = is_read_only
+        # Why, when it is: ``license`` or ``organization`` (X-Org-Read-Only-Reason),
+        # else None. Only the refusal's wording depends on it.
+        self.read_only_reason = read_only_reason
         # True when the gateway authenticated the call with a caura-daemon
         # install credential (kind=install_credential; HMAC-derived
         # ``mci_v1_`` prefix on the wire — intentional carve-out from
@@ -236,19 +240,16 @@ class AuthContext:
     def enforce_usage_limits(self) -> None:
         """Raise 403 if the org is over its plan limits (read-only mode).
 
-        Use on create/update endpoints. Do NOT use on delete endpoints — users
-        in read-only mode must be able to delete data to get back under limits.
+        Use on create/update endpoints. Do NOT use on delete endpoints: deletes
+        stay allowed in read-only mode, though they do not lower the month's
+        operation counters it compares (ENT2-095).
         Demo mode (is_demo) is enforced separately via enforce_read_only().
         """
         if self.is_read_only:
+            message, details = errors.read_only_refusal(self.read_only_reason)
             raise HTTPException(
                 status_code=403,
-                detail=coded_detail(
-                    errors.AUTH_PLAN_LIMIT,
-                    "Organization is in read-only mode: usage exceeds plan limits. "
-                    "Upgrade your plan or delete data to restore write access.",
-                    remediation="Deletes stay permitted so you can get back under the limit.",
-                ),
+                detail=coded_detail(errors.AUTH_PLAN_LIMIT, message, **details),
             )
 
     def enforce_admin(self) -> None:
@@ -646,6 +647,10 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
     # exceeded plan limits after a subscription cancellation. In standalone
     # and OSS-direct paths the header is absent, so enforcement is a no-op.
     is_read_only = request.headers.get("x-org-read-only", "").lower() == "true"
+    # And why (ENT2-168): ``license`` when an on-prem licence is missing or
+    # expired, ``organization`` for the plan. Read only with the verdict itself.
+    _reason = request.headers.get("x-org-read-only-reason", "").lower()
+    read_only_reason = _reason if is_read_only and _reason in errors.READ_ONLY_REASONS else None
     # Multi-tenant read support: the gateway plumbs the set of tenants this
     # caller may read from. Absent header → single-tenant key (defaults to
     # [tenant_id] inside AuthContext). Present → AuthContext.readable_tenant_ids
@@ -707,6 +712,7 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
                     tenant_id=tenant_id,
                     agent_id=agent_id,
                     is_read_only=is_read_only,
+                    read_only_reason=read_only_reason,
                 )
             set_current_tenant(None)
             return AuthContext(tenant_id=None, agent_id=agent_id)
@@ -818,6 +824,7 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
             # on this branch alone).
             agent_id_verified=True,
             is_read_only=is_read_only,
+            read_only_reason=read_only_reason,
             is_install_credential=is_install_credential,
             install_uuid=install_uuid,
             readable_tenant_ids=readable_tenants or None,

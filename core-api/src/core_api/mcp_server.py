@@ -62,6 +62,7 @@ from core_api.errors import (
     EMBEDDING_NOT_CONFIGURED_MESSAGE,
     REQUEST_BUDGET_EXCEEDED,
     code_for_status,
+    read_only_refusal,
 )
 from core_api.heartbeat.clients import record_mcp as _record_mcp_client
 from core_api.middleware.idempotency import (
@@ -748,12 +749,8 @@ def _check_plan_limit(op: MutatingOp, tenant_id: str) -> str | None:
     )
     if not enforcing:
         return None
-    return _error_response(
-        AUTH_PLAN_LIMIT,
-        "Organization is in read-only mode: usage exceeds plan limits. "
-        "Upgrade your plan or delete data to restore write access.",
-        remediation="Deletes stay permitted so you can get back under the limit.",
-    )
+    message, details = read_only_refusal(_org_read_only_reason_var.get())
+    return _error_response(AUTH_PLAN_LIMIT, message, **details)
 
 
 def _is_write_allowed() -> bool:
@@ -919,14 +916,8 @@ def _check_write_scope() -> CallToolResult | None:
     explicitly-set scope set without 'write' triggers the block.
     """
     if _org_read_only_reason_var.get() == "license":
-        return _as_error_result(
-            _error_response(
-                AUTH_PLAN_LIMIT,
-                "The organization license is unavailable or expired; writes are disabled.",
-                remediation="Restore a valid license to resume writes.",
-                read_only_reason="license",
-            )
-        )
+        message, details = read_only_refusal("license")
+        return _as_error_result(_error_response(AUTH_PLAN_LIMIT, message, **details))
     if _is_write_allowed():
         return None
     return _READ_ONLY_ERROR

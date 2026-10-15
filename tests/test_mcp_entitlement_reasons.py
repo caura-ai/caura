@@ -32,6 +32,24 @@ async def test_registered_mcp_call_preserves_entitlement_error_envelope(
     assert parse_envelope(result)["error"]["code"] == "PLAN_LIMIT_READ_ONLY"
 
 
+@pytest.mark.parametrize("reason", ["organization", None])
+async def test_a_plan_limit_refusal_never_offers_deleting_data(
+    mcp_env, monkeypatch, reason
+):
+    """ENT2-095: read-only mode compares the month's operation counters, which
+    deleting data does not lower, so the refusal does not offer it."""
+    monkeypatch.setattr(settings, "enforce_mcp_plan_limits", True)
+    mcp_server._org_read_only_var.set(True)
+    mcp_server._org_read_only_reason_var.set(reason)
+    result = await mcp_server.mcp.call_tool(
+        "caura_write", {"content": "new memory", "agent_id": "synthetic-agent"}
+    )
+    error = parse_envelope(result)["error"]
+    assert error["code"] == "PLAN_LIMIT_READ_ONLY"
+    assert "delete data" not in error["message"]
+    assert "monthly" in error["message"]
+
+
 @pytest.fixture(autouse=True)
 def _entitlement_context(monkeypatch):
     defaults = [

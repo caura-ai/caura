@@ -82,9 +82,8 @@ OperationType = Literal["write", "search", "recall", "insights", "evolve"]
 # both surfaces.
 #
 # The principle is GROWTH, not direction. Read-only mode exists to stop an
-# over-plan org adding to the store; ``AuthContext.enforce_usage_limits`` spells
-# out the corollary — "users in read-only mode must be able to delete data to
-# get back under limits". A status transition writes one column on a row that
+# over-plan org adding to the store, so ``AuthContext.enforce_usage_limits``
+# leaves deletes allowed. A status transition writes one column on a row that
 # already exists. It adds nothing, in EITHER direction: ``active -> archived``
 # and ``archived -> active`` leave the store exactly the same size, so neither
 # is the thing read-only mode is defending against.

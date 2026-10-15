@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.34.1](https://github.com/caura-ai/caura/compare/backend-v3.34.0...backend-v3.34.1) (2026-10-15)
+
+
+### Bug Fixes
+
+* **storage:** cap scored-search with a statement_timeout ([#2081](https://github.com/caura-ai/caura/issues/2081)) ([a220a7b](https://github.com/caura-ai/caura/commit/a220a7bdf64b248d04ed955ef1929717be3ef00c))
+
 ## [3.34.0](https://github.com/caura-ai/caura/compare/backend-v3.33.2...backend-v3.34.0) (2026-10-13)
 
 

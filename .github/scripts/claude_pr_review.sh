@@ -177,6 +177,15 @@ cleanup() {
   rm -rf -- "$OUTPUT_DIR"
 }
 trap cleanup EXIT
+# A host process's own log (the transport's, the sandbox launch's) holds no model
+# data, only its error. Shown once the guard finds none of the job's secrets in it,
+# as plain lines that cannot be read as workflow commands; holding one, it is
+# withheld whole.
+show_host_log() {
+  if python3 "$SCRIPT_DIR/claude_review_output.py" "$1" 2>/dev/null; then
+    tail -n 20 "$1" | tr -d '\000-\010\013-\037' | sed -e 's/::/: :/g' -e 's/^/  /' >&2
+  fi
+}
 # The native runtime needs /proc, so keep its provider key in a separate host
 # process. Only a short-lived token for this loopback proxy enters the sandbox.
 REVIEW_PROXY_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
@@ -191,12 +200,22 @@ for _ in {1..50}; do
   sleep 0.1
 done
 if [ ! -s "$OUTPUT_DIR/proxy-port" ]; then
+  show_host_log "$OUTPUT_DIR/proxy-log"
   echo "::error::Reviewer transport failed to start" >&2
   post "⚠️ Claude Code review failed: transport unavailable."
   exit 1
 fi
 REVIEW_PROXY_URL="http://127.0.0.1:$(cat "$OUTPUT_DIR/proxy-port")"
 export REVIEW_PROXY_URL
+# Launch the sandbox once before the review. One that cannot start (bwrap,
+# AppArmor, user namespaces) would otherwise fail the run with its error held
+# among the CLI's withheld output.
+if ! bash "$SCRIPT_DIR/claude_review_sandbox.sh" --version >"$OUTPUT_DIR/launch-log" 2>&1; then
+  show_host_log "$OUTPUT_DIR/launch-log"
+  echo "::error::Reviewer sandbox could not start" >&2
+  post "⚠️ Claude Code review failed: the isolated reviewer sandbox failed to launch at review time, so no review was produced. This is not a problem with this PR; the job log has the launch error."
+  exit 1
+fi
 CLAUDE_EXIT=0
 printf '%s' "$DIFF" | bash "$SCRIPT_DIR/claude_review_sandbox.sh" \
   --print --model "$MODEL" --output-format json \
@@ -221,8 +240,21 @@ number_field() {
   printf '%s' "$RESULT" | jq -r "$1 | select(type == \"number\" and . >= 0)" 2>/dev/null || true
 }
 COST=$(number_field '.total_cost_usd')
+# What the job log may say about a failed run: the CLI's own fields, which the
+# model does not write, and the sizes of what it printed. Enough to tell a rotated
+# key (401), an outage (5xx), a turn limit or an empty run apart, with none of the
+# response's text.
+cli_fields() {
+  local subtype is_error status
+  subtype=$(printf '%s' "$RESULT" | jq -r '.subtype | select(type == "string" and test("\\A[a-z_]{1,64}\\z"))' 2>/dev/null || true)
+  is_error=$(printf '%s' "$RESULT" | jq -r '.is_error | select(type == "boolean")' 2>/dev/null || true)
+  status=$(printf '%s' "$RESULT" | jq -r '.api_error_status | select(type == "number" and floor == . and . >= 100 and . <= 599)' 2>/dev/null || true)
+  printf 'exit=%s subtype=%s is_error=%s api_status=%s stdout_bytes=%s stderr_bytes=%s' \
+    "$CLAUDE_EXIT" "${subtype:-none}" "${is_error:-none}" "${status:-none}" \
+    "$(wc -c <"$OUTPUT_DIR/result" | tr -d ' ')" "$(wc -c <"$OUTPUT_DIR/stderr" | tr -d ' ')"
+}
 if [ "$CLAUDE_EXIT" -ne 0 ]; then
-  echo "::error::Reviewer sandbox or CLI exited ${CLAUDE_EXIT}; raw output withheld" >&2
+  echo "::error::Reviewer sandbox or CLI exited ${CLAUDE_EXIT}; raw output withheld ($(cli_fields))" >&2
   if printf '%s' "$RESULT" | jq -e '.subtype == "error_max_budget_usd"' >/dev/null 2>&1; then
     post "⚠️ Claude Code review reached the \$${MAX_BUDGET_USD} spend ceiling after \$${COST:-unknown} without finishing. Split the PR, or raise \`MAX_BUDGET_USD\` on the workflow step."
     exit 1
@@ -231,8 +263,17 @@ if [ "$CLAUDE_EXIT" -ne 0 ]; then
   exit 1
 fi
 
+# An error the CLI reports with a zero exit: --bare with a missing or rotated key
+# exits 0 with {"is_error": true, "result": "Invalid API key ..."}, and that result
+# would otherwise be posted as the review.
+if printf '%s' "$RESULT" | jq -e '.is_error == true' >/dev/null 2>&1; then
+  echo "::error::Reviewer reported an error with a zero exit; raw output withheld ($(cli_fields))" >&2
+  post "⚠️ Claude Code review failed: the CLI reported an error while exiting successfully. Raw output was withheld."
+  exit 1
+fi
+
 REVIEW=$(printf '%s' "$RESULT" | jq -er '.result | select(type == "string")' 2>/dev/null) || {
-  echo "::error::Reviewer returned an invalid result; raw output withheld" >&2
+  echo "::error::Reviewer returned an invalid result; raw output withheld ($(cli_fields))" >&2
   post "⚠️ Claude Code review failed: response was not a valid JSON review."
   exit 1
 }
@@ -240,6 +281,7 @@ REVIEW=$(printf '%s' "$RESULT" | jq -er '.result | select(type == "string")' 2>/
 # Bail before logging any cost, so an empty .result can't leave a cost table in
 # the job summary next to a "review failed" comment.
 if [ -z "$REVIEW" ]; then
+  echo "::error::Reviewer returned an empty review ($(cli_fields))" >&2
   post "⚠️ Claude Code review failed: empty result."
   exit 1
 fi
