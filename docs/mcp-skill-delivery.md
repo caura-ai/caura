@@ -237,5 +237,5 @@ read like a trigger ("Use when deploying to eu-west…"), not a label
 - `core-api/src/core_api/mcp_server.py` — `caura_doc` handler (the pull filter)
 - `core-api/src/core_api/routes/documents.py` — `POST /skills/installable` (the push filter)
 - `plugin/src/reconcile-skills.ts` — the OpenClaw reconciler that consumes it
-- `core-api/src/core_api/repositories/document_repository.py` — `search(status=…)` mechanism
+- `core-storage-api/src/core_storage_api/routers/documents.py` — `search(status=…)` mechanism
 - `docs/operator-forge-cron.md` — how skills reach `active` autonomously
