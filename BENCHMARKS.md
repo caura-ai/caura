@@ -90,13 +90,13 @@ so you can reproduce the methodology against your own Caura instance:
 6. **Latency** — measure p50/p95 of `POST /api/v1/search` under your expected
    concurrency against a warm cache.
 
-> The benchmark runners live in the pinned public
-> [LoCoMo](https://github.com/caura-ai/yanki-locomo/tree/254737614b228ecc4a272e4f17dbb9197c5fb146)
-> and
+> The benchmark runners live in the pinned
 > [LongMemEval](https://github.com/caura-ai/caura-longmemeval/tree/3b1e293aacc652694822ab4062c15fef73536335)
-> harnesses. Use the exact commits and configurations recorded in the evidence
-> registry; operator-scale guidance and caveats live in
-> [`docs/performance.md`](docs/performance.md).
+> harness, which is public, and the pinned
+> [LoCoMo](https://github.com/caura-ai/yanki-locomo/tree/254737614b228ecc4a272e4f17dbb9197c5fb146)
+> harness, whose repository is not public yet. Use the exact commits and
+> configurations recorded in the evidence registry; operator-scale guidance and
+> caveats live in [`docs/performance.md`](docs/performance.md).
 
 ### Reranking, specifically
 
