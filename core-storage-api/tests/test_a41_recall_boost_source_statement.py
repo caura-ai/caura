@@ -41,6 +41,8 @@ async def _capture_scored_search(monkeypatch: pytest.MonkeyPatch, **extra_sp) ->
 
     class _Session:
         async def execute(self, stmt, *args, **kwargs):
+            if "set_config" in str(stmt):
+                return None  # the search's statement_timeout comes first
             captured.append(stmt)
             raise _Stop
 
@@ -126,6 +128,8 @@ async def test_boost_disabled_beats_the_source_knob(monkeypatch) -> None:
 
     class _Session:
         async def execute(self, stmt, *args, **kwargs):
+            if "set_config" in str(stmt):
+                return None  # the search's statement_timeout comes first
             captured.append(stmt)
             raise _Stop
 

@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
+from sqlalchemy.exc import DBAPIError
 
 from common.constants import (
     CONTRADICTION_CANDIDATE_WINDOW,
@@ -274,6 +275,17 @@ async def scored_search(request: Request) -> list[dict]:
             row["pool_arms"] = str(_arms) if _arms is not None else None
             row["entity_links"] = r.entity_links or []
             out.append(row)
+    except DBAPIError as exc:
+        success = False
+        # 57014 is query_canceled: the search's statement_timeout fired (see
+        # Settings.scored_search_statement_timeout_ms). Answer 504 rather than
+        # an unhandled 500, so it reads as a timeout and not a crash. core-api
+        # maps either to its retryable 503.
+        if getattr(exc.orig, "sqlstate", None) == "57014":
+            raise HTTPException(
+                status_code=504, detail="scored search exceeded its statement timeout"
+            ) from exc
+        raise
     except Exception:
         success = False
         raise

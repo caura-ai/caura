@@ -233,10 +233,12 @@ async def test_ann_arm_is_hnsw_servable(tenant_id, monkeypatch) -> None:
 
     class _Session:
         async def execute(self, stmt, *args, **kwargs):
+            # Let the search's set_config calls (statement_timeout, the HNSW
+            # GUCs) through; stop at the first real query.
+            if "set_config" in str(stmt):
+                return None
             captured.append(stmt)
-            if len(captured) >= 3:
-                raise _Stop
-            return None
+            raise _Stop
 
     @contextlib.asynccontextmanager
     async def _fake_session():

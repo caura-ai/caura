@@ -2,7 +2,8 @@
 
 Same capture-and-compile technique as ``test_fts_score_single_render``: the
 statement is intercepted on its way to ``session.execute`` and compiled, so
-these are pure unit tests. Three shapes matter:
+these are pure unit tests. Every search first sets its ``statement_timeout``
+with one ``set_config`` execute; after that, three shapes matter:
 
 * knob 0 (default): the statement must be byte-free of pool machinery —
   the two-stage path ships dark, and "off means unchanged" is the whole
@@ -40,12 +41,13 @@ async def _capture(
     """Run memory_scored_search against a capturing session; return compiled SQL list.
 
     ``expected_executes`` is how many session.execute calls to allow before
-    stopping — 3 in ann-mode (two set_config + the statement), 1 otherwise.
-    Tests that expect ann-mode to DECLINE (probe fallback) pass 1 explicitly.
+    stopping — 4 in ann-mode (statement_timeout, two HNSW set_config, the
+    statement), 2 otherwise (statement_timeout, the statement). Tests that
+    expect ann-mode to DECLINE (probe fallback) pass 2 explicitly.
     """
     captured: list = []
     stop_after = (
-        expected_executes if expected_executes is not None else (3 if extra_sp.get("ann_pool_size") else 1)
+        expected_executes if expected_executes is not None else (4 if extra_sp.get("ann_pool_size") else 2)
     )
 
     class _Stop(Exception):
@@ -79,7 +81,14 @@ async def _capture(
             memory_boost_factor=dict.fromkeys(boosted or (), 1.2),
         )
     assert captured, "no statement reached session.execute"
-    return [str(s.compile(dialect=postgresql.dialect())) for s in captured]
+    return [_compile(s) for s in captured]
+
+
+def _compile(stmt) -> str:
+    # set_config's arguments are bind parameters; render them inline so a test
+    # can see which GUC each call sets.
+    literal = "set_config" in str(stmt)
+    return str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": literal}))
 
 
 @pytest.fixture(autouse=True)
@@ -98,8 +107,9 @@ def _probe_ok(monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def test_default_statement_has_no_pool_machinery(monkeypatch) -> None:
     sqls = await _capture(monkeypatch, query="connection pool sizing")
-    assert len(sqls) == 1, "default path must not issue GUC set_config calls"
-    sql = sqls[0]
+    assert len(sqls) == 2, "default path must issue no GUC set_config beyond statement_timeout"
+    assert "'statement_timeout'" in sqls[0]
+    sql = sqls[1]
     assert "candidate_pool" not in sql
     assert "set_config" not in sql
     assert "string_agg" not in sql, "arm provenance must not leak into the default path"
@@ -113,9 +123,12 @@ async def test_default_statement_has_no_pool_machinery(monkeypatch) -> None:
 async def test_ann_mode_pins_gucs_then_issues_one_pooled_statement(monkeypatch) -> None:
     _probe_ok(monkeypatch)
     sqls = await _capture(monkeypatch, query="connection pool sizing", ann_pool_size=200)
-    assert len(sqls) == 3, "expected set_config(ef_search), set_config(iterative_scan), statement"
-    assert "set_config" in sqls[0] and "set_config" in sqls[1]
-    assert "candidate_pool" in sqls[2]
+    assert len(sqls) == 4, (
+        "expected set_config(statement_timeout), set_config(ef_search), set_config(iterative_scan), statement"
+    )
+    assert "'statement_timeout'" in sqls[0]
+    assert "'hnsw.ef_search'" in sqls[1] and "'hnsw.iterative_scan'" in sqls[2]
+    assert "candidate_pool" in sqls[3]
 
 
 async def test_ann_mode_builds_one_arm_per_admission_signal(monkeypatch) -> None:
@@ -183,7 +196,7 @@ async def test_date_range_adds_a_date_arm(monkeypatch) -> None:
     class _Session:
         async def execute(self, stmt, *args, **kwargs):
             captured.append(stmt)
-            if len(captured) >= 3:
+            if len(captured) >= 4:  # statement_timeout, two HNSW GUCs, the statement
                 raise _Stop
             return None
 
@@ -216,10 +229,11 @@ async def test_date_range_adds_a_date_arm(monkeypatch) -> None:
 
 async def test_old_pgvector_falls_back_to_the_default_shape(monkeypatch) -> None:
     monkeypatch.setattr(ps, "_pgvector_version", (0, 7, 4))
-    sqls = await _capture(monkeypatch, query="connection pool sizing", ann_pool_size=200, expected_executes=1)
-    assert len(sqls) == 1, "fallback must not issue GUC set_config calls"
-    assert "candidate_pool" not in sqls[0]
-    assert sqls[0].count("<=>") == 1
+    sqls = await _capture(monkeypatch, query="connection pool sizing", ann_pool_size=200, expected_executes=2)
+    assert len(sqls) == 2, "fallback must issue no GUC set_config beyond statement_timeout"
+    assert "'statement_timeout'" in sqls[0]
+    assert "candidate_pool" not in sqls[1]
+    assert sqls[1].count("<=>") == 1
 
 
 async def test_concurrent_probes_coalesce_to_one_lookup(monkeypatch) -> None:

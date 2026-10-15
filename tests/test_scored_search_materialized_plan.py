@@ -59,6 +59,10 @@ async def _captured_scored_search_stmt(monkeypatch: pytest.MonkeyPatch, query: s
 
     class _Session:
         async def execute(self, stmt, *args, **kwargs):
+            # The search's set_config calls (statement_timeout) come first;
+            # the statement under test is the first real query.
+            if "set_config" in str(stmt):
+                return None
             captured.append(stmt)
             raise _Stop
 
