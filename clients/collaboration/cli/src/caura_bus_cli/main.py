@@ -18,7 +18,16 @@ from caura_bus_core.config import CONFIG_ENV_VAR, DEFAULT_CONFIG_PATH
 from . import broker as broker_mod
 from .hooks import DEFAULT_LISTEN_SECONDS, MAX_LISTEN_SECONDS, install_hooks
 from .join import JoinError, JoinOptions, run_join
-from .runtime import CodexQueue, WakeState, listen, load_key, receive, state_path, supervise
+from .runtime import (
+    WAKE_RECHECK_SECONDS,
+    CodexQueue,
+    WakeState,
+    listen,
+    load_key,
+    receive,
+    state_path,
+    supervise,
+)
 from .setup import Options, SetupError, run_setup
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help="Caura agent messaging.")
@@ -70,7 +79,7 @@ def wake(
             supervise(
                 cfg,
                 runtime,
-                WakeState(state or state_path(cfg)),
+                WakeState(state or state_path(cfg), recheck_seconds=WAKE_RECHECK_SECONDS),
                 CodexQueue(thread, directory=directory.expanduser().resolve())
                 if runtime == "codex"
                 else None,

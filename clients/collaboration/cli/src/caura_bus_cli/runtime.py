@@ -74,10 +74,25 @@ def wake_retry_delay(attempts):
     return min(WAKE_RETRY_BASE_SECONDS * 2 ** min(attempts - 1, 16), WAKE_RETRY_MAX_SECONDS)
 
 
+# A Codex queue succeeds once the prompt is stored, not once a turn runs it: a
+# prompt queued on a thread no Codex process has open waits there forever. When
+# the agent has not called wait since the wake, wake it again (re-resolving the
+# thread), spaced by a doubling interval so a long busy turn is not flooded.
+WAKE_RECHECK_SECONDS = 120.0
+WAKE_RECHECK_MAX_SECONDS = 1800.0
+
+
+def wake_recheck_delay(rewakes, base):
+    return min(base * 2 ** min(rewakes, 16), WAKE_RECHECK_MAX_SECONDS)
+
+
 class WakeState:
-    def __init__(self, path, clock=time.time):
+    def __init__(self, path, clock=time.time, recheck_seconds=None):
         self.path = Path(path)
         self.clock = clock
+        # Only for runtimes whose wake is unconfirmed (Codex queue); a hook
+        # wake starts the turn itself.
+        self.recheck_seconds = recheck_seconds
 
     def load(self):
         return json.loads(self.path.read_text()) if self.path.exists() else {}
@@ -120,14 +135,22 @@ class WakeState:
             arrived = newest is not None and newest > saved.get("newest_open", 0)
             same_burst = saved.get(marker) == generation and not arrived
             recovering = recovery is not None and recovery != saved.get("recovery_key")
-            if same_burst and not recovering:
+            now = self.clock()
+            # Any wait since the wake proves a turn picked it up; a held lease
+            # means the agent is working.
+            unanswered = (
+                self.recheck_seconds is not None
+                and not snapshot.get("active")
+                and saved.get("woken_wait") == snapshot["wait_generation"]
+                and now >= saved.get("recheck_at", float("inf"))
+            )
+            if same_burst and not recovering and not unanswered:
                 return False
             # The burst is recorded as woken only after the runtime confirms the
             # queue. Before handing control to it, persist the attempt with its
             # backoff deadline: a failed, timed-out or crashed queue is retried
             # on a later snapshot (also after a restart), but never in a storm.
             attempt = saved.get("wake_attempt") or {}
-            now = self.clock()
             if now < attempt.get("retry_at", 0):
                 return False
             attempts = attempt.get("attempts", 0) + 1
@@ -144,9 +167,18 @@ class WakeState:
             # Inventory records only confirmed queue delivery or emitted hook
             # output; a runtime failure never becomes a successful wake.
             current = {k: v for k, v in saved.items() if k != "wake_attempt"}
+            recheck = {}
+            if self.recheck_seconds is not None:
+                rewakes = saved.get("rewakes", 0) + 1 if same_burst and not recovering else 0
+                recheck = {
+                    "woken_wait": snapshot["wait_generation"],
+                    "recheck_at": now + wake_recheck_delay(rewakes, self.recheck_seconds),
+                    "rewakes": rewakes,
+                }
             self.save(
                 {
                     **current,
+                    **recheck,
                     marker: generation,
                     "recovery_key": recovery or saved.get("recovery_key"),
                     "newest_open": max(newest or 0, saved.get("newest_open", 0)),

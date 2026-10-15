@@ -243,3 +243,28 @@ def test_codex_wake_needs_a_key(tmp_path, monkeypatch):
         app, ["wake", "--runtime", "codex", "--thread", "latest", "--config", str(write_config(tmp_path))]
     )
     assert result.exit_code == 1 and "--key-file" in result.stderr
+
+
+async def test_unstarted_codex_wake_is_requeued_on_the_newest_session(tmp_path, monkeypatch):
+    # The wake is queued on a session that is then closed; Codex is restarted.
+    # The re-wake must follow the new session, not repeat the stranded one.
+    home, project = tmp_path / "codex", tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    capture = tmp_path / "argv.jsonl"
+    fake = tmp_path / "codex-bin"
+    fake.write_text(
+        f"#!{sys.executable}\nimport json,sys\n"
+        f"open({str(capture)!r},'a').write(json.dumps(sys.argv[3])+'\\n')\n"
+    )
+    fake.chmod(0o700)
+    now = [1000.0]
+    state = runtime.WakeState(tmp_path / "state.json", clock=lambda: now[0], recheck_seconds=120)
+    queue = runtime.CodexQueue(runtime.LATEST_THREAD, str(fake), directory=project)
+    snapshot = {"pending": True, "active": False, "wait_generation": 7, "drain_generation": 6}
+    rollout(home, "a", "closed", project, 100)
+    assert await state.notify(snapshot, queue)
+    rollout(home, "b", "open", project, 200)
+    now[0] += 120
+    assert await state.notify(snapshot, queue)
+    assert [json.loads(line) for line in capture.read_text().splitlines()] == ["closed", "open"]

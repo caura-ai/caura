@@ -876,3 +876,56 @@ async def test_codex_waker_queues_no_competing_prompt_during_a_busy_turn(tmp_pat
     assert [p.status for p in bus.profiles] == ["ready", "busy", "busy", "ready", "ready"]
     assert sent == [runtime.WAKE_TEXT] * 2
     assert set(bus.calls) <= HINT_OPERATIONS
+
+
+async def test_codex_wake_that_never_starts_a_turn_is_woken_again(tmp_path):
+    # QA run 10131350: `codex queue` stored the 11:51 prompt on a thread no
+    # Codex process had open, so it never ran. The burst counted as woken and
+    # the agent stayed deaf for 75 minutes.
+    clock = Clock()
+    state = runtime.WakeState(tmp_path / "state.json", clock=clock, recheck_seconds=120)
+    queued = []
+
+    async def emit(message=runtime.WAKE_TEXT):
+        queued.append(message)
+
+    snapshot = {"pending": True, "active": False, "wait_generation": 3, "drain_generation": 2}
+    assert await state.notify(snapshot, emit)
+    clock.now += 119
+    assert not await state.notify(snapshot, emit)  # The turn may still be starting.
+    clock.now += 1
+    assert await state.notify(snapshot, emit)
+    assert len(queued) == 2
+    # Still unanswered: the interval doubles, so a stuck thread is never flooded.
+    clock.now += 239
+    assert not await state.notify(snapshot, emit)
+    clock.now += 1
+    assert await state.notify(snapshot, emit)
+    assert len(queued) == 3
+    clock.now += 10_000
+    # A held lease is a busy turn; a wait means a turn picked the prompt up.
+    assert not await state.notify({**snapshot, "active": True}, emit)
+    assert not await state.notify({**snapshot, "wait_generation": 4}, emit)
+    assert len(queued) == 3
+
+
+async def test_answered_wake_and_hook_wakes_are_not_repeated(tmp_path):
+    clock = Clock()
+    snapshot = {"pending": True, "active": False, "wait_generation": 3, "drain_generation": 2}
+    queued = []
+
+    async def emit(message=runtime.WAKE_TEXT):
+        queued.append(message)
+
+    hook = runtime.WakeState(tmp_path / "hook.json", clock=clock)
+    assert await hook.notify(snapshot, emit)
+    codex = runtime.WakeState(tmp_path / "codex.json", clock=clock, recheck_seconds=120)
+    assert await codex.notify(snapshot, emit)
+    clock.now += 10_000
+    # Hooks start the turn themselves, so they keep one hint per burst.
+    assert not await hook.notify(snapshot, emit)
+    # The agent waited (and left work open): it saw the prompt, do not nag.
+    assert not await codex.notify({**snapshot, "wait_generation": 5}, emit)
+    clock.now += 10_000
+    assert not await codex.notify({**snapshot, "wait_generation": 5}, emit)
+    assert len(queued) == 2
