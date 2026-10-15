@@ -1,4 +1,4 @@
-"""MCP collect/recent present a response once; its queued delivery is still ACKed normally."""
+"""MCP collect/recent present a response once; wait settles its queued delivery."""
 
 import json
 from types import SimpleNamespace
@@ -37,6 +37,7 @@ class Platform:
         }
         self.queue = []  # response deliveries waiting for a's session
         self.requests = []
+        self.refused_acks = 0
 
     def reply(self, sender, message_id, body):
         self.messages.append(response(message_id, sender, body))
@@ -64,6 +65,9 @@ class Platform:
             delivery = self.queue[0] if self.queue else None
             return httpx.Response(200, json={"delivery": delivery, "notices": []})
         if path.startswith("deliveries/") and path.endswith("/ack"):
+            if self.refused_acks:
+                self.refused_acks -= 1
+                return httpx.Response(409, json={"detail": "stale delivery lease"})
             delivery_id = path.split("/")[1]
             self.queue = [d for d in self.queue if d["delivery_id"] != delivery_id]
             return httpx.Response(200, json={"state": "acked"})
@@ -104,7 +108,7 @@ async def session():
             await bus.close()
 
 
-async def test_collect_presents_once_and_queued_delivery_is_acked_normally(session):
+async def test_collect_presents_once_and_wait_acks_the_queued_deliveries(session):
     platform, start = session
     call, app = start()
     platform.reply("c", "r-c", "window: Tuesday")
@@ -118,15 +122,12 @@ async def test_collect_presents_once_and_queued_delivery_is_acked_normally(sessi
     # Collection is read-only: nothing was claimed or ACKed.
     assert all(r.method == "GET" for r in platform.requests)
 
-    for message_id in ("r-c", "r-b"):
-        waited = await call("wait", {"timeout": 0})
-        delivery = waited["delivery"]
-        assert delivery["envelope"]["id"] == message_id
-        assert delivery["already_presented"] is True and delivery["envelope"]["body"] is None
-        assert "lease_token" not in delivery
-        await call("ack", {"delivery_id": delivery["delivery_id"]})
-    assert platform.queue == []
+    # Caura ACKs only from the lease holder, so wait claims and settles both queued
+    # deliveries itself: the inbox drains without the model acting on them again.
     assert (await call("wait", {"timeout": 0}))["delivery"] is None
+    assert platform.queue == []
+    acked = [r.url.path.split("/")[-2] for r in platform.requests if r.url.path.endswith("/ack")]
+    assert acked == ["q-r-c", "q-r-b"]
     await app.delivery.close()
 
 
@@ -137,8 +138,33 @@ async def test_recent_reply_to_marks_responses_presented(session):
     recent = await call("recent", {"reply_to": REQUEST})
     assert [m["id"] for m in recent["messages"]] == ["r-b"]
     assert platform.requests[-1].url.params["reply_to"] == REQUEST
+    assert (await call("wait", {"timeout": 0}))["delivery"] is None
+    assert platform.queue == []
+    await app.delivery.close()
+
+
+async def test_wait_returns_the_next_delivery_after_settling_presented_ones(session):
+    platform, start = session
+    call, app = start()
+    platform.reply("b", "r-b", "code: 7731")
+    await call("collect", {"message_id": REQUEST, "timeout": 0})
+    platform.reply("c", "r-c", "window: Tuesday")
     waited = await call("wait", {"timeout": 0})
-    assert waited["delivery"]["already_presented"] is True
+    assert waited["delivery"]["envelope"]["body"] == "window: Tuesday"
+    assert "already_presented" not in waited["delivery"]
+    assert [d["delivery_id"] for d in platform.queue] == ["q-r-c"]
+    await call("ack", {"delivery_id": waited["delivery"]["delivery_id"]})
+    await app.delivery.close()
+
+
+async def test_presented_response_falls_back_to_the_model_when_its_ack_fails(session):
+    platform, start = session
+    call, app = start()
+    platform.reply("b", "r-b", "code: 7731")
+    await call("collect", {"message_id": REQUEST, "timeout": 0})
+    platform.refused_acks = 1
+    waited = await call("wait", {"timeout": 0})
+    assert waited["delivery"]["already_presented"] is True and waited["delivery"]["envelope"]["body"] is None
     await call("ack", {"delivery_id": waited["delivery"]["delivery_id"]})
     assert platform.queue == []
     await app.delivery.close()

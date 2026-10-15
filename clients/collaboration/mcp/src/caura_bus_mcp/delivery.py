@@ -4,6 +4,7 @@ import asyncio
 import logging
 import secrets
 from contextlib import suppress
+from time import monotonic
 
 import httpx
 from caura_bus_core.bus import PlatformError
@@ -58,12 +59,18 @@ class DeliverySession:
 
     async def wait(self, timeout=50):
         async with self.lock:
-            # Notices held from a guard refresh must not wait behind a long poll.
-            result = await self.bus.wait_result(self.session_id, 0 if self.notices else timeout)
-            claim = await self._adopt(result)
+            deadline = monotonic() + timeout
+            while True:
+                # Notices held from a guard refresh must not wait behind a long poll.
+                remaining = 0 if self.notices else max(0.0, deadline - monotonic())
+                result = await self.bus.wait_result(self.session_id, remaining)
+                claim = await self._adopt(result)
+                self.notices.extend(result.get("notices", []))
+                if not await self._settle_presented(claim):
+                    break
             if claim and claim.resume_context:
                 self.surfaced.add(str(claim.resume_context.get("intervention_id")))
-            notices, self.notices = [*self.notices, *result.get("notices", [])], []
+            notices, self.notices = self.notices, []
             delivery = self.public(claim)
             if claim and claim.envelope.kind == "response":
                 delivery["correlation"] = self.correlation(claim.envelope.correlation_id)
@@ -76,6 +83,29 @@ class DeliverySession:
                 elif not delivery["correlation"]["matches_sent_request"]:
                     delivery["note"] = UNMATCHED_RESPONSE
             return {"delivery": delivery, "notices": notices}
+
+    async def _settle_presented(self, claim):
+        """ACK a claimed response this session already presented, so the inbox drains.
+
+        collect and recent(reply_to) read responses without a lease, and Caura only
+        accepts an ACK from the session holding one, so the queued delivery is settled
+        here, when wait claims it. Returns False to hand the claim to the model instead.
+        """
+        if not (
+            claim
+            and claim.state == "leased"
+            and claim.lease_token
+            and claim.envelope.kind == "response"
+            and claim.envelope.id in self.presented
+        ):
+            return False
+        try:
+            await self.bus.delivery_action(claim.delivery_id, "ack", claim.lease_token)
+        except (PlatformError, httpx.TransportError) as exc:
+            log.debug("Could not settle an already presented response: %s", exc)
+            return False
+        self.completed(claim.delivery_id)
+        return True
 
     def correlation(self, reply_to):
         """Which request a response answers, and whether this session sent that request."""

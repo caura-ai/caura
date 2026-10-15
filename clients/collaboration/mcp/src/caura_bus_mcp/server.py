@@ -261,8 +261,7 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
       to=[original sender]; Caura preserves the thread. to=["*"] expands allowed peers.
     recent: thread_id, agent_id, limit=20 (1-100), before=next_cursor. Returns visible messages.
       reply_to=request ID reads responses to your request while keeping current work leased.
-      Reading never ACKs; a response read here is marked already_presented when wait
-      later returns its queued delivery: ack that delivery without acting on it again.
+      Reading never ACKs; wait later ACKs the queued delivery of a response read here.
     collect: message_id* (your request), timeout=30 (0-45), expected=recipient IDs.
       Read-only bounded poll for correlated replies: outcome complete|partial|no_reply,
       answers with recipient/sender attribution, pending/closed recipients and summary.

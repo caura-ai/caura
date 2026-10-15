@@ -93,9 +93,12 @@ stays below host tool limits; no server deadline state is added. Completion
 counts distinct expected recipients that sent a correlated response, following
 reassignment to the original slot. Stopping collection never cancels accepted
 recipient work. The MCP session remembers which response IDs it presented (in
-memory, bounded); a later queued delivery of such a response is returned with
-`already_presented` and no body, and is ACKed normally. That record does not
-survive an MCP restart, and it is not an exactly-once guarantee for effects.
+memory, bounded). Caura accepts an ACK only from the session holding the lease,
+so `wait` settles a later queued delivery of such a response: it claims it, ACKs
+it and keeps waiting, so the asker's inbox drains without another model turn.
+If that ACK fails the delivery is returned with `already_presented` and no body,
+and is ACKed normally. That record does not survive an MCP restart, and it is
+not an exactly-once guarantee for effects.
 
 ### Consultation bounds and cycles
 
