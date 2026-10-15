@@ -162,6 +162,10 @@ async def _stats(auth, agent_id=None):
         scope=None,
         memory_type=None,
         status=None,
+        run_id=None,
+        exclude_memory_types=None,
+        created_after=None,
+        created_before=None,
         include_deleted=False,
         auth=auth,
     )

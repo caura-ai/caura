@@ -7647,6 +7647,10 @@ class PostgresService:
         agent_id: str | None = None,
         memory_type: str | None = None,
         status: str | None = None,
+        run_id: str | None = None,
+        exclude_memory_types: list[str] | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
         exclude_ids: list[UUID] | None = None,
         metadata_filter: dict[str, str] | None = None,
     ) -> int:
@@ -7655,7 +7659,10 @@ class PostgresService:
 
         The JSONB ``metadata->>'key' = 'value'`` predicates are built with
         SQLAlchemy bound params (``Memory.metadata_[key].astext == bindparam(...)``)
-        — never string interpolation. Transactional (writer session).
+        — never string interpolation. ``run_id``, the created window and
+        ``exclude_memory_types`` match ``memory_list_by_filters`` exactly, so a
+        delete removes what the filtered list shows (ENT2-013). Transactional
+        (writer session).
         """
 
         def where(m: Any) -> list[ColumnElement[bool]]:
@@ -7668,6 +7675,14 @@ class PostgresService:
                 clauses.append(m.memory_type == memory_type)
             if status:
                 clauses.append(m.status == status)
+            if run_id:
+                clauses.append(m.run_id == run_id)
+            if exclude_memory_types:
+                clauses.append(m.memory_type.notin_(exclude_memory_types))
+            if created_after is not None:
+                clauses.append(m.created_at >= created_after)
+            if created_before is not None:
+                clauses.append(m.created_at <= created_before)
             for i, (key, value) in enumerate((metadata_filter or {}).items()):
                 # Distinct bindparam name per pair so multiple predicates
                 # don't collide; the KEY indexes the JSONB column (a SQL
@@ -8242,6 +8257,7 @@ class PostgresService:
         agent_id: str | None = None,
         memory_type: str | None = None,
         status: str | None = None,
+        run_id: str | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
         exclude_memory_types: list[str] | None = None,
@@ -8328,6 +8344,8 @@ class PostgresService:
             scope_filters.append(Memory.memory_type == memory_type)
         if status:
             scope_filters.append(Memory.status == status)
+        if run_id:
+            scope_filters.append(Memory.run_id == run_id)
         # Report time-window: half-open [created_after, created_before). Added to
         # ``scope_filters`` so it flows through BOTH the live and include_deleted
         # query paths below (each derives from this list).

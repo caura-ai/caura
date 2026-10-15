@@ -89,6 +89,21 @@ def _validate_pg_regex(value: str | None, field: str) -> None:
         raise HTTPException(status_code=422, detail=f"'{field}' is not a valid regex: {exc}")
 
 
+def _created_window(body: dict) -> tuple[datetime | None, datetime | None]:
+    """``created_after`` / ``created_before`` from a body, as ISO strings or datetimes."""
+    ca, cb = body.get("created_after"), body.get("created_before")
+    try:
+        return (
+            datetime.fromisoformat(ca) if isinstance(ca, str) else ca,
+            datetime.fromisoformat(cb) if isinstance(cb, str) else cb,
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail="'created_after'/'created_before' must be a valid ISO datetime string",
+        )
+
+
 @router.post("")
 async def create_memory(request: Request) -> dict:
     body: dict = await request.json()
@@ -1807,7 +1822,8 @@ async def stats_breakdown(request: Request) -> dict:
     """Visibility-scoped stats breakdown (MCP ``caura_stats``).
 
     Body: ``{tenant_id?, fleet_id?, agent_id?, caller_agent_id?, memory_type?,
-    status?, include_deleted?, readable_tenant_ids?, include_pending?}``.
+    status?, run_id?, created_after?, created_before?, exclude_memory_types?,
+    include_deleted?, readable_tenant_ids?, include_pending?}``.
     ``agent_id`` filters by author; ``caller_agent_id`` is the identity the
     counted rows must be visible to (M-104). Returns
     ``{total, by_type, by_agent, by_status}`` plus optional ``by_tenant`` (when
@@ -1822,18 +1838,8 @@ async def stats_breakdown(request: Request) -> dict:
         # Mirror /list: a binding/home tenant is mandatory. Without it (and with no
         # readable set) the aggregation would run unscoped across all tenants.
         raise HTTPException(status_code=422, detail="tenant_id is required")
-    # Optional report time-window (ISO strings or datetimes) — same parse idiom
-    # as the admin stats route above.
-    ca = body.get("created_after")
-    cb = body.get("created_before")
-    try:
-        created_after = datetime.fromisoformat(ca) if isinstance(ca, str) else ca
-        created_before = datetime.fromisoformat(cb) if isinstance(cb, str) else cb
-    except ValueError:
-        raise HTTPException(
-            status_code=422,
-            detail="'created_after'/'created_before' must be a valid ISO datetime string",
-        )
+    # Optional time-window (ISO strings or datetimes).
+    created_after, created_before = _created_window(body)
     _validate_pg_regex(body.get("exclude_title_regex"), "exclude_title_regex")
     return await _svc.memory_stats_breakdown(
         tenant_id=tenant_id,
@@ -1841,6 +1847,7 @@ async def stats_breakdown(request: Request) -> dict:
         agent_id=body.get("agent_id"),
         memory_type=body.get("memory_type"),
         status=body.get("status"),
+        run_id=body.get("run_id"),
         created_after=created_after,
         created_before=created_before,
         exclude_memory_types=body.get("exclude_memory_types"),
@@ -1946,8 +1953,9 @@ async def soft_delete_by_filter(request: Request) -> dict:
     """Soft-delete every matching live memory for a tenant, and the rows
     derived from them (``deleted`` counts both).
 
-    Body: ``{tenant_id, fleet_id?, agent_id?, memory_type?, status?,
-    exclude_ids?[], metadata_filter?{k:v}}``. The ≤20-pair + string-value
+    Body: ``{tenant_id, fleet_id?, agent_id?, memory_type?, status?, run_id?,
+    exclude_memory_types?[], created_after?, created_before?, exclude_ids?[],
+    metadata_filter?{k:v}}``. The ≤20-pair + string-value
     validation stays in core-api (for its exact 400 messages); this route
     builds the JSONB predicate via SQLAlchemy bound params.
     """
@@ -1962,12 +1970,22 @@ async def soft_delete_by_filter(request: Request) -> dict:
     metadata_filter = body.get("metadata_filter") or None
     if metadata_filter is not None and not isinstance(metadata_filter, dict):
         raise HTTPException(status_code=422, detail="metadata_filter must be an object")
+    exclude_memory_types = body.get("exclude_memory_types") or None
+    if exclude_memory_types is not None and not (
+        isinstance(exclude_memory_types, list) and all(isinstance(t, str) for t in exclude_memory_types)
+    ):
+        raise HTTPException(status_code=422, detail="exclude_memory_types must be a list of strings")
+    created_after, created_before = _created_window(body)
     deleted = await _svc.memory_soft_delete_by_filter(
         tenant_id=tenant_id,
         fleet_id=body.get("fleet_id"),
         agent_id=body.get("agent_id"),
         memory_type=body.get("memory_type"),
         status=body.get("status"),
+        run_id=body.get("run_id"),
+        exclude_memory_types=exclude_memory_types,
+        created_after=created_after,
+        created_before=created_before,
         exclude_ids=exclude_ids,
         metadata_filter=metadata_filter,
     )
