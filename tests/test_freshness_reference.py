@@ -182,6 +182,8 @@ async def test_naive_valid_at_is_normalized_for_every_timestamp_bind(monkeypatch
 
     class _Session:
         async def execute(self, stmt, *args, **kwargs):
+            if "set_config" in str(stmt):
+                return None  # the search's statement_timeout comes first
             captured.append(stmt)
             raise _Stop
 

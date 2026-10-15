@@ -4713,8 +4713,20 @@ class PostgresService:
         # inside the session (they hold lazy-load handles), then drop the
         # Python-side grouping outside the measured block so OrderedDict
         # work doesn't inflate the DB timing signal.
+        from core_storage_api.config import settings as _search_settings
+
+        _statement_timeout_ms = _search_settings.scored_search_statement_timeout_ms
         with db_measure():
             async with get_read_session() as session:
+                if _statement_timeout_ms:
+                    # Cap this search's transaction, with the same SET LOCAL
+                    # mechanism as the ANN GUCs below, so a search whose caller
+                    # has given up stops instead of running on. The route maps
+                    # the cancellation to 504. See
+                    # Settings.scored_search_statement_timeout_ms.
+                    await session.execute(
+                        select(func.set_config("statement_timeout", f"{_statement_timeout_ms}ms", True))
+                    )
                 if use_ann_pool:
                     # Pin the ANN arm's scan behaviour for THIS statement only.
                     # ``set_config(..., is_local => true)`` is SET LOCAL —
@@ -4725,7 +4737,7 @@ class PostgresService:
                     #
                     # This RELIES on the reader engine being transactional:
                     # ``_build_engine`` sets no ``isolation_level``, so the
-                    # session autobegins one transaction spanning all three
+                    # session autobegins one transaction spanning all of its
                     # executes. Were the reader engine ever flipped to
                     # AUTOCOMMIT (per-statement transactions), SET LOCAL would
                     # evaporate before the main statement and the pool would

@@ -149,6 +149,8 @@ async def _compiled_scored_search_sql(monkeypatch: pytest.MonkeyPatch) -> str:
 
     class _Session:
         async def execute(self, stmt, *args, **kwargs):
+            if "set_config" in str(stmt):
+                return None  # the search's statement_timeout comes first
             captured.append(stmt)
             raise _Stop
 
@@ -261,6 +263,8 @@ async def test_the_shipped_statement_keeps_the_inlining_fence(
 
     class _Session:
         async def execute(self, stmt, *args, **kwargs):
+            if "set_config" in str(stmt):
+                return None  # the search's statement_timeout comes first
             captured.append(stmt)
             raise _Stop
 

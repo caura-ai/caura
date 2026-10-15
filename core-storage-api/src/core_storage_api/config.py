@@ -107,6 +107,17 @@ class Settings(BaseSettings):
     # Env: MIGRATION_LOCK_WAIT_SECONDS.
     migration_lock_wait_seconds: int = 1800
 
+    # Postgres ``statement_timeout`` for /memories/scored-search, set with SET
+    # LOCAL on the search's own read transaction. Every caller gives up sooner
+    # or not much later: core-api's REST budget is 45s and its MCP budget 90s.
+    # Without a cap the query keeps running after they have gone. On 2026-10-15
+    # one prod search ran 129s on the read replica, long after core-api had
+    # answered 504 at 45s, while the retries stacked up beside it. 30s is far
+    # above a healthy search (this week's slowest was 4.4s) and below the REST
+    # budget. A timed-out search answers 504. 0 disables the cap.
+    # Env: SCORED_SEARCH_STATEMENT_TIMEOUT_MS.
+    scored_search_statement_timeout_ms: int = Field(default=30_000, ge=0)
+
     @model_validator(mode="after")
     def resolve_alloydb_database_url(self) -> Settings:
         # Explicit DATABASE_URL wins, even when shared environment files carry
