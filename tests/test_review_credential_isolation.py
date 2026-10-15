@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -131,7 +132,7 @@ print('sandbox checks passed')
     assert (repo / "source.txt").read_text() == "public source"
 
 
-def _review(tmp_path, output, stderr="", code=0):
+def _review(tmp_path, output, stderr="", code=0, *, launch_error=None, proxy=None):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     for name in (
@@ -140,8 +141,14 @@ def _review(tmp_path, output, stderr="", code=0):
         "claude_review_proxy.py",
     ):
         shutil.copyfile(SCRIPTS / name, scripts / name)
+    if proxy is not None:
+        (scripts / "claude_review_proxy.py").write_text(proxy)
+    version = "echo 0.0.0-stub; exit 0"
+    if launch_error is not None:
+        version = f"echo {shlex.quote(launch_error)} >&2; exit 1"
     # Publication tests replace only the boundary; the test above uses real bwrap.
     (scripts / "claude_review_sandbox.sh").write_text(
+        f'if [ "${{1:-}}" = --version ]; then {version}; fi\n'
         'cat "$REVIEW_TEST_DIR/model-output"\n'
         'cat "$REVIEW_TEST_DIR/model-stderr" >&2\n'
         f"exit {code}\n"
@@ -214,11 +221,64 @@ def test_raw_invalid_output_is_never_logged(tmp_path, code):
     assert raw not in result.stdout + result.stderr + posted + summary
 
 
-def test_generic_key_shape_is_withheld_even_when_not_a_job_secret(tmp_path):
+def test_generic_key_shape_posts_with_a_warning_when_not_a_job_secret(tmp_path):
+    # A key fixture or a scanner's pattern quoted in a review is none of the job's
+    # secrets, which the cases above withhold with their encodings.
     raw = "sk-ant-" + "synthetic" * 8
     result, posted, _ = _review(tmp_path, json.dumps({"result": raw}))
+    assert result.returncode == 0, result.stderr
+    assert raw in posted
+    assert "shaped like a credential" in result.stderr
+    assert raw not in result.stdout + result.stderr
+
+
+def test_an_error_reported_with_a_zero_exit_is_not_posted_as_the_review(tmp_path):
+    output = {"subtype": "success", "is_error": True, "api_error_status": 401}
+    output["result"] = "Invalid API key"
+    result, posted, summary = _review(tmp_path, json.dumps(output))
     assert result.returncode == 1
-    assert "withheld by credential guard" in posted
+    assert "Invalid API key" not in result.stdout + result.stderr + posted + summary
+    assert "is_error=true api_status=401" in result.stderr
+
+
+def test_a_failed_run_logs_the_clis_own_fields_and_none_of_its_text(tmp_path):
+    output = {"subtype": "error_during_execution", "is_error": True}
+    output.update(api_error_status=529, result="model prose")
+    result, posted, summary = _review(tmp_path, json.dumps(output), "cli prose", 1)
+    logged = "exit=1 subtype=error_during_execution is_error=true api_status=529"
+    assert logged in result.stderr
+    for text in ("model prose", "cli prose"):
+        assert text not in result.stdout + result.stderr + posted + summary
+
+
+def test_a_subtype_that_is_not_a_plain_token_never_reaches_the_log(tmp_path):
+    output = json.dumps({"subtype": "x\n::error::forged", "is_error": True})
+    result, _, _ = _review(tmp_path, output, code=1)
+    assert "subtype=none" in result.stderr
+    assert "forged" not in result.stdout + result.stderr
+
+
+def test_a_sandbox_that_cannot_launch_says_so_and_logs_its_error(tmp_path):
+    error = "bwrap: setting up uid map: Permission denied"
+    result, posted, _ = _review(tmp_path, "{}", launch_error=error)
+    assert result.returncode == 1
+    assert "sandbox failed to launch" in posted
+    assert error in result.stderr
+
+
+@pytest.mark.parametrize("leak", [False, True])
+def test_a_transport_that_cannot_start_shows_its_error_but_no_secret(tmp_path, leak):
+    key = "os.environ['ANTHROPIC_API_KEY']" if leak else "''"
+    proxy = (
+        "import os, sys\n"
+        f"sys.stderr.write('OSError: Address already in use ' + {key} + '\\n')\n"
+        "sys.exit(1)\n"
+    )
+    result, posted, _ = _review(tmp_path, "{}", proxy=proxy)
+    assert result.returncode == 1
+    assert "transport unavailable" in posted
+    assert KEY not in result.stdout + result.stderr + posted
+    assert ("Address already in use" in result.stderr) is not leak
 
 
 def test_safe_review_preserves_body_and_validates_telemetry(tmp_path):
