@@ -1768,7 +1768,12 @@ class CoreStorageClient:
         return result  # type: ignore[return-value]
 
     async def memory_quality_metrics(self, data: dict) -> dict:
-        """Reuse / recall quality aggregates over a scoped corpus (report Quality section)."""
+        """Reuse / recall quality aggregates over a scoped corpus (report Quality section).
+
+        With ``recalled_after`` in ``data``, the result also carries
+        ``corpus_total`` / ``recalled_in_window`` (the corpus without the
+        ``created_after`` bound, and its rows recalled since then).
+        """
         result = await self._post("/memories/quality-metrics", data, read=True)
         if result is None:
             raise RuntimeError("core-storage-api /memories/quality-metrics returned 404")

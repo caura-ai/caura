@@ -8588,14 +8588,24 @@ class PostgresService:
         exclude_title_regex: str | None = None,
         include_scope_agent: bool = False,
         readable_tenant_ids: list[str] | None = None,
+        recalled_after: datetime | None = None,
     ) -> dict:
         """Reuse / recall quality aggregates over the SAME scoped corpus as
         ``memory_stats_breakdown`` (durable+cohesive when the exclude_* filters are
         passed). Backs the report Quality section:
 
         - ``by_type`` = ``{type: {total, reused}}`` → reuse RATE per type,
-        - ``total`` / ``reused`` → never-recalled %,
+        - ``total`` / ``reused`` → never-recalled % (over rows created since
+          ``created_after`` when it is set; ``recall_count`` is lifetime),
         - ``total_recalls`` + ``top_recalls`` (top 6 values) → recall concentration.
+
+        With ``recalled_after``, also ``corpus_total`` / ``recalled_in_window``:
+        the same scoped corpus WITHOUT the ``created_after`` bound (every live
+        row, whenever it was written), and how many of those rows have
+        ``last_recalled_at >= recalled_after``. That is the "was the memory used
+        this period" figure; never-recalled % cannot be, because a row written
+        an hour ago has had an hour to be recalled. One extra pass over the
+        tenant's live rows, both counts in it (``COUNT(*) FILTER``).
 
         Kept separate from the GROUPING SETS breakdown so that shared (MCP stats)
         path stays untouched. The scope/visibility block below MUST mirror
@@ -8624,15 +8634,21 @@ class PostgresService:
             scope_filters.append(_visibility_scope_clause(agent_id, tenant_id))
         elif not include_scope_agent:
             scope_filters.append(_visibility_scope_clause(None))
-        if created_after:
-            scope_filters.append(Memory.created_at >= created_after)
         if exclude_memory_types:
             scope_filters.append(Memory.memory_type.notin_(exclude_memory_types))
         if exclude_agent_ids:
             scope_filters.append(Memory.agent_id.notin_(exclude_agent_ids))
         if exclude_title_regex:
             scope_filters.append(~func.coalesce(Memory.title, "").op("~*")(exclude_title_regex))
-        filters = [Memory.deleted_at.is_(None), Memory.status != QUARANTINED_MEMORY_STATUS, *scope_filters]
+        # The whole durable corpus, any creation date (``recalled_after`` figures).
+        corpus_filters = [
+            Memory.deleted_at.is_(None),
+            Memory.status != QUARANTINED_MEMORY_STATUS,
+            *scope_filters,
+        ]
+        filters = list(corpus_filters)
+        if created_after:
+            filters.append(Memory.created_at >= created_after)
 
         reused = case((Memory.recall_count > 0, 1), else_=0)
         per_type_stmt = (
@@ -8654,13 +8670,23 @@ class PostgresService:
             per_type = (await session.execute(per_type_stmt)).all()
             total, total_reused, total_recalls = (await session.execute(overall_stmt)).one()
             top_recalls = [int(x[0] or 0) for x in (await session.execute(top_stmt)).all()]
-        return {
+            if recalled_after is not None:
+                corpus_stmt = select(
+                    func.count(),
+                    func.count().filter(Memory.last_recalled_at >= recalled_after),
+                ).where(*corpus_filters)
+                corpus_total, recalled_in_window = (await session.execute(corpus_stmt)).one()
+        result = {
             "total": int(total or 0),
             "reused": int(total_reused or 0),
             "total_recalls": int(total_recalls or 0),
             "top_recalls": top_recalls,
             "by_type": {r.memory_type: {"total": int(r.n), "reused": int(r.r or 0)} for r in per_type},
         }
+        if recalled_after is not None:
+            result["corpus_total"] = int(corpus_total or 0)
+            result["recalled_in_window"] = int(recalled_in_window or 0)
+        return result
 
     # ══════════════════════════════════════════════════════════════════════
     #  ENTITIES

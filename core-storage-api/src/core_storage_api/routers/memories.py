@@ -1894,10 +1894,13 @@ async def quality_metrics(request: Request) -> dict:
     """Reuse / recall quality aggregates over a scoped corpus (report Quality section).
 
     Body: ``{tenant_id, fleet_id?, agent_id?, created_after? (ISO),
-    exclude_memory_types?, exclude_agent_ids?, exclude_title_regex?,
-    readable_tenant_ids?}``. Returns ``{total, reused, total_recalls,
-    top_recalls, by_type:{type:{total,reused}}}``. Same scope/visibility as
-    ``/stats-breakdown``; read-only.
+    recalled_after? (ISO), exclude_memory_types?, exclude_agent_ids?,
+    exclude_title_regex?, readable_tenant_ids?}``. Returns ``{total, reused,
+    total_recalls, top_recalls, by_type:{type:{total,reused}}}``, plus
+    ``{corpus_total, recalled_in_window}`` when ``recalled_after`` is sent
+    (the corpus without the ``created_after`` bound, and its rows recalled
+    since ``recalled_after``). Same scope/visibility as ``/stats-breakdown``;
+    read-only.
 
     ``tenant_id`` is required, and ``readable_tenant_ids`` does not substitute
     for it. The guard used to accept either, which made this the only one of
@@ -1918,6 +1921,11 @@ async def quality_metrics(request: Request) -> dict:
         created_after = datetime.fromisoformat(ca) if isinstance(ca, str) else ca
     except ValueError:
         raise HTTPException(status_code=422, detail="'created_after' must be a valid ISO datetime string")
+    ra = body.get("recalled_after")
+    try:
+        recalled_after = datetime.fromisoformat(ra) if isinstance(ra, str) else None
+    except ValueError:
+        raise HTTPException(status_code=422, detail="'recalled_after' must be a valid ISO datetime string")
     _validate_pg_regex(body.get("exclude_title_regex"), "exclude_title_regex")
     return await _svc.memory_quality_metrics(
         tenant_id=tenant_id,
@@ -1929,6 +1937,7 @@ async def quality_metrics(request: Request) -> dict:
         exclude_title_regex=body.get("exclude_title_regex"),
         include_scope_agent=bool(body.get("include_scope_agent", False)),
         readable_tenant_ids=body.get("readable_tenant_ids"),
+        recalled_after=recalled_after,
     )
 
 
