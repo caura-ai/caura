@@ -10,6 +10,21 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.34.2](https://github.com/caura-ai/caura/compare/backend-v3.34.1...backend-v3.34.2) (2026-10-16)
+
+
+### Bug Fixes
+
+* **auth:** read-only refusals name their cause and stop offering deletes ([#2084](https://github.com/caura-ai/caura/issues/2084)) ([7667d67](https://github.com/caura-ai/caura/commit/7667d6741c60cc071cee87d8921aa239e5be3897))
+* **memories:** stats and filtered delete honour the list's filters ([#2086](https://github.com/caura-ai/caura/issues/2086)) ([18b517e](https://github.com/caura-ai/caura/commit/18b517efd55d9b64e570839584ac79e08aebd5a3))
+* **reports:** add recalled-in-window share over the whole durable corpus ([#2089](https://github.com/caura-ai/caura/issues/2089)) ([6503be5](https://github.com/caura-ai/caura/commit/6503be51f869d5cb98102c05e904d0e55938f0cf))
+
+
+### Documentation
+
+* **evidence:** say the LoCoMo harness repository is not public yet ([#2085](https://github.com/caura-ai/caura/issues/2085)) ([cd91be5](https://github.com/caura-ai/caura/commit/cd91be53e709163f37bd9ecb5f5165ab5da9742e))
+* point stale dashboard paths at the current Caura app ([#2090](https://github.com/caura-ai/caura/issues/2090)) ([3e6d509](https://github.com/caura-ai/caura/commit/3e6d5095549d4dd558499ce7f685a964f6493c7c))
+
 ## [3.34.1](https://github.com/caura-ai/caura/compare/backend-v3.34.0...backend-v3.34.1) (2026-10-15)
 
 
