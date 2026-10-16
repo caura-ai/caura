@@ -227,6 +227,19 @@ async def get_report(
     ),
     auth: AuthContext = Depends(get_auth_context),
 ) -> dict:
+    """Governed activity report for one period ('day' or 'week').
+
+    Two recall figures in ``quality``, over different populations:
+
+    - ``never_recalled_pct``: of the durable memories CREATED in the period,
+      the share never recalled (lifetime ``recall_count`` 0).
+    - ``recalled_in_window_pct`` (null when the corpus is empty),
+      ``recalled_in_window_count``, ``durable_corpus_total``: of the whole
+      durable corpus in scope, any creation date, the share recalled during
+      the period (``last_recalled_at`` inside it).
+
+    Recalls are counted only for searches made with an agent identity.
+    """
     # Tenant scope is validated against the credential: agent creds can only
     # report on their own tenant; admin keys may target any tenant.
     auth.enforce_tenant(tenant_id)
@@ -540,8 +553,20 @@ async def get_report(
             ]
 
         # ── Quality: how good is the durable corpus (not just how much). ──
-        # reuse-rate by type, never-recalled %, recall concentration (top-6
-        # share), insight freshness, and the write→durable→reused funnel.
+        # reuse-rate by type, never-recalled %, recalled-in-window %, recall
+        # concentration (top-6 share), insight freshness, and the
+        # write→durable→reused funnel.
+        #
+        # Two recall figures, over two different populations:
+        #   - ``never_recalled_pct``: of the durable memories CREATED in the
+        #     window, the share whose lifetime ``recall_count`` is still 0. A
+        #     memory written this morning has had hours to be recalled, so on an
+        #     active fleet this reads high whatever the corpus is worth.
+        #   - ``recalled_in_window_pct``: of the WHOLE durable corpus (same
+        #     scope and exclusions, any creation date), the share with
+        #     ``last_recalled_at`` inside the window — "was it used this period".
+        # Recalls are only counted for searches that carry an agent identity
+        # (track_recalls, gap A26), so both undercount agentless traffic.
         # Scope keys shared by the three (independent) quality calls below.
         # ``include_scope_agent`` rides along so the funnel's "written" (full) and
         # the insight-freshness corpus (ins) count private rows too — otherwise
@@ -559,7 +584,7 @@ async def get_report(
         #   - insight breakdown: lifetime insight corpus by status (freshness)
         #   - funnel breakdown: full-corpus writes in the window (no excludes)
         qm, ins, full = await asyncio.gather(
-            sc.memory_quality_metrics(breakdown_query),
+            sc.memory_quality_metrics({**breakdown_query, "recalled_after": window_start.isoformat()}),
             sc.memory_stats_breakdown({**scope_keys, "memory_type": "insight"}),
             sc.memory_stats_breakdown({**scope_keys, "created_after": window_start.isoformat()}),
         )
@@ -585,8 +610,17 @@ async def get_report(
         ins_total = int(ins.get("total", 0) or 0)
         ins_stale = int(ins_status.get("outdated", 0) or 0) + int(ins_status.get("archived", 0) or 0)
         written = int(full.get("total", 0) or 0)
+        corpus_total = int(qm.get("corpus_total", 0) or 0)
+        recalled_in_window = int(qm.get("recalled_in_window", 0) or 0)
         quality = {
+            # Over durable memories created in the window (see above).
             "never_recalled_pct": round(100.0 * (q_total - q_reused) / q_total, 1) if q_total else 0.0,
+            # Over the whole durable corpus; null when there is no corpus.
+            "recalled_in_window_pct": (
+                round(100.0 * recalled_in_window / corpus_total, 1) if corpus_total else None
+            ),
+            "recalled_in_window_count": recalled_in_window,
+            "durable_corpus_total": corpus_total,
             "recall_concentration_pct": round(100.0 * top6 / q_recalls, 1) if q_recalls else 0.0,
             "recall_concentration_top6": top6,
             "total_recalls": q_recalls,
