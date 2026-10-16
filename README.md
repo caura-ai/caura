@@ -132,7 +132,7 @@ Four paths — pick the one that matches your setup:
 Get up and running in minutes — no infrastructure, automatic updates, usage analytics, and enterprise-grade security included.
 
 1. **[Sign up free on caura.ai](https://caura.ai).**
-2. Copy an API key from the dashboard.
+2. Create an API key in the dashboard under **Connect › Keys**.
 3. Connect through MCP or REST:
 
 ```json
@@ -379,7 +379,7 @@ Add Caura to any MCP client with one config block.
 }
 ```
 
-> For team or production use, swap the tenant-scoped key for an **agent-scoped credential** — on the managed platform (caura.ai), atomic provisioning via `POST /api/v1/admin/agent-keys/provision` (or the `/settings/organization/api-credentials` wizard) mints the credential + Agent row + initial trust + fleet membership in one round trip. Both kinds use the `mc_` prefix; scope is set at mint time on the credential. See [`docs/integration-without-plugin.md`](docs/integration-without-plugin.md). Using a tenant-scoped credential? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-scoped path.
+> For team or production use, swap the tenant-scoped key for an **agent-scoped credential** — on the managed platform (caura.ai), atomic provisioning via `POST /api/v1/admin/agent-keys/provision` (or **Create Agent Key** under Connect › Keys in the Caura app) mints the credential + Agent row + initial trust + fleet membership in one round trip. Both kinds use the `mc_` prefix; scope is set at mint time on the credential. See [`docs/integration-without-plugin.md`](docs/integration-without-plugin.md). Using a tenant-scoped credential? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-scoped path.
 
 **Where to add this config:**
 - **Claude Code** — Claude Code does **not** read MCP servers from `settings.json`. Register the server with `claude mcp add` instead. Use `-s user` so it's available in **every** working directory — the default scope (`local`) only registers it for the current directory, which bites when you run agents from multiple folders:

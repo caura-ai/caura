@@ -10,7 +10,7 @@
 
 ## What you need
 
-- A tenant-scoped `mc_` credential — get one from `caura.ai/settings/api-keys` (or self-host).
+- A tenant-scoped `mc_` credential — create one at `caura.ai/connect/keys` (Connect › Keys in the Caura app), or self-host.
 - An MCP client. Examples below use `mcp` (Python) and `curl`. The same flow works with `anthropic` (Python SDK's remote-MCP integration), `openai`, or any client that speaks MCP streamable-http.
 
 ---
@@ -21,7 +21,7 @@ Every long-lived integration should bind to a named agent identity rather than c
 
 Both are on the managed platform (caura.ai). A self-hosted core-api has no provisioning route: there, use the tenant-scoped (or standalone) key and pass an explicit `agent_id` on every call.
 
-- **Dashboard (recommended for humans):** `caura.ai/settings/organization/api-credentials` — single-card wizard, one-time raw-key reveal, manages cross-tenant + read-scope settings.
+- **Dashboard (recommended for humans):** `caura.ai/connect/keys` (Connect › Keys) → **Create Agent Key** — agent id, initial trust and an optional fleet, one-time raw-key reveal. That form is what workspace members see; an org admin sees the org's API credentials there instead, which are tenant-scoped (optionally widened to read the org's other tenants) and carry no agent identity, so `agent_id` is passed on each call.
 - **API (for scripted provisioning, shown below):** `POST /api/v1/admin/agent-keys/provision` on the managed platform (caura.ai) — atomic call that creates the Agent row eagerly so subsequent trust-elevation or fleet-assignment endpoints work immediately:
 
 ```bash

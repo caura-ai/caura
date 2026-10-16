@@ -1,9 +1,10 @@
 # Usage metering
 
-Caura records what each workspace's model calls cost and what its memory saved,
-in its own database. Counts only, never content, and nothing is sent anywhere:
-this is not telemetry (see [telemetry.md](telemetry.md) for the separate,
-opt-in heartbeat). Read it with [`GET /api/v1/spend`](api-reference.md).
+Caura records what each tenant's model calls cost and what its memory saved, in
+its own database. A tenant is shown as a workspace in the Caura app, and this
+page calls it a workspace from here on. Counts only, never content, and nothing
+is sent anywhere: this is not telemetry (see [telemetry.md](telemetry.md) for
+the separate, opt-in heartbeat). Read it with [`GET /api/v1/spend`](api-reference.md).
 
 ## What is recorded
 

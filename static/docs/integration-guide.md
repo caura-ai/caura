@@ -221,7 +221,7 @@ Add to `~/.openclaw/plugins/memclaw/.env`: <!-- legacy-name-floor: frozen plugin
 CAURA_API_URL=https://your-caura-instance.example.com   # your Caura API
 CAURA_API_KEY=mc_your_key_here                          # tenant-scoped API key
 CAURA_FLEET_ID=fleet-001                                # identifies this fleet
-CAURA_NODE_NAME=my-gateway                              # friendly name shown in Fleet page
+CAURA_NODE_NAME=my-gateway                              # friendly name shown under Agents › Fleets and machines
 # CAURA_TENANT_ID=                                      # auto-resolved from API key
 # CAURA_AUTO_WRITE_TURNS=true                           # false disables automatic conversation writes
 # CAURA_AUTO_FIX_CONFIG=false                           # set true to auto-fix openclaw.json on startup
@@ -267,7 +267,7 @@ delete existing memories or disable the separately enabled Interviewer
 
 **Critical:** The `plugins.slots.memory` and `memory-core` disablement are required. OpenClaw only loads one `kind: "memory"` plugin at a time — without switching the slot, the gateway sees the plugin but never calls `register()`. The automated installer handles this automatically.
 
-> Alternatively, use the Plugin Manager's **Fix Configuration** button or the OpenClaw CLI:
+> Alternatively, use the OpenClaw CLI:
 > ```bash
 > openclaw plugins disable memory-core
 > openclaw plugins enable memclaw # legacy-name-floor: CLI requires the frozen plugin id
@@ -320,16 +320,16 @@ The plugin registers 11 tools (the MCP surface minus the MCP-only `caura_keyston
 
 On first plugin load, agents are **auto-educated** — the plugin writes SKILL.md, TOOLS.md, and AGENTS.md to all agent workspaces automatically. The `.educated` flag at `~/.openclaw/plugins/memclaw/.educated` prevents re-running on subsequent restarts. <!-- legacy-name-floor: frozen install path -->
 
-For manual or targeted education via the Fleet page:
+For manual or targeted education in the Caura app, under **Agents › Fleets and machines**:
 
-1. Click a node → expand an agent → **Educate** (targets one agent) or use the **Educate Agents** button (targets all or selected)
+1. Select the fleet, then the node, and open the node's **Education** tab
 2. Review/edit the education prompt (pre-filled with default instructions)
-3. Click **Queue Educate Command** — delivered on the next heartbeat (≤60 seconds)
+3. Untick any agents you want to skip (all the node reports are selected), then click **Send to N Agents** — or **Broadcast** when the node reports no agents. Delivered on the next heartbeat (≤60 seconds)
 4. The plugin writes the prompt to each agent's `HEARTBEAT.md` and updates SKILL.md, TOOLS.md, AGENTS.md in their workspace
 5. Each write is verified by read-back — the command result reports `verified` count and any per-workspace failures
 6. Agents process the prompt on their next heartbeat and update their own TOOLS.md, AGENTS.md, SOUL.md, IDENTITY.md
 
-The **Agent Education Status** section in Plugin Manager shows green checkmarks for agents that have been educated.
+On the node's **Overview** tab, each agent shows ✓/✗ badges for the files written to its workspace (HB, SKILL, TOOLS), and until setup is complete the node's setup checklist includes **Agents educated**.
 
 ---
 
@@ -750,8 +750,8 @@ Content-hash rejects exact duplicates within a tenant + fleet + agent scope (HTT
 |---|---|
 | Plugin tools don't appear | Ensure all three `plugins` keys are set in `openclaw.json`: `allow`, `entries`, and `load.paths`. Restart OpenClaw |
 | Tools not in agent sessions | Auto-fixed on first plugin load (adds v1.0 names, removes stale pre-v1.0 names). If it persists after restart, run `openclaw gateway memclaw.allowlist.fix` or check that `CAURA_AUTO_FIX_CONFIG` is not set to `false` <!-- legacy-name-floor: memclaw.allowlist.fix is the live gateway RPC method name --> |
-| Plugin allowed but not loading | Missing `plugins.entries.memclaw.enabled: true` or `plugins.load.paths` entry — the installer and Fix Configuration set both | <!-- legacy-name-floor: troubleshooting names the frozen live config key -->
-| All config issues | Use the "Fix Configuration" button in Fleet Browser Plugin Manager to auto-fix all settings |
+| Plugin allowed but not loading | Missing `plugins.entries.memclaw.enabled: true` or `plugins.load.paths` entry — the installer sets both | <!-- legacy-name-floor: troubleshooting names the frozen live config key -->
+| All config issues | Re-run the installer, then restart OpenClaw. In the Caura app, the node under **Agents › Fleets and machines** lists the setup checks still failing (plugin loaded, tools registered, config complete, agents educated) |
 | `ECONNREFUSED` | Check `CAURA_API_URL`, ensure API is running |
 | API URL redirects | Set `CAURA_API_URL` to the final server URL. Credential-bearing plugin requests reject redirects so an API key cannot be forwarded to another host. |
 | Agent-key provisioning unavailable | Concurrent calls for one agent share one provisioning attempt. Failed attempts wait 60 seconds before retrying; a 404 disables provisioning until plugin restart. Meanwhile the agent's requests use the tenant key. |
