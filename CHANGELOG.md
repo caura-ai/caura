@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.34.3](https://github.com/caura-ai/caura/compare/backend-v3.34.2...backend-v3.34.3) (2026-10-16)
+
+
+### Dependencies
+
+* bump jsonschema from 4.25.1 to 4.26.0 in the pip-minor-patch group across 1 directory ([#2044](https://github.com/caura-ai/caura/issues/2044)) ([22f33ea](https://github.com/caura-ai/caura/commit/22f33eaac70af2c2e82eed45c6aa90bf1de69083))
+* update fastapi requirement from &lt;1,&gt;=0.141.1 to &gt;=0.143.0,&lt;1 ([#2046](https://github.com/caura-ai/caura/issues/2046)) ([ec959ca](https://github.com/caura-ai/caura/commit/ec959ca33db27807a83ef496a60c6de600223877))
+
 ## [3.34.2](https://github.com/caura-ai/caura/compare/backend-v3.34.1...backend-v3.34.2) (2026-10-16)
 
 
