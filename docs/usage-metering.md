@@ -1,17 +1,16 @@
 # Usage metering
 
 Caura records what each tenant's model calls cost and what its memory saved, in
-its own database. A tenant is shown as a workspace in the Caura app, and this
-page calls it a workspace from here on. Counts only, never content, and nothing
-is sent anywhere: this is not telemetry (see [telemetry.md](telemetry.md) for
-the separate, opt-in heartbeat). Read it with [`GET /api/v1/spend`](api-reference.md).
+its own database. Counts only, never content, and nothing is sent anywhere:
+this is not telemetry (see [telemetry.md](telemetry.md) for the separate,
+opt-in heartbeat). Read it with [`GET /api/v1/spend`](api-reference.md).
 
 ## What is recorded
 
 **Every model call the server makes**, with the provider's own token counts:
 enrichment, embeddings, entity extraction, contradiction checks, duplicate
 judgement, crystallization, skill distillation, insights, recall briefs,
-document ingest and the rest. Each is attributed to the workspace, agent,
+document ingest and the rest. Each is attributed to the tenant, agent,
 fleet and operation it was made for, and the provider and model that served
 it.
 
@@ -22,7 +21,7 @@ it.
 | `tokens_in`, `tokens_out` | As the provider reported them. OpenAI-compatible providers (OpenAI, Anthropic, OpenRouter), Vertex and Gemini report them; a local embedder or a self-hosted sidecar that does not counts as calls with 0 tokens. |
 | `tokens_reasoning` | Reasoning ("thinking") tokens: billed as output, never in the visible text. |
 
-A call no request or background task names a workspace for is recorded under
+A call no request or background task names a tenant for is recorded under
 `_unattributed`, so a missed path shows up instead of disappearing.
 
 **Savings, only where both sides are known exactly:**
@@ -48,24 +47,24 @@ Tokens Caura counts itself (recall and merge sizes) use tiktoken
 
 Per minute, not per call: core-api and core-worker add calls up in memory and
 flush every 15 seconds into `llm_usage_minutes` and `value_usage_minutes`
-(migration 066). Each flush is for one workspace: storage writes every row
-under the workspace the request names, so no flush can reach another's
+(migration 066). Each flush is for one tenant: storage writes every row
+under the tenant the request names, so no flush can reach another's
 totals. Each carries an id storage records once, so a flush whose reply was
 lost is re-sent and counted once. A crash loses at most the
 last 15 seconds; a clean shutdown flushes first. If storage is unreachable, up
 to 20 flushes wait and the oldest is then dropped, with an error naming its
 row count.
 
-Both tables go with a workspace when it is purged, and with a fleet when that
+Both tables go with a tenant when it is purged, and with a fleet when that
 fleet is.
 
 ## Turning it off
 
-Per workspace, in its settings:
+Per tenant, in its settings:
 
 ```json
 {"observability": {"usage_metering_enabled": false}}
 ```
 
-Storage drops that workspace's rows from the next flush on, for core-api and
-core-worker alike. Rows already recorded stay until the workspace is purged.
+Storage drops that tenant's rows from the next flush on, for core-api and
+core-worker alike. Rows already recorded stay until the tenant is purged.
