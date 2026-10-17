@@ -79,6 +79,8 @@ event_topic_families:
     topics: 2   # suppression-changed, settings-changed
   - name: Lifecycle
     topics: 9   # archive-expired/-stale/purge/crystallize/crystallize-on-demand/entity-link/insights/embed-backfill/forge-distill (all -requested)
+  - name: Collaboration
+    topics: 1   # wake (optional collaboration mounts)
 
 # Components that are NOT driven by core-operations' scheduler and need an
 # operator-provided external schedule.

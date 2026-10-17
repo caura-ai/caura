@@ -1,0 +1,6 @@
+.venv/
+**/build/
+**/dist/
+**/*.egg-info/
+.coverage
+!uv.lock

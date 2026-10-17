@@ -18,6 +18,10 @@ pytestmark = pytest.mark.unit
 
 REPO = Path(__file__).resolve().parents[1]
 VERSION_FILE = re.compile(r"`([\w./-]+\.(?:json|lock|toml|ts))`")
+# RELEASING's list also names the collaboration clients' README, whose install
+# snippet a release rewrites. CONTRIBUTING keeps the narrower pattern: it names
+# ``CHANGELOG.md``, which release-please writes but not through extra-files.
+RELEASED_FILE = re.compile(r"`([\w./-]+\.(?:json|lock|md|toml|ts))`")
 
 
 def _rewritten() -> set[str]:
@@ -47,7 +51,7 @@ def test_the_release_config_and_docs_are_found() -> None:
 
 def test_releasing_lists_every_file_a_release_rewrites() -> None:
     section = _section("RELEASING.md", "## Version files release-please rewrites")
-    assert set(VERSION_FILE.findall(section)) == _rewritten()
+    assert set(RELEASED_FILE.findall(section)) == _rewritten()
 
 
 def test_contributing_points_to_that_list_and_names_no_other_file() -> None:

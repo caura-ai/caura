@@ -1,0 +1,35 @@
+[project]
+name = "caura-bus-cli"
+version = "0.2.0"  # x-release-please-version
+description = "Caura messaging CLI: setup / doctor / replay / agents / threads / send / status"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Caura, Inc." }]
+dependencies = [
+    "caura-bus-core==0.2.0",  # x-release-please-version
+    # `caura-bus setup` wires this MCP server into Claude Code / Codex.
+    "caura-bus-mcp==0.2.0",  # x-release-please-version
+    "typer>=0.12",
+]
+
+[project.scripts]
+caura-bus = "caura_bus_cli.main:app"
+
+[tool.uv.sources]
+caura-bus-core = { workspace = true }
+caura-bus-mcp = { workspace = true }
+
+[project.urls]
+Homepage = "https://github.com/caura-ai/caura/tree/main/clients/collaboration"
+Source = "https://github.com/caura-ai/caura"
+Changelog = "https://github.com/caura-ai/caura/blob/main/clients/collaboration/CHANGELOG.md"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+caura_bus_cli = ["py.typed", "peer_instructions.md"]
