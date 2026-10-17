@@ -10,6 +10,23 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.34.4](https://github.com/caura-ai/caura/compare/backend-v3.34.3...backend-v3.34.4) (2026-10-17)
+
+
+### Bug Fixes
+
+* **reports:** keep org reports up when one tenant's agent list fails ([#2094](https://github.com/caura-ai/caura/issues/2094)) ([bb77105](https://github.com/caura-ai/caura/commit/bb77105d68ba6f130ef015e5307eb8a7862cb934))
+
+
+### Dependencies
+
+* update pydantic requirement from &lt;3,&gt;=2.13.5 to &gt;=2.14.1,&lt;3 ([#2045](https://github.com/caura-ai/caura/issues/2045)) ([3ea743a](https://github.com/caura-ai/caura/commit/3ea743a4f9d2da4a5d0ee49fc1dc001a489fcb75))
+
+
+### Documentation
+
+* point README, client and skill text at current app places ([#2093](https://github.com/caura-ai/caura/issues/2093)) ([8f4e2fa](https://github.com/caura-ai/caura/commit/8f4e2fa4fe4517c6ba64d7e75e0b809885f4d08f))
+
 ## [3.34.3](https://github.com/caura-ai/caura/compare/backend-v3.34.2...backend-v3.34.3) (2026-10-16)
 
 
