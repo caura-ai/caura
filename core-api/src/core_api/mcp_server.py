@@ -799,7 +799,7 @@ def _refuse_default_agent_on_gateway(agent_id: str) -> str | None:
         "filter by agent_id, so a defaulted value would quietly query one "
         "shared identity's rows rather than yours. Either pass "
         "agent_id=<your-agent-name> or provision an agent-scoped credential "
-        "(POST /api/v1/admin/agent-keys/provision, or Create Agent Key in the "
+        "(POST /api/v1/admin/agent-keys/provision, or Create agent key in the "
         "dashboard under Connect > Keys) — "
         "those have agent identity bound at mint time and the gateway "
         "injects X-Agent-ID for them.",

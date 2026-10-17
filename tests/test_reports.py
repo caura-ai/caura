@@ -535,8 +535,8 @@ async def test_report_org_scope_aggregates_across_tenants(client):
 
 
 async def test_report_org_scope_names_agents_across_tenants(client):
-    """Prism App Review (15 Oct) #413: an org-scope leaderboard carries each
-    agent's display_name from its own tenant's roster, not null."""
+    """An org-scope leaderboard carries each agent's display_name from its own
+    tenant's roster, not null."""
     tag = _uid()
     t1, t2 = f"rep-orgn1-{tag}", f"rep-orgn2-{tag}"
     a1, a2, a3 = f"a1-{tag}", f"a2-{tag}", f"a3-{tag}"
@@ -580,6 +580,54 @@ async def test_report_org_scope_names_agents_across_tenants(client):
         assert resp.status_code == 200, resp.text
         names = {p["agent_id"]: p["display_name"] for p in resp.json()["per_agent"]}
         assert names == {a1: "Box One", a2: "Box Two", a3: None}, names
+    finally:
+        app.dependency_overrides.pop(get_auth_context, None)
+
+
+async def test_report_org_scope_survives_a_failed_roster_read(client, monkeypatch):
+    """One readable tenant's roster read failing must not fail the org report:
+    the other tenants' agents keep their names, the failed tenant's stay null."""
+    tag = _uid()
+    t1, t2 = f"rep-orgf1-{tag}", f"rep-orgf2-{tag}"
+    a1, a2 = f"a1-{tag}", f"a2-{tag}"
+    _, headers = get_test_auth(t1)
+    sc = get_storage_client()
+    for t, a, name in ((t1, a1, "Box One"), (t2, a2, "Box Two")):
+        await sc.create_or_update_agent(
+            {
+                "tenant_id": t,
+                "agent_id": a,
+                "fleet_id": f"f-{tag}",
+                "display_name": name,
+                "trust_level": 1,
+            }
+        )
+    await _seed(client, headers, t1, f"f-{tag}", a1, "decision", 2)
+    await _seed(client, headers, t2, f"f-{tag}", a2, "fact", 1)
+
+    real_list_agents = sc.list_agents
+
+    async def flaky_list_agents(tenant_id, *args, **kwargs):
+        if tenant_id == t2:
+            raise RuntimeError("storage unavailable")
+        return await real_list_agents(tenant_id, *args, **kwargs)
+
+    monkeypatch.setattr(sc, "list_agents", flaky_list_agents)
+    ctx = AuthContext(tenant_id=t1, readable_tenant_ids=[t1, t2])
+    app.dependency_overrides[get_auth_context] = lambda: ctx
+    try:
+        resp = await client.get(
+            "/api/v1/reports",
+            params={
+                "tenant_id": t1,
+                "period": "week",
+                "destination": "internal_group",
+                "scope": "org",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        names = {p["agent_id"]: p["display_name"] for p in resp.json()["per_agent"]}
+        assert names == {a1: "Box One", a2: None}, names
     finally:
         app.dependency_overrides.pop(get_auth_context, None)
 

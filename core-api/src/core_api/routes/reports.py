@@ -430,8 +430,12 @@ async def get_report(
             phase1["agents"] = sc.list_agents(tenant_id, caller_fleet)
         elif org_mode and by_agent and readable:
             # Org scope: list_agents is per-tenant, so read each readable
-            # tenant's roster to name the leaderboard's agents.
-            phase1["org_agents"] = asyncio.gather(*(sc.list_agents(t) for t in readable))
+            # tenant's roster to name the leaderboard's agents. Names are
+            # cosmetic: return_exceptions keeps one tenant's failed read from
+            # failing the whole report (its agents keep a null display_name).
+            phase1["org_agents"] = asyncio.gather(
+                *(sc.list_agents(t) for t in readable), return_exceptions=True
+            )
         if want_trend:
             # Activity-over-time trend (group/org only). Built here — inside the
             # guard — so trend_query is a concrete dict, not dict | None.
@@ -464,7 +468,12 @@ async def get_report(
         # readable tenant's row.
         belong_by_id: dict[str, dict] = {}
         if org_mode:
-            agent_rows = [row for rows in (p1.get("org_agents") or []) for row in (rows or [])]
+            agent_rows: list[dict] = []
+            for t, rows in zip(readable or [], p1.get("org_agents") or []):
+                if isinstance(rows, BaseException):
+                    logger.warning("report: agent roster unavailable for tenant=%s: %r", t, rows)
+                    continue
+                agent_rows.extend(rows or [])
         elif dest == AUDIENCE_GROUP:
             agent_rows = p1.get("agents") or []
         elif is_self_scope:
