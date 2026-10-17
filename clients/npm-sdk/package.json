@@ -7,7 +7,7 @@
   "type": "module",
   "main": "index.js",
   "types": "index.d.ts",
-  "files": ["index.js", "index.d.ts", "README.md"],
+  "files": ["index.js", "index.d.ts", "README.md", "LICENSE"],
   "dependencies": {
     "@caura/client": "^1.0.0"
   },
