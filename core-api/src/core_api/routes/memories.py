@@ -705,6 +705,10 @@ async def memory_stats(
     ),
     memory_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    run_id: str | None = Query(default=None),
+    exclude_memory_types: list[str] | None = Query(default=None),
+    created_after: datetime | None = Query(default=None),
+    created_before: datetime | None = Query(default=None),
     include_deleted: bool = Query(
         default=False,
         description=(
@@ -794,6 +798,14 @@ async def memory_stats(
             "include_scope_agent": auth.is_person,
             "memory_type": memory_type,
             "status": status,
+            # The list's filters too (ENT2-013), so a count summarises the view
+            # it labels rather than the coarse set around it. One edge differs:
+            # stats' window is half-open, so a row created at exactly
+            # ``created_before`` is listed but not counted.
+            "run_id": run_id,
+            "exclude_memory_types": exclude_memory_types,
+            "created_after": created_after.isoformat() if created_after else None,
+            "created_before": created_before.isoformat() if created_before else None,
             "include_deleted": await _effective_include_deleted(auth, include_deleted),
             # lme-0929-m-03: additive ``pending`` / ``settled`` block so a caller
             # can tell whether background work (embed / enrich / fan-out) is
@@ -1058,6 +1070,10 @@ async def delete_all_memories(
     agent_id: str | None = Query(default=None),
     memory_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    run_id: str | None = Query(default=None),
+    exclude_memory_types: list[str] | None = Query(default=None),
+    created_after: datetime | None = Query(default=None),
+    created_before: datetime | None = Query(default=None),
     confirm_scope: str | None = Query(
         default=None,
         description=(
@@ -1090,9 +1106,13 @@ async def delete_all_memories(
 
     So the unbounded case now requires ``confirm_scope=tenant`` (SAFE-03 /
     C28). Every narrowed call is unaffected: pass a ``fleet_id``, ``agent_id``,
-    ``memory_type``, ``status``, ``exclude_ids`` or ``metadata_filter`` and
-    nothing changes. This deliberately does not widen C13 — the trust ladder is
-    untouched, and the confirmation is a statement of intent, not a permission.
+    ``memory_type``, ``status``, ``run_id``, ``created_after``,
+    ``created_before``, ``exclude_memory_types``, ``exclude_ids`` or
+    ``metadata_filter`` and nothing changes. The middle four are the list's
+    filters (ENT2-013): undeclared, they were dropped, and a delete narrowed by
+    fleet and run removed the whole fleet. This deliberately does not widen
+    C13 — the trust ladder is untouched, and the confirmation is a statement
+    of intent, not a permission.
 
     **Recovery.** Deletes here are SOFT: rows are marked deleted, not removed,
     and stay readable with ``include_deleted=true``. There is no self-serve
@@ -1123,7 +1143,20 @@ async def delete_all_memories(
     # entry here: forgetting it would silently classify a narrowed call as
     # unbounded (annoying), while inferring from ``locals()`` would silently do
     # the reverse the day someone adds a non-filter parameter (dangerous).
-    is_tenant_wide = not any((fleet_id, agent_id, memory_type, status, exclude_ids, metadata_filter))
+    is_tenant_wide = not any(
+        (
+            fleet_id,
+            agent_id,
+            memory_type,
+            status,
+            run_id,
+            exclude_memory_types,
+            created_after,
+            created_before,
+            exclude_ids,
+            metadata_filter,
+        )
+    )
     if is_tenant_wide and confirm_scope != "tenant":
         logger.warning(
             "Refused unconfirmed tenant-wide delete",
@@ -1139,8 +1172,9 @@ async def delete_all_memories(
                 "This request would soft-delete every memory in the tenant. "
                 "No fleet_id and no other narrowing filter was supplied. "
                 "Pass confirm_scope=tenant to proceed, or narrow the request "
-                "with fleet_id / agent_id / memory_type / status / exclude_ids "
-                "/ metadata_filter."
+                "with fleet_id / agent_id / memory_type / status / run_id / "
+                "created_after / created_before / exclude_memory_types / "
+                "exclude_ids / metadata_filter."
             ),
         )
     if metadata_filter:
@@ -1180,6 +1214,10 @@ async def delete_all_memories(
             "agent_id": agent_id,
             "memory_type": memory_type,
             "status": status,
+            "run_id": run_id,
+            "exclude_memory_types": exclude_memory_types,
+            "created_after": created_after.isoformat() if created_after else None,
+            "created_before": created_before.isoformat() if created_before else None,
             "exclude_ids": exclude_ids,
             "metadata_filter": metadata_filter or None,
         }
@@ -1195,6 +1233,10 @@ async def delete_all_memories(
             "agent_id": agent_id,
             "memory_type": memory_type,
             "status_filter": status,
+            "run_id": run_id,
+            "exclude_memory_types": exclude_memory_types,
+            "created_after": created_after.isoformat() if created_after else None,
+            "created_before": created_before.isoformat() if created_before else None,
             "metadata_filter": metadata_filter or None,
             # Without this the audit row for a tenant wipe is shaped exactly
             # like the row for a narrow delete that happened to match a lot.

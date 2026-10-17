@@ -40,11 +40,12 @@ your first call in a session.
 - **`agent_id`** — who you are. Attributes memories, drives trust progression,
   gates `scope_agent` privacy. Resolve it from your runtime. Never fabricate,
   hardcode a placeholder, or impersonate another agent.
-- **`fleet_id`** — your team / organization scope. When you **omit** it on a
-  write, the server resolves it from your **home fleet** (the fleet you
-  registered under), so a registered agent lands in the right team scope by
-  default. Pass it **explicitly** in two cases: (1) you have **no home fleet**
-  set — omitting then persists `fleet_id=NULL`, which is **tenant-shared**:
+- **`fleet_id`** — your fleet: a team or group of agents within your
+  tenant. When you **omit** it on a write, the server resolves it from your
+  **home fleet** (the fleet you registered under), so a registered agent
+  lands in the right fleet by default. Pass it **explicitly** in two cases:
+  (1) you have **no home fleet** set — omitting then persists
+  `fleet_id=NULL`, which is **tenant-shared**:
   every fleet's recall still finds the row, but a fleet-filtered `list` or
   `stats` does not, so it answers teammates' searches while going missing
   from their counts; or (2) you're writing into a **different**
@@ -355,8 +356,9 @@ changes):
 
 - **A `staged` landing is not an error.** With the Factory on, your `op=write`
   persists with `status=staged`, pending operator review in the
-  **Skills Inbox** before it can become `active`. Don't retry, rewrite, or
-  delete a write that landed staged — that's governance working.
+  **Skills Inbox** (in the Caura app: Review › Skills to approve; on any
+  server, the Skills Inbox API) before it can become `active`. Don't retry,
+  rewrite, or delete a write that landed staged — that's governance working.
 - **`doc_id` prefixes carry provenance.** `forge/<slug>` marks a skill
   distilled server-side by **Forge** from fleet activity; `agent/<slug>` marks
   a direct agent write; a plain `<slug>` (the prefix is optional) is typically

@@ -132,7 +132,7 @@ Four paths — pick the one that matches your setup:
 Get up and running in minutes — no infrastructure, automatic updates, usage analytics, and enterprise-grade security included.
 
 1. **[Sign up free on caura.ai](https://caura.ai).**
-2. Copy an API key from the dashboard.
+2. Create an API key in the dashboard under **Connect › Keys**.
 3. Connect through MCP or REST:
 
 ```json
@@ -379,7 +379,7 @@ Add Caura to any MCP client with one config block.
 }
 ```
 
-> For team or production use, swap the tenant-scoped key for an **agent-scoped credential** — on the managed platform (caura.ai), atomic provisioning via `POST /api/v1/admin/agent-keys/provision` (or the `/settings/organization/api-credentials` wizard) mints the credential + Agent row + initial trust + fleet membership in one round trip. Both kinds use the `mc_` prefix; scope is set at mint time on the credential. See [`docs/integration-without-plugin.md`](docs/integration-without-plugin.md). Using a tenant-scoped credential? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-scoped path.
+> For team or production use, swap the tenant-scoped key for an **agent-scoped credential** — on the managed platform (caura.ai), atomic provisioning via `POST /api/v1/admin/agent-keys/provision` (or **Create agent key** under Connect › Keys in the Caura app) mints the credential + Agent row + initial trust + fleet membership in one round trip. Both kinds use the `mc_` prefix; scope is set at mint time on the credential. See [`docs/integration-without-plugin.md`](docs/integration-without-plugin.md). Using a tenant-scoped credential? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-scoped path.
 
 **Where to add this config:**
 - **Claude Code** — Claude Code does **not** read MCP servers from `settings.json`. Register the server with `claude mcp add` instead. Use `-s user` so it's available in **every** working directory — the default scope (`local`) only registers it for the current directory, which bites when you run agents from multiple folders:
@@ -415,7 +415,9 @@ Sharing a skill by hand (above) is the floor. **Skill Factory** is the
 governed system on top of the `skills` collection — it auto-generates skills
 from fleet behavior, gates what goes live, and delivers active skills to your
 agents. It's **opt-in per tenant and off by default**: until you set
-`skills_factory.enabled = true` in the tenant's org settings, the `skills`
+`skills_factory.enabled = true` in the tenant's settings (`PUT /api/v1/settings`
+with `{"skills_factory": {"enabled": true}}`, or in the Caura app at caura.ai:
+Settings › Tenant settings), the `skills`
 collection behaves exactly as described above (no lifecycle, every stored skill
 visible). Three pillars:
 
@@ -431,7 +433,9 @@ visible). Three pillars:
   defer, reject, or quarantine staged skills over a REST surface —
   `GET /api/v1/skills-inbox` lists the staged cards, and
   `POST /api/v1/skills-inbox/{slug}/approve|edit|defer|quarantine|reject`
-  acts on them. An agent write lands as `staged`, never instantly `active`.
+  acts on them (in the Caura app at caura.ai the same queue is Review › Skills
+  to approve, for org admins). An agent write lands as `staged`, never
+  instantly `active`.
 - **Delivery — pull and push.** Agents *pull* active skills over MCP
   (`caura_doc op=search`/`op=read`), or the **OpenClaw plugin** *pushes* them:
   its reconciler fetches every active skill from `POST /api/v1/skills/installable`
@@ -460,8 +464,9 @@ treat Interviewer memories as a useful approximation, not a verbatim record.)
 
 It's a third way memories enter Caura, alongside realtime writes and
 ingestion. Like Skill Factory it's **opt-in per tenant and off by default** —
-inert until you set `interviewer.enabled = true` in the tenant's org
-settings.
+inert until you set `interviewer.enabled = true` in the tenant's settings
+(`PUT /api/v1/settings`, or in the Caura app at caura.ai: Settings › Tenant
+settings).
 
 - **What it writes.** Six report sections map onto the memory-type enum:
   `worked_on → episode`, `decisions → decision`, `outcomes → outcome`,

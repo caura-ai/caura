@@ -35,6 +35,11 @@ with Caura("mc_xxx", tenant_id="my-team", agent_id="my-agent") as mc:
     print(mc.recall("Q3 revenue target").summary)
 ```
 
+`tenant_id` is required. On caura.ai it is the id of the tenant your key
+belongs to; `GET /api/v1/whoami` returns it
+(`curl -s https://caura.ai/api/v1/whoami -H "X-API-Key: mc_xxx"`). A
+standalone self-hosted server uses `default`.
+
 Self-hosted? Pass `base_url`:
 
 ```python
