@@ -38,8 +38,8 @@ Self-hosted? Pass `base_url="http://localhost:8000"`. The full client API is on 
 ## Connect an MCP client
 
 Agents that speak MCP (Claude Code, Cursor, OpenClaw and others) reach the same
-memory without any SDK. Copy an API key from the [caura.ai](https://caura.ai)
-dashboard and add:
+memory without any SDK. Create an API key in the [Caura app](https://caura.ai)
+under Connect › Keys and add:
 
 ```json
 {

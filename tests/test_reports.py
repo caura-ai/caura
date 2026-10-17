@@ -8,15 +8,18 @@ Real FastAPI app + in-process storage (see conftest). Validates:
 
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import text
 
 from core_api.app import app
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.routes import reports as reports_route
+from core_storage_api.services.postgres_service import get_session
 from tests.conftest import get_test_auth
 
 pytestmark = pytest.mark.asyncio
@@ -531,6 +534,104 @@ async def test_report_org_scope_aggregates_across_tenants(client):
         app.dependency_overrides.pop(get_auth_context, None)
 
 
+async def test_report_org_scope_names_agents_across_tenants(client):
+    """An org-scope leaderboard carries each agent's display_name from its own
+    tenant's roster, not null."""
+    tag = _uid()
+    t1, t2 = f"rep-orgn1-{tag}", f"rep-orgn2-{tag}"
+    a1, a2, a3 = f"a1-{tag}", f"a2-{tag}", f"a3-{tag}"
+    _, headers = get_test_auth(t1)
+    sc = get_storage_client()
+    await sc.create_or_update_agent(
+        {
+            "tenant_id": t1,
+            "agent_id": a1,
+            "fleet_id": f"f1-{tag}",
+            "display_name": "Box One",
+            "trust_level": 1,
+        }
+    )
+    await sc.create_or_update_agent(
+        {
+            "tenant_id": t2,
+            "agent_id": a2,
+            "fleet_id": f"f2-{tag}",
+            "display_name": "Box Two",
+            "trust_level": 1,
+        }
+    )
+    await _register(t2, f"f2-{tag}", a3)  # no display_name -> stays null
+    await _seed(client, headers, t1, f"f1-{tag}", a1, "decision", 2)
+    await _seed(client, headers, t2, f"f2-{tag}", a2, "fact", 1)
+    await _seed(client, headers, t2, f"f2-{tag}", a3, "fact", 1)
+
+    ctx = AuthContext(tenant_id=t1, readable_tenant_ids=[t1, t2])
+    app.dependency_overrides[get_auth_context] = lambda: ctx
+    try:
+        resp = await client.get(
+            "/api/v1/reports",
+            params={
+                "tenant_id": t1,
+                "period": "week",
+                "destination": "internal_group",
+                "scope": "org",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        names = {p["agent_id"]: p["display_name"] for p in resp.json()["per_agent"]}
+        assert names == {a1: "Box One", a2: "Box Two", a3: None}, names
+    finally:
+        app.dependency_overrides.pop(get_auth_context, None)
+
+
+async def test_report_org_scope_survives_a_failed_roster_read(client, monkeypatch):
+    """One readable tenant's roster read failing must not fail the org report:
+    the other tenants' agents keep their names, the failed tenant's stay null."""
+    tag = _uid()
+    t1, t2 = f"rep-orgf1-{tag}", f"rep-orgf2-{tag}"
+    a1, a2 = f"a1-{tag}", f"a2-{tag}"
+    _, headers = get_test_auth(t1)
+    sc = get_storage_client()
+    for t, a, name in ((t1, a1, "Box One"), (t2, a2, "Box Two")):
+        await sc.create_or_update_agent(
+            {
+                "tenant_id": t,
+                "agent_id": a,
+                "fleet_id": f"f-{tag}",
+                "display_name": name,
+                "trust_level": 1,
+            }
+        )
+    await _seed(client, headers, t1, f"f-{tag}", a1, "decision", 2)
+    await _seed(client, headers, t2, f"f-{tag}", a2, "fact", 1)
+
+    real_list_agents = sc.list_agents
+
+    async def flaky_list_agents(tenant_id, *args, **kwargs):
+        if tenant_id == t2:
+            raise RuntimeError("storage unavailable")
+        return await real_list_agents(tenant_id, *args, **kwargs)
+
+    monkeypatch.setattr(sc, "list_agents", flaky_list_agents)
+    ctx = AuthContext(tenant_id=t1, readable_tenant_ids=[t1, t2])
+    app.dependency_overrides[get_auth_context] = lambda: ctx
+    try:
+        resp = await client.get(
+            "/api/v1/reports",
+            params={
+                "tenant_id": t1,
+                "period": "week",
+                "destination": "internal_group",
+                "scope": "org",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        names = {p["agent_id"]: p["display_name"] for p in resp.json()["per_agent"]}
+        assert names == {a1: "Box One", a2: None}, names
+    finally:
+        app.dependency_overrides.pop(get_auth_context, None)
+
+
 async def test_report_org_scope_hides_private_content_from_an_agent_caller(client):
     """M-31, org half. ``scope=org`` carried the same defect as internal_group.
 
@@ -833,6 +934,187 @@ async def test_report_quality_metrics(client):
     # Insight freshness present and well-formed (no insights seeded here).
     assert q["insight_freshness"]["total"] == 0, q["insight_freshness"]
     assert q["insight_freshness"]["stale_pct"] == 0.0, q["insight_freshness"]
+
+
+async def _set_times(memory_id, *, created_at, last_recalled_at=None, recall_count=0):
+    """Backdate a row: the recall-in-window figures depend on ``created_at`` and
+    ``last_recalled_at``, which no API sets to the past."""
+    async with get_session() as session:
+        await session.execute(
+            text(
+                "UPDATE memories SET created_at = :c, last_recalled_at = :r, "
+                "recall_count = :n WHERE id = CAST(:id AS uuid)"
+            ),
+            {
+                "c": created_at,
+                "r": last_recalled_at,
+                "n": recall_count,
+                "id": memory_id,
+            },
+        )
+
+
+async def test_report_recalled_in_window(client):
+    """``recalled_in_window_pct`` is over the WHOLE durable corpus, by
+    ``last_recalled_at``; ``never_recalled_pct`` stays over memories created in
+    the window (Prism App Review C3/A5).
+
+    Five durable rows: three created a month ago (one recalled yesterday, one
+    recalled three weeks ago, one never), one created today and recalled now,
+    one created today and never recalled. Plus an episode, recalled yesterday,
+    that the durable corpus excludes.
+    """
+    tag = _uid()
+    tenant_id, headers = get_test_auth(f"rep-riw-{tag}")
+    fleet, a1 = f"rep-fleet-{tag}", f"rep-a1-{tag}"
+    await _register(tenant_id, fleet, a1)
+    sc = get_storage_client()
+    now = datetime.now(UTC)
+    month_ago = now - timedelta(days=30)
+
+    old_hot = await _seed_titled(
+        client, headers, tenant_id, fleet, a1, "decision", f"Old hot {tag}"
+    )
+    old_cold = await _seed_titled(
+        client, headers, tenant_id, fleet, a1, "fact", f"Old cold {tag}"
+    )
+    old_never = await _seed_titled(
+        client, headers, tenant_id, fleet, a1, "fact", f"Old never {tag}"
+    )
+    new_hot = await _seed_titled(
+        client, headers, tenant_id, fleet, a1, "decision", f"New hot {tag}"
+    )
+    await _seed_titled(
+        client, headers, tenant_id, fleet, a1, "fact", f"New never {tag}"
+    )
+    episode = await _seed_titled(
+        client, headers, tenant_id, fleet, a1, "episode", f"Episode {tag}"
+    )
+
+    await _set_times(
+        old_hot,
+        created_at=month_ago,
+        last_recalled_at=now - timedelta(days=1),
+        recall_count=4,
+    )
+    await _set_times(
+        old_cold,
+        created_at=month_ago,
+        last_recalled_at=now - timedelta(days=21),
+        recall_count=2,
+    )
+    await _set_times(old_never, created_at=month_ago)
+    await _set_times(
+        episode,
+        created_at=month_ago,
+        last_recalled_at=now - timedelta(days=1),
+        recall_count=1,
+    )
+    assert await sc.increment_recall([new_hot], tenant_id=tenant_id) == 1
+
+    resp = await client.get(
+        "/api/v1/reports",
+        params={
+            "tenant_id": tenant_id,
+            "period": "week",
+            "destination": "internal_group",
+            "agent_id": a1,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    q = resp.json()["quality"]
+    # Whole durable corpus: 5 rows, any creation date; old_hot + new_hot recalled this week.
+    assert q["durable_corpus_total"] == 5, q
+    assert q["recalled_in_window_count"] == 2, q
+    assert q["recalled_in_window_pct"] == 40.0, q
+    # Unchanged: never-recalled is over the 2 rows created this week, 1 never recalled.
+    assert q["funnel"]["durable"] == 2, q["funnel"]
+    assert q["never_recalled_pct"] == 50.0, q
+
+
+async def test_report_recalled_in_window_org_scope(client):
+    """Org scope: the corpus spans the readable tenant set, as every other
+    quality figure does."""
+    tag = _uid()
+    t1, t2 = f"rep-riw1-{tag}", f"rep-riw2-{tag}"
+    _, headers = get_test_auth(t1)
+    await _register(t1, f"f1-{tag}", f"a1-{tag}")
+    await _register(t2, f"f2-{tag}", f"a2-{tag}")
+    now = datetime.now(UTC)
+    month_ago = now - timedelta(days=30)
+    m1 = await _seed_titled(
+        client, headers, t1, f"f1-{tag}", f"a1-{tag}", "decision", f"T1 hot {tag}"
+    )
+    await _seed_titled(
+        client, headers, t1, f"f1-{tag}", f"a1-{tag}", "fact", f"T1 never {tag}"
+    )
+    m3 = await _seed_titled(
+        client, headers, t2, f"f2-{tag}", f"a2-{tag}", "decision", f"T2 hot {tag}"
+    )
+    m4 = await _seed_titled(
+        client, headers, t2, f"f2-{tag}", f"a2-{tag}", "fact", f"T2 old {tag}"
+    )
+    await _set_times(
+        m1,
+        created_at=month_ago,
+        last_recalled_at=now - timedelta(days=2),
+        recall_count=1,
+    )
+    await _set_times(
+        m3,
+        created_at=month_ago,
+        last_recalled_at=now - timedelta(days=3),
+        recall_count=1,
+    )
+    await _set_times(m4, created_at=month_ago)
+
+    ctx = AuthContext(tenant_id=t1, readable_tenant_ids=[t1, t2])
+    app.dependency_overrides[get_auth_context] = lambda: ctx
+    try:
+        resp = await client.get(
+            "/api/v1/reports",
+            params={
+                "tenant_id": t1,
+                "period": "week",
+                "destination": "internal_group",
+                "scope": "org",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        q = resp.json()["quality"]
+        assert q["durable_corpus_total"] == 4, q
+        assert q["recalled_in_window_count"] == 2, q
+        assert q["recalled_in_window_pct"] == 50.0, q
+        # Only T1's "never" row was created this week, and it was never recalled.
+        assert q["never_recalled_pct"] == 100.0, q
+    finally:
+        app.dependency_overrides.pop(get_auth_context, None)
+
+
+async def test_report_recalled_in_window_empty_corpus_is_null(client):
+    """No durable corpus → the share is null, not 0 (nothing to be recalled)."""
+    tag = _uid()
+    tenant_id, headers = get_test_auth(f"rep-riw-empty-{tag}")
+    fleet, a1 = f"rep-fleet-{tag}", f"rep-a1-{tag}"
+    await _register(tenant_id, fleet, a1)
+    await _seed(client, headers, tenant_id, fleet, a1, "episode", 1)
+
+    resp = await client.get(
+        "/api/v1/reports",
+        params={
+            "tenant_id": tenant_id,
+            "period": "week",
+            "destination": "internal_group",
+            "agent_id": a1,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    q = resp.json()["quality"]
+    assert q["durable_corpus_total"] == 0, q
+    assert q["recalled_in_window_count"] == 0, q
+    assert q["recalled_in_window_pct"] is None, q
 
 
 async def test_report_org_scope_requires_cross_tenant_key(client):

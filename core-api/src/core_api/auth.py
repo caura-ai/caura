@@ -231,7 +231,7 @@ class AuthContext:
                     remediation=(
                         "This is a property of the CREDENTIAL, not of the endpoint or "
                         "of tenant keys in general — mint a key with the 'write' "
-                        "capability (Settings → Organization → API Credentials) and "
+                        "capability (in the dashboard under Connect > Keys) and "
                         "retry the same call."
                     ),
                 ),
