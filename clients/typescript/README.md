@@ -33,6 +33,11 @@ for (const m of await mc.search("Q3 revenue target", { topK: 5 })) {
 console.log((await mc.recall("Q3 revenue target")).summary);
 ```
 
+`tenantId` is required. On caura.ai it is the id of the tenant your key
+belongs to; `GET /api/v1/whoami` returns it
+(`curl -s https://caura.ai/api/v1/whoami -H "X-API-Key: mc_xxx"`). A
+standalone self-hosted server uses `default`.
+
 Self-hosted? Pass `baseUrl`:
 
 ```ts

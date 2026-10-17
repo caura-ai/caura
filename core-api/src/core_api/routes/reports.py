@@ -428,6 +428,10 @@ async def get_report(
         }
         if want_agents:
             phase1["agents"] = sc.list_agents(tenant_id, caller_fleet)
+        elif org_mode and by_agent and readable:
+            # Org scope: list_agents is per-tenant, so read each readable
+            # tenant's roster to name the leaderboard's agents.
+            phase1["org_agents"] = asyncio.gather(*(sc.list_agents(t) for t in readable))
         if want_trend:
             # Activity-over-time trend (group/org only). Built here — inside the
             # guard — so trend_query is a concrete dict, not dict | None.
@@ -455,20 +459,22 @@ async def get_report(
 
         # Per-agent leaderboard, joined with belonging metadata. Group = the whole
         # fleet (list_agents); self = just the caller's own row (already fetched);
-        # org scope skips the join (list_agents is per-tenant, can't cover the
-        # readable set — cross-tenant agents get null).
+        # org scope = every readable tenant's roster. by_agent is keyed by
+        # agent_id alone, so an id present in two tenants takes the first
+        # readable tenant's row.
         belong_by_id: dict[str, dict] = {}
-        if not org_mode:
-            if dest == AUDIENCE_GROUP:
-                agent_rows = p1.get("agents") or []
-            elif is_self_scope:
-                agent_rows = [caller] if caller else []
-            else:
-                agent_rows = []
-            for row in agent_rows:
-                aid = row.get("agent_id")
-                if aid:
-                    belong_by_id[aid] = row
+        if org_mode:
+            agent_rows = [row for rows in (p1.get("org_agents") or []) for row in (rows or [])]
+        elif dest == AUDIENCE_GROUP:
+            agent_rows = p1.get("agents") or []
+        elif is_self_scope:
+            agent_rows = [caller] if caller else []
+        else:
+            agent_rows = []
+        for row in agent_rows:
+            aid = row.get("agent_id")
+            if aid:
+                belong_by_id.setdefault(aid, row)
         for aid, cnt in sorted(by_agent.items(), key=lambda kv: kv[1], reverse=True)[:_TOP_AGENTS_LIMIT]:
             row = belong_by_id.get(aid, {})
             per_agent.append(

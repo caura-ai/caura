@@ -152,7 +152,7 @@ exists to separate.
 | OpenClaw plugin (`plugin/src/`) | no | possible | none |
 | Python SDK (`clients/python/src/caura_client/client.py:63`) | no — sends `X-API-Key` only; `agent_id` goes in the body/query | possible | none |
 | TypeScript SDK (`clients/typescript`, `clients/npm-*`) | no | possible | none |
-| Dashboard | no — tenant-scoped, and it says so (`frontend/app/(dashboard)/mcp-tools/page.tsx:16`) | no | none |
+| Dashboard | no — tenant-scoped, and it says so (Connect › MCP console, `frontend/app/(dashboard)/connect/mcp/page.tsx:16` in caura-enterprise) | no | none |
 | A self-hosted OSS operator scripting against a shared key | possible, by hand | yes | the only population affected |
 
 A repo-wide grep finds **no** production sender of `X-Agent-ID` in

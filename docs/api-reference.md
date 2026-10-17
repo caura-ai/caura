@@ -65,7 +65,7 @@ See also the [public API stability contract](public-api-stability.md) and the
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/spend` | GET | A workspace's model calls (provider-reported tokens in, out and reasoning, failed attempts) and recall savings over a window (`start`, `end`; default the last 30 days), grouped by `group_by` (`day`, `agent_id`, `fleet_id`, `operation`, `kind`, `provider`, `model`, `metric`), with a `summary`. Tenant or admin credentials only: agent keys and org members get 403. See [usage metering](usage-metering.md) |
+| `/spend` | GET | A tenant's model calls (provider-reported tokens in, out and reasoning, failed attempts) and recall savings over a window (`start`, `end`; default the last 30 days), grouped by `group_by` (`day`, `agent_id`, `fleet_id`, `operation`, `kind`, `provider`, `model`, `metric`), with a `summary`. Tenant or admin credentials only: agent keys and org members get 403. See [usage metering](usage-metering.md) |
 
 **Agents**
 

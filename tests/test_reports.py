@@ -534,6 +534,56 @@ async def test_report_org_scope_aggregates_across_tenants(client):
         app.dependency_overrides.pop(get_auth_context, None)
 
 
+async def test_report_org_scope_names_agents_across_tenants(client):
+    """Prism App Review (15 Oct) #413: an org-scope leaderboard carries each
+    agent's display_name from its own tenant's roster, not null."""
+    tag = _uid()
+    t1, t2 = f"rep-orgn1-{tag}", f"rep-orgn2-{tag}"
+    a1, a2, a3 = f"a1-{tag}", f"a2-{tag}", f"a3-{tag}"
+    _, headers = get_test_auth(t1)
+    sc = get_storage_client()
+    await sc.create_or_update_agent(
+        {
+            "tenant_id": t1,
+            "agent_id": a1,
+            "fleet_id": f"f1-{tag}",
+            "display_name": "Box One",
+            "trust_level": 1,
+        }
+    )
+    await sc.create_or_update_agent(
+        {
+            "tenant_id": t2,
+            "agent_id": a2,
+            "fleet_id": f"f2-{tag}",
+            "display_name": "Box Two",
+            "trust_level": 1,
+        }
+    )
+    await _register(t2, f"f2-{tag}", a3)  # no display_name -> stays null
+    await _seed(client, headers, t1, f"f1-{tag}", a1, "decision", 2)
+    await _seed(client, headers, t2, f"f2-{tag}", a2, "fact", 1)
+    await _seed(client, headers, t2, f"f2-{tag}", a3, "fact", 1)
+
+    ctx = AuthContext(tenant_id=t1, readable_tenant_ids=[t1, t2])
+    app.dependency_overrides[get_auth_context] = lambda: ctx
+    try:
+        resp = await client.get(
+            "/api/v1/reports",
+            params={
+                "tenant_id": t1,
+                "period": "week",
+                "destination": "internal_group",
+                "scope": "org",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        names = {p["agent_id"]: p["display_name"] for p in resp.json()["per_agent"]}
+        assert names == {a1: "Box One", a2: "Box Two", a3: None}, names
+    finally:
+        app.dependency_overrides.pop(get_auth_context, None)
+
+
 async def test_report_org_scope_hides_private_content_from_an_agent_caller(client):
     """M-31, org half. ``scope=org`` carried the same defect as internal_group.
 

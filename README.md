@@ -415,7 +415,9 @@ Sharing a skill by hand (above) is the floor. **Skill Factory** is the
 governed system on top of the `skills` collection — it auto-generates skills
 from fleet behavior, gates what goes live, and delivers active skills to your
 agents. It's **opt-in per tenant and off by default**: until you set
-`skills_factory.enabled = true` in the tenant's org settings, the `skills`
+`skills_factory.enabled = true` in the tenant's settings (`PUT /api/v1/settings`
+with `{"skills_factory": {"enabled": true}}`, or in the Caura app at caura.ai:
+Settings › Tenant settings), the `skills`
 collection behaves exactly as described above (no lifecycle, every stored skill
 visible). Three pillars:
 
@@ -431,7 +433,9 @@ visible). Three pillars:
   defer, reject, or quarantine staged skills over a REST surface —
   `GET /api/v1/skills-inbox` lists the staged cards, and
   `POST /api/v1/skills-inbox/{slug}/approve|edit|defer|quarantine|reject`
-  acts on them. An agent write lands as `staged`, never instantly `active`.
+  acts on them (in the Caura app at caura.ai the same queue is Review › Skills
+  to approve, for org admins). An agent write lands as `staged`, never
+  instantly `active`.
 - **Delivery — pull and push.** Agents *pull* active skills over MCP
   (`caura_doc op=search`/`op=read`), or the **OpenClaw plugin** *pushes* them:
   its reconciler fetches every active skill from `POST /api/v1/skills/installable`
@@ -460,8 +464,9 @@ treat Interviewer memories as a useful approximation, not a verbatim record.)
 
 It's a third way memories enter Caura, alongside realtime writes and
 ingestion. Like Skill Factory it's **opt-in per tenant and off by default** —
-inert until you set `interviewer.enabled = true` in the tenant's org
-settings.
+inert until you set `interviewer.enabled = true` in the tenant's settings
+(`PUT /api/v1/settings`, or in the Caura app at caura.ai: Settings › Tenant
+settings).
 
 - **What it writes.** Six report sections map onto the memory-type enum:
   `worked_on → episode`, `decisions → decision`, `outcomes → outcome`,
