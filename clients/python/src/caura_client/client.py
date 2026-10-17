@@ -53,15 +53,25 @@ def _check_key_transport(base_url: str, allow_insecure_http: bool | None) -> Non
         )
     if parts.scheme == "https" or _is_loopback(parts.hostname or ""):
         return
+    env_value = None
     if allow_insecure_http is None:
-        allow_insecure_http = os.environ.get("CAURA_ALLOW_INSECURE_HTTP") in ("true", "1")
+        env_value = os.environ.get("CAURA_ALLOW_INSECURE_HTTP")
+        allow_insecure_http = env_value in ("true", "1")
     if not allow_insecure_http:
         host = parts.netloc.rpartition("@")[2]  # never echo userinfo
+        # Deliberately do not echo the value: it might contain a secret.
+        invalid_env = (
+            " CAURA_ALLOW_INSECURE_HTTP is set but was ignored: only the exact "
+            "case-sensitive values 'true' and '1' opt in."
+            if env_value is not None and env_value not in ("true", "1")
+            else ""
+        )
         raise ValueError(
             f"Refusing to send the API key to {host}: base_url uses plain HTTP to a "
             "non-loopback host, so the key would cross the network in cleartext. Use https://, or "
             "pass allow_insecure_http=True (or set CAURA_ALLOW_INSECURE_HTTP=true) to accept the "
             "risk, e.g. on a trusted private network."
+            + invalid_env
         )
 
 
