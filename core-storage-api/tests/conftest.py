@@ -247,3 +247,52 @@ async def without_content_hash_index(_ensure_schema):
         await session.execute(text(f"DROP INDEX IF EXISTS {UQ_LIVE_CONTENT_HASH}"))
         await session.execute(text(cleanup_sql))
         await session.execute(text(UQ_LIVE_CONTENT_HASH_SQL))
+
+
+# ---------------------------------------------------------------------------
+# Duplicate entities — production's table never had the natural-key index (O24)
+# ---------------------------------------------------------------------------
+
+UQ_ENTITIES_NATURAL_KEY = "uq_entities_tenant_type_name_fleet"
+
+# Mirrors migration 001's index, which 068 builds where it is missing.
+UQ_ENTITIES_NATURAL_KEY_SQL = (
+    f"CREATE UNIQUE INDEX {UQ_ENTITIES_NATURAL_KEY} ON entities "
+    "(tenant_id, entity_type, lower(canonical_name), COALESCE(fleet_id, ''))"
+)
+
+# Every tenant the 068 tests write starts with this, so the fixture below can
+# remove their rows whatever state a failed test left them in.
+ENTITY_MERGE_TENANT_PREFIX = "o24-"
+
+
+def load_migration_068():
+    """Migration 068, so its tests execute the REAL merge statements."""
+    return load_migration("068_entities_natural_key_unique.py")
+
+
+@pytest.fixture
+async def without_entities_natural_key_index(_ensure_schema):
+    """Drop the entities natural-key index for the duration of a test, as
+    production's table is.
+
+    Teardown deletes the test tenants' rows rather than running the merge, so the
+    index rebuilds even when the merge under test is missing or broken: every
+    later test in the session needs it (``entity_add`` infers its ``ON
+    CONFLICT`` from it).
+    """
+    from sqlalchemy import text
+
+    from core_storage_api.services.postgres_service import get_session
+
+    async with get_session() as session:
+        await session.execute(text(f"DROP INDEX IF EXISTS {UQ_ENTITIES_NATURAL_KEY}"))
+    try:
+        yield
+    finally:
+        async with get_session() as session:
+            pattern = {"p": f"{ENTITY_MERGE_TENANT_PREFIX}%"}
+            await session.execute(text("DELETE FROM memories WHERE tenant_id LIKE :p"), pattern)
+            await session.execute(text("DELETE FROM entities WHERE tenant_id LIKE :p"), pattern)
+            await session.execute(text(f"DROP INDEX IF EXISTS {UQ_ENTITIES_NATURAL_KEY}"))
+            await session.execute(text(UQ_ENTITIES_NATURAL_KEY_SQL))

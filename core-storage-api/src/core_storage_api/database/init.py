@@ -44,8 +44,13 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # (``llm_usage_minutes``, ``value_usage_minutes``, ``usage_flush_batches``) in
 # one transaction, so the last of them joins the probe. 067 adds the value
 # metering tables (``agent_sessions``, ``memory_origins``, ``memory_reuse``),
-# also in one transaction; the last joins the probe.
-_HEAD_FINGERPRINT_REVISION = "067"
+# also in one transaction; the last joins the probe. 068 merges duplicate
+# entities and builds ``uq_entities_tenant_type_name_fleet`` where it is missing,
+# so that index, valid, joins the probe. It is the one probe that can exist before
+# its head: a chain-built database has had it since 001. That is safe here, as
+# 068 does nothing where the index stands valid, so stamping 068 over such a 067
+# database skips no work.
+_HEAD_FINGERPRINT_REVISION = "068"
 _HEAD_FINGERPRINT_SQL: str | None = (
     "SELECT (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -59,7 +64,10 @@ _HEAD_FINGERPRINT_SQL: str | None = (
     "AND EXISTS (SELECT 1 FROM information_schema.tables "
     "WHERE table_schema = 'public' AND table_name = 'usage_flush_batches') "
     "AND EXISTS (SELECT 1 FROM information_schema.tables "
-    "WHERE table_schema = 'public' AND table_name = 'memory_reuse')"
+    "WHERE table_schema = 'public' AND table_name = 'memory_reuse') "
+    "AND EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+    "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' "
+    "AND c.relname = 'uq_entities_tenant_type_name_fleet' AND i.indisvalid)"
 )
 
 _engine: AsyncEngine | None = None
