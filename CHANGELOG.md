@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.34.5](https://github.com/caura-ai/caura/compare/backend-v3.34.4...backend-v3.34.5) (2026-10-18)
+
+
+### Bug Fixes
+
+* **storage:** merge duplicate entities and build the natural-key index (O24) ([#2095](https://github.com/caura-ai/caura/issues/2095)) ([396c13e](https://github.com/caura-ai/caura/commit/396c13e2e89b467355ef89f24a700a2ffce02aea))
+
 ## [3.34.4](https://github.com/caura-ai/caura/compare/backend-v3.34.3...backend-v3.34.4) (2026-10-17)
 
 
