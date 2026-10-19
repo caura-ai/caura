@@ -16,6 +16,7 @@ Existing <code>memclaw_*</code> tool calls and supported <code>MEMCLAW_*</code> 
 <p align="center">
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="#features">Features</a> &middot;
+  <a href="docs/agent-fleet-memory.md">Fleet Memory Guide</a> &middot;
   <a href="#performance">Performance</a> &middot;
   <a href="#mcp-model-context-protocol">MCP</a> &middot;
   <a href="#api-reference">API Reference</a> &middot;
@@ -84,6 +85,9 @@ The keyless strong-write response includes `memory_type`, `title`, `status`, and
 > instead — matching that phrase to "JWT with 15-minute expiry" exercises semantic recall.
 
 ### See the fleet effect
+
+For the architecture, evaluation checklist, and a stable GitHub-native citation
+target, see [Shared persistent memory for AI agent fleets](docs/agent-fleet-memory.md).
 
 Connect two MCP clients to the same fleet. Agent A records an operational
 lesson with `caura_write`:

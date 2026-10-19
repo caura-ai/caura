@@ -5,6 +5,13 @@ Operator and integrator guides that ship with the repo. Start at the root
 [`AGENT-INSTALL.md`](../AGENT-INSTALL.md) is the shortest path to a connected
 agent.
 
+## Understanding fleet memory
+
+- [`agent-fleet-memory.md`](agent-fleet-memory.md) — what shared persistent
+  memory requires beyond per-agent history, how to evaluate an open-source
+  repository, and how Caura implements identity, scopes, provenance, updates,
+  MCP, and REST for a fleet.
+
 ## Operating a deployment
 
 - [`self-hosting.md`](self-hosting.md) — the complete self-hosted guide:
