@@ -1,17 +1,18 @@
 #!/bin/sh
 # Connect this Claude Code or Codex session to Caura in one command.
 #
-#   curl -fsSL https://raw.githubusercontent.com/caura-ai/caura/release/agent-collaboration-rc/scripts/caura-join.sh \
+#   curl -fsSL https://raw.githubusercontent.com/caura-ai/caura/main/scripts/caura-join.sh \
 #     | sh -s -- --url https://caura.example
 #
 # Installs uv if missing, installs (or updates) the caura-bus CLI, then runs
 # `caura-bus join` with the arguments given. The password comes from
 # CAURA_PASSWORD or a prompt on the terminal; it is never passed as an argument.
-# Set CAURA_JOIN_REF to install the client from another branch or tag.
+# The client comes from main, the ref this script is fetched from, so the two
+# match. Set CAURA_JOIN_REF to install the client from another branch or tag.
 set -eu
 
 main() {
-  ref="${CAURA_JOIN_REF:-release/agent-collaboration-rc}"
+  ref="${CAURA_JOIN_REF:-main}"
   spec="git+https://github.com/caura-ai/caura@${ref}#subdirectory=clients/collaboration/cli"
 
   if ! command -v uv >/dev/null 2>&1; then
