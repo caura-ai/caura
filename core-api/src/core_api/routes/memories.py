@@ -119,7 +119,12 @@ from core_api.services.ingest_service import (
     ingest_commit,
     ingest_preview,
 )
-from core_api.services.memory_field import FIELD_DEFAULT_LIMIT, FIELD_MAX_LIMIT, get_memory_field
+from core_api.services.memory_field import (
+    FIELD_DEFAULT_LIMIT,
+    FIELD_MAX_LIMIT,
+    FieldBusyError,
+    get_memory_field,
+)
 from core_api.services.memory_service import (
     _memory_to_out,
     create_memories_bulk,
@@ -945,8 +950,11 @@ async def memory_field(
     Same tenant check, fleet-read gate and visibility scoping as
     ``GET /memories``, so the map never places a memory the caller's list would
     not show. Results are cached in-process for a few minutes and recomputed
-    when a memory is written, embedded, deleted or changes status. Declared
-    before ``/memories/{memory_id}`` so ``field`` is not parsed as an id.
+    when a memory is written, edited, embedded, deleted or changes status.
+    A build is costly, so a process runs only a few at once and one per
+    tenant; requests for a map being built wait for it, and any other
+    answers 429 with ``Retry-After``. Declared before
+    ``/memories/{memory_id}`` so ``field`` is not parsed as an id.
     """
     auth.enforce_readable_tenant(tenant_id)
     if agent_id is not None:
@@ -961,7 +969,14 @@ async def memory_field(
         "caller_tenant_id": auth.tenant_id,
         "fleet_id": fleet_id,
     }
-    return await get_memory_field(scope_body, limit=limit)
+    try:
+        return await get_memory_field(scope_body, limit=limit)
+    except FieldBusyError:
+        raise HTTPException(
+            status_code=429,
+            detail="The memory map is busy building; retry shortly.",
+            headers={"Retry-After": "2"},
+        ) from None
 
 
 def _require_person(auth: AuthContext, what: str) -> None:

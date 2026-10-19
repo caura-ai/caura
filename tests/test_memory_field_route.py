@@ -8,14 +8,18 @@ rows out, superseded rows in. Plus the shape the map frontend reads.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from uuid import uuid4
 
 import pytest
+from fastapi import Request
 from sqlalchemy import text
 
 from core_api.app import app
 from core_api.auth import AuthContext, get_auth_context
 from core_api.constants import VECTOR_DIM
+from core_api.services import memory_field
 from core_api.services.memory_field import field_cache
 from core_api.tenant_context import set_current_tenant
 from core_storage_api.services.postgres_service import get_session
@@ -47,6 +51,10 @@ def as_auth():
     yield _install
     app.dependency_overrides.pop(get_auth_context, None)
     field_cache.clear()
+    # A build a failed test left running must not hold a slot in the next one.
+    memory_field._builds.clear()
+    memory_field._building_tenants.clear()
+    memory_field._signatures.clear()
 
 
 def _vec(axis: int, jitter: float = 0.0) -> list[float]:
@@ -258,6 +266,162 @@ async def test_cached_until_the_corpus_changes(client, sc, as_auth):
     third = (await _field(client, tenant)).json()
     assert third["computed_at"] != first["computed_at"]
     assert len(third["points"]) == len(first["points"]) + 1
+
+
+async def test_an_edit_misses_the_cache(client, sc, as_auth):
+    """An edit keeps the row count, the embedded count and the newest
+    timestamp, so the cache must notice the edited columns themselves: a
+    redacted memory may not keep showing its old preview."""
+    ids = await _seed(sc)
+    tenant = ids["tenant"]
+    as_auth(tenant)
+    first = (await _field(client, tenant)).json()
+    edited = ids["topic"][1]
+    await _sql(
+        "UPDATE memories SET content = 'refund note, redacted', "
+        "content_hash = md5('refund note, redacted'), visibility = 'scope_org' "
+        "WHERE id = CAST(:id AS uuid)",
+        id=edited,
+    )
+    second = (await _field(client, tenant)).json()
+    assert second["computed_at"] != first["computed_at"]
+    point = next(p for p in second["points"] if p["id"] == edited)
+    assert point["preview"] == "refund note, redacted"
+    assert point["visibility"] == "scope_org"
+
+
+class _HeldBuilds:
+    """The storage client, except that each map build's first page waits.
+
+    A build starts by fetching its first page (no cursor); that fetch counts
+    the build and then holds until ``release`` is set, so a test can line up
+    requests against builds in flight.
+    """
+
+    def __init__(self, real) -> None:
+        self._real = real
+        self.release = asyncio.Event()
+        self.builds = 0
+        self._started = asyncio.Condition()
+
+    def __getattr__(self, name: str):
+        return getattr(self._real, name)
+
+    async def memory_field_page(self, body: dict) -> dict:
+        if "cursor_id" not in body:
+            async with self._started:
+                self.builds += 1
+                self._started.notify_all()
+            await self.release.wait()
+        return await self._real.memory_field_page(body)
+
+    async def until_builds(self, count: int) -> None:
+        async with self._started:
+            await self._started.wait_for(lambda: self.builds >= count)
+
+
+@pytest.fixture
+def held_builds(sc, monkeypatch):
+    held = _HeldBuilds(memory_field.get_storage_client())
+    monkeypatch.setattr(memory_field, "get_storage_client", lambda: held)
+    yield held
+    held.release.set()
+
+
+async def test_requests_for_one_map_share_its_build(client, sc, as_auth, held_builds):
+    tenant = (await _seed(sc))["tenant"]
+    as_auth(tenant)
+    first = asyncio.create_task(_field(client, tenant))
+    async with asyncio.timeout(5):
+        await held_builds.until_builds(1)
+    second = asyncio.create_task(_field(client, tenant))
+    # Unshared, the second request starts a build of its own.
+    with contextlib.suppress(TimeoutError):
+        async with asyncio.timeout(2):
+            await held_builds.until_builds(2)
+    held_builds.release.set()
+    one, two = await first, await second
+    assert one.status_code == two.status_code == 200
+    assert one.json()["computed_at"] == two.json()["computed_at"]
+    assert held_builds.builds == 1
+
+
+async def test_a_tenant_builds_one_map_at_a_time(client, sc, as_auth, held_builds):
+    tenant = (await _seed(sc))["tenant"]
+    as_auth(tenant)
+    first = asyncio.create_task(_field(client, tenant))
+    async with asyncio.timeout(5):
+        await held_builds.until_builds(1)
+        other = await _field(client, tenant, limit=5)  # another map, same tenant
+    held_builds.release.set()
+    assert other.status_code == 429, other.text
+    assert other.headers["Retry-After"]
+    assert (await first).status_code == 200
+
+
+async def test_builds_are_capped_per_process(client, sc, as_auth, held_builds):
+    """Two builds at a time per process by default; the third tenant waits."""
+    tenants = [(await _seed(sc))["tenant"] for _ in range(3)]
+
+    async def _each_its_own_tenant(request: Request) -> AuthContext:
+        tenant = request.query_params["tenant_id"]
+        set_current_tenant(tenant)
+        return AuthContext(tenant_id=tenant, readable_tenant_ids=[tenant])
+
+    # ``as_auth`` removes this override and clears the cache on teardown.
+    app.dependency_overrides[get_auth_context] = _each_its_own_tenant
+    running = [asyncio.create_task(_field(client, t)) for t in tenants[:2]]
+    async with asyncio.timeout(5):
+        await held_builds.until_builds(2)
+        third = await _field(client, tenants[2])
+    held_builds.release.set()
+    assert third.status_code == 429, third.text
+    assert [(await r).status_code for r in running] == [200, 200]
+
+
+async def test_concurrent_requests_share_one_signature_scan(
+    client, sc, as_auth, monkeypatch
+):
+    """The signature scans every visible row, cache hit or not, so a burst of
+    requests for one scope runs it once."""
+    tenant = (await _seed(sc))["tenant"]
+    as_auth(tenant)
+    real = memory_field.get_storage_client()
+    release = asyncio.Event()
+    started = asyncio.Condition()
+    scans = 0
+
+    class _HeldSignatures:
+        def __getattr__(self, name: str):
+            return getattr(real, name)
+
+        async def memory_field_signature(self, scope: dict) -> dict:
+            nonlocal scans
+            async with started:
+                scans += 1
+                started.notify_all()
+            await release.wait()
+            return await real.memory_field_signature(scope)
+
+    held = _HeldSignatures()
+    monkeypatch.setattr(memory_field, "get_storage_client", lambda: held)
+
+    async def until_scans(count: int) -> None:
+        async with started:
+            await started.wait_for(lambda: scans >= count)
+
+    first = asyncio.create_task(_field(client, tenant))
+    async with asyncio.timeout(5):
+        await until_scans(1)
+    rest = [asyncio.create_task(_field(client, tenant)) for _ in range(2)]
+    # Unshared, each of the others starts a scan of its own.
+    with contextlib.suppress(TimeoutError):
+        async with asyncio.timeout(2):
+            await until_scans(2)
+    release.set()
+    responses = [await first] + [await r for r in rest]
+    assert [r.status_code for r in responses] == [200, 200, 200]
+    assert scans == 1
 
 
 async def test_storage_page_walks_by_cursor(sc):

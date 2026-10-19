@@ -1777,7 +1777,8 @@ async def field_signature(request: Request) -> dict:
 
     Body: ``{tenant_id, caller_agent_id?, caller_tenant_id?, fleet_id?,
     include_scope_agent?}`` — the visibility arguments ``/list`` takes.
-    Returns ``{count, embedded, newest}`` over the rows the field would place.
+    Returns ``{count, embedded, newest, revision}`` over the rows the field
+    would place; ``revision`` moves on an edit.
     """
     body: dict = await request.json()
     tenant_id = _require(body, "tenant_id")

@@ -445,6 +445,14 @@ class Settings(BaseSettings):
     # write rate. Matches ``per_tenant_write_concurrency`` on purpose:
     # one process keeps pace with one saturated tenant.
     contradiction_detection_concurrency: int = 16
+    # Process-wide cap on memory-map layouts being built at once
+    # (``GET /memories/field``, M-125). An uncached build pages up to 50,000
+    # memories with their embeddings off the read replica, decodes them on
+    # the event loop and runs PCA and k-means on the shared thread pool, so
+    # unbounded builds can starve every tenant on the instance. Each tenant
+    # also gets one build at a time, and requests for a map already being
+    # built share it. A request past either cap gets 429 with Retry-After.
+    memory_field_max_concurrent_builds: int = 2
     # Idempotency-Key inbox TTL. 24h matches Stripe's default and is
     # longer than any realistic client retry budget. Cached responses
     # older than this are treated as absent and the request re-runs.
@@ -627,6 +635,7 @@ class Settings(BaseSettings):
         "per_tenant_storage_write_concurrency",
         "per_tenant_storage_search_concurrency",
         "contradiction_detection_concurrency",
+        "memory_field_max_concurrent_builds",
     )
     @classmethod
     def _concurrency_cap_must_be_positive(cls, v: int, info: ValidationInfo) -> int:

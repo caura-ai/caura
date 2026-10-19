@@ -8108,12 +8108,13 @@ class PostgresService:
     ) -> dict:
         """Cheap change-detector for the field layout cache.
 
-        Returns ``{count, embedded, newest}``: how many rows the field would
-        place, how many of them carry an embedding, and the newest
-        ``created_at`` / ``status_changed_at`` among them. A write, an
-        embedding landing, a delete or a status flip moves at least one of the
-        three, so core-api can serve a cached layout while all three hold.
-        Recall counters are not tracked here; the cache TTL bounds their age.
+        Returns ``{count, embedded, newest, revision}``: how many rows the
+        field would place, how many of them carry an embedding, the newest
+        ``created_at`` / ``status_changed_at`` among them, and a hash summed
+        over the columns each placed row shows. A write, an embedding landing,
+        a delete, a status flip or an edit moves at least one of the four, so
+        core-api can serve a cached layout while all four hold. Recall
+        counters are not tracked here; the cache TTL bounds their age.
         """
         filters = self._field_scope_filters(
             tenant_id=tenant_id,
@@ -8122,19 +8123,43 @@ class PostgresService:
             fleet_id=fleet_id,
             include_scope_agent=include_scope_agent,
         )
+        # An edit keeps the count, the embedded count and both timestamps
+        # (``memories`` has no ``updated_at``), so the cache kept showing an
+        # edited or redacted row as it was (L-236). Summed, so row order does
+        # not matter; ``content_hash`` stands in for the content an edit
+        # rewrites.
+        shown = func.concat_ws(
+            literal_column("'|'"),
+            *(
+                func.coalesce(cast(column, String), "")
+                for column in (
+                    Memory.content_hash,
+                    Memory.title,
+                    Memory.visibility,
+                    Memory.memory_type,
+                    Memory.weight,
+                    Memory.fleet_id,
+                    Memory.agent_id,
+                    Memory.status,
+                    Memory.supersedes_id,
+                )
+            ),
+        )
         stmt = select(
             func.count(),
             func.count().filter(Memory.embedding.isnot(None)),
             func.max(
                 func.greatest(Memory.created_at, func.coalesce(Memory.status_changed_at, Memory.created_at))
             ),
+            func.sum(func.hashtextextended(shown, literal_column("0"))),
         ).where(*filters)
         async with get_read_session() as session:
-            count, embedded, newest = (await session.execute(stmt)).one()
+            count, embedded, newest, revision = (await session.execute(stmt)).one()
         return {
             "count": int(count or 0),
             "embedded": int(embedded or 0),
             "newest": newest.isoformat() if newest else None,
+            "revision": str(revision) if revision is not None else None,
         }
 
     async def memory_field_page(

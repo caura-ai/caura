@@ -40,6 +40,7 @@ from typing import Any
 import numpy as np
 
 from core_api.clients.storage_client import get_storage_client
+from core_api.config import settings
 from core_api.services.kmeans import numpy_kmeans
 
 FIELD_KIND = "pca2"
@@ -590,6 +591,47 @@ class _FieldCache:
 field_cache = _FieldCache()
 
 
+class FieldBusyError(Exception):
+    """No build slot is free for this map; the route answers 429."""
+
+
+# Builds in flight, by cache key, and the tenants running them. Touched only
+# on this process's event loop, so they need no lock.
+_builds: dict[tuple, asyncio.Task[dict]] = {}
+_building_tenants: set[str] = set()
+# Signature reads in flight, by visibility scope. A read visits every row the
+# caller can see, cache hit or not, so concurrent requests for one scope share
+# it; none is kept once its own flight ends, so a later request reads afresh.
+_signatures: dict[tuple, asyncio.Task[dict]] = {}
+
+
+def _scope_key(scope: dict) -> tuple:
+    return (
+        scope.get("tenant_id"),
+        scope.get("fleet_id"),
+        scope.get("caller_agent_id"),
+        scope.get("caller_tenant_id"),
+        bool(scope.get("include_scope_agent")),
+    )
+
+
+async def _signature(scope: dict) -> dict:
+    key = _scope_key(scope)
+    read = _signatures.get(key)
+    if read is None:
+        read = asyncio.create_task(get_storage_client().memory_field_signature(scope))
+        _signatures[key] = read
+
+        def _forget(done: asyncio.Task[dict]) -> None:
+            if _signatures.get(key) is done:
+                del _signatures[key]
+            if not done.cancelled():
+                done.exception()  # retrieved, so a read every caller left does not log it
+
+        read.add_done_callback(_forget)
+    return await asyncio.shield(read)
+
+
 async def get_memory_field(scope: dict, *, limit: int) -> dict:
     """Fetch (paged, newest first) and lay out the caller's memories.
 
@@ -597,23 +639,45 @@ async def get_memory_field(scope: dict, *, limit: int) -> dict:
     (``tenant_id``, ``caller_agent_id``, ``caller_tenant_id``, ``fleet_id``,
     ``include_scope_agent``) — the same values ``GET /memories`` sends to
     ``/memories/list``.
+
+    Concurrent requests for one scope share the signature read, and requests
+    for a map already being built wait for that build. Any other build needs a
+    slot (M-125): at most ``memory_field_max_concurrent_builds`` in this
+    process and one per tenant, else :class:`FieldBusyError`. Reads and builds
+    are shielded, so a caller that leaves does not cancel them for the others,
+    and a finished build is cached either way.
     """
-    sc = get_storage_client()
-    sig = await sc.memory_field_signature(scope)
-    signature = f"{sig.get('count')}:{sig.get('embedded')}:{sig.get('newest')}"
-    key = (
-        scope.get("tenant_id"),
-        scope.get("fleet_id"),
-        scope.get("caller_agent_id"),
-        scope.get("caller_tenant_id"),
-        bool(scope.get("include_scope_agent")),
-        limit,
-        signature,
-    )
+    sig = await _signature(scope)
+    # ``revision`` hashes the visible rows' shown columns, so an edit misses
+    # the cache too (L-236); a storage without it leaves the first three.
+    signature = f"{sig.get('count')}:{sig.get('embedded')}:{sig.get('newest')}:{sig.get('revision')}"
+    key = (*_scope_key(scope), limit, signature)
     cached = field_cache.get(key)
     if cached is not None:
         return cached
 
+    build = _builds.get(key)
+    if build is None:
+        tenant = scope["tenant_id"]
+        if tenant in _building_tenants or len(_builds) >= settings.memory_field_max_concurrent_builds:
+            raise FieldBusyError
+        build = asyncio.create_task(_build(scope, key, limit=limit, sig=sig, signature=signature))
+        _builds[key] = build
+        _building_tenants.add(tenant)
+
+        def _release(done: asyncio.Task[dict]) -> None:
+            _builds.pop(key, None)
+            _building_tenants.discard(tenant)
+            if not done.cancelled():
+                done.exception()  # retrieved, so a build every caller left does not log it
+
+        build.add_done_callback(_release)
+    return await asyncio.shield(build)
+
+
+async def _build(scope: dict, key: tuple, *, limit: int, sig: dict, signature: str) -> dict:
+    """Page the caller's rows with their embeddings, lay them out and cache it."""
+    sc = get_storage_client()
     rows: list[dict] = []
     entities: dict[str, dict] = {}
     chunks: list[np.ndarray] = []
