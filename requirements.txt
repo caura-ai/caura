@@ -68,7 +68,7 @@ structlog>=26.1.0,<27
 # Document chunking, imported at startup.
 markdown-it-py>=4.0,<5
 tiktoken>=0.10,<1
-pysbd>=0.3,<1
+pysbd>=0.3.4,<1
 # The insights discover mode.
 numpy>=2.0,<3
 # FastAPI's UploadFile and Form support.
