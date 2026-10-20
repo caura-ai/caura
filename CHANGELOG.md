@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.34.9](https://github.com/caura-ai/caura/compare/backend-v3.34.8...backend-v3.34.9) (2026-10-20)
+
+
+### Bug Fixes
+
+* **ci:** the dependency scan reads OSV, so GitHub advisories reach it ([#2127](https://github.com/caura-ai/caura/issues/2127)) ([f9f7896](https://github.com/caura-ai/caura/commit/f9f7896c813059e67a4ff4e14efeffd495fc922d))
+
+
+### Dependencies
+
+* update pydantic-settings requirement from &lt;3,&gt;=2.15.0 to &gt;=2.16.0,&lt;3 ([#2103](https://github.com/caura-ai/caura/issues/2103)) ([898e0de](https://github.com/caura-ai/caura/commit/898e0deac6af74daf26b0127ed2131300eb18348))
+* update python-multipart requirement from &lt;1,&gt;=0.0.20 to &gt;=0.0.32,&lt;1 ([#2102](https://github.com/caura-ai/caura/issues/2102)) ([b9f6e8c](https://github.com/caura-ai/caura/commit/b9f6e8c7bb6e29c1ac29925f7c3681b0c36f4089))
+
 ## [3.34.8](https://github.com/caura-ai/caura/compare/backend-v3.34.7...backend-v3.34.8) (2026-10-20)
 
 
