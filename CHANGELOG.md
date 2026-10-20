@@ -10,6 +10,15 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.34.6](https://github.com/caura-ai/caura/compare/backend-v3.34.5...backend-v3.34.6) (2026-10-20)
+
+
+### Bug Fixes
+
+* **clients:** keep stats() and Retry-After inside the error contract ([#2116](https://github.com/caura-ai/caura/issues/2116)) ([f796a6c](https://github.com/caura-ai/caura/commit/f796a6cc2b8a19a5d8e1980ee75d7990d199f7cd))
+* **collaboration:** install the join client from main, not a deleted branch ([#2111](https://github.com/caura-ai/caura/issues/2111)) ([8d439c3](https://github.com/caura-ai/caura/commit/8d439c3cd0b3102fd90e650cc1be2272638b4730))
+* **field:** bound memory-map builds and see edits in its cache ([#2110](https://github.com/caura-ai/caura/issues/2110)) ([c222908](https://github.com/caura-ai/caura/commit/c222908fbb7a984bc7740801f62f23c5f33f31d5))
+
 ## [3.34.5](https://github.com/caura-ai/caura/compare/backend-v3.34.4...backend-v3.34.5) (2026-10-18)
 
 
