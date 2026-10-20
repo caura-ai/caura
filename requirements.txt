@@ -72,6 +72,6 @@ pysbd>=0.3.4,<1
 # The insights discover mode.
 numpy>=2.0,<3
 # FastAPI's UploadFile and Form support.
-python-multipart>=0.0.20,<1
+python-multipart>=0.0.32,<1
 # SQLAlchemy[asyncio]'s greenlet, capped as the services cap it.
 greenlet<3.6.0
