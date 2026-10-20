@@ -73,3 +73,20 @@ def test_pip_audit_reads_what_the_images_install() -> None:
     audit = _runs("pip-audit --")
     assert "--all-extras" not in audit
     assert "/Dockerfile" in audit
+
+
+def test_pip_audit_reads_osv() -> None:
+    """L-239: pip-audit's default service, PyPI's JSON feed, had no entry for
+    GHSA-5639-2j2p-m4mx (mako < 1.4.2) two weeks after OSV and the GitHub
+    advisory database published it, so the scan passed while two images
+    installed mako 1.3.12. OSV carries both the PYSEC and the GHSA advisories."""
+    assert re.search(r"(--vulnerability-service|-s)[ =]osv\b", _runs("pip-audit --"))
+
+
+def test_every_accepted_advisory_says_why() -> None:
+    """An advisory is accepted only with the reason it does not apply, written
+    beside the step, so each ignored ID appears in that comment as well."""
+    ignored = re.findall(r"--ignore-vuln ([\w-]+)", _runs("pip-audit --"))
+    text = SCAN.read_text()
+    assert ignored
+    assert [vid for vid in ignored if text.count(vid) < 2] == []
