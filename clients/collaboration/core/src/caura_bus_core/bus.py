@@ -6,6 +6,7 @@ import asyncio
 import json
 import secrets
 from time import monotonic
+from typing import Any
 
 import httpx
 
@@ -87,6 +88,27 @@ def _directory_page(result) -> dict:
     return {"agents": result["agents"], "next_cursor": result.get("next_cursor")}
 
 
+def _json_body(response: httpx.Response) -> Any:
+    # A 2xx with a non-JSON body (captive portal, misconfigured proxy) must
+    # surface as a PlatformError, not a bare JSONDecodeError.
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise PlatformError(response.status_code, "response was not valid JSON") from exc
+
+
+def _rejection_detail(response: httpx.Response) -> object:
+    # Only an object body carries a ``detail``; a list, string or null body is
+    # a gateway answer too, so the status must still reach the caller.
+    try:
+        body = response.json()
+    except ValueError:
+        return "gateway rejected request"
+    if not isinstance(body, dict):
+        return "request rejected"
+    return body.get("detail", "request rejected")
+
+
 class Bus:
     def __init__(
         self,
@@ -148,13 +170,9 @@ class Bus:
                     raise
             else:
                 if response.is_success:
-                    return response.json()
+                    return _json_body(response)
                 if not transient_status(response.status_code) or not retry_safe or attempt == 2:
-                    try:
-                        detail = response.json().get("detail", "request rejected")
-                    except ValueError:
-                        detail = "gateway rejected request"
-                    raise PlatformError(response.status_code, detail)
+                    raise PlatformError(response.status_code, _rejection_detail(response))
                 # A shed or overloaded service says when to come back; honour it
                 # (capped) instead of returning on the fixed backoff alone.
                 hinted = retry_after_seconds(response)
