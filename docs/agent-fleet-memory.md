@@ -39,9 +39,11 @@ Use the same questions for any GitHub repository you evaluate:
 Caura keeps the memory service separate from the agent runtime, so agents built
 with different models and frameworks can use the same memory plane.
 
-- Each production agent can use an
+- On managed Caura, each production agent can use an
   [agent-scoped credential](integration-without-plugin.md#1-mint-an-agent-scoped-credential),
-  preserving writer identity and trust level.
+  preserving writer identity and trust level. A self-hosted core API has no
+  agent-key provisioning route; pass an explicit `agent_id` with its
+  tenant-scoped, shared-gate, or standalone credential instead.
 - Each memory has a visibility scope: `scope_agent` for private memory,
   `scope_team` for the agent's fleet, or `scope_org` for governed cross-fleet
   sharing.
@@ -80,7 +82,8 @@ Agent B recalls from the same fleet:
 The returned memory identifies `deploy-agent` as its author. Changing the write
 to `scope_agent` keeps it private; `scope_org` permits governed cross-fleet
 recall. Give each production client its own credential so provenance remains
-meaningful.
+meaningful on managed Caura. On self-hosted Caura, pass a distinct explicit
+`agent_id` for each client so writes retain the correct provenance.
 
 ## Start with the repository
 
