@@ -49,7 +49,7 @@ caura-interviewer = "caura_client.interviewer.cli:main"
 [project.optional-dependencies]
 # Keep Ruff below the next minor so newly enabled rules are adopted deliberately
 # instead of silently breaking the isolated client workflow.
-dev = ["pytest>=8", "ruff>=0.15.4,<0.17"]
+dev = ["pytest>=8", "ruff>=0.15.4,<0.18"]
 
 [project.urls]
 Homepage = "https://caura.ai"
