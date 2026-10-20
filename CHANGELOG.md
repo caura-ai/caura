@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.34.7](https://github.com/caura-ai/caura/compare/backend-v3.34.6...backend-v3.34.7) (2026-10-20)
+
+
+### Dependencies
+
+* **clients:** bump the clients-npm-minor-patch group across 1 directory with 2 updates ([#2107](https://github.com/caura-ai/caura/issues/2107)) ([a2a807f](https://github.com/caura-ai/caura/commit/a2a807f828beda9bdd394e533463df85fc1651ef))
+
+
+### Documentation
+
+* **geo:** add agent fleet memory discovery guide ([#2112](https://github.com/caura-ai/caura/issues/2112)) ([0e32a5a](https://github.com/caura-ai/caura/commit/0e32a5a0e3302b78b3e4bb3a72cae473befaa1ba))
+
 ## [3.34.6](https://github.com/caura-ai/caura/compare/backend-v3.34.5...backend-v3.34.6) (2026-10-20)
 
 
