@@ -297,6 +297,18 @@ test("stats raises on 503", async () => {
   await assert.rejects(client.stats(), CauraApiError);
 });
 
+for (const body of [[], "a plain string", null]) {
+  test(`stats throws when the 200 body is not an object (${JSON.stringify(body)})`, async () => {
+    const client = makeClient(() => jsonResponse(200, body));
+    await assert.rejects(client.stats(), (err: unknown) => {
+      assert.ok(err instanceof CauraApiError);
+      assert.equal((err as CauraApiError).statusCode, 200);
+      assert.equal((err as CauraApiError).message, "[200] stats response must be a JSON object");
+      return true;
+    });
+  });
+}
+
 test("403 maps to AuthError and parses the error envelope", async () => {
   const client = makeClient(() =>
     jsonResponse(403, { error: { message: "cross-fleet", details: { x: 1 } } }),
@@ -368,8 +380,13 @@ for (const dateFormat of ["imf", "rfc850", "asctime"]) {
 for (const [value, expected] of [
   ["Sun, 06 Nov 1994 08:49:37 GMT", 0],
   ["not a date", null],
+  // Not a delay a caller can wait on: Number() reads "-5" as -5 and a blank header as 0.
+  ["-5", null],
+  ["", null],
+  ["nan", null],
+  ["Infinity", null],
 ] as const) {
-  test(`429 handles a past or invalid retry-after (${value})`, async () => {
+  test(`429 handles a past or invalid retry-after (${JSON.stringify(value)})`, async () => {
     const client = makeClient(() => new Response("{}", { status: 429, headers: { "retry-after": value } }));
     await assert.rejects(
       client.health(),

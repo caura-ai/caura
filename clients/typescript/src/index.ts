@@ -388,14 +388,18 @@ export class Caura {
    * These counts span the whole deployment — they are **not** scoped to
    * `this.tenantId`. The endpoint is unauthenticated, but the API key header
    * is still sent for consistency with every other call this client makes.
+   * A body that is not a JSON object throws `CauraApiError`, as for `search()`.
    */
   async stats(): Promise<Stats> {
     const data = await this.request("GET", "/api/v1/stats");
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new CauraApiError(200, "stats response must be a JSON object");
+    }
     return {
-      tenantCount: data?.tenant_count ?? 0,
-      memoryCount: data?.memory_count ?? 0,
-      agentCount: data?.agent_count ?? 0,
-      raw: data ?? {},
+      tenantCount: data.tenant_count ?? 0,
+      memoryCount: data.memory_count ?? 0,
+      agentCount: data.agent_count ?? 0,
+      raw: data,
     };
   }
 
@@ -470,7 +474,8 @@ async function raiseForStatus(res: Response): Promise<void> {
     throw new NotFoundError(res.status, message || "not found", details);
   }
   if (res.status === 429) {
-    const retryAfter = res.headers.get("retry-after");
+    // Number() reads a blank header as 0, so blank counts as absent.
+    const retryAfter = res.headers.get("retry-after")?.trim() || null;
     let parsed = retryAfter === null ? Number.NaN : Number(retryAfter);
     if (!Number.isFinite(parsed) && retryAfter !== null) {
       // All HTTP-date forms use GMT, including asctime without an explicit zone.
@@ -481,7 +486,8 @@ async function raiseForStatus(res: Response): Promise<void> {
       res.status,
       message || "rate limit exceeded",
       details,
-      Number.isFinite(parsed) ? parsed : null,
+      // A negative delay is not one a caller can wait on.
+      Number.isFinite(parsed) && parsed >= 0 ? parsed : null,
     );
   }
   throw new CauraApiError(res.status, message || "request failed", details);

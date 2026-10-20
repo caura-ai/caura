@@ -212,13 +212,14 @@ def test_health():
     "call",
     [
         lambda c: c.health(),
+        lambda c: c.stats(),
         lambda c: c.write("x"),
         lambda c: c.search("x"),
         lambda c: c.recall("x"),
         lambda c: c.get_document("d1", collection="c"),
         lambda c: c.submit_interview(node_id="n", agent_id="a", cursor_from=0, cursor_to=1, events=[]),
     ],
-    ids=["health", "write", "search", "recall", "get_document", "submit_interview"],
+    ids=["health", "stats", "write", "search", "recall", "get_document", "submit_interview"],
 )
 def test_non_json_success_body_raises_api_error(call):
     """A 2xx with an HTML body (captive portal, proxy) must not leak JSONDecodeError."""
@@ -290,6 +291,15 @@ def test_stats_raises_on_503():
     assert exc.value.status_code == 503
 
 
+@pytest.mark.parametrize("body", ["[]", '"a plain string"', "null"])
+def test_stats_raises_on_non_object_body(body):
+    client = make_client(lambda request: httpx.Response(200, text=body))
+    with client, pytest.raises(CauraAPIError) as exc:
+        client.stats()
+    assert exc.value.status_code == 200
+    assert str(exc.value) == "[200] stats response must be a JSON object"
+
+
 def test_auth_error_parses_envelope():
     def handler(request):
         return httpx.Response(403, json={"error": {"message": "cross-fleet", "details": {"x": 1}}})
@@ -340,7 +350,21 @@ def test_rate_limit_error_parses_retry_after_http_date(date_format):
     assert 115 <= exc.value.retry_after <= 120
 
 
-@pytest.mark.parametrize("value, expected", [("Sun, 06 Nov 1994 08:49:37 GMT", 0), ("not a date", None)])
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("Sun, 06 Nov 1994 08:49:37 GMT", 0),
+        ("not a date", None),
+        # Not a delay a caller can sleep on: time.sleep() rejects nan and negatives,
+        # overflows on inf, and asyncio.sleep(inf) never returns.
+        ("-5", None),
+        ("nan", None),
+        ("inf", None),
+        ("9" * 400, None),
+        ("", None),
+    ],
+    ids=["past-date", "not-a-date", "negative", "nan", "inf", "beyond-float-range", "blank"],
+)
 def test_rate_limit_error_with_past_or_invalid_retry_after(value, expected):
     client = make_client(lambda request: httpx.Response(429, headers={"Retry-After": value}))
     with client, pytest.raises(RateLimitError) as exc:

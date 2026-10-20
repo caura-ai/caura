@@ -6,6 +6,7 @@ A thin wrapper over the Caura REST API. Point it at a managed
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
@@ -240,13 +241,16 @@ class Caura:
         header is still sent for consistency with every other call this
         client makes.
 
-        A bad ``base_url`` or an old deployment without this route answers
-        non-2xx, which ``_raise_for_status`` turns into a ``CauraAPIError``
-        rather than letting a bare ``.json()`` fail on an HTML body.
+        A non-2xx answer (a bad ``base_url``, an older deployment without this
+        route) and a 2xx body that is not a JSON object both raise
+        ``CauraAPIError``, as for ``search()`` and ``recall()``.
         """
         response = self._request("GET", "/api/v1/stats")
         self._raise_for_status(response)
-        return Stats.from_dict(response.json())
+        data = self._json(response)
+        if not isinstance(data, dict):
+            raise CauraAPIError(200, "stats response must be a JSON object")
+        return Stats.from_dict(data)
 
     def get_document(
         self,
@@ -364,6 +368,9 @@ class Caura:
                     retry_after = max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
                 except (TypeError, ValueError, OverflowError):
                     retry_after = None
+            # float() also takes "nan", "inf" and "-5"; none is a delay a caller can sleep on.
+            if retry_after is not None and not (math.isfinite(retry_after) and retry_after >= 0):
+                retry_after = None
             raise RateLimitError(
                 response.status_code,
                 message or "rate limit exceeded",
