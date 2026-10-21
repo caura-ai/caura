@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.35.4](https://github.com/caura-ai/caura/compare/backend-v3.35.3...backend-v3.35.4) (2026-10-21)
+
+
+### Bug Fixes
+
+* **collaboration:** raise PlatformError on unexpected response bodies ([#2119](https://github.com/caura-ai/caura/issues/2119)) ([#2130](https://github.com/caura-ai/caura/issues/2130)) ([6e86ae6](https://github.com/caura-ai/caura/commit/6e86ae63adb1cf5784690739269df7b4b9f6cd68))
+* **collaboration:** refuse a malformed settings file instead of crashing in install_hooks ([#2128](https://github.com/caura-ai/caura/issues/2128)) ([ac27f75](https://github.com/caura-ai/caura/commit/ac27f752506f82959ada5f63dc59c2bbc760f0d6))
+
 ## [3.35.3](https://github.com/caura-ai/caura/compare/backend-v3.35.2...backend-v3.35.3) (2026-10-21)
 
 
