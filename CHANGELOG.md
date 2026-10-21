@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.35.1](https://github.com/caura-ai/caura/compare/backend-v3.35.0...backend-v3.35.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **collaboration:** reconnect when the live stream sends a bad frame ([#2141](https://github.com/caura-ai/caura/issues/2141)) ([133ce6f](https://github.com/caura-ai/caura/commit/133ce6ff7386abd18ce3a907872de06bfa8b1cf4))
+
+
+### Dependencies
+
+* update asyncpg requirement from &lt;1,&gt;=0.30 to &gt;=0.32.0,&lt;1 ([#2101](https://github.com/caura-ai/caura/issues/2101)) ([9dfad09](https://github.com/caura-ai/caura/commit/9dfad09efa9ceda90527092c9f0da42d762b7916))
+* update google-genai requirement from &gt;=2.28.0 to &gt;=2.31.0 ([#2137](https://github.com/caura-ai/caura/issues/2137)) ([b83e985](https://github.com/caura-ai/caura/commit/b83e985985eb1bf259f73dec30b59afccbc3311d))
+
 ## [3.35.0](https://github.com/caura-ai/caura/compare/backend-v3.34.10...backend-v3.35.0) (2026-10-21)
 
 
