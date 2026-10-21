@@ -8,7 +8,7 @@ fastapi>=0.143.0,<1
 # local-dev install path (AGENT-INSTALL.md) and it should not lie either.
 uvicorn[standard]>=0.53.0,<1
 # Capped as core-api and core-storage-api cap it (L-166).
-sqlalchemy[asyncio]>=2.0.52,<2.2
+sqlalchemy[asyncio]>=2.1.5,<2.2
 asyncpg>=0.32.0,<1
 pgvector>=0.5.1,<1
 alembic>=1.20.0,<2
