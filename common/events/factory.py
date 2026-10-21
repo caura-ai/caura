@@ -50,6 +50,14 @@ def get_event_bus() -> EventBus:
                     "EVENT_BUS_PROJECT_ID) and EVENT_BUS_SUBSCRIPTION_PREFIX"
                 )
             kwargs: dict[str, Any] = {}
+            # Stage broadcast subscription isolation independently of topics
+            # and durable consumers. Blank/unset preserves existing routing;
+            # the constructor refuses invalid or same-project explicit values.
+            broadcast_project = (
+                os.getenv("EVENT_BUS_BROADCAST_SUBSCRIPTION_PROJECT_ID") or ""
+            ).strip()
+            if broadcast_project:
+                kwargs["broadcast_subscription_project_id"] = broadcast_project
             # Env-scoped topic prefix. Unset/empty ⇒ raw topic names (today's
             # behaviour) — a strict no-op. Set EVENT_BUS_TOPIC_PREFIX per-env (e.g.
             # "prod"/"staging") to isolate Pub/Sub topics across environments that

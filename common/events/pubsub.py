@@ -52,6 +52,7 @@ import functools
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import uuid
@@ -460,6 +461,9 @@ class PubSubEventBus(EventBus):
         error_backoff: float = 5.0,
         publish_concurrency: int = 32,
         topic_prefix: str = "",
+        # Optional isolated home for ephemeral broadcast subscriptions only.
+        # Topics and durable subscriptions keep project_id.
+        broadcast_subscription_project_id: str | None = None,
         # Bind each subscribed topic under its renamed twin as well as its
         # current name, so a publisher flip later cannot land a message on a
         # name nothing is pulling. Defaults OFF, and the default is the whole
@@ -483,6 +487,19 @@ class PubSubEventBus(EventBus):
         # installed. The ImportError surfaces on first `publish` /
         # `start` — see `_ensure_pubsub_sdk` below.
         self._project_id = project_id
+        broadcast_project = (broadcast_subscription_project_id or "").strip()
+        if broadcast_project and (
+            not re.fullmatch(r"[a-z][a-z0-9-]{4,28}[a-z0-9]", broadcast_project)
+            or broadcast_project == project_id
+        ):
+            raise ValueError(
+                "broadcast_subscription_project_id must be a valid project ID "
+                "different from the topic project"
+            )
+        self._broadcast_subscription_project_id = broadcast_project or project_id
+        # Keep routing after release clears the delete list: pull tasks can be
+        # scheduled after release starts and must never fall back to topics.
+        self._broadcast_subscription_projects: dict[str, str] = {}
         self._subscription_prefix = subscription_prefix
         # Normalise so a stray trailing space in the env var can't make a
         # publisher's stamp mismatch a subscriber's comparison. Empty
@@ -1109,7 +1126,12 @@ class PubSubEventBus(EventBus):
         from google.api_core import exceptions as gexc
 
         loop = asyncio.get_running_loop()
-        sub_path = self._subscriber.subscription_path(self._project_id, sub_name)
+        self._broadcast_subscription_projects[sub_name] = (
+            self._broadcast_subscription_project_id
+        )
+        sub_path = self._subscriber.subscription_path(
+            self._broadcast_subscription_project_id, sub_name
+        )
         topic_path = f"projects/{self._project_id}/topics/{self._topic_name(topic)}"
 
         def _create() -> None:
@@ -1157,6 +1179,11 @@ class PubSubEventBus(EventBus):
             #   subscription in place.
             pass
         except Exception:
+            if self._broadcast_subscription_project_id != self._project_id:
+                # An explicit isolation rollout must not advertise healthy
+                # fan-out when IAM, project or topic attachment is broken.
+                # No retry in the topic project: that would reopen the boundary.
+                self._failed_subscriptions.add(sub_name)
             logger.error(
                 "pubsub: failed to create broadcast subscription %s; this "
                 "process will NOT receive %s events (cross-process cache "
@@ -1311,7 +1338,12 @@ class PubSubEventBus(EventBus):
                 "PubSubEventBus._pull_loop invoked without a subscriber — "
                 "this is a programming error in start()."
             )
-        sub_path = subscriber.subscription_path(self._project_id, subscription_name)
+        sub_path = subscriber.subscription_path(
+            self._broadcast_subscription_projects.get(
+                subscription_name, self._project_id
+            ),
+            subscription_name,
+        )
         loop = asyncio.get_running_loop()
         # Dedicated executor (not asyncio's default None) so stop() can
         # drain pull/ack threads before closing `subscriber` — otherwise
@@ -2034,6 +2066,7 @@ class PubSubEventBus(EventBus):
                 )
             self._background_tasks.clear()
             self._failed_subscriptions.clear()
+            self._broadcast_subscription_projects.clear()
             self._stopping = False
             self._draining = False
             self._warned_missing_start = False
