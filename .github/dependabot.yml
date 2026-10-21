@@ -67,6 +67,9 @@ updates:
       - "/core-storage-api"
       - "/core-worker"
       - "/core-operations"
+    # Keep transitive lockfile pins (for example certifi) current too.
+    allow:
+      - dependency-type: "all"
     # Deliberately no `versioning-strategy` — see the header before adding one.
     schedule:
       interval: "weekly"
