@@ -10,6 +10,15 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.35.3](https://github.com/caura-ai/caura/compare/backend-v3.35.2...backend-v3.35.3) (2026-10-21)
+
+
+### Dependencies
+
+* **clients:** update ruff requirement from &lt;0.17,&gt;=0.15.4 to &gt;=0.15.4,&lt;0.18 in /clients/python ([#2099](https://github.com/caura-ai/caura/issues/2099)) ([49afd37](https://github.com/caura-ai/caura/commit/49afd37b3c2701d74a8d5fe3e45b9746eb85d112))
+* **plugin:** bump @types/node from 26.6.4 to 26.6.5 in /plugin in the npm-minor-patch group across 1 directory ([#2097](https://github.com/caura-ai/caura/issues/2097)) ([624334a](https://github.com/caura-ai/caura/commit/624334aa6879d73a6c6fbe0db87dee79538d3a0c))
+* update sentry-sdk requirement from &lt;3,&gt;=2.71.0 to &gt;=2.72.0,&lt;3 ([#2136](https://github.com/caura-ai/caura/issues/2136)) ([6e30816](https://github.com/caura-ai/caura/commit/6e308162a81f9e9920403383f1eb8535e1a5223f))
+
 ## [3.35.2](https://github.com/caura-ai/caura/compare/backend-v3.35.1...backend-v3.35.2) (2026-10-21)
 
 
