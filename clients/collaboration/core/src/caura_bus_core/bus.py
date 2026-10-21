@@ -19,6 +19,25 @@ from .retry import Backoff, retry_after_seconds, transient_status
 RESYNC_EVENT = "stream.resync_required"
 
 
+def _stream_event(data: str) -> dict | None:
+    """One SSE ``data:`` frame as an event, or None when it is not one.
+
+    An event is a JSON object with an integer ``seq``; a resync also needs an
+    object ``payload`` whose ``resume_after``, when present, is an integer.
+    """
+    try:
+        event = json.loads(data)
+    except ValueError:
+        return None
+    if not isinstance(event, dict) or type(event.get("seq")) is not int:
+        return None
+    if event.get("event_type") == RESYNC_EVENT:
+        payload = event.get("payload") or {}
+        if not isinstance(payload, dict) or type(payload.get("resume_after", event["seq"])) is not int:
+            return None
+    return event
+
+
 class HumanRequired(RuntimeError):
     def __init__(self, intervention):
         self.intervention = intervention
@@ -428,7 +447,12 @@ class Bus:
                     else:
                         async for line in response.aiter_lines():
                             if line.startswith("data: "):
-                                event = json.loads(line[6:])
+                                event = _stream_event(line[6:])
+                                if event is None:
+                                    # A garbled frame (a proxy page, a truncated write) is a
+                                    # broken stream: reconnect from the last good cursor, as
+                                    # for a dropped connection, so nothing is skipped.
+                                    break
                                 if event.get("event_type") == RESYNC_EVENT:
                                     # Advance only after the reload succeeds;
                                     # a failed reload reconnects and resyncs again.
