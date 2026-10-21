@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.35.0](https://github.com/caura-ai/caura/compare/backend-v3.34.10...backend-v3.35.0) (2026-10-21)
+
+
+### Features
+
+* **events:** prepare isolated broadcast subscription projects ([#2139](https://github.com/caura-ai/caura/issues/2139)) ([0429c5a](https://github.com/caura-ai/caura/commit/0429c5ab94b5b764e8cfc1d41ca02c8fcc7eea95))
+
+
+### Dependencies
+
+* update cachetools requirement from &lt;8,&gt;=7.2.1 to &gt;=7.2.3,&lt;8 ([#2138](https://github.com/caura-ai/caura/issues/2138)) ([118b987](https://github.com/caura-ai/caura/commit/118b987269817e5300756235c0454c025d2db0ac))
+
 ## [3.34.10](https://github.com/caura-ai/caura/compare/backend-v3.34.9...backend-v3.34.10) (2026-10-21)
 
 
