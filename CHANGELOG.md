@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.35.2](https://github.com/caura-ai/caura/compare/backend-v3.35.1...backend-v3.35.2) (2026-10-21)
+
+
+### Dependencies
+
+* update sqlalchemy requirement from &lt;2.2,&gt;=2.0.52 to &gt;=2.1.5,&lt;2.2 ([#2135](https://github.com/caura-ai/caura/issues/2135)) ([95dd14e](https://github.com/caura-ai/caura/commit/95dd14e2a785f43b763db40d4133fb896c6c9996))
+
 ## [3.35.1](https://github.com/caura-ai/caura/compare/backend-v3.35.0...backend-v3.35.1) (2026-10-21)
 
 
