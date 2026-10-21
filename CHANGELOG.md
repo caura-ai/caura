@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.34.10](https://github.com/caura-ai/caura/compare/backend-v3.34.9...backend-v3.34.10) (2026-10-21)
+
+
+### Dependencies
+
+* **clients:** bump certifi and pyjwt in the collaboration lock ([#2133](https://github.com/caura-ai/caura/issues/2133)) ([43456cf](https://github.com/caura-ai/caura/commit/43456cf018c032438028ab2fd190c8fd824b6d9d))
+* update certifi and include indirect dependency updates ([#2131](https://github.com/caura-ai/caura/issues/2131)) ([540540f](https://github.com/caura-ai/caura/commit/540540fea4d00966c740ec21282134debb006f9a))
+
 ## [3.34.9](https://github.com/caura-ai/caura/compare/backend-v3.34.8...backend-v3.34.9) (2026-10-20)
 
 

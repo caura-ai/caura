@@ -1,14 +1,14 @@
 [project]
 name = "caura-bus-cli"
-version = "0.2.0"  # x-release-please-version
+version = "0.3.0"  # x-release-please-version
 description = "Caura messaging CLI: setup / doctor / replay / agents / threads / send / status"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Caura, Inc." }]
 dependencies = [
-    "caura-bus-core==0.2.0",  # x-release-please-version
+    "caura-bus-core==0.3.0",  # x-release-please-version
     # `caura-bus setup` wires this MCP server into Claude Code / Codex.
-    "caura-bus-mcp==0.2.0",  # x-release-please-version
+    "caura-bus-mcp==0.3.0",  # x-release-please-version
     "typer>=0.12",
 ]
 
