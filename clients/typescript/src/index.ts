@@ -285,7 +285,11 @@ export class Caura {
       body.origin = o;
     }
     Object.assign(body, extra);
-    return toMemory(await this.request("POST", "/api/v1/memories", body));
+    const data = await this.request("POST", "/api/v1/memories", body);
+    if (!isRecord(data)) {
+      throw new CauraApiError(200, "write response must be a JSON object");
+    }
+    return toMemory(data);
   }
 
   /**

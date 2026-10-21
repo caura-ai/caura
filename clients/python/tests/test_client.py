@@ -300,6 +300,15 @@ def test_stats_raises_on_non_object_body(body):
     assert str(exc.value) == "[200] stats response must be a JSON object"
 
 
+@pytest.mark.parametrize("body", ["[]", '"a plain string"', "null"])
+def test_write_raises_on_non_object_body(body):
+    client = make_client(lambda request: httpx.Response(200, text=body))
+    with client, pytest.raises(CauraAPIError) as exc:
+        client.write("x")
+    assert exc.value.status_code == 200
+    assert str(exc.value) == "[200] write response must be a JSON object"
+
+
 def test_auth_error_parses_envelope():
     def handler(request):
         return httpx.Response(403, json={"error": {"message": "cross-fleet", "details": {"x": 1}}})

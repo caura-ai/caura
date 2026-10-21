@@ -155,7 +155,10 @@ class Caura:
         if origin:
             body["origin"] = {**{k: origin[k] for k in ("tokens_in", "tokens_out", "turns") if k in origin}, "source": "sdk"}
         body.update(extra)
-        return Memory.from_dict(self._post("/api/v1/memories", body))
+        data = self._post("/api/v1/memories", body)
+        if not isinstance(data, dict):
+            raise CauraAPIError(200, "write response must be a JSON object")
+        return Memory.from_dict(data)
 
     def search(
         self,
