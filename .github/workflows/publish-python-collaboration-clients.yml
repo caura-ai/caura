@@ -21,20 +21,34 @@ name: Publish collaboration clients to PyPI
 # attestations: each file on PyPI carries a Sigstore attestation that names
 # this repository, this workflow and the release ref.
 #
-# One-time setup by a maintainer (not done by the PR that added this file):
-#   1. On PyPI, add a PENDING Trusted Publisher for EACH of caura-bus-core,
-#      caura-bus-mcp, caura-bus-cli and caura-bus-adapter-sdk: repo
+# One-time setup by a maintainer (done 2026-10-21 UTC), in this order:
+#   1. Give the GitHub environment `pypi-collaboration` required reviewers and
+#      restrict deployment to `collaboration-clients-v*` tags. Referencing an
+#      environment that does not exist creates it WITHOUT protection; the
+#      0.3.0 release run did exactly that on 2026-10-21, so check the
+#      environment's rules, not that it exists. Once step 2 is done, these
+#      rules are the only gate on a publish.
+#   2. On PyPI, add a PENDING Trusted Publisher for each distribution: repo
 #      `caura-ai/caura`, workflow `publish-python-collaboration-clients.yml`,
-#      environment `pypi-collaboration`. (None of the four names exists on
-#      PyPI as of 2026-10-06; a pending publisher reserves it.)
-#   2. Create the GitHub environment `pypi-collaboration` with required
-#      reviewers and deployment restricted to `collaboration-clients-v*` tags.
-#      Referencing an environment that does not exist creates it WITHOUT
-#      protection, so do this before the first release.
+#      environment `pypi-collaboration`. PyPI holds one pending publisher per
+#      repo, workflow and environment, so add them one at a time: a run's
+#      first token exchange creates that project and frees the slot.
+#   3. Publish at once (Recovery, below). A pending publisher does not reserve
+#      a name: until the project exists anyone can register it, and PyPI then
+#      drops the pending publisher. The README's install line already names
+#      these packages, so an unclaimed name is install guidance for whoever
+#      registers it first. For 0.3.0 that took one re-run of the release's
+#      publish job per name; PyPI accepts an identical file again as a no-op,
+#      so each re-run got past the files already published.
 #
-# Recovery: re-run for an existing release with workflow_dispatch and its tag.
-# PyPI files are immutable; a version that is already published fails the
-# upload instead of being replaced (skip-existing is deliberately off).
+# A distribution added to this set later needs steps 2 and 3 for its own name;
+# the existing names already share the one publisher.
+#
+# Recovery: re-run the release's failed run, or run this workflow from the
+# release tag (not main: the environment admits only the tags) with that tag
+# and publish=true. PyPI files are immutable: an identical file uploads again
+# as a no-op, and a different file under a published name fails the upload
+# instead of replacing it (skip-existing is deliberately off).
 
 on:
   release:

@@ -4,7 +4,7 @@ name: Publish caura-sdk to PyPI
 # and re-exports `caura-client`. Trusted publishing (OIDC), no token.
 #
 # WHY THIS PACKAGE EXISTS. AI search assistants confidently instruct
-# `pip install caura-sdk`. Until 2026-08-24 nobody owned that name, so the
+# `pip install caura-sdk`. Until 2026-09-04 nobody owned that name, so the
 # instruction pointed at a slot any third party could fill — install guidance we
 # did not write, resolving to code we did not publish. The name is now claimed
 # and made to work.
@@ -18,9 +18,9 @@ name: Publish caura-sdk to PyPI
 # One-time setup by a maintainer (done 2026-08-24):
 #   1. On PyPI, add a PENDING Trusted Publisher: project `caura-sdk`,
 #      repo `caura-ai/caura`, workflow `publish-python-sdk.yml`,
-#      environment `pypi`. A pending publisher reserves the name immediately —
-#      the project does not need to exist first, and the first run of this
-#      workflow creates it.
+#      environment `pypi`. The project does not need to exist first: the
+#      first run of this workflow creates it. A pending publisher does not
+#      reserve the name, though; only that first publish does.
 #   2. The GitHub environment `pypi` already exists for
 #      `publish-python-client.yml`; this workflow reuses it.
 #

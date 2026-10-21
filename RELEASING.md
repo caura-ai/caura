@@ -92,12 +92,22 @@ Release flow:
    `pypi-collaboration` environment, then uploads with PyPI trusted
    publishing and PEP 740 attestations (core first, then its dependents).
 
-`release-as: "0.3.0"` in `release-please-config.json` fixes the first published
-version. `0.2.0` was only ever the version string of unpublished sibling-path
-preview builds, so publishing starts at `0.3.0` to keep a preview install and a
-published artifact distinguishable. **Remove `release-as` in the first commit
-after `collaboration-clients-v0.3.0` is released**, or every later release
-PR will keep proposing `0.3.0`.
+The first release, `collaboration-clients-v0.3.0`, was pinned with `release-as:
+"0.3.0"` in `release-please-config.json`: `0.2.0` was only ever the version
+string of unpublished sibling-path preview builds, so publishing started at
+`0.3.0` to keep a preview install and a published artifact distinguishable. The
+pin outlived that release: every later release PR re-proposed `0.3.0` and
+prepended another `0.3.0` changelog section for fixes 0.3.0 does not contain
+(L-241). It is gone now. If a component ever needs `release-as` again, remove it
+in the first commit after that release;
+`tests/test_l241_changelog_names_each_release_once.py` fails the release PR that
+would repeat a version.
+
+A pending PyPI trusted publisher does not reserve a project name: until the
+first publish creates the project, anyone can register it, and PyPI then drops
+the pending publisher. A distribution whose name the docs already give out must therefore
+be published as soon as its publisher is set up. The setup order is in the
+header of `publish-python-collaboration-clients.yml`.
 
 Check the build locally before cutting a release:
 
