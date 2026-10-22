@@ -73,6 +73,7 @@ for _leaky in (
 # overridden env vars first.
 import pytest
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 # ---------------------------------------------------------------------------
@@ -102,7 +103,26 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 #     createdb caura_test && psql -d caura_test -c 'CREATE EXTENSION IF NOT EXISTS vector'
 DEFAULT_TEST_DB_URL = "postgresql+asyncpg://caura:changeme@127.0.0.1:5432/caura_test"
 
-TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DB_URL)
+# The database the run is pointed at. Under pytest-xdist (``pytest -n 4``) each
+# worker runs against its own copy of it instead, named after the worker
+# (``caura_test_gw0``, ...). Sharing one would not work: every session ends by
+# deleting all ``test-tenant-`` rows, so the first worker to finish would delete
+# the rows the others are still using. ``_worker_database`` makes the copy.
+BASE_TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DB_URL)
+XDIST_WORKER = os.environ.get("PYTEST_XDIST_WORKER")
+
+
+def worker_database_url(url: str, worker: str | None) -> str:
+    """``url`` with ``worker`` appended to its database name; ``url`` if none."""
+    if not worker:
+        return url
+    parsed = make_url(url)
+    return parsed.set(database=f"{parsed.database}_{worker}").render_as_string(
+        hide_password=False
+    )
+
+
+TEST_DB_URL = worker_database_url(BASE_TEST_DB_URL, XDIST_WORKER)
 
 # NOT what the ``tenant_id`` fixture returns — that mints a fresh id per test. This
 # is one id per RUN, kept for the modules whose module-level seed helpers need a
@@ -239,9 +259,70 @@ def _import_all_models():
 
 
 @pytest.fixture(scope="session")
-def _engine():
+def _engine(_worker_database):
     """Create a single engine for the entire test session."""
     return create_async_engine(TEST_DB_URL, echo=False, pool_size=5)
+
+
+def _quoted(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+async def _copy_base_database_for_this_worker() -> None:
+    """Recreate this xdist worker's database as a copy of the base one.
+
+    A template copy carries everything the base has, including what only the
+    Alembic chain creates (CI migrates the base before the suite runs), which
+    ``create_all`` below would not add. Recreated every run, so a worker never
+    inherits an older run's schema or rows. PostgreSQL copies a template only
+    while no other session is connected to it, so the copies are made one at a
+    time under an advisory lock, from a connection to the ``postgres`` database
+    rather than to the template.
+    """
+    import asyncpg
+
+    base, worker = make_url(BASE_TEST_DB_URL), make_url(TEST_DB_URL)
+    conn = await asyncpg.connect(
+        host=base.host,
+        port=base.port or 5432,
+        user=base.username,
+        password=base.password,
+        database="postgres",
+    )
+    try:
+        await conn.execute("SELECT pg_advisory_lock(hashtext('caura-root-suite-copy'))")
+        await conn.execute(
+            f"DROP DATABASE IF EXISTS {_quoted(worker.database)} WITH (FORCE)"
+        )
+        await conn.execute(
+            f"CREATE DATABASE {_quoted(worker.database)}"
+            f" TEMPLATE {_quoted(base.database)}"
+        )
+    finally:
+        # Ending the session releases the advisory lock.
+        await conn.close()
+
+
+def _session_needs_database(items) -> bool:
+    return any(not _needs_no_database(item) for item in items)
+
+
+@pytest.fixture(scope="session")
+async def _worker_database(request):
+    """Make this xdist worker's database before the worker runs any test.
+
+    Before its first test, not on the first one that asks for the schema:
+    ``unit`` tests skip ``_setup_schema``, but many still reach the database
+    through calls they don't stub. A serial run never notices, because the base
+    database is always there, but a worker that started on one of them found
+    none (``test_mcp_doc.py``: ``database "caura_gw3" does not exist``). Every
+    test gets the engine through the autouse storage bridge, so requiring this
+    from ``_engine`` puts it ahead of all of them. Skipped when every selected
+    test is marked database-free, so ``pytest -m unit -n 4`` makes no copy and
+    needs PostgreSQL only where ``pytest -m unit`` does.
+    """
+    if XDIST_WORKER and _session_needs_database(request.session.items):
+        await _copy_base_database_for_this_worker()
 
 
 @pytest.fixture(scope="session")

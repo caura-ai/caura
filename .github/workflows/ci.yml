@@ -628,8 +628,18 @@ jobs:
         # misleads at the end: the last test's line is completed only after
         # session teardown, so the end-of-run sweep reads as that test running
         # slowly, where durations reports it as a teardown.
+        #
+        # ``-n 4`` runs the suite on four pytest-xdist workers, one per vCPU of
+        # GitHub's runner for public repositories. Each worker runs against its
+        # own copy of the ``caura`` database, which tests/conftest.py makes from
+        # it as a template, so the copies carry the migrations above. Copying
+        # needs ``caura`` to have no other connections, which holds here: the
+        # suite connects only to the copies. ``--dist loadfile`` keeps each
+        # file's tests together on one worker, in file order, as a serial run
+        # has them.
         run: |
           uv run pytest tests/ \
+            -n 4 --dist loadfile \
             -v --tb=short -m "not benchmark" \
             --durations=25 \
             --cov=core-api/src/core_api \

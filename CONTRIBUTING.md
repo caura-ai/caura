@@ -102,6 +102,18 @@ createdb caura_storage && psql -d caura_storage -c 'CREATE EXTENSION IF NOT EXIS
 `DATABASE_URL` (storage suite) and `TEST_DATABASE_URL` (root suite) override
 them. CI provisions and passes both explicitly.
 
+The root suite can also run on several workers, as CI runs it:
+
+```bash
+pytest tests/ -n 4 --dist loadfile
+```
+
+Each worker gets its own copy of `caura_test` (`caura_test_gw0`, `caura_test_gw1`,
+...), made from it as a template at the start of every run. PostgreSQL copies a
+database only while nothing else is connected to it, so close any `psql` session
+on `caura_test` first. The copies stay behind between runs; dropping them is
+safe.
+
 See `README.md` for more deployment options and environment variable details.
 
 ## Workflow

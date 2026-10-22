@@ -1693,10 +1693,15 @@ def _slot_child(slot_dir: Path, queue: Any) -> None:
 def spawn_worker(tmp_path: Path) -> Any:
     """Spawn ``_slot_child`` processes into ``tmp_path`` and reap them all."""
     ctx = multiprocessing.get_context("spawn")
-    queue = ctx.Queue()
     started: list[Any] = []
 
     def _spawn() -> tuple[Any, str | None]:
+        # A queue per child. Children sharing one deadlock it whenever a
+        # SIGKILLed child had not yet released its write lock: ``Queue._feed``
+        # holds that lock across ``send_bytes``, so the report can be read
+        # before the lock is let go, and every later child's ``put`` then
+        # waits on it forever. CI hit that on a busy runner.
+        queue = ctx.Queue()
         proc = ctx.Process(target=_slot_child, args=(tmp_path, queue))
         proc.start()
         started.append(proc)
