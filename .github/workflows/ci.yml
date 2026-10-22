@@ -4,6 +4,16 @@ on:
   pull_request:
     branches: [main, dev, feat/agent-collaboration, feat/collaboration-benchmark]
 
+# One run per PR. A push to an open PR supersedes the run on its previous head,
+# whose result nobody acts on once it is behind, so cancel that run rather than
+# let both hold runners for the length of the suite. The group includes the
+# workflow name because concurrency groups are repository-wide, and the
+# ``github.ref`` fallback stops a future non-PR trigger from putting every
+# branch into one group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   PYTHON_VERSION: "3.13"
   UV_VERSION: "0.9.26"
@@ -556,9 +566,15 @@ jobs:
           POSTGRES_REQUIRE_SSL: "false"
 
       - name: Run tests
+        # ``--durations=25`` ends the log with the 25 slowest setups, calls and
+        # teardowns. Reading the suite's tail from line timestamps instead
+        # misleads at the end: the last test's line is completed only after
+        # session teardown, so the end-of-run sweep reads as that test running
+        # slowly, where durations reports it as a teardown.
         run: |
           uv run pytest tests/ \
             -v --tb=short -m "not benchmark" \
+            --durations=25 \
             --cov=core-api/src/core_api \
             --cov=core-storage-api/src/core_storage_api \
             --cov-report=xml \
