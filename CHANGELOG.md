@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.35.6](https://github.com/caura-ai/caura/compare/backend-v3.35.5...backend-v3.35.6) (2026-10-22)
+
+
+### Bug Fixes
+
+* **reports:** leave outdated rows out of the whole-corpus recall share (Prism v2 N034) ([#2150](https://github.com/caura-ai/caura/issues/2150)) ([13f444c](https://github.com/caura-ai/caura/commit/13f444cdc5eb1c5c982bca09bbae1fe2f056be3d))
+
 ## [3.35.5](https://github.com/caura-ai/caura/compare/backend-v3.35.4...backend-v3.35.5) (2026-10-22)
 
 
