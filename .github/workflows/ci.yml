@@ -693,10 +693,21 @@ jobs:
           exit "$status"
 
       - name: Upload coverage to Codecov
+        # Sends the repository upload token from the CODECOV_TOKEN secret, so
+        # uploads don't depend on Codecov accepting tokenless ones from this
+        # repo's branches: it refused them ("Token required - not valid
+        # tokenless upload") until 2026-10-22. With the secret unset, or on a
+        # fork PR, which gets no secrets, the action uploads tokenless.
+        #
+        # ``fail_ci_if_error`` stays false so a Codecov outage cannot block a
+        # merge, which also means a refused upload still shows green here: to
+        # check one, look for "Upload queued for processing failed" in this
+        # step's log.
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ./coverage.xml
           fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   service-tests:
     # Each service's own suite, from that service's own lock: see the note
