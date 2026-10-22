@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.35.8](https://github.com/caura-ai/caura/compare/backend-v3.35.7...backend-v3.35.8) (2026-10-22)
+
+
+### Bug Fixes
+
+* **core-api:** drop the dead super-admin JWT check and python-jose ([#2154](https://github.com/caura-ai/caura/issues/2154)) ([9285430](https://github.com/caura-ai/caura/commit/9285430b57fcb6670fc31122702bbd364a325f95))
+
 ## [3.35.7](https://github.com/caura-ai/caura/compare/backend-v3.35.6...backend-v3.35.7) (2026-10-22)
 
 
