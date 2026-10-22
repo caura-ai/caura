@@ -8643,8 +8643,9 @@ class PostgresService:
         - ``total_recalls`` + ``top_recalls`` (top 6 values) → recall concentration.
 
         With ``recalled_after``, also ``corpus_total`` / ``recalled_in_window``:
-        the same scoped corpus WITHOUT the ``created_after`` bound (every live
-        row, whenever it was written), and how many of those rows have
+        the same scoped corpus WITHOUT the ``created_after`` bound and without
+        ``outdated`` rows, which default search never returns (every row search
+        can return, whenever it was written), and how many of those rows have
         ``last_recalled_at >= recalled_after``. That is the "was the memory used
         this period" figure; never-recalled % cannot be, because a row written
         an hour ago has had an hour to be recalled. One extra pass over the
@@ -8683,15 +8684,22 @@ class PostgresService:
             scope_filters.append(Memory.agent_id.notin_(exclude_agent_ids))
         if exclude_title_regex:
             scope_filters.append(~func.coalesce(Memory.title, "").op("~*")(exclude_title_regex))
-        # The whole durable corpus, any creation date (``recalled_after`` figures).
-        corpus_filters = [
+        live_filters = [
             Memory.deleted_at.is_(None),
             Memory.status != QUARANTINED_MEMORY_STATUS,
             *scope_filters,
         ]
-        filters = list(corpus_filters)
+        filters = list(live_filters)
         if created_after:
             filters.append(Memory.created_at >= created_after)
+        # The whole corpus search can return, any creation date (``recalled_after``
+        # figures). Default search drops ``outdated`` rows (superseded, expired,
+        # retracted) outright, on the scored and the entity-lookup path, so
+        # counting them only drags the share down and inflates the total. They
+        # are out of both counts, even one a history question recalled.
+        # ``conflicted`` stays: search still returns it on an exact match and on
+        # an entity lookup (Prism App Review v2 N034).
+        corpus_filters = [*live_filters, Memory.status != "outdated"]
 
         reused = case((Memory.recall_count > 0, 1), else_=0)
         per_type_stmt = (

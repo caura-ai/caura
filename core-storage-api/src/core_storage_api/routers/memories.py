@@ -1906,9 +1906,9 @@ async def quality_metrics(request: Request) -> dict:
     exclude_title_regex?, readable_tenant_ids?}``. Returns ``{total, reused,
     total_recalls, top_recalls, by_type:{type:{total,reused}}}``, plus
     ``{corpus_total, recalled_in_window}`` when ``recalled_after`` is sent
-    (the corpus without the ``created_after`` bound, and its rows recalled
-    since ``recalled_after``). Same scope/visibility as ``/stats-breakdown``;
-    read-only.
+    (the corpus without the ``created_after`` bound or ``outdated`` rows, and
+    its rows recalled since ``recalled_after``). Same scope/visibility as
+    ``/stats-breakdown``; read-only.
 
     ``tenant_id`` is required, and ``readable_tenant_ids`` does not substitute
     for it. The guard used to accept either, which made this the only one of

@@ -1033,6 +1033,72 @@ async def test_report_recalled_in_window(client):
     assert q["never_recalled_pct"] == 50.0, q
 
 
+async def _set_status(memory_id, status):
+    async with get_session() as session:
+        await session.execute(
+            text("UPDATE memories SET status = :s WHERE id = CAST(:id AS uuid)"),
+            {"s": status, "id": memory_id},
+        )
+
+
+async def test_report_recalled_in_window_leaves_out_outdated(client):
+    """The whole-corpus figures count the memories search can return (Prism App
+    Review v2 N034). Default search leaves ``outdated`` rows (superseded,
+    expired, retracted) out entirely, so in the denominator they only dragged
+    the share down and inflated "of N memories". They are out of both counts,
+    even one a history question recalled. ``conflicted`` stays in: search still
+    returns it on an exact match and on an entity lookup. So do the other
+    statuses search returns.
+
+    One row per status, all written a month ago: ``active`` and ``conflicted``
+    recalled yesterday, the rest never, plus two ``outdated`` rows, one of them
+    recalled yesterday.
+    """
+    tag = _uid()
+    tenant_id, headers = get_test_auth(f"rep-riw-st-{tag}")
+    fleet, a1 = f"rep-fleet-{tag}", f"rep-a1-{tag}"
+    await _register(tenant_id, fleet, a1)
+    now = datetime.now(UTC)
+    yesterday = now - timedelta(days=1)
+    rows = [
+        ("active", yesterday),
+        ("confirmed", None),
+        ("pending", None),
+        ("cancelled", None),
+        ("archived", None),
+        ("conflicted", yesterday),
+        ("outdated", yesterday),
+        ("outdated", None),
+    ]
+    for i, (status, recalled) in enumerate(rows):
+        memory_id = await _seed_titled(
+            client, headers, tenant_id, fleet, a1, "fact", f"Row {i} {status} {tag}"
+        )
+        await _set_times(
+            memory_id,
+            created_at=now - timedelta(days=30),
+            last_recalled_at=recalled,
+            recall_count=1 if recalled else 0,
+        )
+        await _set_status(memory_id, status)
+
+    resp = await client.get(
+        "/api/v1/reports",
+        params={
+            "tenant_id": tenant_id,
+            "period": "week",
+            "destination": "internal_group",
+            "agent_id": a1,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    q = resp.json()["quality"]
+    assert q["durable_corpus_total"] == 6, q
+    assert q["recalled_in_window_count"] == 2, q
+    assert q["recalled_in_window_pct"] == 33.3, q
+
+
 async def test_report_recalled_in_window_org_scope(client):
     """Org scope: the corpus spans the readable tenant set, as every other
     quality figure does."""

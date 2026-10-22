@@ -1772,7 +1772,8 @@ class CoreStorageClient:
 
         With ``recalled_after`` in ``data``, the result also carries
         ``corpus_total`` / ``recalled_in_window`` (the corpus without the
-        ``created_after`` bound, and its rows recalled since then).
+        ``created_after`` bound or ``outdated`` rows, and its rows recalled
+        since then).
         """
         result = await self._post("/memories/quality-metrics", data, read=True)
         if result is None:

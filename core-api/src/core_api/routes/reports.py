@@ -236,7 +236,9 @@ async def get_report(
     - ``recalled_in_window_pct`` (null when the corpus is empty),
       ``recalled_in_window_count``, ``durable_corpus_total``: of the whole
       durable corpus in scope, any creation date, the share recalled during
-      the period (``last_recalled_at`` inside it).
+      the period (``last_recalled_at`` inside it). The corpus is what search
+      can return: ``outdated`` rows (superseded, expired, retracted) are left
+      out of both counts.
 
     Recalls are counted only for searches made with an agent identity.
     """
@@ -578,8 +580,9 @@ async def get_report(
         #     memory written this morning has had hours to be recalled, so on an
         #     active fleet this reads high whatever the corpus is worth.
         #   - ``recalled_in_window_pct``: of the WHOLE durable corpus (same
-        #     scope and exclusions, any creation date), the share with
-        #     ``last_recalled_at`` inside the window — "was it used this period".
+        #     scope and exclusions, any creation date, no ``outdated`` rows,
+        #     which search never returns), the share with ``last_recalled_at``
+        #     inside the window — "was it used this period".
         # Recalls are only counted for searches that carry an agent identity
         # (track_recalls, gap A26), so both undercount agentless traffic.
         # Scope keys shared by the three (independent) quality calls below.
