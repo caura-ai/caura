@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.35.7](https://github.com/caura-ai/caura/compare/backend-v3.35.6...backend-v3.35.7) (2026-10-22)
+
+
+### Bug Fixes
+
+* **auth:** tell a person with a read-only role about the role, not a key (Prism v2 N024) ([#2152](https://github.com/caura-ai/caura/issues/2152)) ([c581890](https://github.com/caura-ai/caura/commit/c58189060e0bf1e8c62127200a4cf4ec6117c914))
+
 ## [3.35.6](https://github.com/caura-ai/caura/compare/backend-v3.35.5...backend-v3.35.6) (2026-10-22)
 
 
