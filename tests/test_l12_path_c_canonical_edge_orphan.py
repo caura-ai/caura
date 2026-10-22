@@ -130,6 +130,10 @@ async def _run_path_c(new_mem: dict, candidates: list[dict]) -> AsyncMock:
             return_value=sc,
         ),
         patch(
+            "core_api.services.contradiction.resolver.get_storage_client",
+            return_value=sc,
+        ),
+        patch(
             "core_api.services.contradiction_detector._llm_contradiction_check_batch",
             batch_judge,
         ),

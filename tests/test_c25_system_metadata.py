@@ -21,23 +21,27 @@ from core_api.services.system_metadata import (
 )
 from tests.conftest import get_test_auth, uid
 
-pytestmark = pytest.mark.unit
+# The tests that write through the API and read the row back from storage
+# need PostgreSQL; the others are marked ``unit`` one by one.
 
 
 # --- sanitize: forgeable keys stripped, caller keys kept -----------------------
 
 
+@pytest.mark.unit
 def test_sanitize_strips_platform_only_keys():
     dirty = {"llm_ms": 9999, "write_latency_ms": 1, "note": "mine", "_system": {"x": 1}}
     clean = sanitize_caller_metadata(dirty)
     assert clean == {"note": "mine"}
 
 
+@pytest.mark.unit
 def test_sanitize_keeps_caller_ownable_keys():
     clean = sanitize_caller_metadata({"summary": "MINE", "tags": ["a"], "k": 1})
     assert clean == {"summary": "MINE", "tags": ["a"], "k": 1}
 
 
+@pytest.mark.unit
 def test_sanitize_none_and_empty():
     assert sanitize_caller_metadata(None) == {}
     assert sanitize_caller_metadata({}) == {}
@@ -46,6 +50,7 @@ def test_sanitize_none_and_empty():
 # --- set_system_value: dual-write + clobber fix --------------------------------
 
 
+@pytest.mark.unit
 def test_platform_key_dual_written():
     md: dict = {}
     set_system_value(md, "llm_ms", 123)
@@ -53,6 +58,7 @@ def test_platform_key_dual_written():
     assert md[SYSTEM_NAMESPACE]["llm_ms"] == 123
 
 
+@pytest.mark.unit
 def test_caller_owned_summary_not_clobbered():
     md: dict = {"summary": "MINE"}
     set_system_value(md, "summary", "platform version", caller_keys=frozenset(md))
@@ -60,6 +66,7 @@ def test_caller_owned_summary_not_clobbered():
     assert md[SYSTEM_NAMESPACE]["summary"] == "platform version"
 
 
+@pytest.mark.unit
 def test_summary_fills_top_level_when_caller_did_not_set_it():
     md: dict = {}
     set_system_value(md, "summary", "platform version", caller_keys=frozenset())
@@ -70,17 +77,20 @@ def test_summary_fills_top_level_when_caller_did_not_set_it():
 # --- extract: read-side view for new and historical rows -----------------------
 
 
+@pytest.mark.unit
 def test_extract_from_historical_row_legacy_keys_only():
     md = {"summary": "s", "llm_ms": 42, "custom": "keep-out"}
     sysm = extract_system_metadata(md)
     assert sysm == {"summary": "s", "llm_ms": 42}
 
 
+@pytest.mark.unit
 def test_extract_prefers_namespace_over_legacy():
     md = {"summary": "CALLER", SYSTEM_NAMESPACE: {"summary": "PLATFORM"}}
     assert extract_system_metadata(md)["summary"] == "PLATFORM"
 
 
+@pytest.mark.unit
 def test_extract_none_when_nothing_platform_written():
     assert extract_system_metadata({"custom": 1}) is None
     assert extract_system_metadata(None) is None
@@ -116,6 +126,7 @@ class _Input:
         self.metadata = metadata
 
 
+@pytest.mark.unit
 async def test_merge_step_preserves_caller_summary():
     """Input arrives PRE-SANITIZED (the single-write path strips forgeries
     before the governance gate); the merge step's job is the clobber fix."""
@@ -145,6 +156,7 @@ async def test_merge_step_preserves_caller_summary():
     assert md["tags"] == ["p1"]  # caller didn't own tags → legacy mirror filled
 
 
+@pytest.mark.unit
 async def test_merge_step_does_not_clobber_upstream_gate_flags():
     """The governance gate writes PII flags into the input metadata BEFORE the
     merge step — the regression that moved sanitize to the write entry point."""
@@ -171,6 +183,7 @@ async def test_merge_step_does_not_clobber_upstream_gate_flags():
     assert md["pii_types"] == ["email"]
 
 
+@pytest.mark.unit
 def test_registries_are_disjoint():
     assert not (PLATFORM_ONLY_KEYS & CALLER_OWNABLE_KEYS)
 
@@ -475,6 +488,7 @@ async def test_platform_keys_outside_the_registry_are_not_forgeable(client, surf
     )
 
 
+@pytest.mark.unit
 def test_source_is_deliberately_not_reserved():
     """``source`` is written by the platform AND by callers.
 

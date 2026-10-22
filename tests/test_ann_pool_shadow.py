@@ -155,7 +155,9 @@ async def test_no_shadow_on_diagnostic_runs(mock_get_sc) -> None:
 
 
 @patch("core_api.pipeline.steps.search.execute_scored_search.get_storage_client")
-async def test_shadow_failure_never_reaches_the_caller(mock_get_sc, caplog) -> None:
+async def test_shadow_failure_never_reaches_the_caller(
+    mock_get_sc, caplog, task_failures
+) -> None:
     """tracked_task absorbs shadow errors; the served result is unaffected."""
     sc = AsyncMock()
     sc.scored_search = AsyncMock(

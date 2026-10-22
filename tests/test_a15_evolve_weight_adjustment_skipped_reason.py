@@ -108,9 +108,16 @@ async def _run(
         ),
     }
     base_patches.update(patches)
-    with patch.multiple(
-        "core_api.services.evolve_service",
-        **{k: v for k, v in base_patches.items()},
+    # Rule generation fetches the related memories for context. None of these
+    # made-up ids exists, so each fetch comes back empty.
+    from core_api.clients.storage_client import get_storage_client
+
+    with (
+        patch.multiple(
+            "core_api.services.evolve_service",
+            **{k: v for k, v in base_patches.items()},
+        ),
+        patch.object(get_storage_client(), "get_memory", AsyncMock(return_value=None)),
     ):
         return await report_outcome(
             tenant_id="t1",

@@ -72,7 +72,11 @@ async def test_keystones_read_drops_agent_id_when_no_fleet(mcp_env, monkeypatch)
     """agent_id without fleet_id can't resolve agent-scope rows; the handler
     must NOT forward agent_id under that shape (would silently miss them at
     the storage layer anyway, but defence in depth)."""
-    sc = _stub_storage_client(monkeypatch, list_keystones=([], False))
+    sc = _stub_storage_client(monkeypatch, list_keystones=([], False), get_agent=None)
+    # The handler looks the named agent up through agent_service; it has no row.
+    monkeypatch.setattr(
+        "core_api.services.agent_service.get_storage_client", lambda: sc
+    )
     await mcp_server.caura_keystones(agent_id="agent-Z", fleet_id=None)
     sc.list_keystones.assert_awaited_once()
     kwargs = sc.list_keystones.await_args.kwargs

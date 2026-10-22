@@ -224,7 +224,16 @@ async def test_the_write_pipeline_returns_409_not_a_pipeline_failure() -> None:
     refuse = AsyncMock(
         side_effect=DuplicateMemoryError(f"Duplicate memory exists: {WINNER}")
     )
-    with patch.object(sc_mod.CoreStorageClient, "create_memory", new=refuse):
+    # The dedup lookups earlier in the pipeline find nothing: the content is new.
+    nothing = AsyncMock(return_value=None)
+    with (
+        patch.object(sc_mod.CoreStorageClient, "find_by_content_hash", new=nothing),
+        patch.object(
+            sc_mod.CoreStorageClient, "find_embedding_by_content_hash", new=nothing
+        ),
+        patch.object(sc_mod.CoreStorageClient, "find_semantic_duplicate", new=nothing),
+        patch.object(sc_mod.CoreStorageClient, "create_memory", new=refuse),
+    ):
         with pytest.raises(HTTPException) as caught:
             await create_memory(
                 MemoryCreate(

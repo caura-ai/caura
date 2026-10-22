@@ -342,7 +342,7 @@ async def test_deferred_deployment_does_not_remediate_here():
     sc.soft_delete_memory.assert_not_awaited()
 
 
-async def test_no_verdict_means_no_remediation():
+async def test_no_verdict_means_no_remediation(task_failures):
     """Enrichment that produced nothing must not trigger a policy decision.
 
     ``_enrich_memory_background`` returns ``None`` when the LLM call yielded no

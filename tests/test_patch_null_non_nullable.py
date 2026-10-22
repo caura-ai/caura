@@ -36,9 +36,8 @@ from core_api.services.memory_service import NON_NULLABLE_UPDATE_FIELDS
 from tests.conftest import get_test_auth
 from tests.conftest import uid as _uid
 
-# ``asyncio_mode = auto`` (pytest.ini) runs the async tests below without an
-# explicit asyncio mark; adding one would also land on the sync drift test.
-pytestmark = [pytest.mark.unit]
+# Every test here but the drift test PATCHes real rows through the API, so
+# that one alone is ``unit``.
 
 
 # Fields whose column IS nullable: an explicit null legitimately clears them and
@@ -159,6 +158,7 @@ async def test_a_real_value_still_updates(client, tenant_id):
     assert body["weight"] == pytest.approx(0.9)
 
 
+@pytest.mark.unit
 def test_guard_list_matches_the_model():
     """Drift guard — the reason the list can be a literal.
 

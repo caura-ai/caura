@@ -659,9 +659,15 @@ class TestFlippedSkipsExistingSupersedesId:
         mock_sc.update_memory_status = AsyncMock()
         install_batch_status_replay_shim(mock_sc)
 
-        with patch(
-            "core_api.services.contradiction_detector.get_storage_client",
-            return_value=mock_sc,
+        with (
+            patch(
+                "core_api.services.contradiction_detector.get_storage_client",
+                return_value=mock_sc,
+            ),
+            patch(
+                "core_api.services.contradiction.resolver.get_storage_client",
+                return_value=mock_sc,
+            ),
         ):
             with caplog.at_level("WARNING"):
                 await _detect(new, [0.1] * VECTOR_DIM)
@@ -711,6 +717,10 @@ class TestFlippedSkipsExistingSupersedesId:
         with (
             patch(
                 "core_api.services.contradiction_detector.get_storage_client",
+                return_value=mock_sc,
+            ),
+            patch(
+                "core_api.services.contradiction.resolver.get_storage_client",
                 return_value=mock_sc,
             ),
             patch(

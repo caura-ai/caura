@@ -764,6 +764,10 @@ async def test_a61_multi_candidate_entity_aware_batches_once_and_flags():
             return_value=sc,
         ),
         patch(
+            "core_api.services.contradiction.resolver.get_storage_client",
+            return_value=sc,
+        ),
+        patch(
             "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check_batch",
             entity_aware_batch,
         ),

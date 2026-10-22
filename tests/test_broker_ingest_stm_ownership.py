@@ -44,6 +44,10 @@ def _broker_auth(
 # ── /ingest/commit ──────────────────────────────────────────────────────
 
 
+async def _get_or_create(tenant_id, agent_id, fleet_id=None, **_kw):
+    return {"agent_id": agent_id, "fleet_id": None, "trust_level": 1}
+
+
 async def _drive_ingest(monkeypatch, *, agent_id, auth):
     gate = AsyncMock(return_value="broker:install-1")
     # Patched on ``agent_service`` for the same reason as ``_drive_stm`` below:
@@ -51,10 +55,6 @@ async def _drive_ingest(monkeypatch, *, agent_id, auth):
     # real gate one level down. Registration and the fleet gate are stubbed —
     # no storage in a unit test.
     monkeypatch.setattr(agent_service, "broker_owned_agent_id", gate)
-
-    async def _get_or_create(tenant_id, agent_id, fleet_id=None, **_kw):
-        return {"agent_id": agent_id, "fleet_id": None, "trust_level": 1}
-
     monkeypatch.setattr(agent_service, "get_or_create_agent", _get_or_create)
     monkeypatch.setattr(memories, "enforce_fleet_write", AsyncMock(return_value={}))
     monkeypatch.setattr(memories, "check_and_increment", AsyncMock(return_value=None))
@@ -112,8 +112,9 @@ async def _drive_stm(monkeypatch, *, agent_id, auth):
     # through ``resolve_write_agent`` (parity with POST /memories), which calls
     # ``broker_owned_agent_id`` itself. So this still patches the REAL gate the
     # ownership boundary runs on, one level down, rather than a seam the route
-    # no longer has.
+    # no longer has. Registration is stubbed, as in ``_drive_ingest``.
     monkeypatch.setattr(agent_service, "broker_owned_agent_id", gate)
+    monkeypatch.setattr(agent_service, "get_or_create_agent", _get_or_create)
     captured: dict[str, str] = {}
 
     async def _promote(

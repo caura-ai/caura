@@ -207,9 +207,15 @@ class TestSupersessionSemantics:
         mock_sc.update_memory_status = AsyncMock()
         install_batch_status_replay_shim(mock_sc)
 
-        with patch(
-            "core_api.services.contradiction_detector.get_storage_client",
-            return_value=mock_sc,
+        with (
+            patch(
+                "core_api.services.contradiction_detector.get_storage_client",
+                return_value=mock_sc,
+            ),
+            patch(
+                "core_api.services.contradiction.resolver.get_storage_client",
+                return_value=mock_sc,
+            ),
         ):
             contradictions = await _detect(new_memory, [0.1] * 10)
 
@@ -322,6 +328,10 @@ class TestSupersessionSemantics:
         with (
             patch(
                 "core_api.services.contradiction_detector.get_storage_client",
+                return_value=mock_sc,
+            ),
+            patch(
+                "core_api.services.contradiction.resolver.get_storage_client",
                 return_value=mock_sc,
             ),
             patch(

@@ -118,7 +118,9 @@ async def test_caura_doc_refuses_default_agent_on_gateway(mcp_env, op, extra_kwa
 # ---------------------------------------------------------------------------
 
 
-async def test_read_default_agent_in_standalone_does_not_trigger_guard(mcp_env):
+async def test_read_default_agent_in_standalone_does_not_trigger_guard(
+    mcp_env, storage_unavailable
+):
     """Standalone (no ``_via_gateway_var`` flip) must NOT raise
     ``MISSING_AGENT_ID`` for the default identity — that's the whole
     point of the standalone vs. gateway split. We don't care whether
@@ -150,7 +152,9 @@ async def test_read_default_agent_in_standalone_does_not_trigger_guard(mcp_env):
 # ---------------------------------------------------------------------------
 
 
-async def test_read_explicit_agent_on_gateway_bypasses_guard(mcp_env):
+async def test_read_explicit_agent_on_gateway_bypasses_guard(
+    mcp_env, storage_unavailable
+):
     """Same gateway-routed path, but caller passed an explicit agent_id —
     the guard MUST NOT fire. The call may still error downstream (we
     haven't fully mocked the storage path), but the error code, if any,
@@ -200,7 +204,7 @@ async def test_a14_write_guard_still_holds(mcp_env):
 # ---------------------------------------------------------------------------
 
 
-async def test_manage_lineage_is_not_guarded_by_a29(mcp_env):
+async def test_manage_lineage_is_not_guarded_by_a29(mcp_env, storage_unavailable):
     """caura_manage op=lineage is a *read* on caura_manage. The A14
     PR deliberately scoped manage's guard to its write ops (delete /
     update / transition / bulk_delete), and A29 did NOT extend the guard

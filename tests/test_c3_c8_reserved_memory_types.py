@@ -103,6 +103,11 @@ def _mention_of(reserved_type: str, message: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+async def _registered(tenant_id, agent_id, fleet_id=None, **_kw):
+    """The write's agent, which the route registers before writing: no storage."""
+    return {"agent_id": agent_id, "fleet_id": fleet_id, "trust_level": 1}
+
+
 @pytest.mark.parametrize("reserved_type", RESERVED_TYPES)
 async def test_rest_single_rejects_reserved_type(client, reserved_type):
     """Each of the three reserved types yields a 422 with the type
@@ -150,6 +155,9 @@ async def test_rest_single_accepts_allowed_type(client, monkeypatch):
         )
     )
     monkeypatch.setattr(routes_mem, "create_memory", create_mock)
+    monkeypatch.setattr(
+        "core_api.services.agent_service.get_or_create_agent", _registered
+    )
 
     resp = await client.post(
         "/api/v1/memories",
@@ -178,6 +186,9 @@ async def test_rest_single_accepts_none_memory_type(client, monkeypatch):
         )
     )
     monkeypatch.setattr(routes_mem, "create_memory", create_mock)
+    monkeypatch.setattr(
+        "core_api.services.agent_service.get_or_create_agent", _registered
+    )
 
     resp = await client.post(
         "/api/v1/memories",
@@ -267,6 +278,9 @@ async def test_rest_bulk_accepts_when_every_item_allowed(client, monkeypatch):
 
     bulk_mock = AsyncMock(side_effect=_stub_bulk)
     monkeypatch.setattr(routes_mem, "create_memories_bulk", bulk_mock)
+    monkeypatch.setattr(
+        "core_api.services.agent_service.get_or_create_agent", _registered
+    )
 
     tenant_id, headers = get_test_auth()
     body = {

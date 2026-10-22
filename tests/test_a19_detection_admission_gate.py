@@ -204,7 +204,7 @@ async def test_path_a_and_path_c_share_one_gate(monkeypatch):
     assert peak > 1, "sanity: passes did run concurrently up to the cap"
 
 
-async def test_a_failing_pass_releases_its_slot(monkeypatch):
+async def test_a_failing_pass_releases_its_slot(monkeypatch, task_failures):
     """A pass that throws must free its slot — a leaked slot is a silent,
     permanent shrink of detection throughput (and at cap failures, a
     deadlock). The entry's own except swallows the error; the gate release

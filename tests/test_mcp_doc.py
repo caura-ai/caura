@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core_api import mcp_server
+from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
     DEFAULT_DOC_SEARCH_TOP_K,
     MAX_DOC_SEARCH_TOP_K,
@@ -171,6 +172,10 @@ async def test_doc_delete_not_found_envelope(mcp_env, monkeypatch):
 
 async def test_doc_delete_happy_path(mcp_env, monkeypatch):
     sc = stub_storage_client(monkeypatch, delete_document=True)
+    # Deleting the doc unmints its memory through the shared client; none was minted.
+    monkeypatch.setattr(
+        get_storage_client(), "soft_delete_by_filter", AsyncMock(return_value=0)
+    )
     out = await mcp_server.caura_doc(op="delete", collection="customers", doc_id="acme")
     payload = parse_envelope(out)
     assert payload["ok"] is True
@@ -1149,6 +1154,10 @@ async def test_skill_delete_allows_active_when_flag_on(mcp_env, monkeypatch):
     # deleted, storage returns True.
     _patch_flag(monkeypatch, True)
     stub_storage_client(monkeypatch, delete_document=True)
+    # Deleting the doc unmints its memory through the shared client; none was minted.
+    monkeypatch.setattr(
+        get_storage_client(), "soft_delete_by_filter", AsyncMock(return_value=0)
+    )
     out = await mcp_server.caura_doc(op="delete", collection="skills", doc_id="forge/x")
     payload = parse_envelope(out)
     assert payload["deleted"] is True

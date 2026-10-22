@@ -125,16 +125,31 @@ class _FakeStorageClient:
     async def upsert_session_traces(self, *, tenant_id, traces):
         self.upsert_calls.append(list(traces))
 
+    # The signal extractors' queries. These memories exist only in this fake,
+    # so no signal can name them: each query comes back empty.
+    async def outcome_contradiction_signals(self, **_query):
+        return []
+
+    async def outcome_supersession_signals(self, **_query):
+        return []
+
+    async def outcome_terminal_memory_signals(self, **_query):
+        return []
+
+    async def outcome_cross_agent_reuse_signals(self, **_query):
+        return []
+
 
 def _patch_storage_for_build(
     memory_rows: list[_MemRow],
     entity_rows: list[_EntityRow] | None = None,
 ) -> tuple[_FakeStorageClient, object]:
-    """Build a fake storage client + a patch context that wires it into
-    ``session_trace.get_storage_client``. Returns ``(fake, ctx)``; the
+    """Build a fake storage client + a patch context that installs it as the
+    storage client singleton, which ``get_storage_client`` returns to the
+    builder and to every signal extractor alike. Returns ``(fake, ctx)``; the
     caller uses ``with ctx:`` and asserts on ``fake``."""
     fake = _FakeStorageClient(memory_rows, entity_rows or [])
-    ctx = patch("core_api.services.session_trace.get_storage_client", return_value=fake)
+    ctx = patch("core_api.clients.storage_client._client", fake)
     return fake, ctx
 
 

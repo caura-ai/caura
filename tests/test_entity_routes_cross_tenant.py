@@ -52,7 +52,12 @@ def _patch_storage(
     sc.get_full_graph = AsyncMock(
         return_value=graph if graph is not None else {"entities": [], "relations": []}
     )
+    # The caller's agent, which the routes look up through agent_service: no row.
+    sc.get_agent = AsyncMock(return_value=None)
     monkeypatch.setattr(entities_routes, "get_storage_client", lambda: sc)
+    monkeypatch.setattr(
+        "core_api.services.agent_service.get_storage_client", lambda: sc
+    )
     return sc
 
 

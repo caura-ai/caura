@@ -197,18 +197,18 @@ async def _drive_auto_chunk(
                 "metadata": {},
             },
             "enrichment": None,
-            # Real dimensionality: the fall-through's ``WriteMemoryRow`` inserts
-            # into the test database, which enforces the vector width.
+            # Real dimensionality, as the row the fall-through's ``WriteMemoryRow``
+            # sends to storage would carry.
             "embedding": [0.1] * EMBEDDING_DIM,
             "t0": 0.0,
             # What ``ComputeContentHash`` leaves behind in
             # ``build_enrichment_pipeline``, which every caller of this handler
             # has already run. The fall-through pipeline's first step reads it.
             #
-            # Unique per run, because the fall-through really does insert into
-            # the test database: a shared constant here makes the SECOND
-            # fall-through test 409 against the row the FIRST one wrote, which
-            # reads exactly like the gate misfiring.
+            # Unique per run, as a real content's hash would be. The fall-through's
+            # insert is routed to ``sc`` below; it used to reach the test
+            # database, where a shared constant made the SECOND fall-through
+            # test 409 against the row the FIRST one wrote.
             "content_hash": uuid.uuid4().hex * 2,
         },
         tenant_config=config,
@@ -237,6 +237,12 @@ async def _drive_auto_chunk(
 
     with (
         patch.object(memory_service, "get_storage_client", lambda: sc),
+        # The fall-through's insert is ``WriteMemoryRow``'s, which looks the
+        # client up itself.
+        patch(
+            "core_api.pipeline.steps.write.write_memory_row.get_storage_client",
+            lambda: sc,
+        ),
         patch.object(
             memory_service, "track_task", MagicMock(side_effect=close_scheduled_coro)
         ),

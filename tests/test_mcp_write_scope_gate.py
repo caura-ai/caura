@@ -228,7 +228,9 @@ async def test_caura_doc_delete_blocked_for_read_only(mcp_env, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_caura_manage_read_does_not_invoke_write_gate(mcp_env, monkeypatch):
+async def test_caura_manage_read_does_not_invoke_write_gate(
+    mcp_env, monkeypatch, storage_unavailable
+):
     """``op=read`` is a query path — the gate should never fire here.
     We assert by spying on ``_check_write_scope`` and confirming it
     was not called. The handler may still fail downstream (mocked DB
@@ -253,7 +255,9 @@ async def test_caura_manage_read_does_not_invoke_write_gate(mcp_env, monkeypatch
     assert calls == [], "write-scope gate fired on a read op"
 
 
-async def test_caura_doc_read_does_not_invoke_write_gate(mcp_env, monkeypatch):
+async def test_caura_doc_read_does_not_invoke_write_gate(
+    mcp_env, monkeypatch, storage_unavailable
+):
     _force_read_only(monkeypatch)
     calls: list[None] = []
 
@@ -269,7 +273,9 @@ async def test_caura_doc_read_does_not_invoke_write_gate(mcp_env, monkeypatch):
     assert calls == [], "write-scope gate fired on a doc-read op"
 
 
-async def test_caura_doc_query_does_not_invoke_write_gate(mcp_env, monkeypatch):
+async def test_caura_doc_query_does_not_invoke_write_gate(
+    mcp_env, monkeypatch, storage_unavailable
+):
     _force_read_only(monkeypatch)
     calls: list[None] = []
 

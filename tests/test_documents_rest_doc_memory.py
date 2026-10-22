@@ -97,6 +97,14 @@ def rest_env(monkeypatch):
     monkeypatch.setattr(mod, "log_action", AsyncMock(return_value=None))
     monkeypatch.setattr(mod, "idempotency_for", AsyncMock(return_value=None))
 
+    # The route's agent gates. The author registers as a new, approved agent,
+    # and there is no earlier document of a different author to overwrite.
+    async def _registered(tenant_id, agent_id, fleet_id=None):
+        return {"agent_id": agent_id, "fleet_id": fleet_id, "trust_level": 1}
+
+    monkeypatch.setattr(mod, "enforce_fleet_write", _registered)
+    monkeypatch.setattr(mod, "enforce_document_overwrite", AsyncMock(return_value=None))
+
     spy = AsyncMock(return_value="mem-1")
     monkeypatch.setattr("core_api.services.doc_memory.safe_sync_doc_memory", spy)
 

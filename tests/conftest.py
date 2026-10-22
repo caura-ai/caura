@@ -2,7 +2,8 @@
 
 Tests marked ``@pytest.mark.unit`` (and not ``integration``) run without any
 database: the autouse storage bridge skips schema setup for them, so
-``pytest -m unit`` works with no PostgreSQL reachable. Every other test —
+``pytest -m unit`` works with no PostgreSQL reachable, and one that touches
+the database anyway fails (``_keeping_off_the_database``). Every other test —
 marked ``integration`` or unmarked — gets the schema, because unmarked tests
 reach the database through that bridge without asking for a DB fixture. Those
 require a running PostgreSQL instance with pgvector — configure via
@@ -10,12 +11,15 @@ TEST_DATABASE_URL env var or the defaults below.
 """
 
 import asyncio
+import contextlib
 import inspect
 import os
+import sys
 import uuid
 import warnings
 from datetime import UTC, datetime, timedelta
-from unittest.mock import DEFAULT
+from pathlib import Path
+from unittest.mock import DEFAULT, AsyncMock, patch
 
 # Set test-friendly defaults before any backend imports read settings.
 # These can be overridden by the caller via environment variables.
@@ -72,9 +76,10 @@ for _leaky in (
 # test collection (which transitively imports config) must see the
 # overridden env vars first.
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.pool import Pool
 
 # ---------------------------------------------------------------------------
 # Test database configuration
@@ -506,6 +511,54 @@ def _needs_no_database(node) -> bool:
     )
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Where each database connection was taken from while a database-free test
+# runs; None the rest of the time. See ``_keeping_off_the_database``.
+_connections_taken_by_database_free_test: list[str] | None = None
+
+
+@event.listens_for(Pool, "checkout")
+def _record_a_database_free_test_taking_a_connection(*_args) -> None:
+    if _connections_taken_by_database_free_test is not None:
+        _connections_taken_by_database_free_test.append(_repo_frames(sys._getframe(1)))
+
+
+def _repo_frames(frame) -> str:
+    """This repo's frames from ``frame`` outward, outermost first.
+
+    The walk continues through each greenlet's parent: async SQLAlchemy checks
+    connections out on a greenlet whose own frames end at ``greenlet_spawn``,
+    and the code that made the query is on the greenlet it switched from. It
+    stops at the asyncio task, so a query core-api asked for over the storage
+    bridge shows from the core-storage-api route down: the storage client
+    sends each request from a task of its own.
+    """
+    import greenlet
+
+    frames, seen, current = [], set(), greenlet.getcurrent()
+    while True:
+        while frame is not None and id(frame) not in seen:
+            seen.add(id(frame))
+            frames.append(frame)
+            frame = frame.f_back
+        current = current.parent
+        if current is None:
+            break
+        frame = current.gr_frame
+    lines = []
+    for frame in reversed(frames):
+        if frame.f_code.co_filename.startswith("<"):  # <string>, <frozen ...>
+            continue
+        path = Path(frame.f_code.co_filename).resolve()
+        if path.is_relative_to(_REPO_ROOT) and not {".venv", "site-packages"} & set(
+            path.parts
+        ):
+            where = f"{path.relative_to(_REPO_ROOT)}:{frame.f_lineno}"
+            lines.append(f"    {where} in {frame.f_code.co_name}")
+    return "\n".join(lines)
+
+
 @pytest.fixture
 def _schema_unless_database_free(request):
     """Set up the schema unless the test is marked database-free.
@@ -514,9 +567,99 @@ def _schema_unless_database_free(request):
     return for a first (unit) test would be cached for every later one. This
     fixture is sync on purpose — ``getfixturevalue`` on an async fixture from
     inside an async one re-enters the running event loop.
+
+    Requested by the autouse storage bridge, this is set up before the test's
+    other function-scoped fixtures and torn down after them, so what it does
+    for a database-free test covers those fixtures too.
     """
-    if not _needs_no_database(request.node):
+    if _needs_no_database(request.node):
+        with _keeping_off_the_database(request.node.nodeid, request.fixturenames):
+            yield
+    else:
         request.getfixturevalue("_setup_schema")
+        yield
+
+
+async def _never_flushed(events: list[dict]) -> None:
+    raise AssertionError("a database-free test's audit queue is never flushed")
+
+
+@contextlib.contextmanager
+def _keeping_off_the_database(nodeid: str, fixturenames=()):
+    """Run a database-free test so that touching the database fails it.
+
+    Nothing checked this while the suite always ran against PostgreSQL, and
+    303 ``unit`` tests had come to reach it, mostly through calls they never
+    stubbed, so ``pytest -m unit`` failed without one. Each connection the test
+    takes is recorded with where it was taken from, and the test fails with
+    that. A test whose fixtures need ``_setup_schema`` fails before it starts:
+    that fixture is session-scoped, set up once by whichever test asks first,
+    so watching for its connections would catch it only some of the time.
+
+    Three things every test inherits would otherwise send one there anyway:
+
+    * Nearly every write and recall reads the tenant's settings and checks
+      whether it is suppressed. Those two storage queries answer as their
+      no-row branches do, for a tenant with nothing stored. Everything above
+      the query, routes and core-api's handling of the answer, still runs.
+    * Both answers are cached per process, so whether a test reached storage
+      for them would depend on which test ran first and warmed the cache.
+      Both caches start empty.
+    * ``_reset_hooks`` wires the real ``log_action``, which writes straight
+      to storage while no audit queue is active. A queue nothing flushes
+      takes the events instead, so ``log_action`` still runs in full.
+    """
+    global _connections_taken_by_database_free_test
+    if "_setup_schema" in fixturenames:
+        pytest.fail(
+            f"{nodeid} is marked unit, so it must not use the database, but a "
+            "fixture it uses needs the schema (``_setup_schema``). Drop its unit "
+            "marker, or that fixture.",
+            pytrace=False,
+        )
+    from common.settings_version import version_of
+    from core_api import suppression
+    from core_api.services import audit_queue, organization_settings
+    from core_storage_api.services.postgres_service import PostgresService
+
+    async def no_settings_stored(self, org_id: str) -> tuple[dict, str]:
+        return {}, version_of(None)
+
+    async def not_suppressed(self, tenant_id: str) -> bool:
+        return False
+
+    suppression.reset_cache_for_testing()
+    organization_settings._settings_cache.clear()
+    previous_queue = audit_queue.get_audit_queue()
+    audit_queue.set_audit_queue(
+        audit_queue.AuditEventQueue(
+            max_queue_size=10_000,
+            flush_threshold=10_000,
+            flush_interval_seconds=3600,
+            flush_callable=_never_flushed,
+        )
+    )
+    outer = _connections_taken_by_database_free_test  # a test of this guard nests it
+    _connections_taken_by_database_free_test = taken = []
+    try:
+        with (
+            patch.object(
+                PostgresService, "organization_settings_read", no_settings_stored
+            ),
+            patch.object(PostgresService, "is_tenant_suppressed", not_suppressed),
+        ):
+            yield
+    finally:
+        _connections_taken_by_database_free_test = outer
+        audit_queue.set_audit_queue(previous_queue)
+    if taken:
+        pytest.fail(
+            f"{nodeid} is marked unit, so it must not use the database, but it "
+            f"took {len(taken)} connection(s). Stub what it reaches, or drop "
+            f"its unit marker if it needs PostgreSQL. The first was taken by:\n"
+            f"{taken[0]}",
+            pytrace=False,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -625,7 +768,19 @@ async def _drain_background_tasks(_patch_storage_client):
     # ``Task.cancel()`` only requests it. ``return_exceptions`` so a task that
     # fails, or refuses to die politely, cannot turn an unrelated test's
     # teardown into an error.
-    await asyncio.gather(*pending, return_exceptions=True)
+    with contextlib.ExitStack() as stack:
+        if _connections_taken_by_database_free_test is not None:
+            # Each ``tracked_task`` records its own cancellation through
+            # storage. Under a database-free test that record is this fixture's
+            # doing, not the test's, so it goes to a mock.
+            from core_api.services import task_tracker
+
+            stack.enter_context(
+                patch.object(
+                    task_tracker, "get_storage_client", return_value=AsyncMock()
+                )
+            )
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 @pytest.fixture
@@ -716,12 +871,14 @@ def agent_id():
 
 
 @pytest.fixture(scope="session")
-async def _setup_app_db(_setup_schema):
+async def _setup_app_db():
     """Standalone seed + audit hooks for the FastAPI app.
 
-    Schema is created by ``_setup_schema`` on the shared test engine; core-api
-    routes reach the DB only through the storage client (bridged in-process by
-    the autouse ``_patch_storage_client``), so core-api itself holds no engine.
+    core-api routes reach the DB only through the storage client (bridged
+    in-process by the autouse ``_patch_storage_client``), so core-api itself
+    holds no engine. Nor does this ask for the schema: the bridge sets it up
+    for every test that is not database-free, so a ``unit`` test can drive
+    the app through ``client`` with its storage calls stubbed.
     """
     # Initialise standalone mode so the default tenant exists
     from core_api.standalone import init_standalone
@@ -810,6 +967,60 @@ def _reset_hooks():
     configure_hooks(ServiceHooks(audit_log=log_action))
     yield
     reset_hooks()
+
+
+@pytest.fixture(autouse=True)
+def _no_session_carried_over():
+    """Clear the value-metering session after each test.
+
+    ``set_session`` called from a sync test sets its ContextVar on the thread's
+    own context, which every later test's task is copied from. The session
+    then rode along with every write after it, each recording a value-metering
+    origin through storage: ``test_value_metering_sessions.py`` left ``mcp-9``
+    behind, and the database-free bulk writes that ran next reached PostgreSQL.
+    """
+    yield
+    from core_api.session_context import set_session
+
+    set_session(None, None)
+
+
+@pytest.fixture
+def task_failures(monkeypatch):
+    """The ``add_task_failure`` calls a test's background tasks make, off storage.
+
+    ``record_task_failure`` writes a ``BackgroundTaskLog`` row for each failed
+    background task. A test that makes one fail on purpose asks for this, so the
+    row goes to this mock instead of the database.
+    """
+    from core_api.services import task_tracker
+
+    storage = AsyncMock()
+    monkeypatch.setattr(task_tracker, "get_storage_client", lambda: storage)
+    return storage.add_task_failure
+
+
+class _RefusingStorageClient:
+    """A storage client whose every call fails, as calls do when storage is down."""
+
+    def __getattr__(self, name: str):
+        async def refuse(*_args, **_kwargs):
+            raise RuntimeError(f"storage is unavailable in this test ({name})")
+
+        return refuse
+
+
+@pytest.fixture
+def storage_unavailable(monkeypatch):
+    """Every storage call fails, through whichever module makes it.
+
+    For a test that asserts on something decided before storage, a guard or a
+    gate, and accepts any failure after it. Without this, such a test reached
+    PostgreSQL through the storage bridge whenever the suite had one.
+    """
+    import core_api.clients.storage_client as sc_mod
+
+    monkeypatch.setattr(sc_mod, "_client", _RefusingStorageClient())
 
 
 @pytest.fixture(scope="session", autouse=True)

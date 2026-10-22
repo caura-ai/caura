@@ -19,7 +19,11 @@ from __future__ import annotations
 import pytest
 
 from core_api import mcp_server
-from tests._mcp_test_helpers import is_error_envelope, parse_envelope
+from tests._mcp_test_helpers import (
+    is_error_envelope,
+    parse_envelope,
+    stub_storage_client,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -80,16 +84,7 @@ async def test_success_path_unchanged(mcp_env, monkeypatch):
     we only flip ``isError`` for ``{"error": ...}`` envelopes. A
     success return going through ``_with_latency`` stays a JSON string
     (which MCPServer then wraps with ``isError=False``)."""
-    from unittest.mock import MagicMock
-
-    def _mock_result(rows):
-        scalars = MagicMock()
-        scalars.all.return_value = rows
-        result = MagicMock()
-        result.scalars.return_value = scalars
-        return result
-
-    mcp_env["db"].execute.return_value = _mock_result([])
+    stub_storage_client(monkeypatch, list_memories_by_filters=[])
     out = await mcp_server.caura_list()
     assert isinstance(out, str), f"success path must stay str, got {type(out).__name__}"
     payload = parse_envelope(out)

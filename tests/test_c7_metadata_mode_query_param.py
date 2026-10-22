@@ -23,7 +23,8 @@ import pytest
 from tests.conftest import get_test_auth
 from tests.conftest import uid as _uid
 
-pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
+# Each test PATCHes a real row through the API, so none is ``unit``.
+pytestmark = [pytest.mark.asyncio]
 
 
 # ---------------------------------------------------------------------------

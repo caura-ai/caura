@@ -88,7 +88,9 @@ class TestCreateMemoryQualityGate:
             await create_memory(make_data("123456789"))
         assert exc_info.value.status_code == 422
 
-    async def test_accepts_exactly_10_chars(self, mock_db, make_data):
+    async def test_accepts_exactly_10_chars(
+        self, mock_db, make_data, storage_unavailable
+    ):
         """10 chars should pass the quality gate (not raise 422 'too short')."""
         from fastapi import HTTPException
 

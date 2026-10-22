@@ -198,7 +198,7 @@ async def test_path_c_edit_within_the_ttl_is_still_checked():
 
 
 @pytest.mark.asyncio
-async def test_path_a_releases_the_lock_when_detection_raises():
+async def test_path_a_releases_the_lock_when_detection_raises(task_failures):
     """One transient LLM/storage failure must not suppress every later trigger
     for the rest of the hour. Pre-fix the retry skipped at the lock."""
     from core_api.services.contradiction_detector import detect_contradictions_async
@@ -236,7 +236,7 @@ async def test_path_a_releases_the_lock_when_detection_raises():
 
 
 @pytest.mark.asyncio
-async def test_path_c_releases_the_lock_when_detection_raises():
+async def test_path_c_releases_the_lock_when_detection_raises(task_failures):
     from core_api.services.contradiction_detector import (
         detect_contradictions_by_entities_async,
     )
@@ -272,7 +272,7 @@ async def test_path_c_releases_the_lock_when_detection_raises():
 
 
 @pytest.mark.asyncio
-async def test_path_c_releases_the_lock_when_it_throws_mid_detection():
+async def test_path_c_releases_the_lock_when_it_throws_mid_detection(task_failures):
     """A failure AFTER the candidate search must release too.
 
     The obvious shortcut is one "we got past the candidate search" marker set
@@ -442,7 +442,7 @@ async def test_a_completed_run_keeps_its_lock():
 
 
 @pytest.mark.asyncio
-async def test_a_late_release_cannot_take_a_successor_s_lock():
+async def test_a_late_release_cannot_take_a_successor_s_lock(task_failures):
     """The release is ownership-checked, not a bare DEL.
 
     Introducing a release introduced this risk with it: a run whose work

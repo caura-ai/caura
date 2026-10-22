@@ -77,9 +77,15 @@ async def test_rdf_path_collapses_to_one_batch_call():
     mock_sc.update_memory_status = AsyncMock()
     mock_sc.find_similar_candidates = AsyncMock(return_value=[])
 
-    with patch(
-        "core_api.services.contradiction_detector.get_storage_client",
-        return_value=mock_sc,
+    with (
+        patch(
+            "core_api.services.contradiction_detector.get_storage_client",
+            return_value=mock_sc,
+        ),
+        patch(
+            "core_api.services.contradiction.resolver.get_storage_client",
+            return_value=mock_sc,
+        ),
     ):
         await _detect(new, [0.1] * VECTOR_DIM)
 
@@ -131,6 +137,10 @@ async def test_semantic_path_collapses_to_one_batch_call():
     with (
         patch(
             "core_api.services.contradiction_detector.get_storage_client",
+            return_value=mock_sc,
+        ),
+        patch(
+            "core_api.services.contradiction.resolver.get_storage_client",
             return_value=mock_sc,
         ),
         patch(
