@@ -34,10 +34,14 @@ Retry policy
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+
+from common import http_retry
+from tests._scoped_module import scoped
 
 pytestmark = pytest.mark.asyncio
 
@@ -45,6 +49,21 @@ pytestmark = pytest.mark.asyncio
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_backoff_wait(monkeypatch):
+    """Retry without waiting out the backoff between attempts.
+
+    ``with_retry`` really sleeps, 0.2s doubling, so each test that exhausts the
+    five connect-phase attempts spent ~3s asleep. The attempt counts are what
+    these tests assert, and the delays are still computed: ``_backoff_delay``
+    is untouched, so ``test_backoff_delay_cap_is_a_hard_ceiling`` checks the
+    real values. Scoped to ``http_retry``'s own ``asyncio``, because faking the
+    shared ``asyncio.sleep`` reaches every task in the process; see
+    ``tests/_scoped_module``.
+    """
+    monkeypatch.setattr(http_retry, "asyncio", scoped(asyncio, sleep=AsyncMock()))
 
 
 def _ok_response(status: int = 200, body: dict | None = None) -> MagicMock:

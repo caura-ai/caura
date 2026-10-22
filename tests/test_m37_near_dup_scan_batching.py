@@ -32,6 +32,7 @@ same cap" is the contract, not an aspiration.
 
 import json
 
+import numpy as np
 import pytest
 
 from core_api.constants import (
@@ -60,11 +61,10 @@ def _vec(seed: int, dim: int = VECTOR_DIM) -> list[float]:
     return base
 
 
-def _cos(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    na = sum(x * x for x in a) ** 0.5
-    nb = sum(x * x for x in b) ** 0.5
-    return dot / (na * nb)
+def _unit(vectors) -> np.ndarray:
+    """``vectors`` scaled to unit length, so a dot product is their cosine."""
+    arr = np.asarray(vectors, dtype=np.float64)
+    return arr / np.linalg.norm(arr, axis=-1, keepdims=True)
 
 
 class FakeStorage:
@@ -78,15 +78,23 @@ class FakeStorage:
         self.corpus = corpus
         self.calls: list[tuple[str, dict]] = []
         self.marked: list[str] = []
+        # The oracle scores every query against every row: rows² dot products
+        # of VECTOR_DIM floats, 164M multiplications for the 400-row corpus
+        # below. In pure Python, recomputing both norms for every pair, that one
+        # test took 68-127s of CI time. The rows stay plain lists, because they
+        # are what goes on the wire; only the oracle's copy is a matrix.
+        self._ids = [mem_id for mem_id, _ in corpus]
+        self._unit_rows = _unit([emb for _, emb in corpus])
 
     # -- the oracle: what the LATERAL / the per-row query would return --------
     def _neighbours(
         self, mem_id: str, emb: list[float], threshold: float, limit: int
     ) -> list[dict]:
+        similarities = self._unit_rows @ _unit(emb)
         scored = [
-            (other_id, _cos(emb, other_emb))
-            for other_id, other_emb in self.corpus
-            if other_id != mem_id and _cos(emb, other_emb) >= threshold
+            (self._ids[i], float(similarities[i]))
+            for i in np.flatnonzero(similarities >= threshold)
+            if self._ids[i] != mem_id
         ]
         # Nearest first, id as the tiebreaker — the order the SQL emits.
         scored.sort(key=lambda t: (-t[1], t[0]))

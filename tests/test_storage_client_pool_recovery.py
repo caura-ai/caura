@@ -29,7 +29,22 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+from common import http_retry
+from tests._scoped_module import scoped
+
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def _no_backoff_wait(monkeypatch):
+    """Exhaust the retry budget without sleeping through its backoff.
+
+    Reaching a recycle means burning all five connect-phase attempts first,
+    ~3s of real ``with_retry`` sleeps per test. The attempt counts and the
+    recycle are what these tests assert, so only the wait goes, scoped to
+    ``http_retry``'s own ``asyncio``; see ``tests/_scoped_module``.
+    """
+    monkeypatch.setattr(http_retry, "asyncio", scoped(asyncio, sleep=AsyncMock()))
 
 
 def _ok_response(status: int = 200, body: dict | None = None) -> MagicMock:

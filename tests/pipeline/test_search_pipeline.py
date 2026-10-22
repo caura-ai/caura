@@ -509,7 +509,7 @@ async def test_search_pipeline_failure_logs_error_not_in_detail():
 
 
 @pytest.mark.asyncio
-async def test_parallel_embed_gather_has_timeout():
+async def test_parallel_embed_gather_has_timeout(monkeypatch):
     """ParallelEmbedAndEntityBoost has a timeout on asyncio.gather."""
     import asyncio
     from unittest.mock import patch
@@ -517,9 +517,20 @@ async def test_parallel_embed_gather_has_timeout():
     from fastapi import HTTPException
 
     from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.search import parallel_embed_entity_boost as step_mod
     from core_api.pipeline.steps.search.parallel_embed_entity_boost import (
         ParallelEmbedAndEntityBoost,
     )
+
+    # Waiting out the real 15s budget cost this test 15s on every run. What it
+    # pins is that the budget exists and ends in a 504, not its size, so the
+    # budget is cut to 0.1s and the waits around it scaled to match. The fakes
+    # still outlast the outer guard and the guard still outlasts the budget, so
+    # a step with no timeout of its own ends in the guard's TimeoutError, not
+    # the 504. The real budget is checked as a value, against the 17s guard
+    # the unscaled test waited under.
+    assert 0 < step_mod._OVERALL_TIMEOUT_S < 17.0
+    monkeypatch.setattr(step_mod, "_OVERALL_TIMEOUT_S", 0.1)
 
     ctx = PipelineContext(
         data={
@@ -532,11 +543,11 @@ async def test_parallel_embed_gather_has_timeout():
     )
 
     async def slow_embed(*args, **kwargs):
-        await asyncio.sleep(20)
+        await asyncio.sleep(2.0)
         return [0.0] * 1536
 
     async def slow_boost(*args, **kwargs):
-        await asyncio.sleep(20)
+        await asyncio.sleep(2.0)
         return ([], {})
 
     with (
@@ -551,7 +562,7 @@ async def test_parallel_embed_gather_has_timeout():
     ):
         step = ParallelEmbedAndEntityBoost()
         with pytest.raises(HTTPException) as exc_info:
-            await asyncio.wait_for(step.execute(ctx), timeout=17.0)
+            await asyncio.wait_for(step.execute(ctx), timeout=1.0)
 
         assert exc_info.value.status_code == 504
 

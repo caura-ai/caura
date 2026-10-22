@@ -22,7 +22,10 @@ how 34 of those 107 stayed hidden from the first sweep.
 from __future__ import annotations
 
 import ast
+import functools
 import pathlib
+import re
+import unicodedata
 
 from tests import conftest
 
@@ -48,17 +51,41 @@ def _names_loaded(fn: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> bool
     )
 
 
-def _functions() -> list[tuple[pathlib.Path, ast.FunctionDef | ast.AsyncFunctionDef]]:
+def _could_take_the_fixture(source: str) -> bool:
+    """Whether ``source`` spells ``FIXTURE`` anywhere, as a whole word.
+
+    A file that never does cannot declare it as a parameter, and most of the
+    tree never does, so this decides which files are worth parsing. NFKC
+    first, because that is how the compiler reads identifiers: a parameter
+    written in compatibility characters is still ``db``.
+    """
+    pattern = rf"\b{re.escape(FIXTURE)}\b"
+    return re.search(pattern, unicodedata.normalize("NFKC", source)) is not None
+
+
+_Located = tuple[pathlib.Path, ast.FunctionDef | ast.AsyncFunctionDef]
+
+
+@functools.cache
+def _functions() -> tuple[_Located, ...]:
+    """Every function in the files that could take the fixture.
+
+    Cached, because both guards below walk it: parsing the whole tree once per
+    guard cost each of them 4-9s in CI.
+    """
     found = []
     for path in sorted(TESTS_ROOT.rglob("*.py")):
+        source = path.read_text()
+        if not _could_take_the_fixture(source):
+            continue
         try:
-            tree = ast.parse(path.read_text(), filename=str(path))
+            tree = ast.parse(source, filename=str(path))
         except SyntaxError:  # pragma: no cover - a broken file fails its own tests
             continue
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 found.append((path, node))
-    return found
+    return tuple(found)
 
 
 def _offenders(*, tests: bool) -> list[str]:

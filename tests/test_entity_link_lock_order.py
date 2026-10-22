@@ -348,6 +348,12 @@ async def test_locking_an_entity_before_a_memory_deadlocks_a_single_row_upsert(
     entire invariant — see ``test_purge_locks_memories_before_entities``.
     """
     dsn = TEST_DB_URL.replace("postgresql+asyncpg://", "postgresql://")
+    # How long each outcome gets to show. Postgres settles a cycle one
+    # ``deadlock_timeout`` (1s by default) after a waiter starts waiting, and
+    # the last waiter here starts at the 0.5s mark, so by ~1.5s whatever is
+    # going to happen has happened. This was 6s, and the "blocked" half spent
+    # all of it waiting out a deadlock that could no longer come.
+    window = 3.0
 
     async def run(entity_first: bool) -> str:
         tenant = f"test-tenant-{uuid.uuid4().hex[:8]}"
@@ -373,7 +379,7 @@ async def test_locking_an_entity_before_a_memory_deadlocks_a_single_row_upsert(
                 await utx.start()
                 try:
                     await asyncio.wait_for(
-                        upserter.execute(_INSERT_LINK, mid, eid), timeout=6.0
+                        upserter.execute(_INSERT_LINK, mid, eid), timeout=window
                     )
                     await utx.rollback()
                 except asyncpg.exceptions.DeadlockDetectedError:
@@ -390,7 +396,7 @@ async def test_locking_an_entity_before_a_memory_deadlocks_a_single_row_upsert(
                 with contextlib.suppress(
                     asyncpg.exceptions.DeadlockDetectedError, TimeoutError
                 ):
-                    await asyncio.wait_for(partner.execute(*second), timeout=6.0)
+                    await asyncio.wait_for(partner.execute(*second), timeout=window)
 
             await asyncio.gather(upsert(), close_the_cycle())
             # Already unwound if this side was the victim.
