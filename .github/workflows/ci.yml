@@ -36,26 +36,15 @@ jobs:
       - name: Validate claims and generated benchmark copy
         run: python3 scripts/evidence_registry.py --check
 
-  ci:
-    name: CI
+  # The lint, root-suite and service-suite jobs below run side by side. The
+  # required "CI" check belongs to the ``ci`` job after them, which passes only
+  # when all three did.
+  lint:
+    name: Lint, types and plugin
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
-
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_DB: caura
-          POSTGRES_USER: caura
-          POSTGRES_PASSWORD: changeme
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U caura"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,12 +55,6 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-
-      - name: Install reviewer sandbox and smoke-test pinned CLI (no API calls)
-        # A backstop for the script's own bound on each download: this job has no
-        # timeout of its own, so a hang here would hold it for GitHub's six hours.
-        timeout-minutes: 10
-        run: bash .github/scripts/install_review_sandbox.sh
 
       - name: Check plugin version-sync (gen-version.sh → src/version.ts)
         # Fails fast if plugin/src/version.ts has drifted from
@@ -148,16 +131,17 @@ jobs:
         #
         # This union resolves every service's pyproject ranges afresh, in one
         # environment, so it matches none of the four locks the images install
-        # (M-01). It runs the lint steps, the repo-level gates, the common/ and
-        # scripts/ type checks and the root suite, which runs core-api and
-        # core-storage-api in one process and so has no single lock to follow.
-        # Each service's own type check and test suite run from that service's
-        # lock instead: see the note above the mypy steps.
+        # (M-01). It runs the lint steps, the repo-level gates and the common/
+        # and scripts/ type checks here, and the root suite in the tests job,
+        # which installs it with an identical step. The root suite runs core-api
+        # and core-storage-api in one process and so has no single lock to
+        # follow. Each service's own type check and test suite run from that
+        # service's lock instead: see the note above the mypy steps.
         run: |
           uv venv .venv
           source .venv/bin/activate
           uv pip install -e core-storage-api/[dev] -e core-api/[dev] -e core-operations/[dev] -e core-worker/[dev] -e clients/collaboration/core -e clients/collaboration/mcp
-          echo "$VIRTUAL_ENV/bin" >> $GITHUB_PATH
+          echo "$VIRTUAL_ENV/bin" >> "$GITHUB_PATH"
 
       # --- Broker↔cloud API-versioning gate (Gate C / Phase 1, deliverables A+B) ---
       # core-api/openapi.broker.json is the FROZEN v1 contract for the
@@ -552,6 +536,79 @@ jobs:
         # backlog; the gate deliberately landed without it.
         run: uv run mypy --config-file scripts/mypy.ini scripts/
 
+      - name: Build packages
+        # core-operations included now that CI installs, lints, type-checks and
+        # tests it — a broken pyproject/build-backend would otherwise surface
+        # only in its Docker build. core-worker joins for exactly the same
+        # reason, now that this workflow covers it: it ships as a package with
+        # its own pyproject, and until this PR nothing here exercised any of it.
+        run: |
+          cd core-api && uv build && cd ..
+          cd core-storage-api && uv build && cd ..
+          cd core-operations && uv build && cd ..
+          cd core-worker && uv build
+
+  tests:
+    name: Root tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: caura
+          POSTGRES_USER: caura
+          POSTGRES_PASSWORD: changeme
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U caura"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js (for the reviewer sandbox's pinned CLI)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Install reviewer sandbox and smoke-test pinned CLI (no API calls)
+        # In this job, not the lint job, because the root suite needs what it
+        # installs: tests/test_review_credential_isolation.py asserts bubblewrap
+        # is present rather than skipping without it. The step timeout is a
+        # backstop for the script's own bound on each download, and well inside
+        # the job's.
+        timeout-minutes: 10
+        run: bash .github/scripts/install_review_sandbox.sh
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5.4.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        # The union environment, as in the lint job, whose install step says why
+        # it exists: the root suite runs core-api and core-storage-api in one
+        # process, so it has no single lock to follow. The two steps must stay
+        # identical; tests/test_ci_check_gates_every_job.py compares them.
+        run: |
+          uv venv .venv
+          source .venv/bin/activate
+          uv pip install -e core-storage-api/[dev] -e core-api/[dev] -e core-operations/[dev] -e core-worker/[dev] -e clients/collaboration/core -e clients/collaboration/mcp
+          echo "$VIRTUAL_ENV/bin" >> "$GITHUB_PATH"
+
       - name: Enable pgvector extension
         run: PGPASSWORD=changeme psql -h localhost -U caura -d caura -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
@@ -624,6 +681,50 @@ jobs:
             --rcfile=core-storage-api/pyproject.toml \
             --include="core-storage-api/src/core_storage_api/*" || status=1
           exit "$status"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  service-tests:
+    # Each service's own suite, from that service's own lock: see the note
+    # above the mypy steps in the lint job.
+    name: Service tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: caura
+          POSTGRES_USER: caura
+          POSTGRES_PASSWORD: changeme
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U caura"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5.4.2
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
 
       - name: Run core-api unit tests
         # core-api/tests/ is core-api's own tree, separate from the repo-root
@@ -742,23 +843,32 @@ jobs:
         env:
           COVERAGE_FILE: .coverage.core-worker
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-        with:
-          files: ./coverage.xml
-          fail_ci_if_error: false
-
-      - name: Build packages
-        # core-operations included now that CI installs, lints, type-checks and
-        # tests it — a broken pyproject/build-backend would otherwise surface
-        # only in its Docker build. core-worker joins for exactly the same
-        # reason, now that this workflow covers it: it ships as a package with
-        # its own pyproject, and until this PR nothing here exercised any of it.
+  ci:
+    # The required "CI" check: main's branch protection requires a check with
+    # this name. It was one job that ran every step of the three jobs above in
+    # series; now it runs after them and fails unless each one succeeded.
+    # ``always()`` makes it run, and fail, when a needed job failed, was
+    # cancelled or was skipped. Without it this job would itself be skipped
+    # whenever one of them failed, and a skipped required check counts as
+    # passing. tests/test_ci_check_gates_every_job.py holds the name, the
+    # needs and the condition.
+    name: CI
+    needs: [lint, tests, service-tests]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every CI job to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
         run: |
-          cd core-api && uv build && cd ..
-          cd core-storage-api && uv build && cd ..
-          cd core-operations && uv build && cd ..
-          cd core-worker && uv build
+          echo "${NEEDS}" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          not_ok=$(echo "${NEEDS}" | jq -r '[to_entries[] | select(.value.result != "success") | .key] | join(", ")')
+          if [ -n "${not_ok}" ]; then
+            echo "::error::CI jobs that did not succeed: ${not_ok}"
+            exit 1
+          fi
 
   image-version:
     # Guards the /api/v1/version surface end-to-end: builds the actual
