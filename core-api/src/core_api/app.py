@@ -132,16 +132,6 @@ class SecurityHeadersMiddleware:
         await self.app(scope, receive, send_with_headers)
 
 
-# Secrets that ship with a known placeholder and MUST be replaced in production.
-# Module scope rather than a local, so the property is testable: a test
-# parametrized over this mapping covers whatever is added next, instead of
-# re-asserting presence for jwt_secret alone and leaving the following entry to
-# be found the way this one was.
-_DANGEROUS_DEFAULTS = {
-    "jwt_secret": "change-me-in-production",
-}
-
-
 def _unwrap_secret(value):  # type: ignore[no-untyped-def]
     """Return a ``SecretStr``-style wrapper's value, or ``value`` unchanged."""
     return value.get_secret_value() if hasattr(value, "get_secret_value") else value
@@ -154,9 +144,7 @@ def _blank_secret(value) -> bool:  # type: ignore[no-untyped-def]
     for emptiness: ``SecretStr("")`` is falsy (``__len__`` is the secret's
     length), but ``SecretStr("   ")`` has length 3 and ``str()`` of it is the
     mask ``'**********'`` — so BOTH halves of this predicate pass on the
-    wrapper and a whitespace secret sails through. ``SecretStr("x") == "x"`` is
-    False for the same reason, which bypassed the equality check below once
-    already.
+    wrapper and a whitespace secret sails through.
 
     Note ``str.strip()`` removes only ``str.isspace()`` characters, so a secret
     of U+200B or a UTF-8 BOM still reads as non-blank. Left as-is deliberately:
@@ -240,10 +228,10 @@ def _validate_startup_settings(app_settings) -> None:  # type: ignore[no-untyped
             "fronted by the gateway."
         )
     if app_settings.environment != "production":
-        # JWT_SECRET, ADMIN_API_KEY and SETTINGS_ENCRYPTION_KEY stay
-        # production-only, by decision: whether staging and the sandboxes set
-        # them lives in their Cloud Run state, outside this repo, and a guard
-        # that fails there takes the deployment down rather than warning.
+        # ADMIN_API_KEY and SETTINGS_ENCRYPTION_KEY stay production-only, by
+        # decision: whether staging and the sandboxes set them lives in their
+        # Cloud Run state, outside this repo, and a guard that fails there takes
+        # the deployment down rather than warning.
         return
     if _os.getenv("TESTING") == "1":
         # TESTING=1 registers the test-only ``/testing`` routes (time-warp
@@ -258,28 +246,6 @@ def _validate_startup_settings(app_settings) -> None:  # type: ignore[no-untyped
             "SETTINGS_ENCRYPTION_KEY must be set when ENVIRONMENT=production. "
             'Generate one with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"'
         )
-    for var, bad_val in _DANGEROUS_DEFAULTS.items():
-        # Nothing in ``_DANGEROUS_DEFAULTS`` is SecretStr today (the only ones
-        # are platform_llm_api_key / platform_embedding_api_key); the unwrap is
-        # here for whatever gets added next. The example that used to be named
-        # here, postgres_password, no longer exists — core-api dropped its DB
-        # engine.
-        val = _unwrap_secret(getattr(app_settings, var, None))
-        # Strip ONCE and test both properties against the stripped value. Doing
-        # only the first half — presence on the stripped value, equality on the
-        # raw one — leaves the published placeholder booting production the
-        # moment it carries surrounding whitespace, and
-        # ``change-me-in-production\n`` is exactly what a file-mounted secret
-        # yields (``cat key >> .env``, a k8s ``stringData`` block scalar). That
-        # is the delivery path a left-in-place placeholder actually arrives by.
-        stripped = str(val or "").strip()
-        # Presence first, and for every entry. This loop compared against one
-        # literal only, so ``JWT_SECRET=""`` was not equal to the placeholder
-        # and production booted signing API tokens with an empty secret.
-        if not stripped:
-            raise RuntimeError(f"{var.upper()} must be set to a non-blank value for production")
-        if stripped == bad_val:
-            raise RuntimeError(f"{var.upper()} must be changed from default for production")
     if _blank_secret(app_settings.admin_api_key):
         raise RuntimeError("ADMIN_API_KEY must be set for production")
 

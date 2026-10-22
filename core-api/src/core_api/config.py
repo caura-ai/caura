@@ -543,7 +543,6 @@ class Settings(BaseSettings):
     # and agents resolve relative paths correctly; empty emits no servers block.
     public_api_url: str = ""
     settings_encryption_key: str = ""  # Required in production (Fernet key)
-    jwt_secret: str = "change-me-in-production"  # Required in production
     use_stm: bool = False
     # D13 — meter /recall and MCP caura_recall against the "recall" counter
     # instead of "search". Off by default because the recalls counter feeds
