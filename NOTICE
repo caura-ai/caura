@@ -34,7 +34,7 @@ Notable third-party components:
     - FastAPI, Starlette, Uvicorn                    (MIT, BSD-3-Clause)
     - Pydantic, SQLAlchemy, Alembic                  (MIT)
     - google-cloud-aiplatform, vertexai, openai      (Apache-2.0)
-    - cryptography, argon2-cffi, python-jose, pyotp  (Apache-2.0, MIT)
+    - cryptography, argon2-cffi, pyotp               (Apache-2.0, MIT)
     - redis, hiredis, asyncpg, pgvector              (MIT, Apache-2.0)
     - mcp (Model Context Protocol SDK)               (MIT)
     - sentry-sdk (optional, opt-in via SENTRY_DSN)   (MIT)

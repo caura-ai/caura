@@ -76,12 +76,6 @@ jobs:
         #
         # Accepted advisories, each with the reason it does not apply here. Drop
         # one once a fixed release is locked.
-        # - CVE-2026-85394, python-jose <= 3.5.0: HMAC verification can take an
-        #   asymmetric public key as its secret. Our one use, core-api's
-        #   standalone tenant middleware, verifies HS256 with the shared
-        #   jwt_secret, never with an asymmetric key.
-        # - PYSEC-2026-1325, ecdsa, which python-jose depends on: a timing attack
-        #   on signing with P-256. Nothing here signs with ecdsa.
         # - PYSEC-2026-4243 (GHSA-5639-2j2p-m4mx), mako < 1.4.2, which alembic
         #   depends on: on Windows, a TemplateLookup URI with a drive letter
         #   escapes the template directory. The images run on Linux, nothing
@@ -97,7 +91,6 @@ jobs:
             echo "::group::${service} ${extras[*]}"
             pip-audit --desc --no-deps --disable-pip --vulnerability-service osv \
               -r "${RUNNER_TEMP}/${service}.txt" \
-              --ignore-vuln CVE-2026-85394 --ignore-vuln PYSEC-2026-1325 \
               --ignore-vuln PYSEC-2026-4243 \
               || vulnerable="${vulnerable} ${service}"
             echo "::endgroup::"

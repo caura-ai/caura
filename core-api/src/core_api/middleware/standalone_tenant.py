@@ -38,31 +38,6 @@ class StandaloneTenantMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # Don't inject for superadmin sessions (they may intentionally omit tenant_id)
-        headers_list = scope.get("headers", [])
-        for name, value in headers_list:
-            if name.lower() == b"authorization":
-                auth_val = value.decode("latin-1", errors="ignore")
-                if auth_val.startswith("Bearer "):
-                    try:
-                        from jose import jwt as jose_jwt
-
-                        from core_api.config import settings as _settings
-
-                        token = auth_val[7:]  # strip "Bearer "
-                        payload = jose_jwt.decode(
-                            token,
-                            _settings.jwt_secret,
-                            algorithms=["HS256"],
-                            options={"verify_exp": False},
-                        )
-                        if payload.get("super_admin"):
-                            await self.app(scope, receive, send)
-                            return
-                    except Exception:
-                        pass
-                break
-
         # Inject tenant_id into query string if missing
         qs = scope.get("query_string", b"")
         if b"tenant_id=" not in qs:
