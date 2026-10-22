@@ -33,6 +33,7 @@ from core_api.schemas import (
 from core_api.services.agent_service import lookup_agent
 from core_api.services.ingest_chunking import (
     DOC_HARD_TOKEN_LIMIT,
+    Section,
     chunk_blocks,
     doc_token_count,
     parse,
@@ -1029,6 +1030,15 @@ async def _find_prior_ingest_by_doc_hash(
     )
 
 
+def _sections_of(content: str) -> list[Section]:
+    """``content`` parsed into blocks and chunked into Sections.
+
+    Synchronous and CPU-bound on purpose: ``ingest_preview`` runs it in a
+    worker thread, so neither step holds the event loop.
+    """
+    return chunk_blocks(parse(content))
+
+
 @scoped(
     "ingest",
     tenant=lambda a: a["request"].tenant_id,
@@ -1172,8 +1182,12 @@ async def ingest_preview(request: IngestRequest) -> dict:
 
     # Parse → Block list → Section list. Format detection is heuristic
     # (looks for markdown headings / fenced code); fallback is plain-text.
-    blocks = parse(content)
-    sections = chunk_blocks(blocks)
+    # Both are pure-Python CPU work, up to about a second for a document at
+    # ``DOC_HARD_TOKEN_LIMIT``, so they run in a worker thread: on the event
+    # loop, every other request this worker serves would wait for them. The
+    # token count above stays inline (~17ms at the limit), so an oversized
+    # document is refused before any thread is used.
+    sections = await asyncio.to_thread(_sections_of, content)
     if not sections:
         # Defensive: parser produced nothing usable. Treat as a no-op
         # rather than crashing the request.
