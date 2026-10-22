@@ -17,6 +17,12 @@ The enforcement path splits on the tiktoken encoding rather than on words,
 because the cap is counted in tokens and a word split still overshoots on text
 that tokenises densely — CJK, base64, long identifiers — which is exactly the
 shape that reaches this path in the first place.
+
+The sentence pass in front of it was quadratic. pysbd's time grows with the
+square of the text it is given, and it was given the whole paragraph: the
+"no terminator" input below took 5-10s per call in CI, and doubling it cost 4x.
+It is now handed bounded windows, and the pieces are cut from the paragraph
+rather than rebuilt from pysbd's sentence strings.
 """
 
 import re
@@ -24,8 +30,10 @@ import re
 import pytest
 
 from core_api.services.ingest_chunking import (
+    _SEGMENT_WINDOW_CHARS,
     SECTION_HARD_TOKENS,
     _count_tokens,
+    _sentence_slices,
     _split_oversized_paragraph,
 )
 
@@ -49,8 +57,21 @@ _HARD_INPUTS = {
     "arabic — combining marks": "مرحبا بالعالم " * 5000,
 }
 
+# Shapes chosen for how they SEGMENT: cheap for the token splitter, expensive
+# for pysbd. Every word that starts with one of its abbreviations ("al", "ga",
+# "del") costs it a pass over its whole input, and so does every sentence. The
+# last three have boundaries pysbd finds without any whitespace.
+_SEGMENTER_INPUTS = {
+    "a terminator every four words": "alpha beta gamma delta. " * 1000,
+    "chinese full stops, no spaces": "这是一个测试句子。" * 2700,
+    "terminators, no whitespace": "x!Y?" * 3000,
+    "a boundary with no space after it": "ok.)Next" * 3000,
+}
 
-@pytest.mark.parametrize("text", _HARD_INPUTS.values(), ids=list(_HARD_INPUTS))
+_ALL_INPUTS = {**_HARD_INPUTS, **_SEGMENTER_INPUTS}
+
+
+@pytest.mark.parametrize("text", _ALL_INPUTS.values(), ids=list(_ALL_INPUTS))
 def test_no_piece_exceeds_the_cap(text):
     """The contract the docstring always claimed."""
     parts = _split_oversized_paragraph(text, CAP)
@@ -58,15 +79,15 @@ def test_no_piece_exceeds_the_cap(text):
     assert not oversized, f"{len(oversized)} piece(s) over {CAP}: {oversized}"
 
 
-@pytest.mark.parametrize("text", _HARD_INPUTS.values(), ids=list(_HARD_INPUTS))
+@pytest.mark.parametrize("text", _ALL_INPUTS.values(), ids=list(_ALL_INPUTS))
 def test_splitting_loses_no_content(text):
     """A size fix that drops text would be worse than the bug. Compared with
-    whitespace normalised, since packing re-joins on single spaces."""
+    whitespace normalised, since each piece is stripped at its ends."""
     parts = _split_oversized_paragraph(text, CAP)
     assert _norm("".join(parts)) == _norm(text)
 
 
-@pytest.mark.parametrize("text", _HARD_INPUTS.values(), ids=list(_HARD_INPUTS))
+@pytest.mark.parametrize("text", _ALL_INPUTS.values(), ids=list(_ALL_INPUTS))
 def test_no_replacement_characters_are_introduced(text):
     """One CJK character spans several cl100k_base tokens, so cutting between
     tokens can land mid-character and `decode` yields U+FFFD — silently
@@ -77,6 +98,72 @@ def test_no_replacement_characters_are_introduced(text):
     """
     parts = _split_oversized_paragraph(text, CAP)
     assert "�" not in "".join(parts)
+
+
+@pytest.mark.parametrize("text", _ALL_INPUTS.values(), ids=list(_ALL_INPUTS))
+def test_the_segmenter_is_only_ever_handed_a_window(text, monkeypatch):
+    """What keeps the split linear: pysbd costs the square of its input, so it
+    must never be handed the whole paragraph.
+
+    No call longer than ``_SEGMENT_WINDOW_CHARS``, and at most ``2n + window``
+    characters across all calls, bounds pysbd's total work by
+    ``window * (2n + window)``. Asserted as a count of what it was handed
+    rather than as a time, for the reason ``pytest.ini`` gives for deselecting
+    the benchmarks.
+    """
+    import pysbd  # type: ignore[import-untyped]
+
+    handed: list[int] = []
+    segment = pysbd.Segmenter.segment
+
+    def recording(self, window):
+        handed.append(len(window))
+        return segment(self, window)
+
+    monkeypatch.setattr(pysbd.Segmenter, "segment", recording)
+    _split_oversized_paragraph(text, CAP)
+
+    assert max(handed) <= _SEGMENT_WINDOW_CHARS, (
+        f"pysbd was handed {max(handed)} characters in one call"
+    )
+    assert sum(handed) <= 2 * len(text) + _SEGMENT_WINDOW_CHARS, (
+        f"pysbd was handed {sum(handed)} characters in all, for {len(text)}"
+    )
+    # The bound above is the constant itself, so the constant is held down too:
+    # what one call costs grows with its square.
+    assert _SEGMENT_WINDOW_CHARS <= 4_000
+
+
+def test_windows_find_the_sentences_the_whole_text_has():
+    """Windowing must not move boundaries in ordinary prose.
+
+    Each window hands its last sentence on, so pysbd judges every boundary with
+    the text after it in view; cut it off at the window's edge instead and the
+    pieces start ending mid-sentence. Abbreviations are in the text because
+    they are what pysbd reads ahead to decide.
+    """
+    import pysbd  # type: ignore[import-untyped]
+
+    text = " ".join(
+        f"Item {i} costs about $3.50, e.g. at Dr. Smith's shop on Main St. today."
+        for i in range(300)
+    )
+    whole = pysbd.Segmenter(language="en", clean=False).segment(text)
+    assert len(text) > 5 * _SEGMENT_WINDOW_CHARS
+    assert [s.strip() for s in _sentence_slices(text)] == [s.strip() for s in whole]
+
+
+@pytest.mark.parametrize("text", _ALL_INPUTS.values(), ids=list(_ALL_INPUTS))
+def test_every_piece_is_a_verbatim_slice_of_the_paragraph(text):
+    """Pieces are cut from the paragraph, not rebuilt from sentence strings.
+
+    Rebuilding joined the sentences with a space, which put one wherever pysbd
+    found a boundary with none (``ok.)Next`` came back as ``ok. )Next``). With
+    windows it would also land inside words: a window holding no boundary at
+    all is cut where the window ends.
+    """
+    for piece in _split_oversized_paragraph(text, CAP):
+        assert piece in text, f"not in the input: {piece[:60]!r}"
 
 
 # ── behaviour that must not change ───────────────────────────────────────

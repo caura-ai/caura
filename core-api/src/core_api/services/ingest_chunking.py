@@ -378,40 +378,91 @@ def _hard_split_on_tokens(text: str, hard_tokens: int) -> list[str]:
     return out
 
 
+# pysbd's segmenter takes time quadratic in the text it is given. Its
+# abbreviation pass runs one regex substitution over the whole text for every
+# word that starts with one of its ~190 abbreviations ("al", "ga", "del", ...),
+# and its span pass rescans the text from the top for every sentence. Handed
+# whole paragraphs, a 12k-token one took seconds and every doubling of length
+# cost 4x. Handed windows this long, the split is linear in the paragraph's
+# length.
+_SEGMENT_WINDOW_CHARS = 2_000
+
+
+def _sentence_slices(text: str) -> list[str]:
+    """``text`` cut at its sentence boundaries, as contiguous slices.
+
+    The slices are cut from ``text`` itself rather than taken from pysbd's
+    strings, so they join back to ``text`` exactly: nothing is dropped, and
+    nothing is inserted where a window had to end without a boundary.
+
+    Each window hands its last sentence on to the next one, since that sentence
+    may run past the window's edge, so pysbd decides that boundary with the text
+    after it in view. A window with no boundary in it at all, a long run with no
+    terminator, is taken whole, ending on whitespace where it has any.
+    """
+    # Import inside the function — pysbd warmup is non-trivial and
+    # most paragraphs DON'T need this path.
+    import pysbd  # type: ignore[import-untyped]
+
+    seg = pysbd.Segmenter(language="en", clean=False, char_span=True)
+    out: list[str] = []
+    start = 0
+    while start < len(text):
+        stop = min(start + _SEGMENT_WINDOW_CHARS, len(text))
+        final = stop == len(text)
+        window = text[start:stop]
+        if not final:
+            cut = max(window.rfind(" "), window.rfind("\n"), window.rfind("\t"))
+            if cut > 0:
+                window = window[: cut + 1]
+        ends = [span.end for span in seg.segment(window)]
+        if final:
+            ends.append(len(window))
+        elif len(ends) > 1:
+            ends.pop()
+        else:
+            ends = [len(window)]
+        taken = 0
+        for end in ends:
+            if end > taken:
+                out.append(text[start + taken : start + end])
+                taken = end
+        start += taken
+    return out
+
+
 def _split_oversized_paragraph(text: str, hard_tokens: int) -> list[str]:
     """Last-resort sub-split for a single paragraph that exceeds the hard cap.
 
-    Uses pysbd for sentence boundaries (handles abbreviations correctly).
-    Falls back to a naive `. ` split if pysbd raises.
+    Uses pysbd for sentence boundaries (handles abbreviations correctly), one
+    window at a time (see ``_SEGMENT_WINDOW_CHARS``). Falls back to a naive
+    `. ` split if pysbd raises.
 
     Returns one or more substrings, each at most ``hard_tokens`` tokens —
     enforced, not assumed. Sentence packing alone cannot guarantee it (see
-    ``_hard_split_on_tokens``).
+    ``_hard_split_on_tokens``). Each is a verbatim slice of ``text``, stripped.
     """
     try:
-        # Import inside the function — pysbd warmup is non-trivial and
-        # most paragraphs DON'T need this path.
-        import pysbd  # type: ignore[import-untyped]
-
-        seg = pysbd.Segmenter(language="en", clean=False)
-        sents = [s.strip() for s in seg.segment(text) if s.strip()]
+        sents = _sentence_slices(text)
     except Exception:
         logger.warning("pysbd failed; falling back to naive sentence split", exc_info=True)
-        sents = [s.strip() + "." for s in text.split(". ") if s.strip()]
+        sents = re.split(r"(?<=\. )", text)
 
+    # The slices keep their own whitespace, so a piece is their concatenation:
+    # joining them with spaces would put one wherever a boundary had none.
     out: list[str] = []
     current = ""
     current_tokens = 0
     for sent in sents:
-        sent_tokens = _count_tokens(sent)
-        if current_tokens + sent_tokens > hard_tokens and current:
+        sent_tokens = _count_tokens(sent.strip())
+        if current_tokens + sent_tokens > hard_tokens and current.strip():
             out.append(current.strip())
             current = sent
             current_tokens = sent_tokens
         else:
-            current = f"{current} {sent}".strip() if current else sent
+            current += sent
             current_tokens += sent_tokens
-    if current:
+    if current.strip():
         out.append(current.strip())
 
     # 09/02 M-41 — enforce the contract this function's docstring states.
