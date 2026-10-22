@@ -201,7 +201,11 @@ class AuthContext:
           credential is read-only by construction (a credential minted
           with capabilities={'read'} — e.g., a viewer or reporting
           credential). Legacy credentials (capabilities=None) pass
-          through unchanged.
+          through unchanged. For a signed-in person (``is_person``) the
+          capabilities come from their role in the tenant instead (the
+          enterprise gateway sends ``read`` for a Reader), so the refusal
+          names the role and sends them to an admin, not to a key they
+          don't hold (Prism App Review v2 N024).
 
         Usage-limit / plan-cap enforcement is intentionally separate
         (``enforce_usage_limits``) because the delete path is allowed
@@ -223,6 +227,19 @@ class AuthContext:
                 ),
             )
         if self.capabilities is not None and "write" not in self.capabilities:
+            if self.is_person:
+                raise HTTPException(
+                    status_code=403,
+                    detail=coded_detail(
+                        errors.AUTH_READ_ONLY_ROLE,
+                        "Your role in this tenant lets you read it but not change it.",
+                        remediation=(
+                            "This is your role in the tenant, not a property of the "
+                            "endpoint — ask an admin to change your role in this "
+                            "tenant, then retry."
+                        ),
+                    ),
+                )
             raise HTTPException(
                 status_code=403,
                 detail=coded_detail(

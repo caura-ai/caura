@@ -86,6 +86,9 @@ def make_error_payload(
 # ``MISSING_AGENT_ID`` in ``mcp_server`` is the shape being copied: what
 # happened, why, and the concrete way out.
 AUTH_READ_ONLY_KEY = "READ_ONLY_CREDENTIAL"
+# The same refusal for a signed-in person, whose capabilities come from their
+# role in the tenant (an enterprise Reader), not from a key they could replace.
+AUTH_READ_ONLY_ROLE = "READ_ONLY_ROLE"
 AUTH_DEMO_SANDBOX = "DEMO_SANDBOX_READ_ONLY"
 AUTH_PLAN_LIMIT = "PLAN_LIMIT_READ_ONLY"
 AUTH_ADMIN_REQUIRED = "ADMIN_REQUIRED"
