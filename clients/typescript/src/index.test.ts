@@ -593,11 +593,14 @@ for (const value of ["", "false", "0", "yes", "True", "TRUE", "on"]) {
 
 test("unrecognized env value is not copied into transport errors", () => {
   withEnvOptIn("secret-sample-not-a-token", () => {
-    assert.throws(() => clientFor("http://caura.example"), (error: unknown) => {
-      assert.ok(error instanceof Error);
-      assert.doesNotMatch(error.message, /secret-sample-not-a-token/);
-      return true;
-    });
+    assert.throws(
+      () => clientFor("http://caura.example"),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.doesNotMatch(error.message, /secret-sample-not-a-token/);
+        return true;
+      },
+    );
   });
 });
 
