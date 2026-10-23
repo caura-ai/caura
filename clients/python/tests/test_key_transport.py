@@ -73,11 +73,27 @@ def test_the_env_opt_in_allows_plain_http(monkeypatch, value):
     assert _client("http://caura.example").health() == {"status": "ok"}
 
 
-@pytest.mark.parametrize("value", ["", "false", "0", "yes"])
+@pytest.mark.parametrize("value", ["", "false", "0", "yes", "True", "TRUE", "on"])
 def test_other_env_values_do_not_opt_in(monkeypatch, value):
     monkeypatch.setenv("CAURA_ALLOW_INSECURE_HTTP", value)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as exc:
         _client("http://caura.example")
+    assert "is set but was ignored" in str(exc.value)
+    assert "case-sensitive values 'true' and '1'" in str(exc.value)
+
+
+def test_invalid_env_value_is_not_exposed_in_error(monkeypatch):
+    monkeypatch.setenv("CAURA_ALLOW_INSECURE_HTTP", "secret-sample-not-a-token")
+    with pytest.raises(ValueError) as exc:
+        _client("http://caura.example")
+    assert "secret-sample-not-a-token" not in str(exc.value)
+
+
+def test_explicit_false_does_not_claim_env_value_was_ignored(monkeypatch):
+    monkeypatch.setenv("CAURA_ALLOW_INSECURE_HTTP", "true")
+    with pytest.raises(ValueError) as exc:
+        _client("http://caura.example", allow_insecure_http=False)
+    assert "is set but was ignored" not in str(exc.value)
 
 
 def test_an_explicit_refusal_beats_the_env_opt_in(monkeypatch):
