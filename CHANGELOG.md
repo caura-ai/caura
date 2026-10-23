@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.35.10](https://github.com/caura-ai/caura/compare/backend-v3.35.9...backend-v3.35.10) (2026-10-23)
+
+
+### Dependencies
+
+* lock mako 1.4.3 and drop the scan's last accepted advisory ([#2167](https://github.com/caura-ai/caura/issues/2167)) ([3e0a81f](https://github.com/caura-ai/caura/commit/3e0a81f5c8916ca3d0210ed9d0d05db980b98061))
+
 ## [3.35.9](https://github.com/caura-ai/caura/compare/backend-v3.35.8...backend-v3.35.9) (2026-10-23)
 
 
