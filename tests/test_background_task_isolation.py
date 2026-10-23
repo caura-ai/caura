@@ -27,8 +27,11 @@ pytest-asyncio and anyio.)
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock, patch
 
 import pytest
+
+from tests.conftest import drain_background_tasks
 
 pytestmark = [pytest.mark.unit]
 
@@ -137,3 +140,41 @@ async def test_the_drain_ran_before_the_storage_bridge_was_removed() -> None:
         "client into the singleton: saw "
         f"{_client_at_drain['during_drain']!r}"
     )
+
+
+async def test_a_task_not_yet_started_is_drained_without_dropping_its_work() -> None:
+    """The drain must not drop the coroutine a task has not yet started.
+
+    A task cancelled before its first step has ``CancelledError`` thrown in
+    ahead of its first line, so ``tracked_task`` neither enters its ``try`` —
+    no cancellation is recorded — nor awaits the coroutine it was handed,
+    which is then freed unstarted. That is how #2171 failed, on
+    ``detect_contradictions_async``: a background re-embed created its
+    detection task in the loop iteration the drain began in, about one run in
+    sixty. Draining in the same step as ``track_task`` meets the task in that
+    state every time.
+    """
+    from core_api.services import task_tracker
+    from core_api.tasks import track_task
+
+    started = asyncio.Event()
+
+    async def _detection() -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    with patch.object(task_tracker, "record_task_failure", AsyncMock()) as record:
+        task = track_task(
+            task_tracker.tracked_task(
+                _detection(), "contradiction_detection", None, "test-tenant-drain"
+            )
+        )
+        await drain_background_tasks()
+
+    assert task.cancelled()
+    assert started.is_set(), (
+        "the drain cancelled the task before its first step, so the coroutine "
+        "it wraps never ran and was dropped unawaited"
+    )
+    record.assert_awaited_once()
+    assert record.await_args.kwargs["status"] == "cancelled"
