@@ -798,11 +798,11 @@ def _refuse_default_agent_on_gateway(agent_id: str) -> str | None:
         "path. This applies to reads as well as writes: agent-scoped reads "
         "filter by agent_id, so a defaulted value would quietly query one "
         "shared identity's rows rather than yours. Either pass "
-        "agent_id=<your-agent-name> or provision an agent-scoped credential "
-        "(POST /api/v1/admin/agent-keys/provision, or Create agent key in the "
-        "dashboard under Connect > Keys) — "
-        "those have agent identity bound at mint time and the gateway "
-        "injects X-Agent-ID for them.",
+        "agent_id=<your-agent-name> or use an agent-scoped credential, which "
+        "has agent identity bound at mint time and for which the gateway "
+        "injects X-Agent-ID. On caura.ai, POST /api/v1/admin/agent-keys/provision "
+        "mints one; it needs the Manage API credentials permission, so without "
+        "it, ask an organization admin.",
     )
 
 
@@ -897,9 +897,10 @@ _READ_ONLY_ERROR = _as_error_result(
     _error_response(
         "FORBIDDEN",
         "This credential is scope-limited to read operations. "
-        "Provision a credential with the 'write' capability "
-        "(POST /api/v1/admin/agent-keys/provision, or in the dashboard under "
-        "Connect > Keys) to perform write actions.",
+        "Use a credential with the 'write' capability to perform write actions. "
+        "On caura.ai, people with the Manage API credentials permission make "
+        "one under Connect > Keys or with POST /api/v1/admin/agent-keys/provision; "
+        "without it, ask an organization admin.",
     )
 )
 

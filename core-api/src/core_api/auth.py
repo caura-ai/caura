@@ -247,9 +247,10 @@ class AuthContext:
                     "This API key is read-only and cannot perform write operations.",
                     remediation=(
                         "This is a property of the CREDENTIAL, not of the endpoint or "
-                        "of tenant keys in general — mint a key with the 'write' "
-                        "capability (in the dashboard under Connect > Keys) and "
-                        "retry the same call."
+                        "of tenant keys in general — use a key with the 'write' "
+                        "capability and retry the same call. On caura.ai, people "
+                        "with the Manage API credentials permission make one under "
+                        "Connect > Keys; without it, ask an organization admin."
                     ),
                 ),
             )

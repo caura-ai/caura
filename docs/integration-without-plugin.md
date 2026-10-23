@@ -17,11 +17,12 @@
 
 ## 1. Mint an agent-scoped credential
 
-Every long-lived integration should bind to a named agent identity rather than calling under a tenant-scoped credential. Two ways:
+Every long-lived integration should bind to a named agent identity rather than calling under a tenant-scoped credential.
 
-Both are on the managed platform (caura.ai). A self-hosted core-api has no provisioning route: there, use the tenant-scoped (or standalone) key and pass an explicit `agent_id` on every call.
+Provisioning is on the managed platform (caura.ai). A self-hosted core-api has no provisioning route: there, use the tenant-scoped (or standalone) key and pass an explicit `agent_id` on every call.
 
-- **Dashboard (recommended for humans):** `caura.ai/connect/keys` (Connect › Keys) → **Create agent key** — agent id, initial trust and an optional fleet, one-time raw-key reveal. That form is what tenant members see; an org admin sees the org's API credentials there instead, which are tenant-scoped (optionally widened to read the org's other tenants) and carry no agent identity, so `agent_id` is passed on each call.
+The dashboard's **Connect › Keys** (`caura.ai/connect/keys`) makes only API keys, which are tenant-scoped (optionally widened to read the org's other tenants) and carry no agent identity, so `agent_id` is passed on each call. Making keys of either kind needs the **Manage API credentials** permission; without it, ask an organization admin.
+
 - **API (for scripted provisioning, shown below):** `POST /api/v1/admin/agent-keys/provision` on the managed platform (caura.ai) — atomic call that creates the Agent row eagerly so subsequent trust-elevation or fleet-assignment endpoints work immediately:
 
 ```bash
