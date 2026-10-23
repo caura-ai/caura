@@ -61,7 +61,8 @@ def env(tmp_path, monkeypatch):
         f"with open({str(capture)!r},'a') as f:\n"
         " f.write(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd()})+'\\n')\n"
         "var='FAKE_CLAUDE_MEMORY_EXIT' if '--transport' in sys.argv else 'FAKE_CLAUDE_EXIT'\n"
-        "sys.exit(int(os.environ.get(var,'0')) if sys.argv[1:3]==['mcp','add'] else 0)\n"
+        "sys.exit(int(os.environ.get(var,'0')) if sys.argv[1:3]==['mcp','add'] else 0)\n",
+        encoding="utf-8",
     )
     claude.chmod(0o700)
     monkeypatch.setenv("HOME", str(home))
@@ -97,7 +98,11 @@ def invoke(*args, key=KEY):
 
 
 def calls(capture: Path) -> list[dict]:
-    return [json.loads(line) for line in capture.read_text().splitlines()] if capture.exists() else []
+    return (
+        [json.loads(line) for line in capture.read_text(encoding="utf-8").splitlines()]
+        if capture.exists()
+        else []
+    )
 
 
 def mode(path: Path) -> int:
@@ -105,7 +110,7 @@ def mode(path: Path) -> int:
 
 
 def test_claude_setup_verifies_writes_private_config_and_wires_local_mcp(env):
-    (env.project / "CLAUDE.md").write_text("# Team rules\n\nKeep tests green.\n")
+    (env.project / "CLAUDE.md").write_text("# Team rules\n\nKeep tests green.\n", encoding="utf-8")
     result = invoke("--runtime", "claude", "--dir", str(env.project))
     assert result.exit_code == 0, result.output
     assert KEY not in result.output
@@ -114,11 +119,11 @@ def test_claude_setup_verifies_writes_private_config_and_wires_local_mcp(env):
     assert "caura-bus doctor" in result.output and "Next steps" in result.output
 
     assert mode(env.config) == 0o600
-    config = tomllib.loads(env.config.read_text())
+    config = tomllib.loads(env.config.read_text(encoding="utf-8"))
     assert config["api_url"] == URL and config["peers"] == ["*"]
     assert config["agent"] == {"agent_id": "qa-alice", "tenant_id": "tenant-1"}
     assert "allow_insecure_http" not in config
-    assert KEY not in env.config.read_text()
+    assert KEY not in env.config.read_text(encoding="utf-8")
 
     remove, add, memory_remove, memory_add = calls(env.capture)
     assert remove["argv"] == ["mcp", "remove", "--scope", "local", "caura-bus"]
@@ -146,21 +151,21 @@ def test_claude_setup_verifies_writes_private_config_and_wires_local_mcp(env):
     ]
     assert "claude mcp list" in result.output
 
-    text = (env.project / "CLAUDE.md").read_text()
+    text = (env.project / "CLAUDE.md").read_text(encoding="utf-8")
     assert text.startswith("# Team rules\n\nKeep tests green.\n\n" + setup_mod.MARK_START)
-    assert TEMPLATE.read_text().strip() in text
+    assert TEMPLATE.read_text(encoding="utf-8").strip() in text
     assert text.rstrip().endswith(setup_mod.MARK_END)
 
 
 def test_rerun_is_idempotent(env):
     assert invoke("--runtime", "claude", "--dir", str(env.project)).exit_code == 0
-    first_config = env.config.read_text()
-    first_md = (env.project / "CLAUDE.md").read_text()
+    first_config = env.config.read_text(encoding="utf-8")
+    first_md = (env.project / "CLAUDE.md").read_text(encoding="utf-8")
     result = invoke("--runtime", "claude", "--dir", str(env.project))
     assert result.exit_code == 0, result.output
     assert "unchanged" in result.output
-    assert env.config.read_text() == first_config
-    assert (env.project / "CLAUDE.md").read_text() == first_md
+    assert env.config.read_text(encoding="utf-8") == first_config
+    assert (env.project / "CLAUDE.md").read_text(encoding="utf-8") == first_md
     assert first_md.count(setup_mod.MARK_START) == 1
     # Each run replaces the previous MCP entry instead of adding a second one.
     assert [c["argv"][1] for c in calls(env.capture)] == ["remove", "add"] * 4
@@ -227,12 +232,12 @@ def test_localhost_config_allows_http(env, monkeypatch):
     assert result.exit_code == 0, result.output
     (path,) = (env.home / ".config" / "caura-bus" / "agents").rglob("*.toml")
     assert path.parent.parent.name == "127.0.0.1_55003"
-    assert tomllib.loads(path.read_text())["allow_insecure_http"] is True
+    assert tomllib.loads(path.read_text(encoding="utf-8"))["allow_insecure_http"] is True
 
 
 def test_dry_run_writes_nothing(env):
     env.codex.parent.mkdir()
-    env.codex.write_text('model = "x"\n')
+    env.codex.write_text('model = "x"\n', encoding="utf-8")
     for runtime in ("claude", "codex"):
         result = invoke("--runtime", runtime, "--dir", str(env.project), "--dry-run", "--description", "d")
         assert result.exit_code == 0, result.output
@@ -240,7 +245,7 @@ def test_dry_run_writes_nothing(env):
         assert KEY not in result.output and setup_mod.mask(KEY) in result.output
     assert not env.config.exists() and not calls(env.capture)
     assert not (env.project / "CLAUDE.md").exists() and not (env.project / "AGENTS.md").exists()
-    assert env.codex.read_text() == 'model = "x"\n'
+    assert env.codex.read_text(encoding="utf-8") == 'model = "x"\n'
     assert [c[1] for c in env.server.calls] == ["/api/v1/bus/identity"] * 2
 
 
@@ -276,34 +281,37 @@ def test_codex_updates_only_its_table_keeps_backup_and_is_idempotent(env):
         '[projects."/x"]\n'
         'trust_level = "trusted"\n'
     )
-    env.codex.write_text(original)
+    env.codex.write_text(original, encoding="utf-8")
     result = invoke("--runtime", "codex", "--dir", str(env.project))
     assert result.exit_code == 0, result.output
     assert KEY not in result.output
-    data = tomllib.loads(env.codex.read_text())
+    data = tomllib.loads(env.codex.read_text(encoding="utf-8"))
     entry = data["mcp_servers"]["caura-bus"]
     assert Path(entry["command"]).name == "caura-bus-mcp" and Path(entry["command"]).is_absolute()
     assert entry["env"] == {"CAURA_API_KEY": KEY, "CAURA_BUS_AGENT_CONFIG": str(env.config)}
     assert entry["startup_timeout_sec"] == 30 and entry["tools"] == {"peer": {"approval_mode": "approve"}}
     assert data["mcp_servers"]["other"] == {"command": "other-mcp"}
     assert data["model"] == "gpt-5" and data["projects"] == {"/x": {"trust_level": "trusted"}}
-    assert "# keep me" in env.codex.read_text()
+    assert "# keep me" in env.codex.read_text(encoding="utf-8")
     backup = env.codex.with_name("config.toml.caura-bus-setup.bak")
-    assert backup.read_text() == original
+    assert backup.read_text(encoding="utf-8") == original
     assert mode(env.codex) == 0o600
-    assert (env.project / "AGENTS.md").read_text().startswith(setup_mod.MARK_START)
+    assert (env.project / "AGENTS.md").read_text(encoding="utf-8").startswith(setup_mod.MARK_START)
 
-    updated = env.codex.read_text()
+    updated = env.codex.read_text(encoding="utf-8")
     again = invoke("--runtime", "codex", "--dir", str(env.project))
     assert again.exit_code == 0 and "already current" in again.output
-    assert env.codex.read_text() == updated
+    assert env.codex.read_text(encoding="utf-8") == updated
     assert not calls(env.capture)
 
 
 def test_codex_creates_config_when_absent(env):
     result = invoke("--runtime", "codex", "--dir", str(env.project))
     assert result.exit_code == 0, result.output
-    assert set(tomllib.loads(env.codex.read_text())["mcp_servers"]) == {"caura-bus", "caura-caura-test"}
+    assert set(tomllib.loads(env.codex.read_text(encoding="utf-8"))["mcp_servers"]) == {
+        "caura-bus",
+        "caura-caura-test",
+    }
     assert not env.codex.with_name("config.toml.caura-bus-setup.bak").exists()
 
 
@@ -317,11 +325,11 @@ def test_codex_creates_config_when_absent(env):
 )
 def test_codex_refuses_unsafe_edits(env, text, message):
     env.codex.parent.mkdir()
-    env.codex.write_text(text)
+    env.codex.write_text(text, encoding="utf-8")
     result = invoke("--runtime", "codex", "--dir", str(env.project))
     assert result.exit_code == 1
     assert message in result.output
-    assert env.codex.read_text() == text
+    assert env.codex.read_text(encoding="utf-8") == text
 
 
 def test_description_registered_and_unsupported_server_is_a_warning(env):
@@ -352,7 +360,8 @@ def test_rerun_preserves_local_peer_allow_list_and_consultation(tmp_path):
     existing = tmp_path / "a.toml"
     existing.write_text(
         'api_url = "https://old"\npeers = ["bob"]\n[agent]\nagent_id = "x"\ntenant_id = "y"\n'
-        "[consultation]\nmax_requests = 2\ndeadline_seconds = 60\n"
+        "[consultation]\nmax_requests = 2\ndeadline_seconds = 60\n",
+        encoding="utf-8",
     )
     text = setup_mod.render_config(URL, False, IDENTITY, existing)
     data = tomllib.loads(text)
@@ -365,7 +374,7 @@ def test_packaged_peer_instructions_match_docs_template():
     # The CLI ships its own copy (docs/ is not in the wheel). Re-copy on template changes:
     #   cp docs/agent-collaboration/PEER_AGENT_CLAUDE_template.md \
     #      clients/collaboration/cli/src/caura_bus_cli/peer_instructions.md
-    assert setup_mod.peer_template() == TEMPLATE.read_text()
+    assert setup_mod.peer_template() == TEMPLATE.read_text(encoding="utf-8")
 
 
 def test_mask_never_reveals_short_keys():
@@ -384,9 +393,9 @@ def test_claude_setup_hooks_stores_private_key_file_and_installs_wake_hooks(env)
     assert result.exit_code == 0, result.output
     assert KEY not in result.output
     key_file = env.config.with_suffix(".key")
-    assert mode(key_file) == 0o600 and key_file.read_text().strip() == KEY
+    assert mode(key_file) == 0o600 and key_file.read_text(encoding="utf-8").strip() == KEY
     settings = env.project / ".claude" / "settings.local.json"
-    text = settings.read_text()
+    text = settings.read_text(encoding="utf-8")
     assert KEY not in text  # hooks reference the key file, never the key
     hooks = json.loads(text)["hooks"]
     assert set(hooks) == {"SessionStart", "Stop", "UserPromptSubmit"}
@@ -395,7 +404,7 @@ def test_claude_setup_hooks_stores_private_key_file_and_installs_wake_hooks(env)
         assert hook["asyncRewake"] is True
         assert f"--key-file {key_file}" in hook["command"] and f"--config {env.config}" in hook["command"]
     assert invoke("--runtime", "claude", "--dir", str(env.project), "--hooks").exit_code == 0
-    assert json.loads(settings.read_text())["hooks"] == hooks  # idempotent
+    assert json.loads(settings.read_text(encoding="utf-8"))["hooks"] == hooks  # idempotent
 
 
 def test_codex_setup_hooks_prints_the_waker_command(env):
@@ -419,11 +428,11 @@ def test_dry_run_hooks_writes_nothing(env):
 def test_claude_setup_hooks_reports_a_malformed_settings_file_and_keeps_it(env):
     settings = env.project / ".claude" / "settings.local.json"
     settings.parent.mkdir()
-    settings.write_text("[]")
+    settings.write_text("[]", encoding="utf-8")
     result = invoke("--runtime", "claude", "--dir", str(env.project), "--hooks")
     assert result.exit_code == 0, result.output
     assert f"[!!] wake hooks not installed: {settings} must hold a JSON object; not modified" in result.output
-    assert settings.read_text() == "[]"
+    assert settings.read_text(encoding="utf-8") == "[]"
     assert env.config.exists()  # the rest of setup still ran
 
 
@@ -456,34 +465,34 @@ def test_codex_memory_table_written_per_host_in_place_with_one_backup(env):
         "[mcp_servers.caura-caura-test.tools.caura_write]\n"
         'approval_mode = "approve"\n'
     )
-    env.codex.write_text(original)
+    env.codex.write_text(original, encoding="utf-8")
     result = invoke("--runtime", "codex", "--dir", str(env.project))
     assert result.exit_code == 0, result.output
     assert KEY not in result.output
-    data = tomllib.loads(env.codex.read_text())
+    data = tomllib.loads(env.codex.read_text(encoding="utf-8"))
     entry = data["mcp_servers"]["caura-caura-test"]
     assert entry["url"] == f"{URL}/mcp/" and entry["http_headers"] == {"X-API-Key": KEY}
     assert entry["startup_timeout_sec"] == 20
     assert entry["tools"] == {"caura_write": {"approval_mode": "approve"}}
     assert set(data["mcp_servers"]) == {"caura-bus", "caura-caura-test"} and data["model"] == "gpt-5"
-    assert "# keep me" in env.codex.read_text() and mode(env.codex) == 0o600
-    assert env.codex.with_name("config.toml.caura-bus-setup.bak").read_text() == original
+    assert "# keep me" in env.codex.read_text(encoding="utf-8") and mode(env.codex) == 0o600
+    assert env.codex.with_name("config.toml.caura-bus-setup.bak").read_text(encoding="utf-8") == original
     assert "codex mcp list" in result.output
 
-    updated = env.codex.read_text()
+    updated = env.codex.read_text(encoding="utf-8")
     again = invoke("--runtime", "codex", "--dir", str(env.project))
     assert again.exit_code == 0 and "already current" in again.output
-    assert env.codex.read_text() == updated
+    assert env.codex.read_text(encoding="utf-8") == updated
 
 
 def test_codex_memory_subtable_header_is_refused_unchanged(env):
     env.codex.parent.mkdir()
     text = '[mcp_servers.caura-caura-test]\nurl = "https://x/mcp/"\n\n[mcp_servers.caura-caura-test.http_headers]\nX-API-Key = "old"\n'
-    env.codex.write_text(text)
+    env.codex.write_text(text, encoding="utf-8")
     result = invoke("--runtime", "codex", "--dir", str(env.project))
     assert result.exit_code == 1
     assert "[mcp_servers.caura-caura-test] would produce invalid TOML" in result.output
-    assert env.codex.read_text() == text and KEY not in result.output
+    assert env.codex.read_text(encoding="utf-8") == text and KEY not in result.output
 
 
 def test_no_memory_skips_the_memory_server(env):
@@ -493,7 +502,7 @@ def test_no_memory_skips_the_memory_server(env):
     assert "claude mcp list" not in result.output
     result = invoke("--runtime", "codex", "--dir", str(env.project), "--no-memory")
     assert result.exit_code == 0, result.output
-    assert set(tomllib.loads(env.codex.read_text())["mcp_servers"]) == {"caura-bus"}
+    assert set(tomllib.loads(env.codex.read_text(encoding="utf-8"))["mcp_servers"]) == {"caura-bus"}
 
 
 def test_claude_warns_about_memory_entries_pointing_elsewhere(env):
@@ -508,9 +517,12 @@ def test_claude_warns_about_memory_entries_pointing_elsewhere(env):
                     "github": {"type": "http", "url": "https://api.github.com/mcp"},
                 }
             }
-        )
+        ),
+        encoding="utf-8",
     )
-    (env.project / ".mcp.json").write_text(json.dumps({"mcpServers": {LEGACY: {"command": "npx"}}}))
+    (env.project / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {LEGACY: {"command": "npx"}}}), encoding="utf-8"
+    )
     result = invoke("--runtime", "claude", "--dir", str(env.project))
     assert result.exit_code == 0, result.output
     out = result.output
@@ -525,7 +537,9 @@ def test_claude_warns_about_memory_entries_pointing_elsewhere(env):
 def test_claude_config_dir_is_honoured_for_warnings(env, monkeypatch):
     other = env.home / "alt"
     other.mkdir()
-    (other / ".claude.json").write_text(json.dumps({"mcpServers": {"caura": {"url": "https://prod/mcp/"}}}))
+    (other / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"caura": {"url": "https://prod/mcp/"}}}), encoding="utf-8"
+    )
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(other))
     result = invoke("--runtime", "claude", "--dir", str(env.project))
     assert "'caura' -> prod is overridden" in result.output
@@ -535,7 +549,8 @@ def test_codex_warns_about_other_memory_entries(env):
     env.codex.parent.mkdir()
     env.codex.write_text(
         '[mcp_servers.caura]\nurl = "https://caura.ai/mcp/"\n\n'
-        '[mcp_servers.caura-qa]\nurl = "https://caura.test/mcp/"\n'
+        '[mcp_servers.caura-qa]\nurl = "https://caura.test/mcp/"\n',
+        encoding="utf-8",
     )
     result = invoke("--runtime", "codex", "--dir", str(env.project))
     assert result.exit_code == 0, result.output

@@ -12,7 +12,7 @@ DEFAULT_CONFIG_PATH = Path("caura-bus.toml")
 
 def load_config(path: Path | None = None) -> AgentConfig:
     path = path or Path(os.environ.get(CONFIG_ENV_VAR, str(DEFAULT_CONFIG_PATH)))
-    return AgentConfig.model_validate(tomllib.loads(path.read_text()))
+    return AgentConfig.model_validate(tomllib.loads(path.read_text(encoding="utf-8")))
 
 
 def require_api_key() -> str:

@@ -44,14 +44,17 @@ def install_broker(env, *, usage=USAGE, exit_code=0):  # noqa: F811
         f"    sys.stderr.write({usage!r}); sys.exit(0)\n"
         f"with open({str(calls)!r}, 'a') as f:\n"
         " f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
-        f"sys.exit({exit_code})\n"
+        f"sys.exit({exit_code})\n",
+        encoding="utf-8",
     )
     script.chmod(0o700)
     return calls
 
 
 def broker_calls(path: Path) -> list[list[str]]:
-    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    return (
+        [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+    )
 
 
 def test_without_broker_join_is_unchanged(env):  # noqa: F811

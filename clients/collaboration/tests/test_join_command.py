@@ -153,7 +153,8 @@ def env(tmp_path, monkeypatch):
         f"#!{sys.executable}\nimport json,os,sys\n"
         f"with open({str(capture)!r},'a') as f:\n"
         " f.write(json.dumps({'argv':sys.argv[1:],'env':{k:v for k,v in os.environ.items() if 'CAURA' in k}})+'\\n')\n"
-        "sys.exit(int(os.environ.get('FAKE_CLAUDE_EXIT','0')) if sys.argv[1:3]==['mcp','add'] else 0)\n"
+        "sys.exit(int(os.environ.get('FAKE_CLAUDE_EXIT','0')) if sys.argv[1:3]==['mcp','add'] else 0)\n",
+        encoding="utf-8",
     )
     claude.chmod(0o700)
     monkeypatch.setenv("HOME", str(home))
@@ -197,11 +198,15 @@ def invoke(*args, runtime="claude", password=PASSWORD):
 
 
 def claude_calls(capture: Path) -> list[dict]:
-    return [json.loads(line) for line in capture.read_text().splitlines()] if capture.exists() else []
+    return (
+        [json.loads(line) for line in capture.read_text(encoding="utf-8").splitlines()]
+        if capture.exists()
+        else []
+    )
 
 
 def all_text_under(root: Path) -> str:
-    return "\n".join(p.read_text(errors="ignore") for p in root.rglob("*") if p.is_file())
+    return "\n".join(p.read_text(errors="ignore", encoding="utf-8") for p in root.rglob("*") if p.is_file())
 
 
 def test_claude_join_signs_in_mints_and_runs_setup(env):
@@ -221,8 +226,11 @@ def test_claude_join_signs_in_mints_and_runs_setup(env):
     assert raw not in result.output and PASSWORD not in result.output
 
     config = env.home / ".config" / "caura-bus" / "agents" / "caura.test" / TENANT / f"{name}.toml"
-    assert tomllib.loads(config.read_text())["agent"] == {"agent_id": name, "tenant_id": TENANT}
-    assert config.with_suffix(".key").read_text().strip() == raw  # hooks on by default
+    assert tomllib.loads(config.read_text(encoding="utf-8"))["agent"] == {
+        "agent_id": name,
+        "tenant_id": TENANT,
+    }
+    assert config.with_suffix(".key").read_text(encoding="utf-8").strip() == raw  # hooks on by default
     add = [c for c in claude_calls(env.capture) if c["argv"][:2] == ["mcp", "add"]]
     assert add and f"CAURA_API_KEY={raw}" in add[0]["argv"]
     # The same server's memory MCP is registered too, with the same key.
@@ -241,7 +249,7 @@ def test_codex_join_writes_codex_config_and_prints_waker(env):
     assert result.exit_code == 0, result.output
     name = env.dashboard.minted()[0][2]["home_agent_id"]
     assert name.startswith("codex-my-project-")
-    codex = tomllib.loads((env.home / ".codex" / "config.toml").read_text())
+    codex = tomllib.loads((env.home / ".codex" / "config.toml").read_text(encoding="utf-8"))
     assert codex["mcp_servers"]["caura-bus"]["env"]["CAURA_API_KEY"] in env.dashboard.keys
     memory = codex["mcp_servers"]["caura-caura-test"]
     assert memory["url"] == f"{URL}/mcp/" and memory["http_headers"]["X-API-Key"] in env.dashboard.keys

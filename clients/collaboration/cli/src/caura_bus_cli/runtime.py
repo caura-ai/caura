@@ -95,12 +95,12 @@ class WakeState:
         self.recheck_seconds = recheck_seconds
 
     def load(self):
-        return json.loads(self.path.read_text()) if self.path.exists() else {}
+        return json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
 
     def save(self, data):
         temporary = self.path.with_suffix(".tmp")
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as stream:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(data, stream)
             stream.flush()
             os.fsync(stream.fileno())
@@ -212,7 +212,7 @@ def latest_codex_thread(directory, home=None):
     rollouts = sorted(sessions.rglob("rollout-*.jsonl"), key=lambda p: p.name, reverse=True)
     for rollout in rollouts:
         try:
-            with rollout.open() as stream:
+            with rollout.open(encoding="utf-8") as stream:
                 meta = json.loads(stream.readline())
         except (OSError, ValueError):
             continue
@@ -548,7 +548,7 @@ def load_key(key_file=None):
     path = Path(key_file)
     if path.stat().st_mode & 0o077:
         raise ValueError(f"{path} must be private to you (chmod 600 {path})")
-    key = path.read_text().strip()
+    key = path.read_text(encoding="utf-8").strip()
     if not key:
         return False
     os.environ["CAURA_API_KEY"] = key

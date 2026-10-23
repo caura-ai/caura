@@ -130,7 +130,7 @@ def find_mcp_binary() -> Path | None:
 
 
 def peer_template() -> str:
-    return files("caura_bus_cli").joinpath("peer_instructions.md").read_text()
+    return files("caura_bus_cli").joinpath("peer_instructions.md").read_text(encoding="utf-8")
 
 
 # --- 1. verify the key ----------------------------------------------------
@@ -166,7 +166,7 @@ def render_config(url: str, insecure: bool, identity: dict, existing: Path) -> s
     consultation: dict[str, Any] = {}
     if existing.is_file():
         try:
-            old = tomllib.loads(existing.read_text())
+            old = tomllib.loads(existing.read_text(encoding="utf-8"))
         except (tomllib.TOMLDecodeError, OSError):
             old = {}
         if isinstance(old.get("peers"), list):
@@ -202,7 +202,7 @@ def write_private(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = path.with_name(path.name + ".tmp")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as handle:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(text)
     os.chmod(temporary, 0o600)
     temporary.replace(path)
@@ -375,7 +375,7 @@ def update_codex_text(text: str, key: str, config: Path, mcp: Path) -> str:
 def wire_codex(tables: list[CodexTable], path: Path | None = None) -> list[str]:
     """Update every table in one write, with one backup of the previous file."""
     path = path or codex_config_path()
-    text = path.read_text() if path.exists() else ""
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
     updated = text
     for table in tables:
         updated = update_codex_table(updated, table)
@@ -451,7 +451,7 @@ def claude_config_file() -> Path:
 
 def read_json(path: Path) -> dict:
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -572,11 +572,11 @@ def merge_instructions(existing: str | None) -> tuple[str, str]:
 
 
 def write_instructions(path: Path) -> str:
-    existing = path.read_text() if path.exists() else None
+    existing = path.read_text(encoding="utf-8") if path.exists() else None
     updated, action = merge_instructions(existing)
     if action != "unchanged":
         temporary = path.with_name(path.name + ".tmp")
-        temporary.write_text(updated)
+        temporary.write_text(updated, encoding="utf-8")
         if path.exists():
             os.chmod(temporary, path.stat().st_mode & 0o777)
         temporary.replace(path)
@@ -699,7 +699,7 @@ def run_setup(options: Options, echo: Callable[[str], None], run_async) -> int:
     options.config_path = config_path
     text = render_config(url, insecure, identity, config_path)
     AgentConfig.model_validate(tomllib.loads(text))
-    unchanged = config_path.is_file() and config_path.read_text() == text
+    unchanged = config_path.is_file() and config_path.read_text(encoding="utf-8") == text
     if options.dry_run:
         echo(f"  {prefix}write agent config {show(config_path)} (mode 600)")
     else:
@@ -740,7 +740,7 @@ def run_setup(options: Options, echo: Callable[[str], None], run_async) -> int:
         tables = [bus_table(key, config_path, mcp)]
         if options.memory:
             tables.append(memory_table(url, key))
-        current = codex_path.read_text() if codex_path.exists() else ""
+        current = codex_path.read_text(encoding="utf-8") if codex_path.exists() else ""
         if options.dry_run:
             planned = current
             for table in tables:
@@ -768,7 +768,9 @@ def finish(options, runtime, directory, config_path, echo, run_async, key, *, fa
     prefix = "[dry-run] would " if options.dry_run else ""
     instructions = directory / INSTRUCTION_FILES[runtime]
     if options.dry_run:
-        _, action = merge_instructions(instructions.read_text() if instructions.exists() else None)
+        _, action = merge_instructions(
+            instructions.read_text(encoding="utf-8") if instructions.exists() else None
+        )
         verb = {"created": "create", "appended": "append to", "updated": "update", "unchanged": "keep"}[
             action
         ]

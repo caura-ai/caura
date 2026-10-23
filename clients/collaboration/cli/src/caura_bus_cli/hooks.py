@@ -102,7 +102,7 @@ def install_hooks(
         written[event] = entry
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(settings, indent=2) + "\n")
+    temporary.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
     return {"path": str(path), "hooks": written}
 
@@ -117,7 +117,7 @@ def load_settings(path):
     """
     if not path.exists():
         return {}
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     if not text.strip():
         return {}
     try:
