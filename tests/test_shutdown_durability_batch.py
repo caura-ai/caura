@@ -146,3 +146,39 @@ async def test_a_task_spawned_during_the_grace_is_still_cancelled(
     assert spawned[0].cancelled(), (
         "a task spawned during the grace escaped cancellation entirely"
     )
+
+
+async def test_a_task_not_yet_started_at_shutdown_still_records_its_cancellation(
+    task_sc, monkeypatch
+) -> None:
+    """A task created just before shutdown must not be cancelled unstarted.
+
+    Cancelled before its first step, a task has ``CancelledError`` thrown in
+    ahead of its first line, so ``tracked_task`` never reaches the handler that
+    writes its row and the coroutine it wraps is dropped unawaited — the work
+    vanishes exactly as it did before M-19. Scheduling and shutting down in the
+    same step, with no grace (a documented setting), reaches that state every
+    time.
+    """
+    from core_api.services.task_tracker import tracked_task
+
+    monkeypatch.setattr(tasks_mod, "_DRAIN_GRACE_S", 0.0)
+    monkeypatch.setattr(tasks_mod, "_CANCEL_SETTLE_S", 1.0)
+    started = asyncio.Event()
+
+    async def blocks_forever() -> None:
+        started.set()
+        await asyncio.sleep(3600)
+
+    task = tasks_mod.track_task(
+        tracked_task(blocks_forever(), "background_enrichment", None, "tenant-a")
+    )
+    await tasks_mod.cancel_all_tasks()
+
+    assert task.cancelled()
+    assert started.is_set(), (
+        "shutdown cancelled the task before its first step, so the work it "
+        "wraps never ran and was dropped unawaited"
+    )
+    task_sc.add_task_failure.assert_awaited_once()
+    assert task_sc.add_task_failure.await_args.args[0]["status"] == "cancelled"
