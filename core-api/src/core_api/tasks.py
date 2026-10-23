@@ -39,10 +39,10 @@ _DRAIN_GRACE_S: float = read_float_env("BACKGROUND_TASK_DRAIN_GRACE_S", 2.0)
 #: it waits on did not exist before.
 _CANCEL_SETTLE_S: float = read_float_env("BACKGROUND_TASK_CANCEL_SETTLE_S", 0.5)
 
-#: Loop turns ``cancel_all_tasks`` yields for tasks that have not taken their
-#: first step. One turn starts every task created before it, so more are needed
-#: only when a starting task schedules another; the bound keeps a task that
-#: respawns itself forever from holding up shutdown.
+#: Loop turns ``let_tracked_tasks_start`` yields for. One turn starts every task
+#: created before it, so more are needed only when a starting task schedules
+#: another; the bound keeps a task that respawns itself forever from holding up
+#: its caller.
 _FIRST_STEP_TURNS = 10
 
 
@@ -61,6 +61,25 @@ def track_task(coro) -> asyncio.Task:
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
+
+
+async def let_tracked_tasks_start() -> None:
+    """Yield until every tracked task has taken its first step. Call before cancelling them.
+
+    A task cancelled before its first step has ``CancelledError`` thrown in
+    ahead of its first line: ``tracked_task`` never reaches the handler that
+    writes its ``cancelled`` row, and the coroutine it wraps is dropped
+    unawaited, so the work vanishes with no trace. Once a task has started, its
+    cancellation lands inside the code that records it.
+
+    Nothing is closed or discarded here. Shared by ``cancel_all_tasks`` and the
+    test suite's per-test drain (``tests/conftest.py``), where a dropped
+    coroutine fails the run (#2171).
+    """
+    for _ in range(_FIRST_STEP_TURNS):
+        if not any(_not_started(task) for task in _background_tasks):
+            return
+        await asyncio.sleep(0)
 
 
 async def cancel_all_tasks() -> None:
@@ -87,17 +106,10 @@ async def cancel_all_tasks() -> None:
             if not task.cancelled() and task.exception() is not None:
                 logger.debug("background task failed during shutdown drain", exc_info=task.exception())
 
-    # A task cancelled before its first step has ``CancelledError`` thrown in
-    # ahead of its first line: ``tracked_task`` never reaches the handler that
-    # writes its ``cancelled`` row, and the coroutine it wraps is dropped
-    # unawaited, so the work vanishes with no trace. That is any task created
-    # in the turn just before this point — with no grace, whatever was
-    # scheduled as shutdown began. Yielding until each has started puts every
-    # cancellation inside the code that records it.
-    for _ in range(_FIRST_STEP_TURNS):
-        if not any(_not_started(task) for task in _background_tasks):
-            break
-        await asyncio.sleep(0)
+    # Any task created in the turn just before this point — with no grace,
+    # whatever was scheduled as shutdown began — has not started, and
+    # cancelling it now would lose its record.
+    await let_tracked_tasks_start()
 
     # Re-read rather than trusting the snapshot: tracked coroutines spawn
     # further tracked tasks (``_reembed_memory`` and the bulk re-embed path both

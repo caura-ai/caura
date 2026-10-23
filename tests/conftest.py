@@ -758,30 +758,13 @@ async def _drain_background_tasks(_patch_storage_client):
     await drain_background_tasks()
 
 
-#: How many times the drain yields for tasks that have not taken their first
-#: step. Each yield starts every task created before it, so one is enough unless
-#: a starting task schedules another; the bound only keeps a task that respawns
-#: itself forever from hanging teardown. Whatever is still unstarted after it is
-#: cancelled as before, and the ``pytest.ini`` gate reports what that drops.
-_DRAIN_FIRST_STEP_ROUNDS = 10
-
-
-def _not_started(task: asyncio.Task) -> bool:
-    coro = task.get_coro()
-    return (
-        not task.done()
-        and inspect.iscoroutine(coro)
-        and inspect.getcoroutinestate(coro) == inspect.CORO_CREATED
-    )
-
-
 async def drain_background_tasks() -> None:
     """Cancel every background task still pending and wait for each to end.
 
     The body of ``_drain_background_tasks``, outside the fixture so a test can
     run it at a moment of its choosing (``test_background_task_isolation.py``).
     """
-    from core_api.tasks import _background_tasks
+    from core_api.tasks import _background_tasks, let_tracked_tasks_start
 
     if all(task.done() for task in _background_tasks):
         return
@@ -798,18 +781,11 @@ async def drain_background_tasks() -> None:
                     task_tracker, "get_storage_client", return_value=AsyncMock()
                 )
             )
-        # A task cancelled before its first step has ``CancelledError`` thrown
-        # in ahead of its first line: ``tracked_task`` then neither records the
-        # cancellation nor awaits the coroutine it was handed, which is freed
-        # unstarted and fails the run as "never awaited" (#2171, on
-        # ``detect_contradictions_async``). Yielding until every task has
-        # started puts each cancellation inside the code that handles it.
-        # Nothing is closed or discarded, so the ``pytest.ini`` gate still sees
-        # every coroutine the code itself drops.
-        for _ in range(_DRAIN_FIRST_STEP_ROUNDS):
-            if not any(_not_started(task) for task in _background_tasks):
-                break
-            await asyncio.sleep(0)
+        # Cancelled before its first step, a task drops the coroutine it wraps
+        # unawaited, which fails the run (#2171, on
+        # ``detect_contradictions_async``). Nothing is closed or discarded, so
+        # the ``pytest.ini`` gate still sees every coroutine the code drops.
+        await let_tracked_tasks_start()
         pending = [task for task in _background_tasks if not task.done()]
         for task in pending:
             task.cancel()
