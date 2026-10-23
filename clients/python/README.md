@@ -76,10 +76,13 @@ To reach the same memory from an MCP client with no SDK, see the
 | `close()` | — | `None` |
 
 The client is a context manager (`with Caura(...) as mc:`) and raises
-`AuthError` (401/403), `NotFoundError` (404), or `CauraAPIError` on HTTP failures.
+`AuthError` (401/403), `NotFoundError` (404), `RateLimitError` (429, with the
+server's `Retry-After` in seconds on `retry_after` when it sent one), or
+`CauraAPIError` on other HTTP failures.
 Network failures and timeouts raise `TransportError`, with the original `httpx`
 exception in `__cause__`. Catch `CauraError` to handle both HTTP and transport
-failures. Transport errors have no HTTP status code; requests are not retried.
+failures. Transport errors have no HTTP status code. Requests are not retried
+unless you opt in; see [Retries](#retries).
 Every result also exposes the full API payload on `.raw`. `search()` returns a
 `SearchResult`: a list of `Memory` that also carries the response's
 `recall_tracked`, `diagnostic` (set by `diagnostic=True`) and `warnings` (for
@@ -88,6 +91,39 @@ example a parameter the server ignored), and the whole body on `.raw`.
 `recall()` reads the brief's `memories` and asks the server not to repeat them
 under `items` (`items_alias=False`), which halves the response. Pass
 `items_alias=True` if you read `raw["items"]`.
+
+### Retries
+
+Retries are off by default. Pass `retries` (0 to 10) to retry transient
+failures:
+
+```python
+with Caura("mc_xxx", tenant_id="my-team", retries=3) as mc:
+    ...
+```
+
+Only calls the server can safely receive twice are retried:
+
+| Call | Retried on |
+|---|---|
+| `health()`, `stats()`, `get_document()` | 429, 502, 503, 504, network errors and timeouts |
+| `search()`, `recall()` | 429 and connection failures (`httpx.ConnectError`, `httpx.ConnectTimeout`) only |
+| `write()`, `submit_interview()` | never |
+
+`search()` and `recall()` count toward the tenant's usage, and a search made as
+an agent bumps `recall_count` on the memories it returns. A 502, 503, 504 or a
+read timeout can arrive after the server has done that, so retrying would count
+the call twice. A 429 is returned before the call is counted, and a connection
+failure means the request never arrived.
+
+Between attempts the client waits for the server's `Retry-After` when it sends
+one, and otherwise `retry_backoff * 2**attempt` seconds (`retry_backoff`
+defaults to 0.5, so 0.5 s, 1 s, 2 s, ...). The wait never exceeds
+`max_retry_delay` (default 60 s), and it blocks the calling thread. When
+`Retry-After` asks for longer than `max_retry_delay`, the client stops retrying
+and returns the response: a 429 then raises `RateLimitError` with `retry_after`,
+and you decide when to try again. After the last attempt the usual exception is
+raised.
 
 ### Reading as an agent with a tenant key
 
