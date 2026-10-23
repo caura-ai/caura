@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.35.11](https://github.com/caura-ai/caura/compare/backend-v3.35.10...backend-v3.35.11) (2026-10-23)
+
+
+### Bug Fixes
+
+* **clients:** raise CauraError when write() gets a non-object 2xx body ([#2144](https://github.com/caura-ai/caura/issues/2144)) ([b984c14](https://github.com/caura-ai/caura/commit/b984c1421acff15b2f9de79dc99c65908dcc0f83))
+* **core-api:** key refusals say who makes keys (Prism v2 R3) ([#2170](https://github.com/caura-ai/caura/issues/2170)) ([4b0514f](https://github.com/caura-ai/caura/commit/4b0514f5174cf1512e43346eea43e26b19189e25))
+
+
+### Code Refactoring
+
+* share one first-step wait between shutdown and tests ([#2175](https://github.com/caura-ai/caura/issues/2175)) ([6f0bd75](https://github.com/caura-ai/caura/commit/6f0bd75245f309d2d3ade1eacab6dcc07ad9dd2f))
+
 ## [3.35.10](https://github.com/caura-ai/caura/compare/backend-v3.35.9...backend-v3.35.10) (2026-10-23)
 
 
