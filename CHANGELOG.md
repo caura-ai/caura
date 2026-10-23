@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.36.1](https://github.com/caura-ai/caura/compare/backend-v3.36.0...backend-v3.36.1) (2026-10-23)
+
+
+### Documentation
+
+* **client-python:** document opt-in retries ([#2178](https://github.com/caura-ai/caura/issues/2178)) ([733c529](https://github.com/caura-ai/caura/commit/733c529e0148f91326d91fec08702565af6145c8))
+
 ## [3.36.0](https://github.com/caura-ai/caura/compare/backend-v3.35.11...backend-v3.36.0) (2026-10-23)
 
 
