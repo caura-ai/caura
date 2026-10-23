@@ -9,8 +9,8 @@ pin `caura-bus-core` exactly; add `caura-bus-adapter-sdk` to build adapters:
 <!-- x-release-please-start-version -->
 ```sh
 pip install \
-  "caura-bus-cli==0.3.2" \
-  "caura-bus-mcp==0.3.2"
+  "caura-bus-cli==0.3.3" \
+  "caura-bus-mcp==0.3.3"
 ```
 <!-- x-release-please-end -->
 

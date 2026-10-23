@@ -10,6 +10,26 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.36.0](https://github.com/caura-ai/caura/compare/backend-v3.35.11...backend-v3.36.0) (2026-10-23)
+
+
+### Features
+
+* **client-python:** safe opt-in retries for transient API errors ([#2020](https://github.com/caura-ai/caura/issues/2020)) ([1da9356](https://github.com/caura-ai/caura/commit/1da9356fbc7d35e470af09ff61cc5dfba85eac58))
+
+
+### Bug Fixes
+
+* **clients:** explain ignored insecure HTTP env settings without weakening safety gate ([#2026](https://github.com/caura-ai/caura/issues/2026)) ([b748725](https://github.com/caura-ai/caura/commit/b748725d8d9226de3dd07b5db60473fc67e4032c))
+* **collaboration:** use UTF-8 for persisted files and enforce encoding ([#2120](https://github.com/caura-ai/caura/issues/2120)) ([#2173](https://github.com/caura-ai/caura/issues/2173)) ([de771dc](https://github.com/caura-ai/caura/commit/de771dca805c9a3493354e772872075551789ad0))
+* **packaging:** ship Apache-2.0 LICENSE in npm SDK alias ([#2021](https://github.com/caura-ai/caura/issues/2021)) ([3d8b561](https://github.com/caura-ai/caura/commit/3d8b56156bb264117cef24f8e50eedd63b9901e8))
+
+
+### Documentation
+
+* fix stale caura_manage op list and moved document_repository path ([#2088](https://github.com/caura-ai/caura/issues/2088)) ([cdab0d0](https://github.com/caura-ai/caura/commit/cdab0d046aeb0fa494a26348fd0b9870b3565e08))
+* list telemetry.md in the docs index ([#2114](https://github.com/caura-ai/caura/issues/2114)) ([714d282](https://github.com/caura-ai/caura/commit/714d28244f388d6129421e547fcb3d935b3fe0ee))
+
 ## [3.35.11](https://github.com/caura-ai/caura/compare/backend-v3.35.10...backend-v3.35.11) (2026-10-23)
 
 

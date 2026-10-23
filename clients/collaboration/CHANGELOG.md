@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.3.2...collaboration-clients-v0.3.3) (2026-10-23)
+
+
+### Bug Fixes
+
+* **collaboration:** use UTF-8 for persisted files and enforce encoding ([#2120](https://github.com/caura-ai/caura/issues/2120)) ([#2173](https://github.com/caura-ai/caura/issues/2173)) ([de771dc](https://github.com/caura-ai/caura/commit/de771dca805c9a3493354e772872075551789ad0))
+
 ## [0.3.2](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.3.1...collaboration-clients-v0.3.2) (2026-10-23)
 
 
