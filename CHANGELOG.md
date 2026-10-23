@@ -10,6 +10,24 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.35.9](https://github.com/caura-ai/caura/compare/backend-v3.35.8...backend-v3.35.9) (2026-10-23)
+
+
+### Bug Fixes
+
+* **core-api:** stop requiring JWT_SECRET, which nothing reads ([#2161](https://github.com/caura-ai/caura/issues/2161)) ([01c4e18](https://github.com/caura-ai/caura/commit/01c4e18e2d5c0fad33f8483f7ae4b439180023c4))
+
+
+### Performance
+
+* **core-api:** parse and chunk ingest previews off the event loop ([#2162](https://github.com/caura-ai/caura/issues/2162)) ([a823149](https://github.com/caura-ai/caura/commit/a8231498f0095b21b5bb59df0ecfdd43e30b9d41))
+* **core-api:** split oversized paragraphs in linear time ([#2158](https://github.com/caura-ai/caura/issues/2158)) ([0cb737b](https://github.com/caura-ai/caura/commit/0cb737b800a135b4ca40788e1193a56c96b33b35))
+
+
+### Dependencies
+
+* bump opentelemetry-api to 1.45.1 for CVE-2026-114603 ([#2166](https://github.com/caura-ai/caura/issues/2166)) ([3714851](https://github.com/caura-ai/caura/commit/3714851a2928e1a114c22d80b567773ab74a0de1))
+
 ## [3.35.8](https://github.com/caura-ai/caura/compare/backend-v3.35.7...backend-v3.35.8) (2026-10-22)
 
 
