@@ -637,6 +637,14 @@ jobs:
         # suite connects only to the copies. ``--dist loadfile`` keeps each
         # file's tests together on one worker, in file order, as a serial run
         # has them.
+        #
+        # ``COVERAGE_CORE=sysmon`` measures through Python's ``sys.monitoring``
+        # instead of a trace function. It runs the suite about 25% faster.
+        # It also sees code that runs inside SQLAlchemy's greenlets, which the
+        # trace function missed: ~470 lines of core-storage-api's
+        # postgres_service.py, measured 2026-10-23. This run measures lines, not
+        # branches (no coverage config is read from the repo root), so
+        # sys.monitoring covers all of it on Python 3.13.
         run: |
           uv run pytest tests/ \
             -n 4 --dist loadfile \
@@ -657,6 +665,7 @@ jobs:
           EMBEDDING_PROVIDER: fake
           ENTITY_EXTRACTION_PROVIDER: none
           USE_LLM_FOR_MEMORY_CREATION: "false"
+          COVERAGE_CORE: sysmon
 
       - name: Enforce coverage floors (per package)
         # The step above collects coverage but enforced no floor. Both packages
