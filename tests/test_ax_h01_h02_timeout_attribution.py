@@ -175,7 +175,15 @@ async def _timed_out_search(client) -> tuple[int, dict, dict]:
     tenant_id, headers = get_test_auth()
     resp = await client.post(
         "/api/v1/search",
-        json={"tenant_id": tenant_id, "query": "who runs fleet ops"},
+        # ``entity_boost: false`` keeps entity retrieval out of the request, so
+        # the budget can only go to the hop a test stalls: with it on,
+        # ClassifyQuery's real storage FTS query runs before the embedding and
+        # can take the whole 0.4s on a loaded runner.
+        json={
+            "tenant_id": tenant_id,
+            "query": "who runs fleet ops",
+            "entity_boost": False,
+        },
         headers=headers,
     )
     return resp.status_code, resp.json(), dict(resp.headers)
@@ -308,6 +316,24 @@ async def test_the_504_names_the_layer_that_ate_the_budget(
     assert (
         storage_evidence["details"]["phase"] == "storage.POST /memories/scored-search"
     )
+
+
+async def test_only_the_stalled_hop_can_eat_the_budget(
+    client, tight_budget, monkeypatch, caplog
+):
+    """With entity retrieval on, ``ClassifyQuery`` runs a real storage FTS
+    query before the embedding starts, and that query had to finish inside the
+    0.4s budget. On a loaded runner it sometimes did not, so the 504 named
+    ``storage.POST /entities/fts-search`` and the embedding stall was never
+    reached. Here that lookup hangs outright: the searches these tests send
+    must not reach it."""
+    from core_storage_api.services.postgres_service import PostgresService
+
+    monkeypatch.setattr(PostgresService, "entity_fts_search", _stall_forever)
+    body, _ = await _timeout_with(
+        client, caplog, lambda: _stall_embedding_provider(monkeypatch)
+    )
+    assert body["error"]["details"]["phase"] == "embed.query"
 
 
 async def test_the_log_line_carries_the_phase_for_aggregation(
