@@ -10,6 +10,7 @@ import math
 import os
 import re
 import sys
+import time
 import urllib.parse
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -100,12 +101,34 @@ class Caura:
         transport: httpx.BaseTransport | None = None,
         allow_insecure_http: bool | None = None,
         session_id: str | None = None,
+        retries: int = 0,
+        retry_backoff: float = 0.5,
+        max_retry_delay: float = 60.0,
     ) -> None:
         if not api_key:
             raise ValueError("api_key is required")
         if not tenant_id:
             raise ValueError("tenant_id is required")
         _check_key_transport(base_url, allow_insecure_http)
+        if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= 10:
+            raise ValueError("retries must be an integer between 0 and 10")
+        if (
+            isinstance(retry_backoff, bool)
+            or not isinstance(retry_backoff, (int, float))
+            or not math.isfinite(retry_backoff)
+            or retry_backoff < 0
+        ):
+            raise ValueError("retry_backoff must be a finite non-negative number")
+        if (
+            isinstance(max_retry_delay, bool)
+            or not isinstance(max_retry_delay, (int, float))
+            or not math.isfinite(max_retry_delay)
+            or max_retry_delay <= 0
+        ):
+            raise ValueError("max_retry_delay must be a finite positive number")
+        self.retries = retries
+        self.retry_backoff = retry_backoff
+        self.max_retry_delay = max_retry_delay
         self.tenant_id = tenant_id
         self.agent_id = agent_id
         self._http = httpx.Client(
@@ -163,7 +186,10 @@ class Caura:
         if metadata is not None:
             body["metadata"] = metadata
         if origin:
-            body["origin"] = {**{k: origin[k] for k in ("tokens_in", "tokens_out", "turns") if k in origin}, "source": "sdk"}
+            body["origin"] = {
+                **{k: origin[k] for k in ("tokens_in", "tokens_out", "turns") if k in origin},
+                "source": "sdk",
+            }
         body.update(extra)
         data = self._post("/api/v1/memories", body)
         if not isinstance(data, dict):
@@ -340,11 +366,61 @@ class Caura:
         self._raise_for_status(response)
         return self._json(response)
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    @staticmethod
+    def _retry_after_seconds(value: str | None) -> float | None:
+        """Parse Retry-After once for both backoff and RateLimitError.
+
+        The header may be a delta-seconds value or an HTTP-date in UTC.
+        Reject non-finite, negative, or malformed values rather than sleeping.
+        """
+        if not value:
+            return None
         try:
-            return self._http.request(method, path, **kwargs)
-        except httpx.TransportError as exc:
-            raise TransportError(f"Request failed: {exc}") from exc
+            seconds = float(value)
+        except (TypeError, ValueError):
+            try:
+                deadline = parsedate_to_datetime(value)
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=timezone.utc)
+                seconds = max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                return None
+        if not math.isfinite(seconds) or seconds < 0:
+            return None
+        return seconds
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        method = method.upper()
+        # Search/recall POSTs meter usage and can affect ranking. Only rate
+        # limiter responses or connection failures known not to reach the
+        # server are safe to retry; 502/503/504 and read timeouts are not.
+        metered_post = method == "POST" and path in ("/api/v1/search", "/api/v1/recall")
+        attempts = self.retries if method in ("GET", "HEAD") or metered_post else 0
+        status_codes = (429,) if metered_post else (429, 502, 503, 504)
+        for attempt in range(attempts + 1):
+            try:
+                response = self._http.request(method, path, **kwargs)
+            except httpx.TransportError as exc:
+                safe_connection_failure = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+                if attempt >= attempts or (metered_post and not safe_connection_failure):
+                    raise TransportError(f"Request failed: {exc}") from exc
+                time.sleep(min(self.retry_backoff * 2**attempt, self.max_retry_delay))
+                continue
+
+            if response.status_code not in status_codes or attempt >= attempts:
+                return response
+            retry_after = self._retry_after_seconds(response.headers.get("Retry-After"))
+            # A long server-mandated wait should go back to the caller, not
+            # silently stall a synchronous SDK request for hours.
+            if retry_after is not None and retry_after > self.max_retry_delay:
+                return response
+            delay = (
+                retry_after
+                if retry_after is not None
+                else min(self.retry_backoff * 2**attempt, self.max_retry_delay)
+            )
+            time.sleep(delay)
+        raise AssertionError("retry loop unexpectedly exhausted")
 
     @staticmethod
     def _raise_for_status(response: httpx.Response) -> None:
@@ -369,21 +445,7 @@ class Caura:
         if response.status_code == 404:
             raise NotFoundError(response.status_code, message or "not found", details=details)
         if response.status_code == 429:
-            try:
-                retry_after = float(response.headers["Retry-After"])
-            except KeyError:
-                retry_after = None
-            except ValueError:
-                try:
-                    deadline = parsedate_to_datetime(response.headers["Retry-After"])
-                    # The obsolete asctime HTTP-date form has no explicit zone; it is still GMT.
-                    deadline = deadline.replace(tzinfo=timezone.utc) if deadline.tzinfo is None else deadline
-                    retry_after = max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
-                except (TypeError, ValueError, OverflowError):
-                    retry_after = None
-            # float() also takes "nan", "inf" and "-5"; none is a delay a caller can sleep on.
-            if retry_after is not None and not (math.isfinite(retry_after) and retry_after >= 0):
-                retry_after = None
+            retry_after = Caura._retry_after_seconds(response.headers.get("Retry-After"))
             raise RateLimitError(
                 response.status_code,
                 message or "rate limit exceeded",
