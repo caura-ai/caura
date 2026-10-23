@@ -238,7 +238,7 @@ def setup(
 def tty_prompt(label: str, secret: bool = False) -> str:
     """Prompt on the controlling terminal, also when stdin is a pipe (``curl ... | sh``)."""
     try:
-        tty = open("/dev/tty", "r+", encoding="utf-8")
+        tty = open("/dev/tty", "r+", encoding="locale")
     except OSError:
         raise JoinError(f"no terminal to ask for the {label.lower()}") from None
     with tty:
