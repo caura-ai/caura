@@ -85,8 +85,11 @@ def test_pip_audit_reads_osv() -> None:
 
 def test_every_accepted_advisory_says_why() -> None:
     """An advisory is accepted only with the reason it does not apply, written
-    beside the step, so each ignored ID appears in that comment as well."""
-    ignored = re.findall(r"--ignore-vuln ([\w-]+)", _runs("pip-audit --"))
+    beside the step, so each ignored ID appears in that comment as well. None
+    may be accepted, so instead of requiring one, every ``--ignore-vuln`` must
+    parse: a spelling the pattern missed would leave its ID unchecked."""
+    audit = _runs("pip-audit --")
+    ignored = re.findall(r"--ignore-vuln[ =]([\w-]+)", audit)
     text = SCAN.read_text()
-    assert ignored
+    assert len(ignored) == audit.count("--ignore-vuln")
     assert [vid for vid in ignored if text.count(vid) < 2] == []

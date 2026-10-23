@@ -74,14 +74,9 @@ jobs:
         # database published it, so the scan passed on it (L-239). OSV carries
         # both the PYSEC and the GHSA advisories.
         #
-        # Accepted advisories, each with the reason it does not apply here. Drop
-        # one once a fixed release is locked.
-        # - PYSEC-2026-4243 (GHSA-5639-2j2p-m4mx), mako < 1.4.2, which alembic
-        #   depends on: on Windows, a TemplateLookup URI with a drive letter
-        #   escapes the template directory. The images run on Linux, nothing
-        #   here imports mako, and alembic renders only the migrations' own
-        #   script.py.mako, when a developer runs `alembic revision`, never at
-        #   runtime.
+        # Accepted advisories: none. Accept one with --ignore-vuln on the
+        # pip-audit line only with the reason it does not apply here, listed in
+        # this comment, and drop it once a fixed release is locked.
         run: |
           vulnerable=""
           for service in core-api core-storage-api core-operations core-worker; do
@@ -91,11 +86,10 @@ jobs:
             echo "::group::${service} ${extras[*]}"
             pip-audit --desc --no-deps --disable-pip --vulnerability-service osv \
               -r "${RUNNER_TEMP}/${service}.txt" \
-              --ignore-vuln PYSEC-2026-4243 \
               || vulnerable="${vulnerable} ${service}"
             echo "::endgroup::"
           done
           if [ -n "${vulnerable}" ]; then
-            echo "::error::Known-vulnerable dependencies in:${vulnerable}. Bump them, or accept the advisory above with the reason it does not apply."
+            echo "::error::Known-vulnerable dependencies in:${vulnerable}. Bump them, or accept the advisory in this step's comment with the reason it does not apply."
             exit 1
           fi
