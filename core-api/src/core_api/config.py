@@ -485,11 +485,12 @@ class Settings(BaseSettings):
     # paths are behaviourally identical (the engine delegates to the same
     # detector); the flag exists so the old arch can be retired later.
     contradiction_engine_enabled: bool = False
-    # A55 1d — when True, the detector additionally writes a memory_conflicts
-    # classification record for each confirmed conflict (via the resolver).
-    # Additive: it never changes the status/supersedes effect, so retrieval is
-    # unaffected. Default False; enable to start populating conflict records.
-    contradiction_write_conflict_record: bool = False
+    # A55 1d — write a memory_conflicts classification record for every
+    # confirmed conflict. Every detector demotion must be reviewable; otherwise
+    # an edge-linked loser can disappear from recall without a conflict record.
+    # Tenants may explicitly opt out, but the safe default is to keep the audit
+    # trail enabled.
+    contradiction_write_conflict_record: bool = True
     # A58 — Path D (basis invalidation) in SHADOW mode: after Path A, one
     # bridge LLM call proposes <=3 other predicates of the same subject whose
     # practical basis the new memory may have broken; <=2 invalidation-judge
