@@ -10,7 +10,8 @@
   "files": [
     "index.js",
     "index.d.ts",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "dependencies": {
     "@caura/client": "^1.0.1"

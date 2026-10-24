@@ -307,6 +307,74 @@ def test_npm_client_tag_package_agreement_rejects_an_unknown_brand(
     )
 
 
+def _published_package_directories() -> list[str]:
+    """Every ``clients/`` directory holding a package manifest, read from disk.
+
+    Derived rather than listed, so a new client package is covered the moment
+    it lands. ``collaboration`` is a uv workspace root that publishes nothing
+    itself; its four members ship LICENSE and NOTICE, which
+    ``clients/collaboration/scripts/verify_dist.py`` checks in every built
+    wheel before a release.
+    """
+    return sorted(
+        manifest.parent.name
+        for pattern in ("*/pyproject.toml", "*/package.json")
+        for manifest in CLIENTS.glob(pattern)
+        if manifest.parent.name != "collaboration"
+    )
+
+
+@pytest.mark.unit
+def test_the_published_package_scan_finds_every_known_package() -> None:
+    """An empty or narrowed glob would make the license checks below vacuous."""
+    known = {*PY_DISTS, *PY_SHELLS, *NPM_DISTS, "npm-caura-client", "npm-caura-sdk"}
+    assert known <= set(_published_package_directories())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("directory", _published_package_directories())
+def test_every_published_package_ships_the_license_text(directory: str) -> None:
+    """Apache-2.0 4(a): whoever receives a copy of the work receives the License.
+
+    Each package declares Apache-2.0, and the repo-root LICENSE is part of no
+    distributed artifact, so each package directory carries its own copy (#969).
+    """
+    license_file = CLIENTS / directory / "LICENSE"
+    assert license_file.is_file(), f"clients/{directory} ships no LICENSE"
+    assert license_file.read_text() == (REPO_ROOT / "LICENSE").read_text(), (
+        f"clients/{directory}/LICENSE is not the repo's Apache-2.0 text"
+    )
+    if (CLIENTS / directory / "package.json").is_file():
+        assert "LICENSE" in _package_json(directory)["files"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("directory", sorted({*PY_DISTS, *PY_SHELLS}))
+def test_every_python_wheel_carries_the_license(directory: str, tmp_path: Path) -> None:
+    """The file on disk is only half of it: the wheel has to pick it up."""
+    source_copy = tmp_path / directory
+    wheel_dir = tmp_path / "wheel"
+    shutil.copytree(
+        CLIENTS / directory,
+        source_copy,
+        ignore=shutil.ignore_patterns("*.egg-info", "build", "dist"),
+    )
+    wheel_dir.mkdir()
+    result = subprocess.run(
+        ["uv", "build", "--wheel", str(source_copy), "--out-dir", str(wheel_dir)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    (wheel,) = wheel_dir.glob("*.whl")
+    with zipfile.ZipFile(wheel) as archive:
+        names = archive.namelist()
+        (metadata,) = [n for n in names if n.endswith(".dist-info/METADATA")]
+        assert "License-File: LICENSE" in archive.read(metadata).decode()
+        assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names), names
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "directory", sorted({*PY_DISTS, *PY_SHELLS, *NPM_DISTS} - {"typescript", "python"})
