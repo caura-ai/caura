@@ -1183,6 +1183,53 @@ async def test_report_recalled_in_window_empty_corpus_is_null(client):
     assert q["recalled_in_window_pct"] is None, q
 
 
+async def test_report_recalled_in_window_absent_when_storage_predates_it(
+    client, monkeypatch
+):
+    """A core-storage-api that predates ``corpus_total`` (a rollback, or mixed
+    on-prem versions) is not an empty corpus. The three whole-corpus keys are
+    left out, so a client falls back to the period's own figure rather than
+    say there are no durable memories (Prism App Review v2 N128)."""
+    tag = _uid()
+    tenant_id, headers = get_test_auth(f"rep-riw-old-{tag}")
+    fleet, a1 = f"rep-fleet-{tag}", f"rep-a1-{tag}"
+    await _register(tenant_id, fleet, a1)
+    await _seed(client, headers, tenant_id, fleet, a1, "decision", 2)
+
+    sc = get_storage_client()
+    real_quality_metrics = sc.memory_quality_metrics
+
+    async def older_storage(data):
+        result = await real_quality_metrics(data)
+        return {
+            k: v
+            for k, v in result.items()
+            if k not in ("corpus_total", "recalled_in_window")
+        }
+
+    monkeypatch.setattr(sc, "memory_quality_metrics", older_storage)
+    resp = await client.get(
+        "/api/v1/reports",
+        params={
+            "tenant_id": tenant_id,
+            "period": "week",
+            "destination": "internal_group",
+            "agent_id": a1,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    q = resp.json()["quality"]
+    for key in (
+        "recalled_in_window_pct",
+        "recalled_in_window_count",
+        "durable_corpus_total",
+    ):
+        assert key not in q, q
+    # The period's own figure is still there to fall back on.
+    assert q["never_recalled_pct"] == 100.0, q
+
+
 async def test_report_org_scope_requires_cross_tenant_key(client):
     """scope=org without a cross-tenant read credential → 403 (home-only key can't widen)."""
     tag = _uid()

@@ -238,7 +238,8 @@ async def get_report(
       durable corpus in scope, any creation date, the share recalled during
       the period (``last_recalled_at`` inside it). The corpus is what search
       can return: ``outdated`` rows (superseded, expired, retracted) are left
-      out of both counts.
+      out of both counts. All three are absent when core-storage-api predates
+      them.
 
     Recalls are counted only for searches made with an agent identity.
     """
@@ -633,12 +634,22 @@ async def get_report(
         quality = {
             # Over durable memories created in the window (see above).
             "never_recalled_pct": round(100.0 * (q_total - q_reused) / q_total, 1) if q_total else 0.0,
-            # Over the whole durable corpus; null when there is no corpus.
-            "recalled_in_window_pct": (
-                round(100.0 * recalled_in_window / corpus_total, 1) if corpus_total else None
+            # Over the whole durable corpus; null when there is no corpus. Left
+            # out when storage predates ``corpus_total`` (a rollback, or mixed
+            # on-prem versions): read as 0 it would say the corpus is empty,
+            # and without the keys a client falls back to never_recalled_pct
+            # (Prism App Review v2 N128).
+            **(
+                {
+                    "recalled_in_window_pct": (
+                        round(100.0 * recalled_in_window / corpus_total, 1) if corpus_total else None
+                    ),
+                    "recalled_in_window_count": recalled_in_window,
+                    "durable_corpus_total": corpus_total,
+                }
+                if "corpus_total" in qm
+                else {}
             ),
-            "recalled_in_window_count": recalled_in_window,
-            "durable_corpus_total": corpus_total,
             "recall_concentration_pct": round(100.0 * top6 / q_recalls, 1) if q_recalls else 0.0,
             "recall_concentration_top6": top6,
             "total_recalls": q_recalls,
