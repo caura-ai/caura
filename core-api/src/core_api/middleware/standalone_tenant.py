@@ -1,8 +1,10 @@
 """ASGI middleware that injects tenant_id into requests when running in standalone mode."""
 
 import json
-import re
 from urllib.parse import parse_qs, urlencode
+
+from fastapi.routing import iter_route_contexts
+from starlette.routing import WebSocketRoute
 
 from core_api.standalone import get_standalone_tenant_id
 
@@ -112,67 +114,91 @@ def _body_model_accepts_tenant_id(scope) -> bool:
     the historical behaviour. The only case that changes is the one we can
     prove is wrong: a resolved body schema with no ``tenant_id`` property.
 
-    Reads ``app.openapi()`` rather than walking ``app.router.routes``, for the
-    reason spelled out in ``app.py``'s timeout-opt-out guard: FastAPI 0.137
-    mounts prefixed routers as an opaque ``_IncludedRouter`` with no public
-    ``.routes``, so a walk sees 30 top-level entries instead of the ~91 real
-    paths and would silently conclude "no match → inject" for every router-
-    mounted endpoint. The schema is the stable public surface, it is already
-    built and cached at import time by that same guard, and this result is
-    computed once per app and memoised.
+    Which route the request will hit is decided the way the router decides it:
+    the first route, in registration order, whose own compiled pattern matches
+    the path and whose methods include the request's (#1028). The OpenAPI path
+    templates cannot answer that, because a template has lost its converters —
+    ``{slug:path}`` renders as ``{slug}``. Read one segment per placeholder, a
+    template misses the skills-inbox actions whenever the slug carries a slash,
+    which every Forge and agent candidate's does; read across slashes, it claims
+    paths that an ordinary route registered earlier actually serves, and would
+    withhold ``tenant_id`` from a body that requires it.
+
+    The routes come from ``fastapi.routing.iter_route_contexts``, the public
+    walk ``app.openapi()`` itself builds the schema from, so the table sees
+    every route the router tries, prefixed and in its order, without touching
+    the ``_IncludedRouter`` internals that ``app.py``'s timeout-opt-out guard
+    declines to depend on. The body schemas still come from ``app.openapi()``,
+    keyed by each route's ``path_format``; a route the schema hides has none to
+    read, so it keeps the historical injection. Both are fixed after startup,
+    so the table is computed once per app and memoised.
     """
     app = scope.get("app")
     if app is None:
         return True
-    skip = _no_tenant_id_body_routes(app)
-    if skip is None:
+    routes = _route_table(app)
+    if routes is None:
         return True
-    method = scope.get("method", "").lower()
+    method = scope.get("method", "").upper()
     path = scope.get("path", "")
-    return not any(methods and method in methods and pattern.match(path) for pattern, methods in skip)
+    for pattern, methods, no_tenant_id_methods in routes:
+        if (methods is None or method in methods) and pattern.match(path):
+            return method not in no_tenant_id_methods
+    return True
 
 
-# ``id(app)`` -> tuple of (compiled path regex, frozenset of lowercase methods)
-# for the operations whose JSON body schema has no ``tenant_id`` property.
-# Memoised because it is derived from a schema that cannot change after
-# startup; keyed by app identity so a test that builds a second app is correct
-# rather than merely fast.
-_SKIP_CACHE: dict[int, tuple | None] = {}
+# ``id(app)`` -> tuple, in routing order, of (compiled path regex, frozenset of
+# uppercase methods or None for "any", frozenset of the methods whose JSON body
+# schema has no ``tenant_id`` property). Memoised because it is derived from
+# routes and a schema that cannot change after startup; keyed by app identity
+# so a test that builds a second app is correct rather than merely fast.
+_ROUTE_CACHE: dict[int, tuple | None] = {}
 
 
-def _no_tenant_id_body_routes(app) -> tuple | None:
-    cached = _SKIP_CACHE.get(id(app))
-    if cached is not None or id(app) in _SKIP_CACHE:
+def _route_table(app) -> tuple | None:
+    cached = _ROUTE_CACHE.get(id(app))
+    if cached is not None or id(app) in _ROUTE_CACHE:
         return cached
     try:
-        schema = app.openapi()
-        components = schema.get("components", {}).get("schemas", {})
+        no_tenant_id = _no_tenant_id_body_operations(app)
         entries = []
-        for raw_path, path_item in schema.get("paths", {}).items():
-            methods = set()
-            for method, operation in path_item.items():
-                if method.lower() not in ("post", "put", "patch"):
-                    continue
-                body_schema = (
-                    operation.get("requestBody", {})
-                    .get("content", {})
-                    .get("application/json", {})
-                    .get("schema")
-                )
-                if not isinstance(body_schema, dict):
-                    continue  # no JSON body declared → nothing to contradict
-                resolved = _resolve_schema(body_schema, components)
-                if resolved is None or "properties" not in resolved:
-                    continue  # free-form (``body: dict``) → historical behaviour
-                if "tenant_id" not in resolved["properties"]:
-                    methods.add(method.lower())
-            if methods:
-                entries.append((_path_template_to_regex(raw_path), frozenset(methods)))
+        for route in iter_route_contexts(app.routes):
+            if isinstance(route.original_route, WebSocketRoute):
+                continue  # never matches an HTTP request, so never shadows one
+            pattern = getattr(route, "path_regex", None)
+            if pattern is None:
+                continue
+            # A ``Mount`` declares no methods; the router hands it every one.
+            methods = frozenset(m.upper() for m in route.methods) if route.methods else None
+            skip = frozenset(m for m in methods or () if (route.path_format, m.lower()) in no_tenant_id)
+            entries.append((pattern, methods, skip))
         result: tuple | None = tuple(entries)
     except Exception:  # pragma: no cover — never break requests over this
         result = None
-    _SKIP_CACHE[id(app)] = result
+    _ROUTE_CACHE[id(app)] = result
     return result
+
+
+def _no_tenant_id_body_operations(app) -> set[tuple[str, str]]:
+    """``(OpenAPI path, lowercase method)`` for each body schema with no ``tenant_id``."""
+    schema = app.openapi()
+    components = schema.get("components", {}).get("schemas", {})
+    operations = set()
+    for raw_path, path_item in schema.get("paths", {}).items():
+        for method, operation in path_item.items():
+            if method.lower() not in ("post", "put", "patch"):
+                continue
+            body_schema = (
+                operation.get("requestBody", {}).get("content", {}).get("application/json", {}).get("schema")
+            )
+            if not isinstance(body_schema, dict):
+                continue  # no JSON body declared → nothing to contradict
+            resolved = _resolve_schema(body_schema, components)
+            if resolved is None or "properties" not in resolved:
+                continue  # free-form (``body: dict``) → historical behaviour
+            if "tenant_id" not in resolved["properties"]:
+                operations.add((raw_path, method.lower()))
+    return operations
 
 
 def _resolve_schema(node: dict, components: dict) -> dict | None:
@@ -191,13 +217,6 @@ def _resolve_schema(node: dict, components: dict) -> dict | None:
         if key in node:
             return None
     return node
-
-
-def _path_template_to_regex(template: str):
-    """``/api/v1/memories/{memory_id}`` -> a pattern matching one concrete path."""
-    parts = re.split(r"(\{[^/}]*\})", template)
-    pattern = "".join("[^/]+" if p.startswith("{") and p.endswith("}") else re.escape(p) for p in parts)
-    return re.compile(f"^{pattern}$")
 
 
 async def _read_body(receive) -> bytes:

@@ -34,6 +34,8 @@ from core_api import errors
 from core_api.app import http_exception_handler as _http_exception_handler
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients import storage_client
+from core_api.middleware import standalone_tenant
+from core_api.middleware.standalone_tenant import StandaloneTenantMiddleware
 from core_api.routes import skills_inbox as si
 from core_api.services.forge.sentinel_scan import ScanFinding, ScanResult
 
@@ -290,9 +292,15 @@ def make_client(
     capabilities: set[str] | None = None,
     is_demo: bool = False,
     user_id: str | None = None,
+    # Mount ``StandaloneTenantMiddleware`` in front of the router, as a
+    # standalone deployment does (#1028). It injects nothing unless the test
+    # also patches ``get_standalone_tenant_id``.
+    standalone: bool = False,
 ) -> AsyncClient:
     app = FastAPI()
     app.include_router(si.router, prefix="/api/v1")
+    if standalone:
+        app.add_middleware(StandaloneTenantMiddleware)
     # C32 — register the app's real HTTPException handler. Without it a bare
     # ``FastAPI()`` serialises ``HTTPException.detail`` verbatim, so a
     # ``coded_detail`` dict reaches the assertion as a dict and the test is
@@ -329,6 +337,31 @@ _ACTIONS = [
     ("quarantine", {"reason": "r"}),
     ("reject", {"reason": "r"}),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Standalone deployments (#1028)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("action", "body"), [(a, b) for a, b in _ACTIONS if b is not None]
+)
+async def test_standalone_mode_leaves_a_slash_slug_action_body_alone(
+    monkeypatch, storage, settings, side_effects, action, body
+):
+    """Every Forge and agent candidate's slug carries a slash (``forge/<name>``,
+    ``agent/<name>``), and these three action bodies forbid unknown fields.
+    Standalone mode injected ``tenant_id`` into them anyway, because its guard
+    could not see that a ``{slug:path}`` route takes none, so the action
+    answered 422 ``extra_forbidden`` on ``body.tenant_id``.
+    """
+    monkeypatch.setattr(standalone_tenant, "get_standalone_tenant_id", lambda: TENANT)
+    storage.seed(forge_doc())
+    async with make_client(standalone=True) as client:
+        r = await client.post(f"{BASE}/{SLUG}/{action}", json=body)
+    assert r.status_code == 200, r.text
+    assert r.json()["slug"] == SLUG
 
 
 # ---------------------------------------------------------------------------
