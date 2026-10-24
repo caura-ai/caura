@@ -48,6 +48,7 @@ PUBLIC_TEXT_FILES = (
 DENIED_PUBLIC_PATTERNS = {
     r"87\.5\s*%": "87.5% is not an approved Caura LoCoMo result",
     r"87\.27\s*%": "87.27% is a withheld full-context control",
+    r"77\.9\s*%": "77.9% is withheld pending benchmark-owner confirmation",
     r"77\.6\s*%": "77.6% is the stale April LoCoMo result",
     r"96\.6\s*%": "96.6% is a withdrawn LoCoMo token-savings claim",
     r"23\s*(?:ms|milliseconds)\s*p50": "23 ms p50 latency is withheld",
@@ -63,7 +64,6 @@ DENIED_PUBLIC_PATTERNS = {
 # inside generated blocks. This prevents a registry update from leaving a
 # manually duplicated, now-stale value elsewhere in README/docs.
 GOVERNED_CURRENT_PATTERNS = {
-    r"77\.9\s*%": "LoCoMo accuracy",
     r"92\.2\s*%": "LongMemEval reference-judge accuracy",
     r"90\.2\s*%": "LongMemEval secondary-judge accuracy",
     r"79\.2\s*%": "LongMemEval context-only savings",
@@ -326,7 +326,9 @@ def render_public_block(registry: dict[str, Any], *, relative_prefix: str = "") 
     )
     lines = [BEGIN]
     lines.extend(
-        f"- **{label}:** {_approved(claims, claim_id)}" for label, claim_id in rows
+        f"- **{label}:** {_approved(claims, claim_id)}"
+        for label, claim_id in rows
+        if claims[claim_id]["status"] == "active"
     )
     lines.extend(
         [

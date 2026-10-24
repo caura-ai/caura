@@ -128,11 +128,11 @@ def test_active_percentage_must_appear_in_approved_wording() -> None:
     claim = next(
         item
         for item in broken["claims"]
-        if item["id"] == "locomo_caura_retrieval_accuracy_2026_09"
+        if item["id"] == "longmemeval_reference_accuracy_2026_09_15"
     )
     claim["approved_wording"] = "Caura passed the documented evaluation."
 
-    with pytest.raises(ValueError, match=r"approved_wording must include 77\.9%"):
+    with pytest.raises(ValueError, match=r"approved_wording must include 92\.2%"):
         _validate(broken)
 
 
@@ -199,9 +199,9 @@ def test_active_methodology_url_must_pin_code_commit() -> None:
     claim = next(
         item
         for item in broken["claims"]
-        if item["id"] == "locomo_caura_retrieval_accuracy_2026_09"
+        if item["id"] == "longmemeval_reference_accuracy_2026_09_15"
     )
-    claim["methodology_url"] = "https://github.com/caura-ai/yanki-locomo/README.md"
+    claim["methodology_url"] = "https://github.com/caura-ai/yanki-longmemeval/README.md"
 
     with pytest.raises(ValueError, match="methodology_url must pin code_commit"):
         _validate(broken)
@@ -211,7 +211,7 @@ def test_registry_updated_at_covers_all_claim_metadata() -> None:
     broken = copy.deepcopy(_registry())
     broken["updated_at"] = "2026-10-05"
 
-    with pytest.raises(ValueError, match="predates claim metadata dated 2026-10-06"):
+    with pytest.raises(ValueError, match="predates claim metadata dated 2026-10-19"):
         _validate(broken)
 
 
@@ -253,7 +253,16 @@ def test_future_dates_are_rejected(date_field: str) -> None:
 def test_generated_blocks_contain_only_active_approved_wording() -> None:
     registry = _registry()
     expected = SCRIPT_API["expected_files"](registry)
-    inactive_values = ("87.27%", "96.6%", "23 ms", "27 ms", "300+", "26,500+", "1,372")
+    inactive_values = (
+        "77.9%",
+        "87.27%",
+        "96.6%",
+        "23 ms",
+        "27 ms",
+        "300+",
+        "26,500+",
+        "1,372",
+    )
 
     for path in (
         ROOT / "README.md",
@@ -268,7 +277,6 @@ def test_generated_blocks_contain_only_active_approved_wording() -> None:
     block = SCRIPT_API["render_public_block"](registry)
     claims = {claim["id"]: claim for claim in registry["claims"]}
     approved_ids = (
-        "locomo_caura_retrieval_accuracy_2026_09",
         "longmemeval_reference_accuracy_2026_09_15",
         "longmemeval_secondary_accuracy_2026_09_15",
         "longmemeval_token_savings_2026_09_15",
@@ -276,6 +284,20 @@ def test_generated_blocks_contain_only_active_approved_wording() -> None:
     for claim_id in approved_ids:
         assert claims[claim_id]["status"] == "active"
         assert claims[claim_id]["approved_wording"] in block
+
+
+def test_locomo_retrieval_result_stays_withheld_until_owner_confirmation() -> None:
+    claim = next(
+        item
+        for item in _registry()["claims"]
+        if item["id"] == "locomo_caura_retrieval_accuracy_2026_09"
+    )
+
+    assert claim["status"] == "withheld"
+    assert claim["approved_wording"] is None
+    assert "benchmark-owner confirmation" in claim["evidence_gap"].lower()
+    assert "benchmark-owner confirmation" in claim["withholding"]["reason"]
+    assert "77.9%" not in SCRIPT_API["render_public_block"](_registry())
 
 
 def test_full_context_baseline_stays_withheld_until_owner_approval() -> None:
@@ -317,6 +339,7 @@ def test_article_only_latency_claim_stays_withheld() -> None:
     [
         "Caura scored 87.5% on LoCoMo.",
         "The full-context control scored 87.27%.",
+        "Caura scored 77.9% on LoCoMo.",
         "Caura scored 77.6% on LoCoMo.",
         "Caura saved 96.6% of tokens.",
         "Search returns in 23 ms p50.",

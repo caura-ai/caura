@@ -1,18 +1,18 @@
 {
   "$schema": "./claims.schema.json",
   "registry_version": 1,
-  "updated_at": "2026-10-15",
+  "updated_at": "2026-10-19",
   "claims": [
     {
       "id": "locomo_caura_retrieval_accuracy_2026_09",
       "title": "Caura retrieval-augmented LoCoMo accuracy",
-      "status": "active",
+      "status": "withheld",
       "role": "headline",
       "metric": "accuracy",
       "benchmark": "LoCoMo",
       "measurement_at": "2026-09-22",
-      "last_verified_at": "2026-10-05",
-      "approved_wording": "Caura scored 77.9% (1,199/1,540) under its documented LoCoMo semantic-judge protocol using the retrieval-augmented agentic-v1 pipeline.",
+      "last_verified_at": "2026-10-19",
+      "approved_wording": null,
       "scope": "All 1,540 scored LoCoMo questions in categories 1-4.",
       "evaluation": {
         "population": "LoCoMo category 1-4 questions",
@@ -50,7 +50,7 @@
       "methodology_url": "https://github.com/caura-ai/yanki-locomo/blob/254737614b228ecc4a272e4f17dbb9197c5fb146/README.md",
       "raw_result_url": null,
       "reproducible_harness_url": "https://github.com/caura-ai/yanki-locomo/tree/254737614b228ecc4a272e4f17dbb9197c5fb146",
-      "evidence_gap": null,
+      "evidence_gap": "Benchmark-owner confirmation of the last LoCoMo trial is pending, and the repository does not currently publish the full question-level result artifact.",
       "measurements": [
         { "label": "LLM-judge semantic accuracy", "value": 77.9, "unit": "percent", "display": "77.9%", "measurement_at": "2026-09-22" }
       ],
@@ -66,7 +66,10 @@
         "The pinned methodology and harness repository, caura-ai/yanki-locomo, is not public yet, so its links resolve only for Caura members."
       ],
       "withdrawal": null,
-      "withholding": null
+      "withholding": {
+        "at": "2026-10-19",
+        "reason": "Temporarily withheld pending benchmark-owner confirmation of the last LoCoMo trial and the confirmed result report."
+      }
     },
     {
       "id": "locomo_full_context_control_2026_09",
