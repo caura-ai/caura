@@ -28,7 +28,7 @@ arXiv:2605.06527 — steps 6-8 of its pipeline) onto caura's existing
 (``path_d_shadow``) so the Type-II base rate and precision can be measured
 on real corpora before any status write ships (that build is A59, including
 the ``unsafe`` status / migration 037). Flag: ``settings.basis_invalidation_shadow``
-(default off), mirroring ``contradiction_write_conflict_record``.
+(default off). Conflict-record persistence is independently enabled by default.
 
 Failure isolation: the single entry point swallows everything — Path D can
 never affect Path A's outcome or the write path.

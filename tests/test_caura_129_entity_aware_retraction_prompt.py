@@ -112,6 +112,27 @@ def test_prompt_frames_resolved_entities_as_authoritative():
     assert "resolved entities" in text
 
 
+
+def test_prompt_says_shared_entity_overlap_is_not_conflict_evidence():
+    from core_api.services.contradiction_detector import (
+        BATCH_CONTRADICTION_PROMPT,
+        BATCH_ENTITY_AWARE_CONTRADICTION_PROMPT,
+        CONTRADICTION_PROMPT,
+        ENTITY_AWARE_CONTRADICTION_PROMPT,
+    )
+
+    for prompt in (
+        CONTRADICTION_PROMPT,
+        BATCH_CONTRADICTION_PROMPT,
+        ENTITY_AWARE_CONTRADICTION_PROMPT,
+        BATCH_ENTITY_AWARE_CONTRADICTION_PROMPT,
+    ):
+        text = prompt.lower()
+        assert "shared entity links" in text or "shared entities" in text
+        assert "not evidence of contradiction" in text
+        assert "different attributes" in text
+
+
 def test_prompt_decides_same_subject_mechanically_on_entity_id():
     """CAURA-133 — the priya silence on dev v2.12.1 showed that the
     original ``If the subjects are the SAME canonical entity row, treat

@@ -308,7 +308,8 @@ def _unlinked_pairs(
     ``expect_supersedes_null`` CAS to a concurrent writer and kept the pointer it
     had, so the loser it was to point at may have none. Such a pair is recorded
     too; if the other writer wired the same pair, the record repeats the edge, as
-    every record does with ``contradiction_write_conflict_record`` on.
+    every record does while ``contradiction_write_conflict_record`` is enabled
+    (the default); with an explicit opt-out, only unlinked losers are recorded.
     """
     flushed = flushed or {}
     lost = {*(flushed.get("skipped") or []), *(flushed.get("edge_skipped") or [])}
@@ -328,9 +329,9 @@ async def _record_conflicts(
 ) -> None:
     """Write the ``memory_conflicts`` records a detection loop owes, after its flush.
 
-    A55 1d records every confirmed pair when ``contradiction_write_conflict_record``
-    is on (off by default). An unlinked loser (M-34) is recorded whatever the flag:
-    its record is all that still names the memory that replaced it. ``unlinked`` is
+    A55 1d records every confirmed pair by default. An explicit opt-out retains
+    the older behaviour of recording only unlinked losers (M-34), because their
+    record is all that still names the memory that replaced them. ``unlinked`` is
     drawn from ``pairs``, so no pair is written twice.
     """
     to_record = pairs if settings.contradiction_write_conflict_record else unlinked
@@ -1082,6 +1083,22 @@ async def _detect(
                 "agent_id": new_memory.get("agent_id"),
             }
         )
+        # CAURA-2129 — apply the same structured slot guard before the
+        # vector-similarity judge. Similarity can retrieve topical neighbours;
+        # distinct known single-value attributes are not contradiction pairs.
+        if candidates:
+            before_slot_gate = len(candidates)
+            candidates = [
+                c for c in candidates if not _known_single_value_slots_disjoint(new_memory, c)
+            ]
+            if len(candidates) != before_slot_gate:
+                logger.info(
+                    "PATH_A_SEMANTIC slot_preflight_dropped memory=%s dropped=%d "
+                    "remaining=%d reason=distinct_known_single_value_predicates",
+                    memory_id,
+                    before_slot_gate - len(candidates),
+                    len(candidates),
+                )
         # CAURA-132 diag — Path A semantic invocation + candidate count.
         # Symmetric to PATH_C_DETECTION entry log; lets us tell apart
         # "Path A ran but found no semantic candidates" from "Path A
@@ -1252,8 +1269,16 @@ CONTRADICTION_PROMPT = """\
 You are a contradiction detector for a business memory system.
 
 Two statements contradict ONLY IF they make incompatible claims about the
-SAME real-world subject. Different subjects -> NOT a contradiction, even if
-the predicates look opposite or the statements look semantically similar.
+SAME real-world subject AND the same attribute/slot. Different subjects or
+different attributes -> NOT a contradiction, even if the predicates look
+opposite or the statements look semantically similar.
+
+IMPORTANT CANDIDATE-RETRIEVAL RULE: shared entity links and semantic similarity
+are only reasons to consider a pair, NOT evidence of contradiction. Common
+people, product/codebase names, and generic terms such as "PR", "merge", or
+"worktree" often appear in unrelated work notes. Do not infer a shared subject
+or attribute from topical overlap alone. If the claims concern different work
+items, tickets, incidents, events, or attributes, return contradicts=false.
 
 Statement A (NEW): {new_content}
 
@@ -1379,9 +1404,16 @@ the second-pass judgement after entity resolution has already linked
 both statements to their canonical entities.
 
 Two statements contradict ONLY IF they make incompatible claims about
-the SAME real-world subject. Different subjects -> NOT a contradiction,
-even if the predicates look opposite or the statements look semantically
-similar.
+THE SAME real-world subject AND the same attribute/slot. Different subjects
+or different attributes -> NOT a contradiction, even if the predicates look
+opposite or the statements look semantically similar.
+
+IMPORTANT CANDIDATE-RETRIEVAL RULE: shared entity links are only a reason to
+consider a pair, NOT evidence of contradiction. Common people, product/codebase
+names, and generic terms such as "PR", "merge", or "worktree" often appear in
+unrelated work notes. Do not infer a shared subject or attribute from topical
+or entity overlap alone. If the claims concern different work items, tickets,
+incidents, events, or attributes, return contradicts=false.
 
 CRITICAL: Resolved entities below are AUTHORITATIVE. The subject of
 each statement has ALREADY been resolved to a specific entity row
@@ -1748,8 +1780,14 @@ Judge EACH candidate INDEPENDENTLY against the NEW statement — one candidate's
 verdict must NOT influence another's.
 
 Two statements contradict ONLY IF they make incompatible claims about the SAME
-real-world subject. Different subjects -> NOT a contradiction, even if the
-predicates look opposite.
+real-world subject AND the same attribute/slot. Different subjects or different
+attributes -> NOT a contradiction, even if the predicates look opposite.
+
+IMPORTANT CANDIDATE-RETRIEVAL RULE: semantic similarity and shared entities are
+only reasons to consider a pair, NOT evidence of contradiction. Common people,
+product/codebase names, and generic terms such as "PR", "merge", or "worktree"
+often appear in unrelated work notes. If the claims concern different work
+items, tickets, incidents, events, or attributes, return contradicts=false.
 
 NEW statement:
 {new_content}
@@ -1774,10 +1812,11 @@ For EACH candidate index decide, applying the rules in order:
    window / whole vs part / context; both hold); "same_name_distinct_subject"
    (same surface name, plausibly different instances); "conditional_unrealized"
    (one is hypothetical/irrealis); "event_restatement" (same event restated).
-3. contradicts (bool): true ONLY when same_subject is true AND
-   non_conflict_reason is "none" AND the two assert mutually exclusive states in
-   the same time frame. Updates / corrections about the same subject ARE
-   contradictions ("X lives in Tel Aviv" vs "X lives in Haifa").
+3. contradicts (bool): true ONLY when same_subject is true, the claims concern
+   the same attribute/slot, non_conflict_reason is "none", and the two assert
+   mutually exclusive states in the same time frame. Updates / corrections about
+   the same subject and same slot ARE contradictions. Topical overlap or a shared
+   entity name is never enough.
 
 Reply with ONLY a JSON object, no prose, no markdown fences, with exactly two
 keys. EVERY candidate index from 0 to N-1 must appear in exactly one of them:
@@ -2149,6 +2188,28 @@ def _normalize_subject_name(name: str | None) -> str:
     return " ".join(name.lower().split())
 
 
+def _known_single_value_slots_disjoint(new_memory: dict, candidate: dict) -> bool:
+    """Return True when two rows carry known, incompatible single-value slots.
+
+    Path C retrieves by *any* shared entity, so it can hand the judge two notes
+    about the same codebase/person that describe unrelated attributes. When both
+    rows have structured, recognised single-value predicates, there is no reason
+    to ask an LLM to override that slot distinction. Alias clusters are compared
+    so equivalent spellings (``status`` / ``current_status``) remain compatible.
+    Missing or unrecognised predicates fail open to preserve semantic coverage.
+    """
+    new_predicate = new_memory.get("predicate")
+    old_predicate = candidate.get("predicate")
+    if not new_predicate or not old_predicate:
+        return False
+
+    new_cluster = predicate_cluster(str(new_predicate))
+    old_cluster = predicate_cluster(str(old_predicate))
+    new_is_known = bool(new_cluster & SINGLE_VALUE_PREDICATES)
+    old_is_known = bool(old_cluster & SINGLE_VALUE_PREDICATES)
+    return new_is_known and old_is_known and not bool(new_cluster & old_cluster)
+
+
 def _extract_subject_canonical_identity(
     entities: list[dict],
 ) -> tuple[str, str, str] | None:
@@ -2186,6 +2247,32 @@ def _extract_subject_canonical_identity(
                 continue
             return (str(name), str(etype), str(entity_id))
     return None
+
+
+def _has_subject_or_slot_evidence(
+    new_memory: dict,
+    candidate: dict,
+    new_entities: list[dict] | None = None,
+    candidate_entities: list[dict] | None = None,
+) -> bool:
+    """Require matching subject identity before a Path C verdict can demote a row.
+
+    Path C's entity-overlap query is deliberately broad. Shared object entities
+    and matching predicates can occur in unrelated work items, so neither is
+    sufficient evidence that two memories describe the same subject. When the
+    subject IDs are unavailable, require matching resolved subject identities
+    from entity context; otherwise reject the destructive verdict.
+    """
+    new_subject_id = new_memory.get("subject_entity_id")
+    candidate_subject_id = candidate.get("subject_entity_id")
+    if new_subject_id and candidate_subject_id and str(new_subject_id) == str(candidate_subject_id):
+        return True
+    if new_entities and candidate_entities:
+        new_identity = _extract_subject_canonical_identity(new_entities)
+        candidate_identity = _extract_subject_canonical_identity(candidate_entities)
+        if new_identity and candidate_identity and new_identity[2] == candidate_identity[2]:
+            return True
+    return False
 
 
 _ENTITY_CTX_FANOUT_LIMIT = 8
@@ -2491,6 +2578,14 @@ A NEW statement is compared against several EXISTING candidate statements.
 Judge EACH candidate INDEPENDENTLY against the NEW statement — one
 candidate's verdict must NOT influence another's.
 
+IMPORTANT CANDIDATE-RETRIEVAL RULE: shared entity links are only a reason to
+consider a pair, NOT evidence of contradiction. Common people, product/codebase
+names, and generic terms such as "PR", "merge", or "worktree" often appear in
+unrelated work notes. Do not infer a shared subject or attribute from topical
+or entity overlap alone. Different attributes are not contradictions. If the
+claims concern different work items, tickets, incidents, events, or attributes,
+return contradicts=false.
+
 CRITICAL: the RESOLVED ENTITIES blocks are AUTHORITATIVE. The subject of
 each statement has ALREADY been resolved to a specific entity row
 (identified by ``entity_id``) by upstream entity extraction. Do NOT re-do
@@ -2529,10 +2624,11 @@ For EACH candidate index decide, applying the rules in order:
    both hold); "same_name_distinct_subject" (surface names match, resolved
    entities differ); "conditional_unrealized" (one is hypothetical /
    irrealis); "event_restatement" (same event restated).
-3. contradicts (bool): true ONLY when same_subject is true AND
-   non_conflict_reason is "none" AND the two assert mutually exclusive
-   states in the same time frame. Corrections / updates about the same
-   subject ARE contradictions.
+3. contradicts (bool): true ONLY when same_subject is true, the claims
+   concern the same attribute/slot, non_conflict_reason is "none", and the
+   two assert mutually exclusive states in the same time frame. Corrections /
+   updates about the same subject and same slot ARE contradictions. Topical
+   overlap, a shared entity, or a shared product/person name is never enough.
 Reply with ONLY a JSON object, no prose, no markdown fences, with exactly two
 keys. EVERY candidate index from 0 to N-1 must appear in exactly one of them:
 - "clean": array of every candidate index (integers) where contradicts is false.
@@ -3290,6 +3386,27 @@ async def detect_contradictions_by_entities_async(
             concluded = True
             return
 
+        # CAURA-2129 — entity overlap is a retrieval signal, not a conflict
+        # relation. If both memories have recognised single-value predicates
+        # for different slots, do not let a shared person/product/codebase or
+        # generic entity send the pair to the probabilistic judge.
+        slot_mismatches = [
+            c for c in candidates if _known_single_value_slots_disjoint(new_memory, c)
+        ]
+        if slot_mismatches:
+            rejected_ids = {str(c.get("id")) for c in slot_mismatches}
+            candidates = [c for c in candidates if str(c.get("id")) not in rejected_ids]
+            logger.info(
+                "PATH_C_DETECTION slot_preflight_dropped memory=%s dropped=%d "
+                "remaining=%d reason=distinct_known_single_value_predicates",
+                memory_id,
+                len(slot_mismatches),
+                len(candidates),
+            )
+        if not candidates:
+            concluded = True
+            return
+
         # A1 #17 — subject preflight. Drop candidates whose
         # ``subject_entity_id`` is non-NULL AND differs from the new
         # memory's: they're definitionally about different subjects,
@@ -3684,6 +3801,22 @@ async def detect_contradictions_by_entities_async(
                 verdict,
                 _confidence,
             )
+            if verdict and not _has_subject_or_slot_evidence(
+                new_memory,
+                candidate,
+                new_ctx if contexts_fetched else None,
+                contexts.get(str(candidate.get("id")), []) if contexts_fetched else None,
+            ):
+                # CAURA-2129 — an entity-overlap candidate with neither a
+                # resolved shared subject nor a recognised shared slot cannot
+                # demote a memory, even if the judge over-calls a contradiction.
+                logger.info(
+                    "PATH_C_DETECTION verdict_rejected memory=%s candidate=%s "
+                    "reason=no_subject_or_slot_evidence",
+                    memory_id,
+                    candidate.get("id"),
+                )
+                continue
             if verdict:
                 # CAURA-125 — symmetric attribution; see RDF path for
                 # the rationale. ``new_memory`` carries at most one
