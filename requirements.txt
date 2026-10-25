@@ -69,7 +69,7 @@ markdown-it-py>=4.2.0,<5
 tiktoken>=0.10,<1
 pysbd>=0.3.4,<1
 # The insights discover mode.
-numpy>=2.0,<3
+numpy>=2.5.4,<3
 # FastAPI's UploadFile and Form support.
 python-multipart>=0.0.32,<1
 # SQLAlchemy[asyncio]'s greenlet, capped as the services cap it.
