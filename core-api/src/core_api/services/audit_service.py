@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID, uuid4
 
+from core_api.audit_actor import audit_principal
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.audit_queue import get_audit_queue
 
@@ -65,6 +66,29 @@ async def log_action(
     keep the fire-and-forget enqueue (drop-with-counter on overflow), so
     the high-volume hot path is unaffected.
     """
+    # Copy before projecting: callers may still need their original detail.
+    detail = dict(detail or {})
+    detail.pop("query_summary", None)
+    if "changes" in detail:
+        changes = dict(detail["changes"])
+        content = changes.pop("content", None)
+        if content is not None:
+            detail["content_changed"] = True
+            # This boundary has no PII verdict. Drop raw content without
+            # deriving a permanent digest from unchecked caller input.
+        detail["changes"] = changes
+    principal = audit_principal.get()
+    if principal is not None:
+        claimed_agent_id = agent_id
+        agent_id = principal.get("agent_id")
+        if claimed_agent_id != agent_id:
+            detail["claimed_agent_id"] = claimed_agent_id
+        detail.update({k: v for k, v in principal.items() if k != "agent_id"})
+    else:
+        # Non-request jobs retain their resource attribution and identify the
+        # actor class explicitly, rather than claiming a credential.
+        detail.setdefault("credential_id", None)
+        detail.setdefault("credential_kind", "system")
     payload = {
         "tenant_id": tenant_id,
         "agent_id": agent_id,
@@ -149,6 +173,5 @@ async def log_cross_tenant_read(
                 "home_tenant_id": home_tenant_id,
                 "home_agent_id": home_agent_id,
                 "result_count_from_this_tenant": ((result_count_by_tenant or {}).get(src)),
-                "query_summary": query_summary,
             },
         )

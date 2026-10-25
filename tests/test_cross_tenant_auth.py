@@ -242,7 +242,7 @@ async def test_log_cross_tenant_read_emits_per_source_tenant():
         assert first_call["detail"]["home_tenant_id"] == "home"
         assert first_call["detail"]["home_agent_id"] == "agent-1"
         assert first_call["detail"]["result_count_from_this_tenant"] == 3
-        assert first_call["detail"]["query_summary"] == "how do we handle X"
+        assert "query_summary" not in first_call["detail"]
         second_call = mock.await_args_list[1].kwargs
         assert second_call["tenant_id"] == "src-b"
         assert second_call["detail"]["result_count_from_this_tenant"] == 0

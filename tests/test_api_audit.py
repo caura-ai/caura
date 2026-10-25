@@ -3,6 +3,8 @@
 All tests use httpx AsyncClient against the real FastAPI app with PostgreSQL.
 """
 
+from uuid import uuid4
+
 import pytest
 
 from tests.conftest import get_test_auth
@@ -94,8 +96,8 @@ async def test_multiple_writes_multiple_entries(client):
 # ── 3. Audit contains agent_id ──
 
 
-async def test_audit_contains_agent_id(client):
-    """Write memory with agent_id, audit entry has the same agent_id."""
+async def test_audit_records_named_agent_as_claim(client):
+    """A tenant credential names a memory owner without authenticating as it."""
     tenant_id, headers = get_test_auth()
     tag = _uid()
     agent_id = f"my-agent-{tag}"
@@ -125,42 +127,43 @@ async def test_audit_contains_agent_id(client):
         e for e in entries if "create" in e["action"] and e["resource_type"] == "memory"
     ]
     assert len(create_entries) >= 1
-    matching = [e for e in create_entries if e.get("agent_id") == agent_id]
-    assert len(matching) >= 1, (
-        f"Expected agent_id='{agent_id}' in audit, got agents: {[e.get('agent_id') for e in create_entries]}"
-    )
+    matching = [
+        e
+        for e in create_entries
+        if (e.get("detail") or {}).get("claimed_agent_id") == agent_id
+    ]
+    assert matching
+    assert all(e["agent_id"] is None for e in matching)
 
 
 # ── 4. Filters and the keyset cursor (governance build plan row p1.40) ──
 
 
-async def _write(
-    client, tenant_id: str, headers: dict, agent_id: str, tag: str, n: int
-) -> list[str]:
+async def _write(sc, tenant_id: str, agent_id: str, n: int) -> list[str]:
+    # Seed authenticated-agent events directly so pagination tests do not
+    # depend on a tenant credential's caller-supplied owner becoming an actor.
     ids = []
-    for i in range(n):
-        resp = await client.post(
-            "/api/v1/memories",
-            json={
+    for _ in range(n):
+        mid = str(uuid4())
+        await sc.create_audit_log(
+            {
                 "tenant_id": tenant_id,
                 "agent_id": agent_id,
-                "fleet_id": f"audit-fleet-{tag}",
-                "memory_type": "fact",
-                "content": f"Audit paging test {i} [{tag}]",
-            },
-            headers=headers,
+                "action": "create",
+                "resource_type": "memory",
+                "resource_id": mid,
+            }
         )
-        assert resp.status_code == 201, resp.text
-        ids.append(resp.json()["id"])
+        ids.append(mid)
     return ids
 
 
-async def test_agent_and_resource_filters_narrow_the_log(client):
+async def test_agent_and_resource_filters_narrow_the_log(client, sc):
     tenant_id, headers = get_test_auth()
     tag = _uid()
     mine, other = f"filter-agent-{tag}", f"filter-other-{tag}"
-    (memory_id,) = await _write(client, tenant_id, headers, mine, tag, 1)
-    await _write(client, tenant_id, headers, other, tag, 2)
+    (memory_id,) = await _write(sc, tenant_id, mine, 1)
+    await _write(sc, tenant_id, other, 2)
 
     async def _get(**filters):
         params = {"tenant_id": tenant_id, **filters}
@@ -177,11 +180,11 @@ async def test_agent_and_resource_filters_narrow_the_log(client):
         assert {e["action"] for e in narrowed} == {action}
 
 
-async def test_the_cursor_pages_through_the_route_without_gaps(client):
+async def test_the_cursor_pages_through_the_route_without_gaps(client, sc):
     tenant_id, headers = get_test_auth()
     tag = _uid()
     agent = f"page-agent-{tag}"
-    await _write(client, tenant_id, headers, agent, tag, 4)
+    await _write(sc, tenant_id, agent, 4)
 
     scope = {"tenant_id": tenant_id, "agent_id": agent}
     resp = await client.get("/api/v1/audit-log", params=scope, headers=headers)

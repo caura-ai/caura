@@ -23,6 +23,11 @@ can then tell "not known" (``None``) from "written before these fields
 existed" (key absent).
 """
 
+from contextvars import ContextVar
+
+# Request identity is captured before handlers resolve caller-supplied agent names.
+audit_principal: ContextVar[dict | None] = ContextVar("audit_principal", default=None)
+
 # ``X-Caura-Surface``, lowercased: the form raw ASGI headers carry, and one
 # Starlette's case-insensitive ``request.headers`` also matches.
 SURFACE_HEADER = "x-caura-surface"
@@ -57,3 +62,10 @@ def parse_surface(raw: str | None) -> str | None:
 def actor_detail(user_id: str | None, surface: str | None) -> dict[str, str | None]:
     """The ``user_id`` and ``surface`` keys for an audit row's ``detail``."""
     return {"user_id": user_id, "surface": surface}
+
+
+def audit_credential_kind(raw: str | None, *, is_admin: bool = False, is_person: bool = False) -> str:
+    """Canonical audit label from verified credential facts on either transport."""
+    return (raw or "").strip().lower() or (
+        "admin_key" if is_admin else "person" if is_person else "tenant_key"
+    )

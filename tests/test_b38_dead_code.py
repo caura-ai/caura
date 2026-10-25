@@ -204,6 +204,8 @@ _BREAKS = {
 
 
 def _audit_client(auth: AuthContext, verdict: dict, monkeypatch) -> AsyncClient:
+    monkeypatch.setattr(audit, "_verification_next_allowed", {})
+    monkeypatch.setattr(audit, "_verification_inflight", set())
     storage = MagicMock()
     storage.verify_audit_chain = AsyncMock(return_value=verdict)
     monkeypatch.setattr(audit, "get_storage_client", lambda: storage)

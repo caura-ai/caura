@@ -4629,14 +4629,6 @@ async def update_memory(
                     ),
                 )
 
-        changes["content"] = {
-            "old": mem.get("content", "")[:200],
-            # A flagged edit keeps its text, which contains detected PII; the
-            # audit chain refuses raw PII, and the whole update record was then
-            # dropped. Record that it changed, not what it says.
-            "new": "[content flagged as PII; not recorded]" if pii_flags else data.content[:200],
-        }
-
     # Build patch dict for storage client
     patch: dict = {}
     if content_changed:
@@ -4983,11 +4975,15 @@ async def update_memory(
         try:
             await _hooks.audit_log(
                 tenant_id=tenant_id,
-                agent_id=agent_id or mem.get("agent_id"),
+                agent_id=agent_id,
                 action="update",
                 resource_type="memory",
                 resource_id=memory_id,
-                detail={"changes": changes, "content_changed": content_changed},
+                detail={
+                    "changes": changes,
+                    "content_changed": content_changed,
+                    "owner_agent_id": mem.get("agent_id"),
+                },
             )
         except Exception:
             logger.warning("Audit hook failed (non-critical)", exc_info=True)
@@ -4998,10 +4994,11 @@ async def update_memory(
             try:
                 await _hooks.audit_log(
                     tenant_id=tenant_id,
-                    agent_id=child.get("agent_id"),
+                    agent_id=agent_id,
                     action="soft_delete",
                     resource_type="memory",
                     resource_id=child["id"],
+                    detail={"owner_agent_id": child.get("agent_id")},
                 )
             except Exception:
                 logger.warning("Audit hook failed (non-critical)", exc_info=True)

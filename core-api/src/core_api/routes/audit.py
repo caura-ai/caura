@@ -1,15 +1,26 @@
+import asyncio
+import hashlib
+import time
 from datetime import datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 
+from core_api import errors
 from core_api.auth import AuthContext, get_auth_context
+from core_api.cache import _get_redis, cache_delete_if
 from core_api.clients.storage_client import get_storage_client
+from core_api.config import settings
 from core_api.constants import AUDIT_NEXT_CURSOR_HEADER, DEFAULT_AUDIT_LIMIT, MAX_AUDIT_LIMIT
+from core_api.errors import coded_detail
 from core_api.pagination import decode_cursor, encode_cursor
 
 router = APIRouter(tags=["Admin"])
+
+# Standalone protection; Redis adds a shared lease and budget across replicas.
+_verification_inflight: set[str] = set()
+_verification_next_allowed: dict[str, float] = {}
 
 
 class AuditEntry(BaseModel):
@@ -89,6 +100,14 @@ async def list_audit_log(
     auth: AuthContext = Depends(get_auth_context),
 ):
     auth.enforce_tenant(tenant_id)
+    auth.enforce_not_agent_credential("read the audit log")
+    if auth.is_install_credential:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                errors.AUTH_AGENT_CREDENTIAL_FORBIDDEN, "Install credentials cannot read the audit log"
+            ),
+        )
     cursor_ts: datetime | None = None
     cursor_id: UUID | None = None
     if cursor:
@@ -127,7 +146,7 @@ async def list_audit_log(
 async def verify_audit_log(
     tenant_id: str = Query(...),
     # The storage verifier's bound: one window is read into memory.
-    limit: int = Query(default=100_000, ge=1, le=500_000),
+    limit: int = Query(default=50_000, ge=1, le=50_000),
     start_seq: int = Query(
         default=1, ge=1, description="Where the window starts: the previous window's ``next_seq``."
     ),
@@ -143,4 +162,61 @@ async def verify_audit_log(
     auth.enforce_tenant(tenant_id)
     auth.enforce_not_agent_credential("verify the audit chain")
     auth.enforce_not_org_member("verify the audit chain")
-    return await get_storage_client().verify_audit_chain(tenant_id, limit=limit, start_seq=start_seq)
+    if auth.is_install_credential:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                errors.AUTH_AGENT_CREDENTIAL_FORBIDDEN, "Install credentials cannot verify the audit chain"
+            ),
+        )
+    if tenant_id in _verification_inflight:
+        raise HTTPException(status_code=409, detail="Audit verification already running")
+    now = time.monotonic()
+    for key, deadline in list(_verification_next_allowed.items()):
+        if deadline <= now:
+            _verification_next_allowed.pop(key, None)
+    if tenant_id in _verification_next_allowed:
+        raise HTTPException(
+            status_code=429, detail="Audit verification rate limit", headers={"Retry-After": "60"}
+        )
+    _verification_inflight.add(tenant_id)
+    lease_key = "audit-verify:lease:" + hashlib.sha256(tenant_id.encode()).hexdigest()
+    token = str(uuid4())
+    acquired = False
+    try:
+        if settings.redis_url:
+            redis = await _get_redis()
+            if redis is None:
+                raise HTTPException(status_code=503, detail="Audit verification admission unavailable")
+            try:
+                acquired = bool(await redis.set(lease_key, token, nx=True, ex=180))
+                if not acquired:
+                    raise HTTPException(status_code=409, detail="Audit verification already running")
+                if not await redis.set(lease_key + ":budget", token, nx=True, ex=60):
+                    raise HTTPException(
+                        status_code=429, detail="Audit verification rate limit", headers={"Retry-After": "60"}
+                    )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503, detail="Audit verification admission unavailable"
+                ) from exc
+        _verification_next_allowed[tenant_id] = now + 60
+        try:
+            return await asyncio.wait_for(
+                get_storage_client().verify_audit_chain(tenant_id, limit=limit, start_seq=start_seq),
+                timeout=120,
+            )
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            # Storage may still be finishing a cancelled HTTP request. Let the
+            # shared lease expire rather than admitting a new verifier at once.
+            acquired = False
+            _verification_next_allowed[tenant_id] = time.monotonic() + 180
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise HTTPException(status_code=504, detail="Audit verification timed out")
+    finally:
+        if acquired:
+            await cache_delete_if(lease_key, token)
+        _verification_inflight.discard(tenant_id)

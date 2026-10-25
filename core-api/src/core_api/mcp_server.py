@@ -36,7 +36,7 @@ from core_api.agent_ids import (
     effective_read_agent_id,
     effective_write_agent_id,
 )
-from core_api.audit_actor import MCP_SURFACE, actor_detail
+from core_api.audit_actor import MCP_SURFACE, actor_detail, audit_credential_kind, audit_principal
 from core_api.auth import get_admin_key
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.constants import (
@@ -435,9 +435,11 @@ class MCPAuthMiddleware:
             shared_key = settings.memclaw_api_key  # legacy-name-ok: rule 3 dual-read field
 
             via_gateway = False
+            is_admin_credential = False
             if admin_key and api_key and _hmac.compare_digest(api_key, admin_key):
                 # ── Path 1: admin API key (REST ``auth.py`` Path 1) ──
                 _tenant_id_var.set(_ADMIN)
+                is_admin_credential = True
             elif shared_key:
                 # ── Path 2: CAURA_API_KEY shared gate (REST Path 2) ──
                 #
@@ -630,7 +632,31 @@ class MCPAuthMiddleware:
             # one on this response. See ``core_api.session_context``.
             from core_api.session_context import run_with_mcp_session
 
-            await run_with_mcp_session(scope, receive, send, self.app)
+            principal_token = audit_principal.set(
+                {
+                    **_audit_actor(),
+                    "agent_id": _get_agent_id() if via_gateway and settings.gateway_shared_secret else None,
+                    "credential_id": (headers.get(b"x-caura-credential-id", b"").decode() or None)
+                    if via_gateway and settings.gateway_shared_secret
+                    else None,
+                    "credential_kind": audit_credential_kind(
+                        _credential_kind_var.get()
+                        if via_gateway and settings.gateway_shared_secret
+                        else None,
+                        is_admin=is_admin_credential,
+                        is_person=bool(
+                            via_gateway
+                            and _get_agent_id() is None
+                            and headers.get(b"x-org-role", b"").decode().strip().lower()
+                            in {"admin", "member"}
+                        ),
+                    ),
+                }
+            )
+            try:
+                await run_with_mcp_session(scope, receive, send, self.app)
+            finally:
+                audit_principal.reset(principal_token)
             return
 
         await self.app(scope, receive, send)

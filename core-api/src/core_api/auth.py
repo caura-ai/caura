@@ -6,7 +6,13 @@ from fastapi.security import APIKeyHeader
 
 from core_api import errors
 from core_api.agent_ids import AgentIdentity, canonical_service_agent_id
-from core_api.audit_actor import SURFACE_HEADER, actor_detail, parse_surface
+from core_api.audit_actor import (
+    SURFACE_HEADER,
+    actor_detail,
+    audit_credential_kind,
+    audit_principal,
+    parse_surface,
+)
 from core_api.config import settings
 from core_api.constants import API_KEY_HEADER
 from core_api.errors import coded_detail
@@ -641,6 +647,19 @@ async def get_auth_context(
     # On every path, unlike the identity headers: it names the client, not the
     # caller, and nothing may trust it. An unknown value is dropped, never 4xx.
     ctx.surface = parse_surface(request.headers.get(SURFACE_HEADER))
+    verified_gateway = bool(settings.gateway_shared_secret and ctx.agent_id_verified)
+    audit_principal.set(
+        {
+            **ctx.audit_actor(),
+            "agent_id": ctx.agent_id if verified_gateway else None,
+            "credential_id": request.headers.get("x-caura-credential-id") if verified_gateway else None,
+            "credential_kind": audit_credential_kind(
+                request.headers.get("x-caura-credential-kind") if verified_gateway else None,
+                is_admin=ctx.is_admin,
+                is_person=ctx.is_person,
+            ),
+        }
+    )
     # Anonymous heartbeat: count the client family (by User-Agent prefix)
     # once the caller is authenticated. One prefix match, and a no-op unless
     # the heartbeat policy enabled the counter at boot — the raw header is
