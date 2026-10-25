@@ -113,8 +113,8 @@ async def client(_ensure_schema) -> AsyncClient:
 # ---------------------------------------------------------------------------
 
 
-async def plan_with_only_index(stmt, *indexes: str) -> str:
-    """``EXPLAIN`` of ``stmt`` on an empty copy of ``memories`` with ``indexes`` as its only indexes.
+async def plan_with_only_index(stmt, *indexes: str, table: str = "memories") -> str:
+    """``EXPLAIN`` of ``stmt`` on an empty copy of ``table`` with ``indexes`` as its only indexes.
 
     A plan test asks whether a migration's index CAN serve a statement. On the
     real table most predicates have several indexes that could serve them, and
@@ -126,7 +126,7 @@ async def plan_with_only_index(stmt, *indexes: str) -> str:
 
     The copy gets each index's definition from the migrated schema, so a missing
     index still fails here. ``pg_temp`` comes first on the search path, so the
-    statement's ``memories`` is the copy. With no other index and sequential
+    statement's ``table`` is the copy. With no other index and sequential
     scans off, the plan names an index exactly when it can serve the statement.
     More than one index is for a statement only a combination can serve, such as
     an OR with one index per arm. The copy goes with the transaction.
@@ -140,21 +140,21 @@ async def plan_with_only_index(stmt, *indexes: str) -> str:
             found = await conn.execute(
                 text(
                     "SELECT indexdef FROM pg_indexes "
-                    "WHERE schemaname = 'public' AND tablename = 'memories' AND indexname = :name"
+                    "WHERE schemaname = 'public' AND tablename = :table AND indexname = :name"
                 ),
-                {"name": index},
+                {"table": table, "name": index},
             )
             definition = found.scalar_one_or_none()
-            assert definition is not None, f"{index} is not on the migrated memories table"
-            assert " ON public.memories " in definition, definition
+            assert definition is not None, f"{index} is not on the migrated {table} table"
+            assert f" ON public.{table} " in definition, definition
             definitions.append(definition)
-        await conn.execute(text("CREATE TEMP TABLE memories (LIKE public.memories) ON COMMIT DROP"))
+        await conn.execute(text(f"CREATE TEMP TABLE {table} (LIKE public.{table}) ON COMMIT DROP"))
         for definition in definitions:
-            await conn.execute(text(definition.replace(" ON public.memories ", " ON pg_temp.memories ", 1)))
+            await conn.execute(text(definition.replace(f" ON public.{table} ", f" ON pg_temp.{table} ", 1)))
         shadowed = await conn.execute(
-            text("SELECT 'memories'::regclass::oid = 'pg_temp.memories'::regclass::oid")
+            text(f"SELECT '{table}'::regclass::oid = 'pg_temp.{table}'::regclass::oid")
         )
-        assert shadowed.scalar_one(), "memories does not resolve to the copy"
+        assert shadowed.scalar_one(), f"{table} does not resolve to the copy"
         await conn.execute(text("SET LOCAL enable_seqscan = off"))
         return "\n".join(row[0] for row in (await conn.execute(text(f"EXPLAIN {sql}"))).all())
 

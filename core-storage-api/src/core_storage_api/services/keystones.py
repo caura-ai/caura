@@ -100,6 +100,39 @@ def _resolution(
     return or_(*predicates), order
 
 
+def _list_statement(*, tenant_id: str, fleet_id: str | None, agent_id: str | None) -> Select[Any]:
+    """The live keystones ``(fleet_id, agent_id)`` gets, heaviest first, one past the cap.
+
+    Index-served without an index of its own: ``tenant_id`` and ``collection``
+    are equalities ``ix_documents_tenant_collection`` (migration 001) answers,
+    so only the tenant's own keystones are read, and the ``LIMIT`` makes the
+    sort a top-N heapsort that holds one row past the cap. The functional index
+    #112 once proposed for the weight sort would not have been used anyway: the
+    statement binds each JSON key as a parameter and casts the weight to FLOAT,
+    so no ``((data->>'weight')::int)`` expression in an index matches it. An
+    ordered index would shorten the read only for a tenant with very many
+    keystones, and would need literal keys and the exact sort expression.
+    ``core-storage-api/tests/test_keystone_list_plan.py`` pins the index this
+    relies on.
+    """
+    where, order = _resolution(
+        _Keystone(Document.doc_id, Document.fleet_id, Document.data, Document.updated_at),
+        fleet_id=fleet_id,
+        agent_id=agent_id,
+    )
+    return (
+        select(Document)
+        .where(
+            Document.tenant_id == tenant_id,
+            Document.collection == KEYSTONE_COLLECTION,
+            where,
+        )
+        .order_by(*order)
+        # Over-fetch by one so the router can detect truncation.
+        .limit(KEYSTONE_MAX_RESULTS + 1)
+    )
+
+
 async def list_keystones(
     *,
     tenant_id: str,
@@ -117,28 +150,7 @@ async def list_keystones(
     cap was hit (e.g. via an ``X-Truncated`` response header) — silent
     truncation hides governance gaps.
     """
-    where, order = _resolution(
-        _Keystone(Document.doc_id, Document.fleet_id, Document.data, Document.updated_at),
-        fleet_id=fleet_id,
-        agent_id=agent_id,
-    )
-    stmt = (
-        select(Document)
-        .where(
-            Document.tenant_id == tenant_id,
-            Document.collection == KEYSTONE_COLLECTION,
-            where,
-        )
-        # NOTE: data["weight"] sort requires a functional index:
-        #   CREATE INDEX idx_keystones_weight ON documents
-        #   (tenant_id, ((data->>'weight')::int) DESC, updated_at DESC)
-        #   WHERE collection = '_keystones';
-        # Without it this is a sequential scan. Track in #112.
-        .order_by(*order)
-        # Over-fetch by one so the router can detect truncation.
-        .limit(KEYSTONE_MAX_RESULTS + 1)
-    )
-
+    stmt = _list_statement(tenant_id=tenant_id, fleet_id=fleet_id, agent_id=agent_id)
     async with get_read_session() as session:
         result = await session.execute(stmt)
         rows = list(result.scalars().all())
