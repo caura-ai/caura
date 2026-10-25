@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.25.4](https://github.com/caura-ai/caura/compare/plugin-v2.25.3...plugin-v2.25.4) (2026-10-25)
+
+
+### Documentation
+
+* **skill:** name the read-scope default per tool and transport ([#2185](https://github.com/caura-ai/caura/issues/2185)) ([87643c7](https://github.com/caura-ai/caura/commit/87643c72f7e4820c1378093aecb83102983ff6e6))
+
 ## [2.25.3](https://github.com/caura-ai/caura/compare/plugin-v2.25.2...plugin-v2.25.3) (2026-10-21)
 
 

@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.36.3](https://github.com/caura-ai/caura/compare/backend-v3.36.2...backend-v3.36.3) (2026-10-25)
+
+
+### Bug Fixes
+
+* **core-api:** standalone body guard picks the route the router picks ([#2183](https://github.com/caura-ai/caura/issues/2183)) ([9698a95](https://github.com/caura-ai/caura/commit/9698a9590bc490418ebebdcf3a39845a9c2760ec))
+* **packaging:** ship LICENSE in every remaining client package ([#2184](https://github.com/caura-ai/caura/issues/2184)) ([c05afe6](https://github.com/caura-ai/caura/commit/c05afe6b9b07606e3d57922cd12100ea7b466d8d))
+
+
+### Documentation
+
+* **skill:** name the read-scope default per tool and transport ([#2185](https://github.com/caura-ai/caura/issues/2185)) ([87643c7](https://github.com/caura-ai/caura/commit/87643c72f7e4820c1378093aecb83102983ff6e6))
+
 ## [3.36.2](https://github.com/caura-ai/caura/compare/backend-v3.36.1...backend-v3.36.2) (2026-10-24)
 
 
