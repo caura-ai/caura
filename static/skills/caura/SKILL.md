@@ -198,9 +198,14 @@ than silently retrying at a narrower scope.
 
 **Visibility (on write)** decides who can see a memory: `scope_agent` (private)
 · `scope_team` *(default — your fleet)* · `scope_org` (all fleets in tenant).
-**Scope (on read):** `agent` *(default)* · `fleet` · `all`. For
-`caura_list` / `caura_stats`, your own fleet needs trust 1; another fleet or
-`all` needs trust 2. `caura_insights` requires trust 2 for `fleet` or `all`.
+**Scope (on read):** `agent` · `fleet` · `all`. What an omitted `scope` means
+depends on the tool and the transport, so pass it when the trust boundary
+matters: `caura_insights` and `caura_evolve` default to `agent` on every
+surface, but `caura_list` / `caura_stats` default to `agent` only on MCP —
+over REST and the plugin, an omitted scope filters by `agent_id` with no trust
+gate. For `caura_list` / `caura_stats`, your own fleet needs trust 1; another
+fleet or `all` needs trust 2. `caura_insights` requires trust 2 for `fleet` or
+`all`.
 Prefer `scope_team` on write and `scope=agent` on read unless you need
 cross-agent context. *Naming caveat:* three different axes share the word
 `scope`, and the one place they collide is a single request. Writes take

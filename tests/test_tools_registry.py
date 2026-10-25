@@ -15,10 +15,13 @@ future refactors can't silently break it:
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.unit
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 EXPECTED_PLUGIN_EXPOSED = {
@@ -193,6 +196,72 @@ def test_query_param_scope_tools_do_not_claim_a_default():
             "omitted scope is not scope='agent' on the REST/plugin path. "
             "State the ladder per value and name the per-surface default."
         )
+
+
+# The installed skills: the direct-MCP adapters under ``static/`` and the
+# OpenClaw plugin's own copies, whose tools reach the REST path.
+_SKILLS_TEACHING_READ_SCOPE = sorted(
+    path
+    for pattern in ("static/skills/*/SKILL.md", "plugin/skills/*/SKILL.md")
+    for path in REPO_ROOT.glob(pattern)
+    if "**Scope (on read):**" in path.read_text(encoding="utf-8")
+)
+
+
+def _read_scope_paragraph(skill: Path) -> str:
+    text = skill.read_text(encoding="utf-8").replace("\r\n", "\n")
+    start = text.index("**Scope (on read):**")
+    end = text.find("\n\n", start)
+    return " ".join(text[start : end if end != -1 else len(text)].split())
+
+
+def test_the_skills_teaching_read_scope_are_found():
+    """An empty glob would make the skill check below pass vacuously."""
+    assert len(_SKILLS_TEACHING_READ_SCOPE) >= 2, _SKILLS_TEACHING_READ_SCOPE
+
+
+@pytest.mark.parametrize(
+    "skill",
+    _SKILLS_TEACHING_READ_SCOPE,
+    ids=lambda p: p.relative_to(REPO_ROOT).as_posix(),
+)
+def test_installed_skills_name_the_read_scope_default_per_transport(skill: Path):
+    """The skill is the prompt agent runtimes install, so it must not flatten
+    the transport-dependent default the registry states (#937).
+
+    ``test_query_param_scope_tools_do_not_claim_a_default`` fixed the registry
+    for ``caura_list`` / ``caura_stats``; the skills still said ``agent``
+    *(default)* for every read, which over REST and the plugin is false: an
+    omitted scope there filters by ``agent_id`` with no trust gate. Checked
+    against the registry's own wording, so the two cannot quietly diverge.
+    """
+    from core_api.tools import REGISTRY
+
+    paragraph = _read_scope_paragraph(skill)
+    assert "(default)" not in paragraph, (
+        f"{skill.relative_to(REPO_ROOT)}: the read-scope paragraph names a "
+        "single default, but an omitted scope means different things per "
+        f"transport: {paragraph}"
+    )
+    for name in ("caura_list", "caura_stats"):
+        assert "with no trust gate" in REGISTRY[name].description
+    assert "only on MCP" in paragraph, paragraph
+    assert "with no trust gate" in paragraph, paragraph
+
+
+def test_the_scope_defaults_the_skills_state_hold_on_every_surface():
+    """The skills call ``agent`` the default for ``caura_insights`` and
+    ``caura_evolve`` on every surface, which is true only while the MCP tool
+    and the REST body model both default it (#937).
+    """
+    from core_api import mcp_server
+    from core_api.routes.evolve import EvolveRequest
+    from core_api.routes.insights import InsightsRequest
+
+    for tool in (mcp_server.caura_insights, mcp_server.caura_evolve):
+        assert inspect.signature(tool).parameters["scope"].default == "agent"
+    for model in (InsightsRequest, EvolveRequest):
+        assert model.model_fields["scope"].default == "agent"
 
 
 def test_descriptions_no_leftover_tool_descriptions_import():
