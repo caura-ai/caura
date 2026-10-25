@@ -328,7 +328,13 @@ jobs:
       github.event_name == 'pull_request'
       && needs.pre-checks.result == 'success'
       && needs.pre-checks.outputs.skip != 'true'
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: on the 26.04 image the reviewer sandbox cannot
+    # start ("bwrap: setting up uid map: Permission denied" in
+    # install_review_sandbox.sh), so the job fails before any review. GitHub
+    # moves ubuntu-latest to 26.04 between 2026-10-19 and 2026-11-19, a few
+    # runners at a time, so this failed on some runs and not others. Move to
+    # 26.04 only with a sandbox setup shown to start there.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       pull-requests: write
@@ -379,7 +385,8 @@ jobs:
       github.event_name == 'issue_comment'
       && contains(github.event.comment.body, '@claude')
       && contains(fromJSON('["MEMBER", "OWNER"]'), github.event.comment.author_association)
-    runs-on: ubuntu-latest
+    # Pinned for the reviewer sandbox, as in claude-review above.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       pull-requests: write

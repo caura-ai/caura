@@ -550,7 +550,10 @@ jobs:
 
   tests:
     name: Root tests
-    runs-on: ubuntu-latest
+    # Pinned for the reviewer sandbox this job installs and
+    # test_review_credential_isolation.py runs: it cannot start on the 26.04
+    # image. See the claude-review job in claude_code_review.yml.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
