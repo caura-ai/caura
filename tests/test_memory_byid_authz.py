@@ -15,6 +15,7 @@ agent-facing MCP surface, and the REST endpoint.
 """
 
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -671,3 +672,494 @@ async def test_rest_delete_byid_agent_credential_cannot_spoof_via_param(
         f"/api/v1/memories/{mem_id}?tenant_id={tenant_id}&agent_id=admin-agent"
     )
     assert r.status_code == 403, r.text
+
+
+# ---------------------------------------------------------------------------
+# Install credentials: another install's agents' private rows stay private
+#
+# An install (broker) credential carries no agent identity. On shared rows it
+# keeps the tenant-wide reach its by-id calls have always had, since the broker
+# names no agent there. A ``scope_agent`` row, though, is private to its author,
+# so it opens to an install only when the install owns that author. And where
+# an install names an agent, that agent must be one its install owns, as every
+# broker write already requires.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def install_owners(monkeypatch):
+    """Run MCP calls as a gateway install credential over a fixed agent table.
+
+    ``_set(install_uuid, owners)``: ``owners`` maps each registered agent to the
+    install that owns it (None for an agent no install has claimed).
+    """
+    from core_api import mcp_server
+
+    def _set(install_uuid: str, owners: dict[str, str | None]):
+        mcp_server._via_gateway_var.set(True)
+        mcp_server._credential_kind_var.set("install_credential")
+        mcp_server._install_uuid_var.set(install_uuid)
+
+        async def _lookup(tenant_id, agent_id, *, read=True):
+            if agent_id not in owners:
+                return None
+            return {
+                "agent_id": agent_id,
+                "owner_install_uuid": owners[agent_id],
+                "fleet_id": "fleet-alpha",
+                "trust_level": 3,
+            }
+
+        monkeypatch.setattr(agent_service, "lookup_agent", _lookup)
+
+    return _set
+
+
+def _code(env) -> str | None:
+    """The envelope's error code, or None for a success (of any shape)."""
+    return (env.get("error") or {}).get("code") if isinstance(env, dict) else None
+
+
+def _private_row_of(author):
+    return _fake_read_row(
+        visibility="scope_agent", agent_id=author, fleet_id="fleet-alpha"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("install", "readable"), [("install-a", False), ("install-b", True)]
+)
+async def test_mcp_install_reads_a_private_row_only_of_an_agent_it_owns(
+    mcp_env, monkeypatch, install_owners, install, readable
+):
+    from core_api import mcp_server
+
+    install_owners(install, {"victim": "install-b"})
+    mid, mem = _private_row_of("victim")
+    stub_storage_client(monkeypatch, get_memory=mem)
+
+    env = parse_envelope(
+        await mcp_server.caura_manage(op="read", memory_id=str(mid), agent_id="mine")
+    )
+
+    if readable:
+        assert env["content"] == "cross-fleet secret"
+    else:
+        assert _code(env) == "NOT_FOUND"
+
+
+@pytest.mark.unit
+async def test_mcp_install_reads_a_shared_row_of_any_agent(
+    mcp_env, monkeypatch, install_owners
+):
+    from core_api import mcp_server
+
+    install_owners("install-a", {"victim": "install-b"})
+    mid, mem = _fake_read_row(
+        visibility="scope_team", agent_id="victim", fleet_id="fleet-alpha"
+    )
+    stub_storage_client(monkeypatch, get_memory=mem)
+
+    env = parse_envelope(
+        await mcp_server.caura_manage(op="read", memory_id=str(mid), agent_id="mine")
+    )
+
+    assert env["content"] == "cross-fleet secret"
+
+
+@pytest.mark.unit
+async def test_mcp_install_lineage_hides_another_installs_private_row(
+    mcp_env, monkeypatch, install_owners
+):
+    from core_api import mcp_server
+
+    install_owners("install-a", {"victim": "install-b"})
+    mid, mem = _private_row_of("victim")
+    stub_storage_client(
+        monkeypatch,
+        get_memory_contradictions={"memory": mem, "older": None, "supersessors": []},
+    )
+
+    env = parse_envelope(
+        await mcp_server.caura_manage(op="lineage", memory_id=str(mid), agent_id="mine")
+    )
+
+    assert _code(env) == "NOT_FOUND"
+
+
+@pytest.mark.unit
+async def test_mcp_install_lineage_drops_linked_private_rows_it_does_not_own(
+    mcp_env, monkeypatch, install_owners
+):
+    from core_api import mcp_server
+
+    install_owners("install-a", {"mine": "install-a", "victim": "install-b"})
+    mid, mem = _private_row_of("mine")
+    _, theirs = _private_row_of("victim")
+    _, own = _private_row_of("mine")
+    stub_storage_client(
+        monkeypatch,
+        get_memory_contradictions={
+            "memory": mem,
+            "older": None,
+            "supersessors": [theirs, own],
+        },
+    )
+
+    env = parse_envelope(
+        await mcp_server.caura_manage(op="lineage", memory_id=str(mid), agent_id="mine")
+    )
+
+    assert [row["id"] for row in env["supersessors"]] == [own["id"]]
+
+
+@pytest.mark.unit
+async def test_mcp_install_cannot_transition_another_installs_private_row(
+    mcp_env, monkeypatch, install_owners
+):
+    from core_api import mcp_server
+
+    install_owners("install-a", {"mine": "install-a", "victim": "install-b"})
+    mid, mem = _private_row_of("victim")
+    sc = stub_storage_client(monkeypatch, get_memory=mem, update_memory_status=None)
+    monkeypatch.setattr(mcp_server, "log_action", AsyncMock())
+
+    env = parse_envelope(
+        await mcp_server.caura_manage(
+            op="transition", memory_id=str(mid), status="archived", agent_id="mine"
+        )
+    )
+
+    assert _code(env) == "PERMISSION_DENIED"
+    sc.update_memory_status.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_mcp_install_cannot_delete_another_installs_private_row(
+    mcp_env, monkeypatch, install_owners
+):
+    from core_api import mcp_server
+
+    install_owners("install-a", {"mine": "install-a", "victim": "install-b"})
+    mid, mem = _private_row_of("victim")
+    stub_storage_client(monkeypatch, get_memory=mem)
+    soft_delete = AsyncMock()
+    monkeypatch.setattr(mcp_server, "soft_delete_memory", soft_delete)
+    monkeypatch.setattr(mcp_server, "log_action", AsyncMock())
+
+    env = parse_envelope(
+        await mcp_server.caura_manage(op="delete", memory_id=str(mid), agent_id="mine")
+    )
+
+    assert _code(env) == "PERMISSION_DENIED"
+    soft_delete.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("owner", ["install-b", None])
+async def test_mcp_install_cannot_update_as_an_agent_it_does_not_own(
+    mcp_env, monkeypatch, install_owners, owner
+):
+    from core_api import mcp_server
+
+    install_owners("install-a", {"victim": owner})
+    mid, mem = _private_row_of("victim")
+    stub_storage_client(monkeypatch, get_memory=mem)
+    update = AsyncMock()
+    monkeypatch.setattr(mcp_server, "update_memory", update)
+
+    env = parse_envelope(
+        await mcp_server.caura_manage(
+            op="update", memory_id=str(mid), content="rewritten", agent_id="victim"
+        )
+    )
+
+    assert _code(env) == "AGENT_IDENTITY_MISMATCH"
+    update.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("tool", "kwargs", "storage_call", "returns"),
+    [
+        ("caura_list", {"fleet_id": "fleet-alpha"}, "list_memories_by_filters", []),
+        ("caura_stats", {"fleet_id": "fleet-alpha"}, "memory_stats_breakdown", {}),
+        ("caura_keystones", {"fleet_id": "fleet-alpha"}, "list_keystones", ([], False)),
+    ],
+)
+async def test_mcp_install_cannot_read_as_an_agent_it_does_not_own(
+    mcp_env, monkeypatch, install_owners, tool, kwargs, storage_call, returns
+):
+    from core_api import mcp_server
+
+    install_owners("install-a", {"victim": "install-b"})
+    sc = stub_storage_client(monkeypatch, get_agent=None, **{storage_call: returns})
+
+    env = parse_envelope(await getattr(mcp_server, tool)(agent_id="victim", **kwargs))
+
+    getattr(sc, storage_call).assert_not_awaited()
+    assert _code(env) == "AGENT_IDENTITY_MISMATCH"
+
+
+@pytest.mark.unit
+async def test_mcp_install_cannot_recall_as_an_agent_it_does_not_own(
+    mcp_env, monkeypatch, install_owners
+):
+    from core_api import mcp_server
+
+    install_owners("install-a", {"victim": "install-b"})
+    stub_storage_client(monkeypatch, get_agent=None)
+    search = mcp_env["service"]("search_memories")
+    search.return_value = []
+
+    env = parse_envelope(
+        await mcp_server.caura_recall(query="secrets", agent_id="victim")
+    )
+
+    search.assert_not_called()
+    assert _code(env) == "AGENT_IDENTITY_MISMATCH"
+
+
+@pytest.mark.unit
+async def test_mcp_agent_credential_delete_still_needs_delete_trust(
+    mcp_env, monkeypatch, patch_lookup
+):
+    """An install credential is held to the row check alone; an agent
+    credential still clears ``enforce_delete`` first."""
+    from core_api import mcp_server
+
+    patch_lookup(fleet_id="fleet-alpha", trust_level=1)
+    mid, mem = _fake_read_row(
+        visibility="scope_team", agent_id="alice", fleet_id="fleet-alpha"
+    )
+    stub_storage_client(monkeypatch, get_memory=mem)
+    soft_delete = AsyncMock()
+    monkeypatch.setattr(mcp_server, "soft_delete_memory", soft_delete)
+    monkeypatch.setattr(mcp_server, "_get_agent_id", lambda: "alice")
+
+    env = parse_envelope(await mcp_server.caura_manage(op="delete", memory_id=str(mid)))
+
+    assert _code(env) == "AGENT_TRUST_TOO_LOW"
+    soft_delete.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_mcp_install_reads_as_an_agent_it_owns(
+    mcp_env, monkeypatch, install_owners
+):
+    from core_api import mcp_server
+
+    install_owners("install-a", {"mine": "install-a"})
+    sc = stub_storage_client(monkeypatch, list_memories_by_filters=[])
+
+    env = parse_envelope(await mcp_server.caura_list(agent_id="mine"))
+
+    assert "error" not in env
+    sc.list_memories_by_filters.assert_awaited_once()
+
+
+@pytest.fixture
+def as_install(monkeypatch):
+    """Authenticate REST calls as a gateway install credential: a tenant, an
+    install id, and no agent identity, as the gateway sends them."""
+    from core_api.app import app
+    from core_api.auth import AuthContext, get_auth_context
+    from core_api.tenant_context import set_current_tenant
+
+    def _install(tenant_id: str, install_uuid: str):
+        async def _dep():
+            set_current_tenant(tenant_id)
+            return AuthContext(
+                tenant_id=tenant_id,
+                agent_id=None,
+                is_install_credential=True,
+                install_uuid=install_uuid,
+                readable_tenant_ids=[tenant_id],
+            )
+
+        app.dependency_overrides[get_auth_context] = _dep
+
+    yield _install
+    from core_api.app import app as _app
+    from core_api.auth import get_auth_context as _gac
+
+    _app.dependency_overrides.pop(_gac, None)
+
+
+async def _install_private_row(client, *, visibility="scope_agent"):
+    """A row written by ``victim-…``, an agent ``install-b`` owns."""
+    from tests.conftest import get_test_auth
+
+    tenant_id, headers = get_test_auth()
+    victim = f"victim-{uuid.uuid4().hex[:8]}"
+    await agent_service.get_or_create_agent(
+        tenant_id, victim, owner_install_uuid="install-b"
+    )
+    mid = await _write(
+        client,
+        headers,
+        tenant_id,
+        agent_id=victim,
+        fleet_id=None,
+        visibility=visibility,
+    )
+    return tenant_id, headers, victim, mid
+
+
+@pytest.mark.integration
+async def test_rest_install_reads_a_private_row_only_of_an_agent_it_owns(
+    client, as_install
+):
+    tenant_id, _, _, mid = await _install_private_row(client)
+
+    as_install(tenant_id, "install-a")
+    resp = await client.get(f"/api/v1/memories/{mid}?tenant_id={tenant_id}")
+    assert resp.status_code == 404, resp.text
+    resp = await client.get(
+        f"/api/v1/memories/{mid}/contradictions?tenant_id={tenant_id}"
+    )
+    assert resp.status_code == 404, resp.text
+
+    as_install(tenant_id, "install-b")
+    resp = await client.get(f"/api/v1/memories/{mid}?tenant_id={tenant_id}")
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.integration
+async def test_rest_install_reads_a_shared_row_of_any_agent(client, as_install):
+    tenant_id, _, _, mid = await _install_private_row(client, visibility="scope_team")
+
+    as_install(tenant_id, "install-a")
+    resp = await client.get(f"/api/v1/memories/{mid}?tenant_id={tenant_id}")
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.integration
+async def test_rest_install_cannot_delete_another_installs_private_row(
+    client, as_install
+):
+    tenant_id, _, _, mid = await _install_private_row(client)
+
+    as_install(tenant_id, "install-a")
+    resp = await client.delete(f"/api/v1/memories/{mid}?tenant_id={tenant_id}")
+    assert resp.status_code == 403, resp.text
+
+    as_install(tenant_id, "install-b")
+    resp = await client.get(f"/api/v1/memories/{mid}?tenant_id={tenant_id}")
+    assert resp.status_code == 200, resp.text  # still there
+    resp = await client.delete(f"/api/v1/memories/{mid}?tenant_id={tenant_id}")
+    assert resp.status_code == 204, resp.text
+
+
+@pytest.mark.integration
+async def test_rest_install_cannot_rewrite_another_installs_private_row(
+    client, as_install
+):
+    tenant_id, _, victim, mid = await _install_private_row(client)
+
+    as_install(tenant_id, "install-a")
+    resp = await client.patch(
+        f"/api/v1/memories/{mid}?tenant_id={tenant_id}", json={"title": "rewritten"}
+    )
+    assert resp.status_code == 403, resp.text
+    resp = await client.patch(
+        f"/api/v1/memories/{mid}?tenant_id={tenant_id}&agent_id={victim}",
+        json={"title": "rewritten"},
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == "AGENT_IDENTITY_MISMATCH"
+    resp = await client.patch(
+        f"/api/v1/memories/{mid}/status?tenant_id={tenant_id}",
+        json={"status": "archived"},
+    )
+    assert resp.status_code == 403, resp.text
+
+    as_install(tenant_id, "install-b")
+    resp = await client.patch(
+        f"/api/v1/memories/{mid}?tenant_id={tenant_id}", json={"title": "rewritten"}
+    )
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "/api/v1/memories?tenant_id={t}&agent_id={a}", None),
+        ("GET", "/api/v1/memories/stats?tenant_id={t}&agent_id={a}", None),
+        ("GET", "/api/v1/memories/field?tenant_id={t}&agent_id={a}&field=title", None),
+        ("POST", "/api/v1/search", {"query": "row", "caller_agent_id": "{a}"}),
+        ("POST", "/api/v1/recall", {"query": "row", "caller_agent_id": "{a}"}),
+    ],
+)
+async def test_rest_install_cannot_read_as_an_agent_it_does_not_own(
+    client, as_install, method, path, body
+):
+    tenant_id, _, victim, _ = await _install_private_row(client)
+
+    as_install(tenant_id, "install-a")
+    url = path.format(t=tenant_id, a=victim)
+    if body is None:
+        resp = await client.request(method, url)
+    else:
+        payload = {k: v.format(a=victim) for k, v in body.items()}
+        resp = await client.request(
+            method, url, json={"tenant_id": tenant_id, **payload}
+        )
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == "AGENT_IDENTITY_MISMATCH"
+
+
+@pytest.mark.integration
+async def test_rest_install_lists_as_an_agent_it_owns(client, as_install):
+    tenant_id, _, victim, mid = await _install_private_row(client)
+
+    as_install(tenant_id, "install-b")
+    resp = await client.get(f"/api/v1/memories?tenant_id={tenant_id}&agent_id={victim}")
+
+    assert resp.status_code == 200, resp.text
+    assert mid in [row["id"] for row in resp.json()["items"]]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "/api/v1/memories?tenant_id={t}", None),
+        ("GET", "/api/v1/memories/stats?tenant_id={t}", None),
+        ("GET", "/api/v1/memories/field?tenant_id={t}&field=title", None),
+        ("POST", "/api/v1/search", {"query": "row"}),
+        ("POST", "/api/v1/recall", {"query": "row"}),
+    ],
+)
+async def test_rest_install_naming_no_agent_reads_no_private_rows(
+    client, as_install, method, path, body
+):
+    """How the broker reads: no agent named, so no visibility identity, and a
+    reader with none is entitled to no ``scope_agent`` row (storage's
+    ``_visibility_scope_clause``). The owning install naming its agent is the
+    control: the row is there to be found."""
+    tenant_id, _, victim, mid = await _install_private_row(client)
+
+    async def _read(install: str, agent: str | None):
+        as_install(tenant_id, install)
+        url = path.format(t=tenant_id) + (
+            f"&agent_id={agent}" if agent and body is None else ""
+        )
+        if body is None:
+            return await client.request(method, url)
+        named = {"caller_agent_id": agent} if agent else {}
+        return await client.request(
+            method, url, json={"tenant_id": tenant_id, **body, **named}
+        )
+
+    resp = await _read("install-a", None)
+    assert resp.status_code == 200, resp.text
+    assert mid not in resp.text
+    assert victim not in resp.text
+
+    resp = await _read("install-b", victim)
+    assert resp.status_code == 200, resp.text
+    assert victim in resp.text

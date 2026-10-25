@@ -756,3 +756,281 @@ async def test_hint_does_not_promise_a_retry_it_cannot_guarantee(mcp_env, monkey
         "to author a rule for yourself",
     ):
         assert imperative not in message, (imperative, message)
+
+
+# ---------------------------------------------------------------------------
+# Callers that name themselves: install credentials and asserted callers
+# ---------------------------------------------------------------------------
+#
+# An install credential carries no agent identity, so the agent it names in
+# ``caller_agent_id`` is a claim. It may act only as an agent its install owns,
+# as every other broker path requires. A caller that only asserts its identity
+# on the gateway (a tenant key) may still name itself, but not to author or
+# remove a tenant- or fleet-scoped rule.
+
+_RULE_ID = "11111111-1111-4111-8111-111111111111"
+
+
+def _as_install(monkeypatch, install_uuid: str, owners: dict[str, str | None]):
+    """Run the call as a gateway install credential.
+
+    ``owners`` maps each registered agent to the install that owns it (None for
+    an agent no install has claimed); every one of them is at trust 3.
+    """
+    from core_api.services import agent_service
+
+    mcp_server._via_gateway_var.set(True)
+    mcp_server._credential_kind_var.set("install_credential")
+    mcp_server._install_uuid_var.set(install_uuid)
+
+    async def _lookup(tenant_id, agent_id, *, read=True):
+        if agent_id not in owners:
+            return None
+        return {
+            "agent_id": agent_id,
+            "owner_install_uuid": owners[agent_id],
+            "trust_level": 3,
+        }
+
+    monkeypatch.setattr(agent_service, "lookup_agent", _lookup)
+
+
+def _as_asserted_caller(*, via_gateway: bool):
+    """A credential that names no agent of its own: a tenant key, or off the
+    gateway the shared key."""
+    mcp_server._via_gateway_var.set(via_gateway)
+    mcp_server._credential_kind_var.set(None)
+    mcp_server._install_uuid_var.set(None)
+
+
+def _code(out) -> str | None:
+    return (parse_envelope(out).get("error") or {}).get("code")
+
+
+@pytest.mark.parametrize("owner", ["install-b", None])
+async def test_install_credential_cannot_set_a_rule_as_an_agent_it_does_not_own(
+    mcp_env, monkeypatch, owner
+):
+    _as_install(monkeypatch, "install-a", {"governor": owner})
+    sc = _stub_storage_client(
+        monkeypatch, get_document=None, upsert_keystone={"id": _RULE_ID}
+    )
+
+    out = await mcp_server.caura_keystones_set(
+        op="set",
+        doc_id="r",
+        title="T",
+        content="C",
+        scope="agent",
+        weight="high",
+        fleet_id="fleet-X",
+        agent_id="worker",
+        caller_agent_id="governor",
+    )
+
+    assert _code(out) == "AGENT_IDENTITY_MISMATCH"
+    sc.upsert_keystone.assert_not_awaited()
+
+
+@pytest.mark.parametrize("owner", ["install-b", None])
+async def test_install_credential_cannot_delete_a_rule_as_an_agent_it_does_not_own(
+    mcp_env, monkeypatch, owner
+):
+    _as_install(monkeypatch, "install-a", {"governor": owner})
+    sc = _stub_storage_client(
+        monkeypatch,
+        get_document={"data": {"scope": "agent", "agent_id": "worker"}},
+        delete_keystone=True,
+    )
+
+    out = await mcp_server.caura_keystones_set(
+        op="delete", doc_id="r", caller_agent_id="governor"
+    )
+
+    assert _code(out) == "AGENT_IDENTITY_MISMATCH"
+    sc.delete_keystone.assert_not_awaited()
+
+
+async def test_install_credential_sets_an_agent_rule_as_an_agent_it_owns(
+    mcp_env, monkeypatch
+):
+    _as_install(monkeypatch, "install-a", {"governor": "install-a"})
+    sc = _stub_storage_client(
+        monkeypatch, get_document=None, upsert_keystone={"id": _RULE_ID}
+    )
+
+    out = await mcp_server.caura_keystones_set(
+        op="set",
+        doc_id="r",
+        title="T",
+        content="C",
+        scope="agent",
+        weight="high",
+        fleet_id="fleet-X",
+        agent_id="worker",
+        caller_agent_id="governor",
+    )
+
+    assert parse_envelope(out)["ok"] is True
+    assert sc.upsert_keystone.await_args.args[0]["actor_agent_id"] == "governor"
+
+
+@pytest.mark.parametrize(
+    ("scope", "fleet_id"), [("tenant", None), ("fleet", "fleet-X")]
+)
+async def test_asserted_caller_on_the_gateway_cannot_set_a_tenant_or_fleet_rule(
+    mcp_env, monkeypatch, scope, fleet_id
+):
+    _as_asserted_caller(via_gateway=True)
+    sc = _stub_storage_client(
+        monkeypatch, get_document=None, upsert_keystone={"id": _RULE_ID}
+    )
+
+    out = await mcp_server.caura_keystones_set(
+        op="set",
+        doc_id="r",
+        title="T",
+        content="C",
+        scope=scope,
+        weight="high",
+        fleet_id=fleet_id,
+        caller_agent_id="alice",
+    )
+
+    assert _code(out) == "FORBIDDEN"
+    sc.upsert_keystone.assert_not_awaited()
+
+
+async def test_asserted_caller_on_the_gateway_cannot_overwrite_a_tenant_rule(
+    mcp_env, monkeypatch
+):
+    """The stored shape counts, as it does for the trust floor: an agent-scoped
+    body must not replace a tenant rule already at that doc_id."""
+    _as_asserted_caller(via_gateway=True)
+    sc = _stub_storage_client(
+        monkeypatch,
+        get_document={"data": {"scope": "tenant"}},
+        upsert_keystone={"id": _RULE_ID},
+    )
+
+    out = await mcp_server.caura_keystones_set(
+        op="set",
+        doc_id="r",
+        title="T",
+        content="C",
+        scope="agent",
+        weight="high",
+        fleet_id="fleet-X",
+        agent_id="bob",
+        caller_agent_id="alice",
+    )
+
+    assert _code(out) == "FORBIDDEN"
+    sc.upsert_keystone.assert_not_awaited()
+
+
+@pytest.mark.parametrize("scope", ["tenant", "fleet"])
+async def test_asserted_caller_on_the_gateway_cannot_delete_a_tenant_or_fleet_rule(
+    mcp_env, monkeypatch, scope
+):
+    _as_asserted_caller(via_gateway=True)
+    sc = _stub_storage_client(
+        monkeypatch, get_document={"data": {"scope": scope}}, delete_keystone=True
+    )
+
+    out = await mcp_server.caura_keystones_set(
+        op="delete", doc_id="r", caller_agent_id="alice"
+    )
+
+    assert _code(out) == "FORBIDDEN"
+    sc.delete_keystone.assert_not_awaited()
+
+
+async def test_asserted_caller_on_the_gateway_still_sets_a_cross_agent_rule(
+    mcp_env, monkeypatch
+):
+    _as_asserted_caller(via_gateway=True)
+    sc = _stub_storage_client(
+        monkeypatch, get_document=None, upsert_keystone={"id": _RULE_ID}
+    )
+
+    out = await mcp_server.caura_keystones_set(
+        op="set",
+        doc_id="r",
+        title="T",
+        content="C",
+        scope="agent",
+        weight="high",
+        fleet_id="fleet-X",
+        agent_id="bob",
+        caller_agent_id="alice",
+    )
+
+    assert parse_envelope(out)["ok"] is True
+    sc.upsert_keystone.assert_awaited_once()
+
+
+async def test_verified_agent_on_the_gateway_still_sets_a_tenant_rule(
+    mcp_env, monkeypatch
+):
+    _as_asserted_caller(via_gateway=True)
+    monkeypatch.setattr(mcp_server, "_get_agent_id", lambda: "governor")
+    sc = _stub_storage_client(
+        monkeypatch, get_document=None, upsert_keystone={"id": _RULE_ID}
+    )
+
+    out = await mcp_server.caura_keystones_set(
+        op="set", doc_id="r", title="T", content="C", scope="tenant", weight="high"
+    )
+
+    assert parse_envelope(out)["ok"] is True
+    sc.upsert_keystone.assert_awaited_once()
+
+
+async def test_asserted_caller_off_the_gateway_still_sets_a_tenant_rule(
+    mcp_env, monkeypatch
+):
+    """Off the gateway the tenant key is the deployment's admin key."""
+    _as_asserted_caller(via_gateway=False)
+    sc = _stub_storage_client(
+        monkeypatch, get_document=None, upsert_keystone={"id": _RULE_ID}
+    )
+
+    out = await mcp_server.caura_keystones_set(
+        op="set",
+        doc_id="r",
+        title="T",
+        content="C",
+        scope="tenant",
+        weight="high",
+        caller_agent_id="alice",
+    )
+
+    assert parse_envelope(out)["ok"] is True
+    sc.upsert_keystone.assert_awaited_once()
+
+
+@pytest.mark.parametrize("verified_user", ["user-1", None])
+async def test_the_rule_author_is_the_verified_user_not_the_argument(
+    mcp_env, monkeypatch, verified_user
+):
+    mcp_server._user_id_var.set(verified_user)
+    sc = _stub_storage_client(
+        monkeypatch, get_document=None, upsert_keystone={"id": _RULE_ID}
+    )
+    audit = AsyncMock()
+    monkeypatch.setattr(mcp_server, "log_action", audit)
+
+    await mcp_server.caura_keystones_set(
+        op="set",
+        doc_id="r",
+        title="T",
+        content="C",
+        scope="tenant",
+        weight="high",
+        author_user_id="someone-else",
+    )
+
+    sent = sc.upsert_keystone.await_args.args[0]
+    assert sent.get("author_user_id") == verified_user
+    assert audit.await_args.kwargs["detail"]["author_user_id"] == verified_user

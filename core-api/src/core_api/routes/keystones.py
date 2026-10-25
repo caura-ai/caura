@@ -79,7 +79,7 @@ from core_api.errors import (
     coded_detail,
 )
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
-from core_api.services.agent_service import lookup_agent
+from core_api.services.agent_service import enforce_broker_agent_ownership, lookup_agent
 from core_api.services.audit_service import log_action
 from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
@@ -121,6 +121,8 @@ class KeystoneSetRequest(TenantScopedBody):
     content: str = Field(min_length=1)
     scope: Literal["tenant", "fleet", "agent"]
     weight: Literal["low", "med", "high"]
+    # Accepted so existing clients keep working, and ignored: the author recorded
+    # is the person the gateway vouched for (``AuthContext.user_id``).
     author_user_id: str | None = None
 
 
@@ -288,6 +290,18 @@ def _resolve_caller_identity(auth: AuthContext, x_agent_id: str | None) -> tuple
     if x_agent_id:
         return canonical_service_agent_id(x_agent_id), False
     return "rest-admin", False
+
+
+async def _enforce_install_owns_caller(auth: AuthContext, tenant_id: str, caller_agent_id: str) -> None:
+    """Refuse an install credential acting as an agent its install does not own.
+
+    The gateway sends no agent id for an install credential, so its caller falls
+    to the ``rest-admin`` sentinel and the trust gate refuses it. That holds only
+    while the gateway keeps stripping ``X-Agent-ID``; this makes the route refuse
+    a forwarded one itself, as MCP ``caura_keystones_set`` does.
+    """
+    if auth.is_install_credential:
+        await enforce_broker_agent_ownership(tenant_id, caller_agent_id, auth.install_uuid)
 
 
 def _is_standalone_admin(auth: AuthContext, x_agent_id: str | None) -> bool:
@@ -458,6 +472,7 @@ async def upsert_keystone(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     caller_agent_id, caller_verified = _resolve_caller_identity(auth, x_agent_id)
+    await _enforce_install_owns_caller(auth, body.tenant_id, caller_agent_id)
     if body.agent_id is not None:
         body.agent_id = canonical_service_agent_id(body.agent_id)
     standalone_admin = _is_standalone_admin(auth, x_agent_id)
@@ -547,11 +562,10 @@ async def upsert_keystone(
         payload["fleet_id"] = body.fleet_id
     if body.agent_id is not None:
         payload["agent_id"] = body.agent_id
-    if body.author_user_id is not None:
-        payload["author_user_id"] = body.author_user_id
     payload["actor_agent_id"] = caller_agent_id
     if auth.user_id is not None:
         payload["actor_user_id"] = auth.user_id
+        payload["author_user_id"] = auth.user_id
 
     try:
         doc = await sc.upsert_keystone(payload)
@@ -570,8 +584,8 @@ async def upsert_keystone(
             "fleet_id": body.fleet_id,
             "agent_id": body.agent_id,
             "weight": body.weight,
-            # The body's claim. ``user_id`` below is the one the gateway vouched for.
-            "author_user_id": body.author_user_id,
+            # The vouched-for person, as ``user_id`` below; never the body's claim.
+            "author_user_id": auth.user_id,
             "via": "rest",
             **auth.audit_actor(),
         },
@@ -598,6 +612,7 @@ async def delete_keystone(
     auth.enforce_tenant(tenant_id)
     auth.enforce_read_only()
     caller_agent_id, caller_verified = _resolve_caller_identity(auth, x_agent_id)
+    await _enforce_install_owns_caller(auth, tenant_id, caller_agent_id)
     standalone_admin = _is_standalone_admin(auth, x_agent_id)
 
     # ONE trust round-trip for both the pre-lookup registration check

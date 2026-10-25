@@ -417,7 +417,9 @@ async def test_keystone_set(monkeypatch, log):
     _assert_actor(_detail(log, "keystone.set"))
     [sent] = sc.upsert_keystone.await_args.args
     _assert_version_actor(log, "keystone.set", sent)
-    assert sent["author_user_id"] == "claimed"  # the claim stays on the rule
+    # The author is the person the gateway vouched for, never the body's claim.
+    assert sent["author_user_id"] == "user-1"
+    assert _detail(log, "keystone.set")["author_user_id"] == "user-1"
 
 
 async def test_keystone_delete(monkeypatch, log):

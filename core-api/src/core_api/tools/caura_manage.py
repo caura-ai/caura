@@ -74,6 +74,7 @@ _SPEC = ToolSpec(
         ),
     ),
     error_codes=(
+        "AGENT_IDENTITY_MISMATCH",
         "AGENT_NOT_REGISTERED",
         "AGENT_TRUST_TOO_LOW",
         "BAD_REQUEST",

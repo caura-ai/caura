@@ -60,6 +60,7 @@ _SPEC = ToolSpec(
         ),
     ),
     error_codes=(
+        "AGENT_IDENTITY_MISMATCH",
         "CONFLICT",
         "FORBIDDEN",
         "INTERNAL_ERROR",

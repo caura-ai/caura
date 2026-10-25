@@ -39,6 +39,7 @@ _SPEC = ToolSpec(
     plugin_exposed=True,
     trust_required=1,
     error_codes=(
+        "AGENT_IDENTITY_MISMATCH",
         "FORBIDDEN",
         "INTERNAL_ERROR",
         "INVALID_ARGUMENTS",

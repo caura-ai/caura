@@ -300,13 +300,20 @@ def _keystone_storage(monkeypatch) -> None:
 
 
 async def test_l111_a_tenant_key_names_its_caller(mcp_env, monkeypatch):
+    # A rule for another agent: on the gateway an asserted caller may not author
+    # a tenant- or fleet-scoped one (tests/test_mcp_keystones.py).
     seen: list[str] = []
     monkeypatch.setattr(mcp_server, "_require_trust", _trust_at(3, seen))
     _keystone_storage(monkeypatch)
     mcp_server._via_gateway_var.set(True)
 
     out = await mcp_server.caura_keystones_set(
-        **_KEYSTONE, scope="tenant", weight="low", caller_agent_id="alice"
+        **_KEYSTONE,
+        scope="agent",
+        weight="low",
+        fleet_id="fleet-a",
+        agent_id="bob",
+        caller_agent_id="alice",
     )
 
     assert not is_error_envelope(out)

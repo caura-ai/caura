@@ -1,7 +1,7 @@
 """Agent trust-level enforcement for fleet-scoped access control."""
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -306,6 +306,21 @@ async def broker_owned_agent_id(
     return AgentIdentity(chosen)
 
 
+async def install_owns_agent(
+    tenant_id: str,
+    agent_id: str | None,
+    install_uuid: str | None,
+) -> bool:
+    """True when ``install_uuid`` owns the existing row of ``agent_id``.
+
+    The test :func:`enforce_broker_agent_ownership` refuses on, for callers that
+    need the answer rather than the refusal. A missing install id or agent id, a
+    missing row, a legacy unclaimed row and a different owner are all False.
+    """
+    owner = await lookup_agent(tenant_id, agent_id) if install_uuid and agent_id else None
+    return owner is not None and owner.get("owner_install_uuid") == install_uuid
+
+
 async def enforce_broker_agent_ownership(
     tenant_id: str,
     agent_id: str,
@@ -318,8 +333,7 @@ async def enforce_broker_agent_ownership(
     install id, missing row, legacy unclaimed row, or different owner therefore
     fails closed without disclosing which case applied.
     """
-    owner = await lookup_agent(tenant_id, agent_id) if install_uuid else None
-    if owner and owner.get("owner_install_uuid") == install_uuid:
+    if await install_owns_agent(tenant_id, agent_id, install_uuid):
         return
     raise HTTPException(
         status_code=403,
@@ -680,6 +694,8 @@ async def authorize_memory_access(
     fleet_id: str | None,
     write: bool = False,
     caller_tenant_id: str | None = None,
+    is_install_credential: bool = False,
+    install_uuid: str | None = None,
 ) -> bool:
     """Authorize a *by-id* memory access against the fleet/scope contract.
 
@@ -697,6 +713,11 @@ async def authorize_memory_access(
     - ``caller_agent_id is None`` → a tenant-scoped user/dashboard credential
       (no gateway ``X-Agent-ID``) → full tenant access, unchanged. The agent
       isolation boundary only applies to agent-scoped credentials.
+    - ``caller_agent_id is None`` with ``is_install_credential`` → an install
+      (broker) credential, which authenticates no agent either. Shared rows
+      stay open to it as to a tenant credential; a ``scope_agent`` row is
+      private to its author, so it opens only when ``install_uuid`` owns that
+      author (:func:`install_owns_agent`).
     - ``scope_agent`` → author-only, and only in the caller's home tenant
       (``caller_tenant_id``, when given). Agent ids are unique per tenant, so a
       same-named agent in a sibling tenant the caller may read is a different
@@ -708,6 +729,8 @@ async def authorize_memory_access(
       writes (mirrors ``enforce_fleet_read`` / ``enforce_fleet_write``).
     """
     if not caller_agent_id:
+        if is_install_credential and visibility == "scope_agent":
+            return await install_owns_agent(tenant_id, owner_agent_id, install_uuid)
         return True
     # scope_team / unknown visibility is fleet-gated by the trust ladder, which
     # needs the caller's agent row; the other two branches need none.
@@ -772,6 +795,9 @@ async def memory_reader(
     caller_agent_id: AgentIdentity | None,
     *,
     caller_tenant_id: str | None = None,
+    is_install_credential: bool = False,
+    install_uuid: str | None = None,
+    rows: Iterable[dict] = (),
 ) -> Callable[[dict], bool]:
     """:func:`authorize_memory_access` for many rows, with one agent lookup.
 
@@ -780,9 +806,18 @@ async def memory_reader(
     memory got: a link is not a grant, and one can join memories that different
     callers may read (L-147 linked a fleet-less memory to other fleets' rows).
     A tenant / user / admin credential (``caller_agent_id`` None) reads them all.
+
+    An install credential with no agent reads them all too, except ``scope_agent``
+    rows whose author its install does not own. Ownership is looked up once per
+    author, so pass every row the reader will be asked about as ``rows``: a
+    ``scope_agent`` row outside them reads as not owned.
     """
     if not caller_agent_id:
-        return lambda _row: True
+        if not is_install_credential:
+            return lambda _row: True
+        authors = {row.get("agent_id") for row in rows if row.get("visibility") == "scope_agent"}
+        owned = {a for a in authors if await install_owns_agent(tenant_id, a, install_uuid)}
+        return lambda row: row.get("visibility") != "scope_agent" or row.get("agent_id") in owned
     agent = await lookup_agent(tenant_id, caller_agent_id)
 
     def can_read(row: dict) -> bool:

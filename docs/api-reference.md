@@ -31,6 +31,13 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/ingest/preview` | POST | Extract 5-20 atomic facts from a URL or text (no writes) |
 | `/ingest/commit` | POST | Write previewed facts as memories |
 
+The broker's install credential carries no agent identity. On these routes it
+reads and changes shared memories as a tenant credential does, but a
+`scope_agent` memory only when its install owns the memory's agent; another is a
+404 to read and a 403 to change or delete. Where it names an agent (`agent_id`,
+`caller_agent_id`), that agent must be one its install owns, or the request is
+refused with `AGENT_IDENTITY_MISMATCH`. The same holds over MCP.
+
 </details>
 
 <details>
@@ -178,8 +185,8 @@ Both keys are always present on these rows, set to `null` when unknown. A
 `null` `user_id` means nobody vouched for a person: an API key of any kind, a
 call that did not come through the gateway, or a deployment without
 `GATEWAY_SHARED_SECRET`. A row without the keys was written before they existed.
-`user_id` is not `author_user_id` on keystone rows: that one is copied from the
-request body.
+`author_user_id` on keystone rows is that same vouched-for person; an
+`author_user_id` sent in the request is ignored.
 
 | `action` | `resource_type` | REST | MCP |
 |---|---|---|---|

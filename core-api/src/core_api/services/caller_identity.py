@@ -29,7 +29,7 @@ from core_api.errors import (
     AUTH_AGENT_TRUST_TOO_LOW,
     coded_detail,
 )
-from core_api.services.agent_service import broker_owned_agent_id
+from core_api.services.agent_service import broker_owned_agent_id, enforce_broker_agent_ownership
 from core_api.services.trust_service import parse_trust_error, require_trust
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,22 @@ def missing_agent_id_error() -> RequestValidationError:
             }
         ]
     )
+
+
+async def enforce_named_agent_ownership(auth: AuthContext, agent_id: str | None) -> None:
+    """Hold an install credential to the agent a request names, fail closed.
+
+    An install credential authenticates no agent, so ``auth.effective_agent_id``
+    hands back whatever agent the request named, and that name then decides
+    whose ``scope_agent`` rows a read returns or which agent a by-id write is
+    gated as. It may be only an agent the caller's install owns
+    (``enforce_broker_agent_ownership``), looked up in the home tenant, where
+    the install's agents and their private rows live. Writes that first-touch an
+    agent go through ``resolve_write_agent`` instead, which degrades rather than
+    refuses. Every other credential, and a request naming no agent, passes.
+    """
+    if agent_id is not None and auth.is_install_credential and auth.tenant_id:
+        await enforce_broker_agent_ownership(auth.tenant_id, agent_id, auth.install_uuid)
 
 
 async def resolve_caller_and_gate(

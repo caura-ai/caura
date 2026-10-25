@@ -4431,8 +4431,16 @@ async def update_memory(
     tenant_id: str,
     data: MemoryUpdate,
     agent_id: str | None = None,
+    *,
+    is_install_credential: bool = False,
+    install_uuid: str | None = None,
 ) -> MemoryOut:
-    """Update a memory. Re-embeds and re-extracts entities if content changes."""
+    """Update a memory. Re-embeds and re-extracts entities if content changes.
+
+    ``is_install_credential`` / ``install_uuid`` describe a caller with no agent
+    identity of its own: an install credential that names no agent may not
+    update a ``scope_agent`` row whose author its install does not own.
+    """
     from core_api.services.organization_settings import resolve_config
 
     sc = get_storage_client()
@@ -4469,6 +4477,26 @@ async def update_memory(
                 detail=coded_detail(
                     AUTH_FLEET_SCOPE_FORBIDDEN,
                     f"Agent '{agent_id}' cannot modify memory in fleet '{mem.get('fleet_id')}'.",
+                ),
+            )
+    elif is_install_credential:
+        from core_api.services.agent_service import authorize_memory_access
+
+        if not await authorize_memory_access(
+            tenant_id,
+            None,
+            visibility=mem.get("visibility"),
+            owner_agent_id=mem.get("agent_id"),
+            fleet_id=mem.get("fleet_id"),
+            write=True,
+            is_install_credential=True,
+            install_uuid=install_uuid,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    AUTH_FLEET_SCOPE_FORBIDDEN,
+                    "Install credential does not own the agent this memory is private to.",
                 ),
             )
 

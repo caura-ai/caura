@@ -449,7 +449,7 @@
             }
           ],
           "default": null,
-          "description": "op=set: optional author identity for audit.",
+          "description": "op=set: ignored; the authenticated user is recorded.",
           "title": "Author User Id"
         },
         "caller_agent_id": {

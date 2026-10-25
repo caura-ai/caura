@@ -83,6 +83,7 @@ from core_api.schemas import (
 from core_api.services.agent_service import (
     authorize_memory_access,
     broker_owned_agent_id,
+    enforce_broker_agent_ownership,
     enforce_delete,
     enforce_document_overwrite,
     enforce_fleet_read_many,
@@ -690,6 +691,25 @@ async def _broker_owned_tool_agent_id(agent_id: str) -> str:
     if not _is_install_credential():
         return agent_id
     return await broker_owned_agent_id(agent_id, _get_install_uuid(), _get_tenant())
+
+
+async def _refuse_unowned_agent(agent_id: str) -> str | None:
+    """Refuse an install credential naming an agent its install does not own.
+
+    For tools where the named agent is the identity the call reads or acts as
+    (whose ``scope_agent`` rows come back, which agent a write is gated as, who
+    authors a keystone), so a claim cannot be degraded the way
+    ``_broker_owned_tool_agent_id`` degrades a write's attribution: it fails
+    closed, as ``enforce_broker_agent_ownership`` does on REST. Every other
+    credential passes. Returns an error envelope, or ``None`` to proceed.
+    """
+    if not _is_install_credential():
+        return None
+    try:
+        await enforce_broker_agent_ownership(_get_tenant(), agent_id, _get_install_uuid())
+    except HTTPException as e:
+        return _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail))
+    return None
 
 
 def _is_org_read_only() -> bool:
@@ -1463,6 +1483,8 @@ async def caura_recall(
         filter_agent_id = canonical_service_agent_id(filter_agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
+    if refuse := await _refuse_unowned_agent(agent_id):
+        return _with_latency(refuse, t0)
     # Clamped at BOTH ends. ``min`` alone let a negative top_k through to the
     # service: the entity route returned a full unscored pool and the scored
     # route sent a negative SQL LIMIT and 500'd. The response also echoed
@@ -2096,9 +2118,13 @@ async def caura_manage(
     caller_agent_id = _get_agent_id()
     agent_id = canonical_service_agent_id(caller_agent_id or agent_id)
     if op in {"update", "transition", "delete", "bulk_delete"} and (
-        refuse := _refuse_default_agent_on_gateway(agent_id)
+        refuse := _refuse_default_agent_on_gateway(agent_id) or await _refuse_unowned_agent(agent_id)
     ):
         return _with_latency(refuse, t0)
+    # An install credential authenticates no agent, so ``caller_agent_id`` is
+    # None for it as for a tenant key, but another install's agents' private
+    # rows are not its to read or change (``authorize_memory_access``).
+    is_install, install_uuid = _is_install_credential(), _get_install_uuid()
 
     # All ops are storage-routed (``_no_db()`` ⇒ db=None): reads/writes carry
     # tenant context explicitly. WRITES (bulk_delete / transition / update /
@@ -2184,6 +2210,8 @@ async def caura_manage(
                     visibility=this.get("visibility"),
                     owner_agent_id=this.get("agent_id"),
                     fleet_id=this.get("fleet_id"),
+                    is_install_credential=is_install,
+                    install_uuid=install_uuid,
                 ):
                     return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
 
@@ -2205,7 +2233,13 @@ async def caura_manage(
                 # M-124 — every linked row gets the check ``this`` just got, or
                 # a link shows its content to a caller who may not read it by id.
                 if older or newer:
-                    can_read = await memory_reader(tenant_id, caller_agent_id)
+                    can_read = await memory_reader(
+                        tenant_id,
+                        caller_agent_id,
+                        is_install_credential=is_install,
+                        install_uuid=install_uuid,
+                        rows=[*([older] if older else []), *newer],
+                    )
                     older = older if older and can_read(older) else None
                     newer = [m for m in newer if can_read(m)]
                 superseded_by = _chain_row(older) if older and older.get("deleted_at") is None else None
@@ -2241,6 +2275,8 @@ async def caura_manage(
                     visibility=memory.get("visibility"),
                     owner_agent_id=memory.get("agent_id"),
                     fleet_id=memory.get("fleet_id"),
+                    is_install_credential=is_install,
+                    install_uuid=install_uuid,
                 ):
                     return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
                 return _with_latency(
@@ -2289,6 +2325,8 @@ async def caura_manage(
                     owner_agent_id=memory.get("agent_id"),
                     fleet_id=memory.get("fleet_id"),
                     write=True,
+                    is_install_credential=is_install,
+                    install_uuid=install_uuid,
                 ):
                     return _with_latency(
                         _error_response(
@@ -2399,11 +2437,13 @@ async def caura_manage(
             # checks below are skipped, and that is the decided behaviour rather
             # than a gap: the trust ladder governs agent credentials, tenant
             # scope governs tenant keys (see ``enforce_delete``). The same
-            # distinction already governs read / update / lineage above.
-            if caller_agent_id:
+            # distinction already governs read / update / lineage above. An
+            # install credential is held to the row check alone.
+            if caller_agent_id or is_install:
                 # Trust gate (>= 3) + cross-fleet / scope_agent row authorization,
                 # mirroring REST DELETE /memories/{id}.
-                await enforce_delete(tenant_id, caller_agent_id)
+                if caller_agent_id:
+                    await enforce_delete(tenant_id, caller_agent_id)
                 target = await sc.get_memory(str(uid), tenant_id)
                 if target and not await authorize_memory_access(
                     tenant_id,
@@ -2412,6 +2452,8 @@ async def caura_manage(
                     owner_agent_id=target.get("agent_id"),
                     fleet_id=target.get("fleet_id"),
                     write=True,
+                    is_install_credential=is_install,
+                    install_uuid=install_uuid,
                 ):
                     return _with_latency(
                         _error_response(
@@ -3647,6 +3689,8 @@ async def caura_list(
         written_by = canonical_service_agent_id(written_by)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
+    if refuse := await _refuse_unowned_agent(agent_id):
+        return _with_latency(refuse, t0)
 
     if scope == "agent" and written_by is not None and written_by != agent_id:
         return _with_latency(
@@ -3861,6 +3905,8 @@ async def caura_stats(
     tenant_id = _get_tenant()
     agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
+        return _with_latency(refuse, t0)
+    if refuse := await _refuse_unowned_agent(agent_id):
         return _with_latency(refuse, t0)
     # Trust ladder resolves by TARGET (spec: L1 = read within own fleet, L2 =
     # cross-fleet): own-fleet scope='fleet' aggregates stay at L1; a different
@@ -4420,6 +4466,8 @@ async def caura_keystones(
     agent_id_effective = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id_effective):
         return _with_latency(refuse, t0)
+    if refuse := await _refuse_unowned_agent(agent_id_effective):
+        return _with_latency(refuse, t0)
 
     sc = get_storage_client()
     try:
@@ -4460,6 +4508,15 @@ async def caura_keystones(
     return _with_latency(_dumps(payload), t0)
 
 
+# Rule scopes that bind more than one agent, and the refusal an asserted gateway
+# caller gets for them (see ``asserted_on_gateway`` in ``caura_keystones_set``).
+_GOVERNANCE_SCOPES = frozenset({"tenant", "fleet"})
+_ASSERTED_GOVERNANCE_REFUSAL = (
+    "caller_agent_id is asserted, not authenticated, so it cannot set or delete a "
+    "tenant- or fleet-scoped rule; use an agent-scoped credential for an agent at trust >= 2."
+)
+
+
 async def caura_keystones_set(
     op: Annotated[str, Field(description="set|delete.")],
     doc_id: Annotated[str, Field(description="Stable slug identifying the rule.")],
@@ -4483,7 +4540,7 @@ async def caura_keystones_set(
         ),
     ] = None,
     author_user_id: Annotated[
-        str | None, Field(description="op=set: optional author identity for audit.")
+        str | None, Field(description="op=set: ignored; the authenticated user is recorded.")
     ] = None,
     caller_agent_id: Annotated[
         str | None,
@@ -4554,6 +4611,11 @@ async def caura_keystones_set(
     caller_verified = verified is not None
     unidentified = verified is None and asserted is None
     standalone_admin = settings.is_standalone and not _via_gateway_var.get(False) and unidentified
+    # On the gateway an asserted caller holds a tenant key or an install
+    # credential, neither of which governs the tenant: it may author a rule that
+    # binds one agent, but not create, replace or remove a tenant- or fleet-wide
+    # one. Off the gateway the deployment key is the admin, as REST's Path 2 is.
+    asserted_on_gateway = not caller_verified and _via_gateway_var.get(False)
     caller_agent_id = canonical_service_agent_id(verified or asserted or "mcp-agent")
     if agent_id is not None:
         agent_id = canonical_service_agent_id(agent_id)
@@ -4582,6 +4644,11 @@ async def caura_keystones_set(
         # raise errors that aren't ``HTTPStatusError`` or ``HTTPException``.
         # Mirrors caura_keystones' fallback.
         try:
+            # An install credential names its caller like any asserted one, but may
+            # name only an agent its install owns, as every other broker path
+            # requires. Ahead of the trust gate, which reads the NAMED agent's trust.
+            if refuse := await _refuse_unowned_agent(caller_agent_id):
+                return _with_latency(refuse, t0)
             sc = get_storage_client()
 
             if op == "set":
@@ -4648,6 +4715,8 @@ async def caura_keystones_set(
                     doc_id=doc_id,
                 )
                 existing_data = (existing or {}).get("data") or {}
+                if asserted_on_gateway and _GOVERNANCE_SCOPES & {scope, existing_data.get("scope")}:
+                    return _with_latency(_error_response("FORBIDDEN", _ASSERTED_GOVERNANCE_REFUSAL), t0)
                 # ``cast`` is a static-only hint (no runtime branch — unlike
                 # ``assert``, which becomes a no-op under ``python -O``).
                 # ``scope`` is guaranteed non-None by the required-fields
@@ -4740,12 +4809,13 @@ async def caura_keystones_set(
                     payload["fleet_id"] = fleet_id
                 if agent_id is not None:
                     payload["agent_id"] = agent_id
-                if author_user_id is not None:
-                    payload["author_user_id"] = author_user_id
                 payload["actor_agent_id"] = caller_agent_id
+                # The author is the person the gateway vouched for; the
+                # ``author_user_id`` argument is ignored, so no call names another.
                 actor_user_id = _user_id_var.get(None)
                 if actor_user_id is not None:
                     payload["actor_user_id"] = actor_user_id
+                    payload["author_user_id"] = actor_user_id
                 doc = await sc.upsert_keystone(payload)
                 await log_action(
                     tenant_id=tenant_id,
@@ -4759,7 +4829,7 @@ async def caura_keystones_set(
                         "fleet_id": fleet_id,
                         "agent_id": agent_id,
                         "weight": weight,
-                        "author_user_id": author_user_id,
+                        "author_user_id": actor_user_id,
                         "via": "mcp",
                         **_audit_actor(),
                     },
@@ -4804,6 +4874,8 @@ async def caura_keystones_set(
                     t0,
                 )
             existing_data = existing.get("data") or {}
+            if asserted_on_gateway and existing_data.get("scope") in _GOVERNANCE_SCOPES:
+                return _with_latency(_error_response("FORBIDDEN", _ASSERTED_GOVERNANCE_REFUSAL), t0)
             min_level = keystone_min_trust(
                 existing_data.get("scope", ""),
                 existing_data.get("agent_id"),

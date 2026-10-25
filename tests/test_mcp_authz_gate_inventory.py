@@ -21,13 +21,14 @@ for, and the same argument: manual sweeps have not converged. So this file
 enumerates from the REGISTRY and reads the HANDLERS, and everything it checks is
 a fact about one or the other.
 
-FOUR INVARIANTS.
+FIVE INVARIANTS.
 
     1. The ops a tool DECLARES are the ops its handler ACCEPTS.
     2. Every accepted op that mutates passes through the write-scope gate.
     3. A declared ``trust_required`` above 0 is corroborated by a handler that
        can actually reach a trust gate.
     4. Every caller-supplied agent identity is bound to the verified one.
+    5. Every caller-supplied agent identity reaches the install-ownership gate.
 
 The fourth is the self plane, the axis #1364/#1365 named and #1367 enumerated
 for REST. It reads differently here because the binding is spelled differently:
@@ -41,6 +42,18 @@ handler can read the caller's value under that name. It is therefore checked by
 a rule here, where REST needed fourteen allowlist lines — the note above
 ``SELF_ID_PARAMS`` in the REST file explains why an ``any()`` over a body
 could not do the same job there.
+
+The fifth closes what the fourth leaves open. Binding makes a verified identity
+win, but an install (broker) credential HAS none: ``_get_agent_id()`` is None
+for it, so after the rebinding the caller's value is all there is, and the
+handler acts or reads as whatever agent it named. Every such name must clear
+the broker ownership boundary, which takes one of three shapes:
+``_refuse_unowned_agent`` refuses an agent the install does not own (reads,
+updates, keystone authorship), ``_broker_owned_tool_agent_id`` degrades one to
+the install's own ``broker:<install>`` identity (evolve, insights), and
+``resolve_write_agent`` does the same while stamping ownership on first touch
+(writes). The check is data flow at the call site: the parameter, or a local
+assigned from it, must be an argument of one of the three in the handler body.
 
 Two axes the REST file has are deliberately ABSENT rather than forgotten.
 ``enforce_not_agent_credential`` has no analogue because ``_check_auth``
@@ -137,9 +150,10 @@ READONLY_TOOLS = frozenset(
 
 # Parameter names carrying a caller's ASSERTION about which agent it is.
 # MEASURED over every registered handler's signature rather than guessed: these
-# two are the only agent-shaped names on the whole MCP surface — there is no
-# ``x_agent_id``, ``caller_agent_id`` or ``target_agent_id`` here, unlike REST.
-SELF_ID_PARAMS = frozenset({"agent_id", "filter_agent_id"})
+# three are the only agent-shaped names on the whole MCP surface. There is no
+# ``x_agent_id`` or ``target_agent_id`` here, unlike REST; ``caller_agent_id``
+# is ``caura_keystones_set``'s, where ``agent_id`` names the rule's target.
+SELF_ID_PARAMS = frozenset({"agent_id", "filter_agent_id", "caller_agent_id"})
 
 # The verified identity, and the binders that consume it. A handler binds by
 # reassigning the parameter from one of these, so a caller-supplied value
@@ -154,10 +168,16 @@ SELF_ID_EXCLUDED: dict[tuple[str, str], str] = {
     ("caura_keystones_set", "agent_id"): (
         "the TARGET agent a rule binds to, not the caller — the handler's own "
         "Field description says so in as many words, and it derives the caller "
-        "separately as caller_agent_id = _get_agent_id() or 'mcp-agent', never "
+        "separately from _get_agent_id() or its caller_agent_id argument, never "
         "falling back to this parameter"
     ),
 }
+
+# Invariant 5's gates. Each refuses or degrades a claimed agent its install
+# does not own, and passes every other credential through unchanged.
+OWNERSHIP_GATES = frozenset(
+    {"_refuse_unowned_agent", "_broker_owned_tool_agent_id", "resolve_write_agent"}
+)
 
 KNOWN_GAP_PREFIX = "KNOWN GAP:"
 
@@ -189,6 +209,19 @@ SELF_BIND_ALLOWLIST: dict[str, str] = {
         "verified: whether the narrowing alone can disclose a peer's rows "
         "depends on the storage visibility predicate, which is asserted in "
         "tests/test_h06_m30_recall_identity.py and was not traced to SQL here"
+    ),
+}
+
+
+# Invariant 5. One entry, for a name the call never acts or reads as. The
+# target agent of ``caura_keystones_set`` is not here: ``SELF_ID_EXCLUDED``
+# already says it is no claim about the caller, and both invariants honour it.
+OWNERSHIP_ALLOWLIST: dict[str, str] = {
+    "caura_recall.filter_agent_id": (
+        "author filter, not an identity. The search reads as agent_id, which "
+        "goes through _refuse_unowned_agent, and this name only narrows the rows "
+        "that identity may already read to one author's (SELF_BIND_ALLOWLIST "
+        "records the same reading for invariant 4)"
     ),
 }
 
@@ -443,7 +476,67 @@ def _rebound_params(fn) -> frozenset[str]:
         ]
         if loads and all(id(n) in consumed for n in loads):
             rebound.add(param)
-    return frozenset(rebound)
+    # A local that shares a parameter NAME is not that parameter: caura_manage
+    # binds a ``caller_agent_id`` local and takes no argument of that name.
+    return frozenset(rebound) & _identity_params(fn)
+
+
+def _owned_params(fn) -> frozenset[str]:
+    """Identity parameters whose value reaches an ownership gate's arguments.
+
+    A parameter counts when it, or a local assigned from it, appears in the
+    arguments of an ``OWNERSHIP_GATES`` call in the handler's own body. Locals
+    are followed to a fixpoint because three spellings are live::
+
+        _refuse_unowned_agent(agent_id)                    # most tools
+        agent_id_effective = _get_agent_id() or agent_id   # caura_keystones
+        _refuse_unowned_agent(agent_id_effective)
+        asserted = canonical_service_agent_id(caller_agent_id) ...
+        caller_agent_id = canonical_service_agent_id(verified or asserted ...)
+        _refuse_unowned_agent(caller_agent_id)             # caura_keystones_set
+
+    Module-local helpers are NOT followed, unlike ``_reachable_calls``: the
+    question is whether the caller's value is the one handed to the gate, and
+    that is only visible where the call is made. Every handler makes it itself
+    today. ``ast.walk`` ignores control flow, so this proves the claim reaches
+    a gate somewhere in the handler, not on every path through it: that a gate
+    refuses on a given op is ``test_memory_byid_authz``'s and
+    ``test_mcp_keystones``' to show.
+    """
+    tree = _parse(fn)
+    if tree is None:
+        return frozenset()
+    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    gate_args = [
+        arg
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+        and n.func.id in OWNERSHIP_GATES
+        for arg in [*n.args, *(k.value for k in n.keywords)]
+    ]
+    passed = {
+        n.id for arg in gate_args for n in ast.walk(arg) if isinstance(n, ast.Name)
+    }
+    owned: set[str] = set()
+    for param in _identity_params(fn):
+        carriers = {param}
+        grew = True
+        while grew:
+            grew = False
+            for node in assigns:
+                if (
+                    not {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)}
+                    & carriers
+                ):
+                    continue
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id not in carriers:
+                        carriers.add(target.id)
+                        grew = True
+        if carriers & passed:
+            owned.add(param)
+    return frozenset(owned)
 
 
 class _Tool(NamedTuple):
@@ -456,6 +549,7 @@ class _Tool(NamedTuple):
     calls: frozenset[str]
     identity_params: frozenset[str]
     rebound_params: frozenset[str]
+    owned_params: frozenset[str]
 
     @property
     def ops(self) -> frozenset[str]:
@@ -479,6 +573,7 @@ def _tools() -> list[_Tool]:
                 calls=_reachable_calls(handler),
                 identity_params=_identity_params(handler),
                 rebound_params=_rebound_params(handler),
+                owned_params=_owned_params(handler),
             )
         )
     return rows
@@ -508,6 +603,13 @@ def _identity_unbound(tool: _Tool, param: str) -> bool:
     return param not in tool.rebound_params
 
 
+def _ownership_ungated(tool: _Tool, param: str) -> bool:
+    """Invariant 5: a caller-supplied identity that no ownership gate sees."""
+    if (tool.name, param) in SELF_ID_EXCLUDED:
+        return False
+    return param not in tool.owned_params
+
+
 def _mutating(tool: _Tool) -> frozenset[str]:
     """Accepted ops that change state; empty for a read-only op-less tool."""
     if not tool.ops:
@@ -532,7 +634,8 @@ def _report(tool: _Tool) -> str:
         f"        write-scope:  {sorted(tool.guarded_ops) or ('ALL' if tool.gate_unconditional else 'NONE')}\n"
         f"        trust gates:  {sorted(tool.calls & TRUST_GATES) or 'none'}\n"
         f"        identity params: {sorted(tool.identity_params) or 'none'}\n"
-        f"        rebound from verified: {sorted(tool.rebound_params) or 'none'}"
+        f"        rebound from verified: {sorted(tool.rebound_params) or 'none'}\n"
+        f"        passed to an ownership gate: {sorted(tool.owned_params) or 'none'}"
     )
 
 
@@ -648,6 +751,64 @@ def test_every_caller_supplied_identity_is_bound() -> None:
         + "\n".join(offenders)
         + f"\n\nRebind the parameter, or add a line to SELF_BIND_ALLOWLIST in "
         f"{__file__} saying what it means if not 'act as this agent'."
+    )
+
+
+def test_every_caller_supplied_identity_reaches_the_ownership_gate() -> None:
+    """An install credential must not act as an agent another install owns.
+
+    Invariant 4 makes a verified identity win; an install credential has none,
+    so for it the name the caller supplied is the identity. A parameter
+    satisfies this by reaching ``_refuse_unowned_agent``,
+    ``_broker_owned_tool_agent_id`` or ``resolve_write_agent``; by being
+    excluded as no claim about the caller (``SELF_ID_EXCLUDED``); or by a line
+    in ``OWNERSHIP_ALLOWLIST`` saying the call never acts or reads as it.
+    """
+    offenders = []
+    for tool in _tools():
+        for param in sorted(tool.identity_params):
+            if not _ownership_ungated(tool, param):
+                continue
+            if f"{tool.name}.{param}" in OWNERSHIP_ALLOWLIST:
+                continue
+            offenders.append(f"{_report(tool)}\n        NO OWNERSHIP GATE: {param}")
+    assert not offenders, (
+        f"{len(offenders)} caller-supplied agent identit(ies) never reach one of "
+        f"{sorted(OWNERSHIP_GATES)}:\n"
+        + "\n".join(offenders)
+        + "\n\nPass the name through the gate that fits the call (refuse for a "
+        "read or an update, degrade for a write), or add a line to "
+        f"OWNERSHIP_ALLOWLIST in {__file__} saying why the call never acts as it."
+    )
+
+
+def test_the_ownership_scan_follows_derived_names() -> None:
+    """``_owned_params`` returning less fails invariant 5 loudly, but returning
+    MORE passes it silently, so the shapes it was written for are pinned.
+
+    ``caura_keystones`` hands the gate a new local, and ``caura_keystones_set``
+    the argument it rebuilt from itself; ``caura_recall`` must credit
+    ``agent_id`` and not the filter that rides in the same search call.
+    """
+    by_name = {tool.name: tool for tool in _tools()}
+    expected = {
+        "caura_keystones": {"agent_id"},
+        "caura_keystones_set": {"caller_agent_id"},
+        "caura_recall": {"agent_id"},
+        "caura_write": {"agent_id"},
+        "caura_evolve": {"agent_id"},
+    }
+    wrong = {
+        name: f"owned {sorted(by_name[name].owned_params)}, want {sorted(want)}"
+        for name, want in expected.items()
+        if name in by_name and by_name[name].owned_params != frozenset(want)
+    }
+    missing = sorted(set(expected) - set(by_name))
+    assert not wrong and not missing, (
+        "the ownership scan stopped seeing what it was written for:\n"
+        + "".join(f"    {k}: {v}\n" for k, v in sorted(wrong.items()))
+        + (f"    tools absent from the registry: {missing}\n" if missing else "")
+        + "Fix _owned_params before trusting a green run."
     )
 
 
@@ -880,6 +1041,16 @@ _ALLOWLISTS = (
         SELF_BIND_ALLOWLIST,
         lambda: {
             f"{t.name}.{p}": _identity_unbound(t, p)
+            for t in _tools()
+            for p in t.identity_params
+        },
+        0,
+    ),
+    _Axis(
+        "OWNERSHIP_ALLOWLIST",
+        OWNERSHIP_ALLOWLIST,
+        lambda: {
+            f"{t.name}.{p}": _ownership_ungated(t, p)
             for t in _tools()
             for p in t.identity_params
         },

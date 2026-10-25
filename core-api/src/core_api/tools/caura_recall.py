@@ -23,6 +23,7 @@ _SPEC = ToolSpec(
     plugin_exposed=True,
     trust_required=0,
     error_codes=(
+        "AGENT_IDENTITY_MISMATCH",
         "BAD_REQUEST",
         "FLEET_SCOPE_FORBIDDEN",
         "FORBIDDEN",

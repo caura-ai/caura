@@ -107,7 +107,7 @@ from core_api.services.agent_service import (
     resolve_write_agent,
 )
 from core_api.services.audit_service import log_action, log_cross_tenant_read
-from core_api.services.caller_identity import missing_agent_id_error
+from core_api.services.caller_identity import enforce_named_agent_ownership, missing_agent_id_error
 from core_api.services.ingest_service import (
     ALLOWED_INGEST_MIME_TYPES,
     BINARY_INGEST_MIME_TYPES,
@@ -561,6 +561,7 @@ async def list_memories(
     if written_by is not None:
         written_by = canonical_service_agent_id(written_by)
     caller_agent_id = auth.effective_agent_id(agent_id)
+    await enforce_named_agent_ownership(auth, caller_agent_id)
     # ``written_by`` is the author filter; ``agent_id`` keeps serving as that
     # filter when ``written_by`` is omitted, so existing callers are unaffected.
     author_filter = written_by if written_by is not None else agent_id
@@ -770,6 +771,7 @@ async def memory_stats(
     # also the visibility identity storage counts for, so an agent's own
     # private rows count, as its GET /memories lists them (M-104).
     caller_agent_id = auth.effective_agent_id(agent_id)
+    await enforce_named_agent_ownership(auth, caller_agent_id)
     effective_agent_id = agent_id
     if scope is not None:
         # scope='fleet'/'all' drops the per-caller filter so cross-agent
@@ -961,6 +963,7 @@ async def memory_field(
         agent_id = canonical_service_agent_id(agent_id)
     # Same identity resolution and fleet gate as ``list_memories``.
     caller_agent_id = auth.effective_agent_id(agent_id)
+    await enforce_named_agent_ownership(auth, caller_agent_id)
     await _gate_fleet_read(auth, tenant_id, caller_agent_id, fleet_id)
     scope_body = {
         "tenant_id": tenant_id,
@@ -1345,6 +1348,8 @@ async def get_memory(
             owner_agent_id=memory.get("agent_id"),
             fleet_id=memory.get("fleet_id"),
             caller_tenant_id=auth.tenant_id,
+            is_install_credential=auth.is_install_credential,
+            install_uuid=auth.install_uuid,
         )
         if not allowed:
             raise HTTPException(status_code=404, detail="Memory not found")
@@ -1473,6 +1478,8 @@ async def get_contradictions(
         owner_agent_id=memory.get("agent_id"),
         fleet_id=memory.get("fleet_id"),
         caller_tenant_id=auth.tenant_id,
+        is_install_credential=auth.is_install_credential,
+        install_uuid=auth.install_uuid,
     )
     if not allowed:
         raise HTTPException(status_code=404, detail="Memory not found")
@@ -1491,7 +1498,14 @@ async def get_contradictions(
     # M-124 — every linked row gets the check this memory just got, or a link
     # shows its content to a caller who may not read it by id.
     if supersessors or older is not None:
-        can_read = await memory_reader(tenant_id, auth.agent_id, caller_tenant_id=auth.tenant_id)
+        can_read = await memory_reader(
+            tenant_id,
+            auth.agent_id,
+            caller_tenant_id=auth.tenant_id,
+            is_install_credential=auth.is_install_credential,
+            install_uuid=auth.install_uuid,
+            rows=[*supersessors, *([older] if older is not None else [])],
+        )
         supersessors = [m for m in supersessors if can_read(m)]
         older = older if older is not None and can_read(older) else None
     older_live = older is not None and older.get("deleted_at") is None
@@ -2236,8 +2250,11 @@ async def delete_memory(
     # lose the only identity the request carried. Authorization must not trust
     # this value; the audit log must not discard it.
     attribution_agent_id = auth.agent_id or agent_id
-    if auth.tenant_id and caller_agent_id:
-        await enforce_delete(tenant_id, caller_agent_id)
+    # An install credential names no agent either, but it is not the tenant's
+    # own key: another install's agents' private rows are not its to delete.
+    if auth.tenant_id and (caller_agent_id or auth.is_install_credential):
+        if caller_agent_id:
+            await enforce_delete(tenant_id, caller_agent_id)
         # Cross-fleet / scope_agent row authorization (write threshold).
         # ``get_memory`` already filters out soft-deleted /
         # cross-tenant rows server-side, so a returned row is live + owned.
@@ -2250,13 +2267,17 @@ async def delete_memory(
                 owner_agent_id=target.get("agent_id"),
                 fleet_id=target.get("fleet_id"),
                 write=True,
+                is_install_credential=auth.is_install_credential,
+                install_uuid=auth.install_uuid,
             )
             if not allowed:
                 raise HTTPException(
                     status_code=403,
                     detail=coded_detail(
                         AUTH_FLEET_SCOPE_FORBIDDEN,
-                        f"Agent '{caller_agent_id}' cannot delete memory in fleet '{target.get('fleet_id')}'.",
+                        f"Agent '{caller_agent_id}' cannot delete memory in fleet '{target.get('fleet_id')}'."
+                        if caller_agent_id
+                        else "Install credential does not own the agent this memory is private to.",
                     ),
                 )
     # ``soft_delete_memory`` already routes the fetch + delete through the
@@ -2334,8 +2355,10 @@ async def update_memory_status(
             detail="This memory is part of a held write: release or reject that write instead.",
         )
     # Cross-fleet / scope_agent row authorization for the authenticated agent
-    # (no-op for tenant-scoped dashboard credentials, where auth.agent_id is None).
-    if auth.agent_id:
+    # (no-op for tenant-scoped dashboard credentials, where auth.agent_id is None),
+    # and for an install credential, which may not touch another install's
+    # agents' private rows.
+    if auth.agent_id or auth.is_install_credential:
         allowed = await authorize_memory_access(
             tenant_id,
             auth.agent_id,
@@ -2343,13 +2366,17 @@ async def update_memory_status(
             owner_agent_id=memory.get("agent_id"),
             fleet_id=memory.get("fleet_id"),
             write=True,
+            is_install_credential=auth.is_install_credential,
+            install_uuid=auth.install_uuid,
         )
         if not allowed:
             raise HTTPException(
                 status_code=403,
                 detail=coded_detail(
                     AUTH_FLEET_SCOPE_FORBIDDEN,
-                    f"Agent '{auth.agent_id}' cannot modify memory in fleet '{memory.get('fleet_id')}'.",
+                    f"Agent '{auth.agent_id}' cannot modify memory in fleet '{memory.get('fleet_id')}'."
+                    if auth.agent_id
+                    else "Install credential does not own the agent this memory is private to.",
                 ),
             )
     old_status = memory.get("status")
@@ -2466,15 +2493,20 @@ async def update_memory_endpoint(
                 detail="metadata_mode is only valid when metadata is also provided",
             )
         body.metadata_mode = metadata_mode
+    # Authenticated agent identity (gateway X-Agent-ID) takes precedence over
+    # the caller-supplied query param for trust/fleet enforcement. An install
+    # credential may name only an agent its install owns.
+    caller_agent_id = auth.effective_agent_id(agent_id) if auth.tenant_id else None
+    await enforce_named_agent_ownership(auth, caller_agent_id)
     if auth.tenant_id and charges_write_quota("update"):  # skip usage metering for admin
         await check_and_increment(tenant_id, "write")
-    # Authenticated agent identity (gateway X-Agent-ID) takes precedence over
-    # the caller-supplied query param for trust/fleet enforcement.
     return await update_memory(
         memory_id,
         tenant_id,
         body,
-        agent_id=auth.effective_agent_id(agent_id) if auth.tenant_id else None,
+        agent_id=caller_agent_id,
+        is_install_credential=auth.is_install_credential,
+        install_uuid=auth.install_uuid,
     )
 
 
@@ -2832,6 +2864,7 @@ async def _search_inner(
     # tenant/user credential (auth.agent_id None, no filter) keeps full-tenant
     # search, unchanged.
     eff_agent_id, identity_asserted = _resolve_read_identity(auth, body)
+    await enforce_named_agent_ownership(auth, eff_agent_id)
     # CAURA-723 — filled by the ``get_or_create_agent`` call below, which does
     # the ``agents`` lookup anyway. Captured because that call REGISTERS the
     # asserted id, so after it the row exists whether or not it did before, and
@@ -3290,6 +3323,7 @@ async def recall_endpoint(
     # that peer's private rows and inherited its trust level for the fleet
     # forcing — the escalation /search already refuses.
     eff_agent_id, identity_asserted = _resolve_read_identity(auth, body)
+    await enforce_named_agent_ownership(auth, eff_agent_id)
     _agent = None
     _agent_reg: dict = {}  # CAURA-723 — see /search
     if auth.tenant_id:

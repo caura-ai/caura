@@ -12,8 +12,9 @@ from __future__ import annotations
 import pytest
 
 from common.governance.ruleset_hash import rule_set_hash
-from core_api import mcp_server
+from core_api import errors, mcp_server
 from core_api.agent_ids import INSIGHTER_AGENT_ID
+from core_api.services.agent_service import get_or_create_agent
 from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
 from tests._mcp_test_helpers import parse_envelope
 from tests.conftest import get_test_auth
@@ -785,3 +786,67 @@ async def test_fleet_scope_403_carries_no_agent_id_hint(client):
     )
     assert resp.status_code == 403, resp.text
     assert "agent_id=" not in str(resp.json()["detail"]), resp.text
+
+
+# ---------------------------------------------------------------------------
+# An install credential authors only as an agent its install owns
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def as_install():
+    """Authenticate as a gateway install credential that also names an agent.
+
+    The gateway sends no agent id for an install credential, so this is the
+    shape a forwarded ``X-Agent-ID`` would produce. The route must not take the
+    agent on the credential's word.
+    """
+    from core_api.app import app
+    from core_api.auth import AuthContext, get_auth_context
+    from core_api.tenant_context import set_current_tenant
+
+    def _install(tenant_id: str, agent_id: str, install_uuid: str):
+        async def _dep():
+            set_current_tenant(tenant_id)
+            return AuthContext(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                agent_id_verified=True,
+                is_install_credential=True,
+                install_uuid=install_uuid,
+                readable_tenant_ids=[tenant_id],
+            )
+
+        app.dependency_overrides[get_auth_context] = _dep
+
+    yield _install
+    app.dependency_overrides.pop(get_auth_context, None)
+
+
+@pytest.mark.parametrize("op", ["set", "delete"])
+async def test_install_credential_writes_keystones_only_as_an_agent_it_owns(
+    client, as_install, op
+):
+    tenant_id, headers = get_test_auth(_ks_tenant())
+    tag = _uid()
+    agent_id, fleet_id, doc_id = f"governor-{tag}", f"fleet-{tag}", f"ks-{tag}"
+    await get_or_create_agent(
+        tenant_id, agent_id, fleet_id, owner_install_uuid="install-b"
+    )
+    await _seed_trusted_agent(client, tenant_id, headers, agent_id, fleet_id)
+    if op == "delete":
+        seeded = await _set_keystone(
+            client, _author_headers(headers, agent_id), tenant_id, doc_id=doc_id
+        )
+        assert seeded.status_code == 200, seeded.text
+
+    as_install(tenant_id, agent_id, "install-a")
+    if op == "set":
+        resp = await _set_keystone(client, headers, tenant_id, doc_id=doc_id)
+    else:
+        resp = await client.delete(
+            f"/api/v1/keystones/{doc_id}?tenant_id={tenant_id}", headers=headers
+        )
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == errors.AUTH_AGENT_IDENTITY_MISMATCH
