@@ -286,3 +286,16 @@ def test_l230_readme_states_the_digest_cadence_and_its_default() -> None:
     bullet = _line(_read("README.md"), "**Agent activity digests**")
     assert "agent_digest.cadence" in bullet
     assert DEFAULT_SETTINGS["agent_digest"]["cadence"] in bullet
+
+
+def test_the_surface_charter_names_every_live_mcp_tool() -> None:
+    """#550: the charter is where a reader inventories the API, and four of the
+    twelve tools had no row in its ownership table, the primary write tool
+    among them. Derived from the registry, so a new tool cannot land the same
+    way."""
+    from core_api.tools import REGISTRY
+
+    table = _section(_read("docs/api-surfaces.md"), "## Surface ownership")
+    live = [name for name, spec in REGISTRY.items() if spec.impl_status != "reserved"]
+    assert live
+    assert sorted(name for name in live if f"`{name}" not in table) == []

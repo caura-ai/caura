@@ -21,10 +21,12 @@ when to add or move an operation.
 
 | Concern | Owner | Reason |
 |---------|-------|--------|
-| Memory CRUD (write/recall/list/get/update/delete/transition) | REST + MCP | Universal; needed by every audience. |
-| Bulk write | REST + MCP | Same. |
-| Per-agent search profile (tune) | REST + MCP | Both administrators (REST) and agents tuning themselves (MCP) need it. |
-| Doc CRUD | REST + MCP | Universal. |
+| Memory CRUD (write/recall/list/get/update/delete/transition) | REST + MCP (`caura_write`, `caura_recall`, `caura_list`, `caura_manage op=read\|update\|transition\|delete`) | Universal; needed by every audience. |
+| Bulk write | REST + MCP (`caura_write` with `items`, ≤ 100 per call) | Same. |
+| Per-agent search profile (tune) | REST (`GET`/`PATCH /agents/{agent_id}/tune`) + MCP (`caura_tune`) | Both administrators (REST) and agents tuning themselves (MCP) need it. |
+| Outcome reporting (evolve) | REST (`POST /evolve/report`) + MCP (`caura_evolve`) | Agents report what happened after acting on recalled memories; the outcome adjusts the weights of the memories named in `related_ids`, and a failure or partial outcome may generate a preventive rule. `scope=agent` is the default on both surfaces and needs trust ≥ 1 (the caller's own memories only); `scope=fleet` / `all` need trust ≥ 2. |
+| Insights (reflection) | REST (`POST /insights/generate`) + MCP (`caura_insights`) | Agents reflect over their own store — `focus` is one of contradictions, failures, stale, divergence, patterns, discover — and the findings are saved as `insight` memories for later runs. `scope=agent` is the default on both surfaces and needs trust ≥ 1; `scope=fleet` / `all` need trust ≥ 2, and `divergence` needs one of them. |
+| Doc CRUD | REST + MCP (`caura_doc op=write\|read\|query\|delete`) | Universal. |
 | Doc semantic search | MCP **and** REST | Was MCP-only; REST endpoint added so non-MCP clients can use vector search on documents. |
 | Doc list-collections | MCP **and** REST | Was MCP-only; REST endpoint added for parity with list use cases. |
 | Bulk delete | REST + MCP (`caura_manage op=bulk_delete`) | Admin sometimes; agents cleaning up after themselves sometimes. |
