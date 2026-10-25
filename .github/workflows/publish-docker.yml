@@ -11,7 +11,16 @@ name: publish-docker
 #
 # Manual workflow_dispatch is provided for re-publishing a specific tag
 # without re-cutting the release (e.g. recovering from a transient
-# registry outage).
+# registry outage). It takes the existing release tag and checks out
+# ``refs/tags/<tag>``, never a branch.
+#
+# REVIEW GATE. A release or a dispatch can name any tag, and a tag can point
+# at any commit, so the job first proves the tagged commit is on main, which
+# only reviewed changes reach. The push itself runs in the ``ghcr``
+# environment, which must carry required reviewers and admit only the main
+# branch and ``backend-v*`` tags (a dispatch runs from main; a release runs
+# from its tag). Those rules are repository settings, not this file: they are
+# what applies even to a run whose workflow file was edited on its ref.
 
 on:
   release:
@@ -30,7 +39,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   build-and-push:
@@ -41,6 +49,10 @@ jobs:
     # backend release (observed alongside the 2026-07-19 tag audit).
     if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'backend-')
     runs-on: ubuntu-latest
+    environment: ghcr
+    permissions:
+      contents: read
+      packages: write
     strategy:
       # All-or-nothing publish: if one image fails, abort the others so
       # we don't ship a release where (e.g.) core-api:v1.0.0 exists in
@@ -67,8 +79,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tag || github.event.release.tag_name }}
+          ref: refs/tags/${{ inputs.tag || github.event.release.tag_name }}
+          # The whole history, so main is there to compare the tag against.
+          fetch-depth: 0
           persist-credentials: false
+
+      # A tag can name any commit, and a release or a manual run can name any
+      # tag. Build only a commit main already contains.
+      - name: The tag must point at a commit on main
+        run: |
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "::error::$(git rev-parse HEAD) is not on main. Only a tag on a commit main already contains is published."
+            exit 1
+          fi
+          echo "$(git rev-parse HEAD) is on main"
 
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1

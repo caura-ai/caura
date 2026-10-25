@@ -30,6 +30,9 @@ bump unless the plugin source itself changes.
    changes.
 4. Merging the Release PR tags each updated package (e.g. `plugin-v2.5.1`)
    and triggers the corresponding release workflows.
+5. Every publish workflow first checks that the tag points at a commit on
+   `main`, and builds nothing otherwise. The backend images then wait for
+   approval on the `ghcr` environment before they are pushed.
 
 ## Version files release-please rewrites
 
@@ -172,7 +175,9 @@ release branches.
 ## Manual emergency release
 
 If release-please is unavailable, bump the affected package's version
-files manually, update `CHANGELOG.md`, and tag with the component-
+files manually, update `CHANGELOG.md`, and merge that change to `main`
+through a pull request. Then tag the merged commit with the component-
 namespaced format (`backend-vX.Y.Z`, `plugin-vX.Y.Z` or
-`collaboration-clients-vX.Y.Z`), then publish the release so the
-corresponding publish workflow runs.
+`collaboration-clients-vX.Y.Z`) and publish the release so the
+corresponding publish workflow runs. A tag on a commit that is not on
+`main` is refused.

@@ -7,18 +7,28 @@ name: Publish the canonical TypeScript client to npm
 # THIS WORKFLOW HAS NEVER RUN. Treat the first real run as unproven, and check
 # the registry afterwards rather than trusting the green tick.
 #
+# AUTH. npm trusted publishing (OIDC): no stored token exists. The `build` job
+# checks out the tag, proves it is on main, builds and packs with no credential
+# at all; only the `publish` job can mint the OIDC token npm accepts, and it
+# runs no repository code, only the pinned setup and `npm publish` of the
+# packed tarball. It runs in the `npm` environment.
+#
 # One-time setup by a maintainer:
-#   1. Ensure the @caura npm org/scope exists and the publisher has access.
-#   2. Add an `NPM_TOKEN` repository secret — an npm automation token with
-#      publish rights. Automation tokens are exempt from 2FA/OTP prompts by
-#      design; an OTP is never entered in CI. As of 2026-08-23 this secret does
-#      NOT exist, so this workflow cannot publish.
+#   1. Give the GitHub environment `npm` required reviewers, and restrict its
+#      deployment to the main branch and this repository's npm tag patterns.
+#      Referencing an environment that does not exist creates it WITHOUT
+#      protection, so check its rules, not that it exists.
+#   2. On npmjs.com, add a trusted publisher to the package: GitHub Actions,
+#      organization `caura-ai`, repository `caura`, workflow
+#      `publish-npm-client.yml`, environment `npm`. Then set the package's
+#      publishing access to require two-factor authentication and disallow
+#      tokens.
 #
 # Release: bump the version in clients/typescript/package.json, then push
-# `caura-client-ts-v<version>` or `caura-npm-v<version>` (or run this workflow
-# manually). Both Caura-spelled tag patterns now reach the same canonical
-# artifact; the latter was the original runbook for `@caura/client` and remains
-# supported.
+# `caura-client-ts-v<version>` or `caura-npm-v<version>`, or run this workflow
+# from main naming an existing tag. Both Caura-spelled tag patterns now reach
+# the same canonical artifact; the latter was the original runbook for
+# `@caura/client` and remains supported.
 #
 # The package name is read from package.json throughout rather than written
 # out, so the rename lands in one place and these steps keep working.
@@ -30,96 +40,173 @@ on:
       - "caura-client-ts-v*"
       - "caura-npm-v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re-)publish, e.g. caura-client-ts-v1.1.1"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
     permissions:
-      # Both, and `contents: read` is not redundant: declaring a permissions
-      # block sets every scope NOT listed to `none`, so naming only id-token
-      # leaves `contents: none` and `actions/checkout` authenticating with a
-      # token that cannot read the repo.
       contents: read
-      id-token: write # npm provenance
+    outputs:
+      name: ${{ steps.package.outputs.name }}
+      version: ${{ steps.package.outputs.version }}
     defaults:
       run:
         working-directory: clients/typescript
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          # The whole history, so main is there to compare the tag against.
+          fetch-depth: 0
           persist-credentials: false
+
+      # A tag can name any commit, and a release or a manual run can name any
+      # tag. Build only a commit main already contains.
+      - name: The tag must point at a commit on main
+        run: |
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "::error::$(git rev-parse HEAD) is not on main. Only a tag on a commit main already contains is published."
+            exit 1
+          fi
+          echo "$(git rev-parse HEAD) is on main"
+
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "20"
-          registry-url: "https://registry.npmjs.org"
 
       # A tag that disagrees with package.json does not fail naturally: npm
       # publishes the manifest's name and version under a misleading release
-      # tag. Validate both in one place before any credential or build work.
+      # tag. Validate both in one place before any build work, on a manual run
+      # as on a tag push.
       - name: The tag must agree with package.json
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
           PKG_NAME=$(node -p "require('./package.json').name")
-          case "${GITHUB_REF_NAME}" in
-            caura-client-ts-v*) TAG_VERSION="${GITHUB_REF_NAME#caura-client-ts-v}" ;;
-            caura-npm-v*) TAG_VERSION="${GITHUB_REF_NAME#caura-npm-v}" ;;
+          case "${RELEASE_TAG}" in
+            caura-client-ts-v*) TAG_VERSION="${RELEASE_TAG#caura-client-ts-v}" ;;
+            caura-npm-v*) TAG_VERSION="${RELEASE_TAG#caura-npm-v}" ;;
             *)
-              echo "::error::tag ${GITHUB_REF_NAME} does not use a supported client prefix"
+              echo "::error::tag ${RELEASE_TAG} does not use a supported client prefix"
               exit 1
               ;;
           esac
 
           case "${PKG_NAME}" in
             *memclaw*) # legacy-name-ok: reject the preserved alias name on this canonical path
-              echo "::error::tag ${GITHUB_REF_NAME} is Caura-spelled but package.json publishes ${PKG_NAME}"
+              echo "::error::tag ${RELEASE_TAG} is Caura-spelled but package.json publishes ${PKG_NAME}"
               exit 1
               ;;
             @caura/*) ;;
             *)
-              echo "::error::tag ${GITHUB_REF_NAME} is Caura-spelled but package.json publishes ${PKG_NAME}, whose brand is not recognized"
+              echo "::error::tag ${RELEASE_TAG} is Caura-spelled but package.json publishes ${PKG_NAME}, whose brand is not recognized"
               exit 1
               ;;
           esac
-          echo "tag ${GITHUB_REF_NAME} and package.json name ${PKG_NAME} are both Caura-spelled"
+          echo "tag ${RELEASE_TAG} and package.json name ${PKG_NAME} are both Caura-spelled"
 
           PKG_VERSION=$(node -p "require('./package.json').version")
           if [[ "${TAG_VERSION}" != "${PKG_VERSION}" ]]; then
-            echo "::error::tag ${GITHUB_REF_NAME} says ${TAG_VERSION} but package.json says ${PKG_VERSION}"
+            echo "::error::tag ${RELEASE_TAG} says ${TAG_VERSION} but package.json says ${PKG_VERSION}"
             exit 1
           fi
           echo "publishing ${PKG_NAME}@${PKG_VERSION}"
 
-      # Checked explicitly because the failure it prevents is a confusing one.
-      # Without the secret, `npm publish` authenticates as nobody and fails
-      # with a 401 or ENEEDAUTH that reads like an npm-side problem rather
-      # than a missing repository secret.
-      - name: The publish credential must exist
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Record the package name and version
+        id: package
         run: |
-          if [[ -z "${NPM_TOKEN}" ]]; then
-            echo "::error::NPM_TOKEN repository secret is not set. Add an npm automation token with publish rights; nothing here can publish without it."
-            exit 1
-          fi
+          echo "name=$(node -p "require('./package.json').name")" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
       # npm ci installs exactly the lockfile CI tests with; npm install may
-      # depart from it (L-64). tsc runs at publish, from prepublishOnly.
+      # depart from it (L-64). The build is explicit because the tarball is
+      # packed here and published elsewhere, so prepublishOnly never runs.
       - name: Install + build
-        run: npm ci
+        run: |
+          npm ci
+          npm run build
 
+      - name: Pack
+        run: |
+          mkdir -p "${RUNNER_TEMP}/package"
+          npm pack --ignore-scripts --pack-destination "${RUNNER_TEMP}/package"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-package
+          path: ${{ runner.temp }}/package/*.tgz
+          if-no-files-found: error
+
+  # Holds the permission, so it runs only the pinned setup, the credential
+  # check, the publish of the tarball built above and the registry check.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/${{ needs.build.outputs.name }}/v/${{ needs.build.outputs.version }}
+    permissions:
+      id-token: write # npm trusted publishing and provenance
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      # Trusted publishing has no stored token to check. It needs an OIDC
+      # token-request context, which GitHub provides only to a job holding
+      # `id-token: write`, and npm 11.5.1 or later. Without either, `npm
+      # publish` fails late with an authentication error that reads like an
+      # npm-side problem. Checked without minting a token in this step.
+      - name: The publish credential must be obtainable
+        run: |
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+            echo "::error::No OIDC token-request context, so npm trusted publishing cannot authenticate. This job needs 'permissions: id-token: write'; there is no stored token to fall back on."
+            exit 1
+          fi
+          NPM_VERSION=$(npm --version)
+          if ! printf '11.5.1\n%s\n' "${NPM_VERSION}" | sort -V -C; then
+            echo "::error::npm ${NPM_VERSION} cannot use trusted publishing, which needs npm 11.5.1 or later"
+            exit 1
+          fi
+          echo "OIDC token-request context is present; npm ${NPM_VERSION}"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-package
+          path: package/
+
+      # A tarball runs no lifecycle scripts when published; --ignore-scripts
+      # says so explicitly. The leading ./ is load-bearing: npm reads
+      # `package/<name>.tgz` as a GitHub `owner/repo` shorthand, not a file.
       - name: Publish
-        run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          shopt -s nullglob
+          TARBALLS=(./package/*.tgz)
+          if [[ "${#TARBALLS[@]}" -ne 1 ]]; then
+            echo "::error::expected one packed tarball, found ${#TARBALLS[@]}"
+            exit 1
+          fi
+          npm publish "${TARBALLS[0]}" --access public --provenance --ignore-scripts
 
       # A green publish step is not evidence the registry serves it. #870
       # merged a version bump, every check passed, and both registries went on
       # serving the old build because no tag had been pushed — the tick meant
       # "nothing went wrong", not "it shipped". Ask the registry.
       - name: The registry must actually serve it
+        env:
+          PKG_NAME: ${{ needs.build.outputs.name }}
+          PKG_VERSION: ${{ needs.build.outputs.version }}
         run: |
-          PKG_NAME=$(node -p "require('./package.json').name")
-          PKG_VERSION=$(node -p "require('./package.json').version")
           # Give the registry five minutes, not fifty seconds. The run for
           # caura-client-ts-v1.0.2 (actions/runs/35459496398, 2026-09-19)
           # published cleanly, polled 5 x 10 s, went red — and the registry was

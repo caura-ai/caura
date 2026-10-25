@@ -120,7 +120,7 @@ def _run_workflow_step(
             _workflow_step_script(workflow, step_name),
         ],
         cwd=working_directory,
-        env={"GITHUB_REF_NAME": tag, "PATH": os.environ["PATH"]},
+        env={"RELEASE_TAG": tag, "GITHUB_REF_NAME": tag, "PATH": os.environ["PATH"]},
         check=False,
         capture_output=True,
         text=True,
@@ -229,7 +229,8 @@ def test_npm_metapackages_reexport_what_they_depend_on(directory: str) -> None:
 
 
 @pytest.mark.unit
-def test_npm_client_tag_package_agreement_precedes_build_and_skips_dispatch() -> None:
+def test_npm_client_tag_package_agreement_precedes_build_on_every_trigger() -> None:
+    # A manual run names its tag too, so it is checked like a tag push.
     workflow = (WORKFLOWS / "publish-npm-client.yml").read_text()
     guard = "      - name: The tag must agree with package.json\n"
     assert workflow.index(guard) < workflow.index("      - name: Install + build\n")
@@ -238,7 +239,7 @@ def test_npm_client_tag_package_agreement_precedes_build_and_skips_dispatch() ->
             "        run: |\n", workflow.index(guard)
         )
     ]
-    assert "if: startsWith(github.ref, 'refs/tags/')" in guard_header
+    assert "if:" not in guard_header
 
 
 # The version the TypeScript client currently declares, so a bump does not

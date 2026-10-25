@@ -11,6 +11,11 @@ on:
       - "clients/typescript/**"
       - ".github/workflows/client-typescript-ci.yml"
 
+# Dependency installs run here, on push to main too, so the token they could
+# reach is read-only whatever the repository default is.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

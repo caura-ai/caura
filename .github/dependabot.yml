@@ -171,6 +171,26 @@ updates:
       pypi-build-majors:
         update-types: ["major"]
 
+  # --- Python: the test runner legacy-name-ratchet.yml installs by hash ---
+  # .github/legacy-name-ratchet/requirements.txt. The ratchet runs its own tests under
+  # it before judging a pull request, in this repository and in every consumer.
+  - package-ecosystem: "pip"
+    directory: "/.github/legacy-name-ratchet"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+      - "kind/chore"
+      - "area/infra"
+    commit-message:
+      prefix: "deps(ci)"
+    groups:
+      legacy-name-ratchet-minor-patch:
+        update-types: ["minor", "patch"]
+      legacy-name-ratchet-majors:
+        update-types: ["major"]
+
   # --- Python: the scanners security-scan.yml runs (L-65) ---
   # .github/security-scan/requirements.txt. A bump's own PR runs the scan with the
   # new version, so a check it adds fires there first.

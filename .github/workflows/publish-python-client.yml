@@ -7,16 +7,28 @@ name: Publish caura-client to PyPI
 #      publishes clients/python, whose distribution name is `caura-client`).
 #   2. On PyPI, add a Trusted Publisher: repo `caura-ai/caura`,
 #      workflow `publish-python-client.yml`, environment `pypi`.
-#   3. Create a GitHub environment named `pypi`.
+#   3. Give the GitHub environment `pypi` required reviewers, and restrict its
+#      deployment to the main branch and the four PyPI client tag patterns
+#      (caura-client-v*, caura-sdk-v*, caura-meta-v* and the redirect shell's).
+#      The other three PyPI client workflows share it.
 #
 # Release: bump the version in clients/python/pyproject.toml, then push a tag
-# `caura-client-v<version>` (or run this workflow manually).
+# `caura-client-v<version>`, or run this workflow from main naming an existing
+# tag. Either way the build job checks the tag is on main before building.
 
 on:
   push:
     tags:
       - "caura-client-v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re-)publish, e.g. caura-client-v1.1.1"
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   # The build has its own job, without `id-token: write`: GitHub hands the
@@ -32,21 +44,32 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          # The whole history, so main is there to compare the tag against.
+          fetch-depth: 0
           persist-credentials: false
+      # A tag can name any commit, and a release or a manual run can name any
+      # tag. Build only a commit main already contains.
+      - name: The tag must point at a commit on main
+        run: |
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "::error::$(git rev-parse HEAD) is not on main. Only a tag on a commit main already contains is published."
+            exit 1
+          fi
+          echo "$(git rev-parse HEAD) is on main"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       # A tag that disagrees with pyproject.toml does not fail — it publishes
       # whatever pyproject.toml says, under a tag claiming otherwise. The release
-      # then looks done while PyPI serves a different version. Skipped on
-      # workflow_dispatch, where there is no tag to agree with.
+      # then looks done while PyPI serves a different version. A manual run
+      # names its tag too, so it is checked the same way.
       - name: The tag must agree with pyproject.toml
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#caura-client-v}"
+          TAG_VERSION="${RELEASE_TAG#caura-client-v}"
           PKG_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           if [[ "$TAG_VERSION" != "$PKG_VERSION" ]]; then
-            echo "::error::tag ${GITHUB_REF_NAME} says ${TAG_VERSION} but pyproject.toml says ${PKG_VERSION}"
+            echo "::error::tag ${RELEASE_TAG} says ${TAG_VERSION} but pyproject.toml says ${PKG_VERSION}"
             exit 1
           fi
           echo "publishing $(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['name'])")==${PKG_VERSION}"
@@ -85,8 +108,8 @@ jobs:
       id-token: write # required for PyPI trusted publishing
     steps:
       # Fail before doing any work if this job cannot mint a publishing
-      # credential at all. The npm twin checks its NPM_TOKEN secret here; there
-      # is no stored token to check for trusted publishing, so the equivalent
+      # credential at all. There is no stored token to check for trusted
+      # publishing (the npm twins publish the same way now), so the
       # condition is whether GitHub is willing to issue an OIDC token — which it
       # signals by setting these two variables, and only when the job actually
       # holds `id-token: write`. Drop that permission while editing this file and
@@ -123,6 +146,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:

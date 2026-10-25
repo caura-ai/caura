@@ -14,8 +14,9 @@ name: Publish collaboration clients to PyPI
 # APPROVAL. Publication needs both (1) a merged release-please PR, which needs
 # review, and (2) approval on the `pypi-collaboration` environment, which must
 # be configured with required reviewers (one-time setup below). The build and
-# verification job runs without any publish credential; only the gated publish
-# job can mint the OIDC token PyPI accepts.
+# verification job runs without any publish credential, and first checks that
+# the tag points at a commit on main; only the gated publish job can mint the
+# OIDC token PyPI accepts.
 #
 # PROVENANCE. Trusted publishing (OIDC, no stored token) with PEP 740
 # attestations: each file on PyPI carries a Sigstore attestation that names
@@ -88,7 +89,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/tags/${{ env.TAG }}
+          # The whole history, so main is there to compare the tag against.
+          fetch-depth: 0
           persist-credentials: false
+      # A tag can name any commit, and a release or a manual run can name any
+      # tag. Build only a commit main already contains.
+      - name: The tag must point at a commit on main
+        run: |
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "::error::$(git rev-parse HEAD) is not on main. Only a tag on a commit main already contains is published."
+            exit 1
+          fi
+          echo "$(git rev-parse HEAD) is on main"
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: "0.9.26"

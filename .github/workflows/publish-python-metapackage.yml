@@ -20,15 +20,23 @@ name: Publish the caura metapackage to PyPI
 #      `publish-python-client.yml`; this workflow reuses it.
 #
 # Release: bump the version in clients/caura-meta/pyproject.toml, then push a
-# tag `caura-meta-v<version>` (or run this workflow manually). The tag prefix is
-# `caura-meta-` rather than `caura-` so it cannot collide with a future bare
-# `caura-v*` release tag for the repo itself.
+# tag `caura-meta-v<version>`, or run this workflow from main naming an
+# existing tag. The tag prefix is `caura-meta-` rather than `caura-` so it
+# cannot collide with a future bare `caura-v*` release tag for the repo itself.
 
 on:
   push:
     tags:
       - "caura-meta-v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re-)publish, e.g. caura-meta-v1.0.2"
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   # The build has its own job, without `id-token: write`: GitHub hands the
@@ -44,23 +52,34 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          # The whole history, so main is there to compare the tag against.
+          fetch-depth: 0
           persist-credentials: false
+      # A tag can name any commit, and a release or a manual run can name any
+      # tag. Build only a commit main already contains.
+      - name: The tag must point at a commit on main
+        run: |
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo "::error::$(git rev-parse HEAD) is not on main. Only a tag on a commit main already contains is published."
+            exit 1
+          fi
+          echo "$(git rev-parse HEAD) is on main"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       # This package was created under the Caura name and has no legacy tag
       # history, so tag-triggered releases accept only caura-meta-v*.
       - name: The tag must agree with pyproject.toml
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
-          if [[ "${GITHUB_REF_NAME}" != caura-meta-v* ]]; then
-            echo "::error::tag ${GITHUB_REF_NAME} must start with caura-meta-v"
+          if [[ "${RELEASE_TAG}" != caura-meta-v* ]]; then
+            echo "::error::tag ${RELEASE_TAG} must start with caura-meta-v"
             exit 1
           fi
-          TAG_VERSION="${GITHUB_REF_NAME#caura-meta-v}"
+          TAG_VERSION="${RELEASE_TAG#caura-meta-v}"
           PKG_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           if [[ "$TAG_VERSION" != "$PKG_VERSION" ]]; then
-            echo "::error::tag ${GITHUB_REF_NAME} says ${TAG_VERSION} but pyproject.toml says ${PKG_VERSION}"
+            echo "::error::tag ${RELEASE_TAG} says ${TAG_VERSION} but pyproject.toml says ${PKG_VERSION}"
             exit 1
           fi
           echo "publishing $(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['name'])")==${PKG_VERSION}"
@@ -126,6 +145,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
