@@ -15,7 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp as ASGIApplication
 from starlette.types import Receive, Scope, Send
 
-from common.structlog_config import configure_logging, reroute_third_party_loggers
+from common.structlog_config import configure_llmobs_privacy, configure_logging, reroute_third_party_loggers
 from core_api.config import settings as app_settings
 
 # Must run before any other module-level `logging.getLogger(...)` call emits
@@ -27,6 +27,8 @@ configure_logging(
     json_logs=app_settings.log_format_json,
     log_file=app_settings.log_file or None,
 )
+
+configure_llmobs_privacy()
 
 logger = logging.getLogger(__name__)
 

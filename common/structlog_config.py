@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import threading
 import warnings
@@ -410,6 +411,141 @@ def _base_processors() -> list[Any]:
     ]
 
 
+_REDACTED = "[REDACTED]"
+_EMAIL = re.compile(
+    r"[\w.+%\-]{1,64}(?:@|%40)[\w.\-]{1,255}\.[\w\-]{1,63}", re.IGNORECASE
+)
+_SENSITIVE_KEYS = frozenset(
+    {
+        "content",
+        "query",
+        "prompt",
+        "messages",
+        "input",
+        "output",
+        "email",
+        "token",
+        "api_key",
+        "authorization",
+        "password",
+        "secret",
+        "headers",
+        "request_body",
+        "response_body",
+    }
+)
+_CREDENTIAL_MARKERS = (
+    "secret",
+    "password",
+    "api_key",
+    "authorization",
+    "cookie",
+    "private_key",
+)
+
+
+def _sensitive_key(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    # Singular token fields are credentials; plural usage counters and
+    # token_count fields retain their operational value.
+    token_key = "token" in normalized.split("_") and not normalized.endswith(
+        "token_count"
+    )
+    return (
+        normalized in _SENSITIVE_KEYS
+        or token_key
+        or any(marker in normalized for marker in _CREDENTIAL_MARKERS)
+    )
+
+
+def _mask_email(value: str) -> str:
+    # Avoid even bounded regex scanning for the common case of no address.
+    if "@" not in value and "%40" not in value:
+        return value
+    return _EMAIL.sub(_REDACTED, value)
+
+
+def _scrub(value: Any, depth: int = 0) -> Any:
+    if depth > 20:
+        return _REDACTED
+    if isinstance(value, dict):
+        return {
+            key: _REDACTED
+            if isinstance(key, str) and _sensitive_key(key)
+            else _scrub(item, depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_scrub(item, depth + 1) for item in value]
+    if isinstance(value, str):
+        return _mask_email(value)
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    # Match the JSON renderer's string fallback, with email masking applied.
+    # An object that cannot be rendered must not break the logging path.
+    try:
+        return _mask_email(str(value))
+    except Exception:
+        return _REDACTED
+
+
+def scrub_log_event(logger: Any, method: str, event: dict[str, Any]) -> dict[str, Any]:
+    """Redact nested content fields and email addresses after exception rendering."""
+    return _scrub(event)
+
+
+def redact_llmobs_span(span: Any) -> Any:
+    """Retain operational span metrics while removing messages and documents.
+
+    The SDK exposes all message/document/value I/O through ``input`` and
+    ``output``. See Datadog's Python SDK span-processing contract:
+    https://docs.datadoghq.com/llm_observability/instrument/sdk/#span-processing
+    """
+    try:
+        kind = span.get_tag("span.kind")
+        if kind not in {
+            "llm",
+            "embedding",
+            "retrieval",
+            "workflow",
+            "agent",
+            "tool",
+            "task",
+        }:
+            return None
+        # In the pinned SDK an empty list removes messages/documents, but
+        # leaves scalar values unchanged. Scalar spans need a blank message.
+        span.input = (
+            [] if kind in {"embedding", "llm"} else [{"role": "user", "content": ""}]
+        )
+        span.output = (
+            []
+            if kind in {"retrieval", "llm"}
+            else [{"role": "assistant", "content": ""}]
+        )
+        if hasattr(span, "metadata"):
+            span.metadata = {}
+        return span
+    except Exception:
+        # The SDK otherwise fails open on processor exceptions. Drop this span
+        # if a changed SDK shape prevents us from removing its content.
+        return None
+
+
+def configure_llmobs_privacy() -> None:
+    """Register before provider calls when LLMObs is explicitly enabled.
+
+    Ordinary OSS/on-prem installs do not import the optional tracer. An
+    explicitly enabled but unusable SDK fails startup rather than collecting
+    without the processor. Applies to staging as well as production.
+    """
+    if os.environ.get("DD_LLMOBS_ENABLED", "").strip().lower() not in {"1", "true"}:
+        return
+    from ddtrace.llmobs import LLMObs
+
+    LLMObs.register_processor(redact_llmobs_span)
+
+
 def _json_processors() -> list[Any]:
     # Production-only chain: runs after _base_processors() in both the native
     # structlog pipeline and the stdlib-bridge foreign_pre_chain. Centralised
@@ -422,6 +558,7 @@ def _json_processors() -> list[Any]:
         # (possibly caller-overridden) severity.
         _add_datadog_status,
         _rename_event_to_message,
+        scrub_log_event,
     ]
 
 

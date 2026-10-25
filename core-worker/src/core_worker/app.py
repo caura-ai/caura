@@ -39,7 +39,7 @@ from common.events.lifecycle_handlers import (
     register_consumers as register_lifecycle_consumers,
 )
 from common.llm import init_platform_providers
-from common.structlog_config import configure_logging
+from common.structlog_config import configure_llmobs_privacy, configure_logging
 from common.usage import UsageAggregator, set_usage_sink
 from core_worker.clients.storage_client import close_storage_client, flush_usage, get_storage_client
 from core_worker.config import Settings
@@ -56,6 +56,8 @@ configure_logging(
     json_logs=settings.log_format_json,
     log_file=settings.log_file or None,
 )
+
+configure_llmobs_privacy()
 
 logger = logging.getLogger(__name__)
 
