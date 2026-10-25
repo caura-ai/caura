@@ -261,10 +261,15 @@ async def submit_interview(
     # ``caura-interviewer`` handles by skipping the one transcript, where a 403
     # aborts its whole run.
     names_fleet_node = _is_uuid(body.node_id)
+    # The node's own name rides into the memories the window yields (#678), so
+    # a report reads as coming from its node rather than only from an agent id.
+    node_name: str | None = None
     if names_fleet_node:
         nodes = await get_storage_client().list_nodes(tenant_id)
-        if not any(str(n.get("id") or "") == body.node_id for n in nodes):
+        node = next((n for n in nodes if str(n.get("id") or "") == body.node_id), None)
+        if node is None:
             raise HTTPException(status_code=404, detail="node_id is not a node of this tenant")
+        node_name = node.get("node_name") or None
     committed, stream_agent_id = await read_watermark_state(tenant_id, body.node_id)
     if (
         not names_fleet_node
@@ -321,6 +326,7 @@ async def submit_interview(
                 cursor_from=body.cursor_from,
                 cursor_to=body.cursor_to,
                 events=[ev.model_dump(mode="json") for ev in body.events],
+                node_name=node_name,
             )
         except InterviewJobPermanentlyFailedError:
             # 409 (not 500): the window is parked after exhausting its retry
@@ -376,6 +382,7 @@ async def submit_interview(
                     cursor_from=body.cursor_from,
                     cursor_to=body.cursor_to,
                     events=[ev.model_dump(mode="json") for ev in body.events],
+                    node_name=node_name,
                 ),
                 timeout=interview_budget,
             )

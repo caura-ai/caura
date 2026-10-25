@@ -324,6 +324,71 @@ def test_report_to_items_maps_types_and_event_time():
     assert by_type["episode"].ts_valid_start.year == 2026
 
 
+def test_report_to_items_stamps_the_node_name_when_there_is_one():
+    named = interview_service.report_to_items(
+        _CANNED_REPORT, node_id="n1", command_id="c1", node_name="oc-webclaw-prod"
+    )
+    assert {item.metadata["node_name"] for item in named} == {"oc-webclaw-prod"}
+    # An adapter stream names no fleet node, so it has no name to stamp.
+    unnamed = interview_service.report_to_items(
+        _CANNED_REPORT, node_id="cc:host:session", command_id=None
+    )
+    assert all("node_name" not in item.metadata for item in unnamed)
+
+
+async def _interviewer_rows(
+    client, tenant_id: str, agent_id: str, headers: dict
+) -> list:
+    listing = await client.get(
+        f"/api/v1/memories?tenant_id={tenant_id}&agent_id={agent_id}", headers=headers
+    )
+    assert listing.status_code == 200
+    rows = (
+        listing.json()["items"] if isinstance(listing.json(), dict) else listing.json()
+    )
+    return [r for r in rows if (r.get("metadata") or {}).get("source") == "interviewer"]
+
+
+async def test_submit_names_the_fleet_node_on_each_memory(client, canned_llm):
+    """#678: a node with no agent id of its own writes under
+    ``main-<install_id>``, so the agent id alone does not say whose report it
+    is. The node's name rides along beside ``node_id``."""
+    tenant_id, headers = get_test_auth(new_tenant_id())
+    await _enable_interviewer(client, tenant_id, headers)
+    node_name = f"oc-node-{uid()}"
+    node_id = await _seed_live_node(client, tenant_id, headers, node_name)
+    agent_id = f"main-{uid()}"
+
+    resp = await client.post(
+        "/api/v1/interview/submit",
+        json=_payload(tenant_id, node_id, agent_id),
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+
+    ours = await _interviewer_rows(client, tenant_id, agent_id, headers)
+    assert len(ours) == 3
+    assert {r["metadata"]["node_id"] for r in ours} == {node_id}
+    assert {r["metadata"]["node_name"] for r in ours} == {node_name}
+
+
+async def test_an_adapter_stream_submit_stamps_no_node_name(client, canned_llm):
+    tenant_id, headers = get_test_auth(new_tenant_id())
+    await _enable_interviewer(client, tenant_id, headers)
+    agent_id = f"agent-{uid()}"
+
+    resp = await client.post(
+        "/api/v1/interview/submit",
+        json=_payload(tenant_id, f"cc:host-{uid()}:session-1", agent_id),
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+
+    ours = await _interviewer_rows(client, tenant_id, agent_id, headers)
+    assert len(ours) == 3
+    assert all("node_name" not in r["metadata"] for r in ours)
+
+
 # ── schedule (admin cron entry point) ──
 
 

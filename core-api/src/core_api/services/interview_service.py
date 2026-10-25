@@ -386,11 +386,19 @@ def _parse_ts(value: Any) -> datetime | None:
         return None
 
 
-def report_to_items(report: dict, *, node_id: str, command_id: str | None) -> list[BulkMemoryItem]:
+def report_to_items(
+    report: dict, *, node_id: str, command_id: str | None, node_name: str | None = None
+) -> list[BulkMemoryItem]:
     """Map report sections onto typed memories.
 
     ``ts_valid_start`` carries the SOURCE event time (not report time) so
     batching does not corrupt freshness ranking — decisions doc / C2/C3.
+
+    ``node_name`` is the fleet node's own name, stamped beside ``node_id`` so a
+    report can be told apart by the node that produced it (#678): a node whose
+    agent id is unset writes under ``main-<install_id>``, an id no operator
+    recognises, and one node's output splits across two agent ids. An adapter
+    stream has no fleet node, and so no name.
     """
     items: list[BulkMemoryItem] = []
     for section, memory_type in REPORT_SECTIONS.items():
@@ -409,6 +417,8 @@ def report_to_items(report: dict, *, node_id: str, command_id: str | None) -> li
                 "node_id": node_id,
                 "written_by": "interviewer",
             }
+            if node_name:
+                metadata["node_name"] = node_name
             if command_id:
                 metadata["command_id"] = command_id
             if entry.get("session_id"):
@@ -593,6 +603,7 @@ async def _synthesize_and_write(
     cursor_to: int,
     masked_events: list[dict],
     advance_watermark_after: bool,
+    node_name: str | None = None,
 ) -> dict:
     """Synthesis half of the interview: map → reduce → bulk (→ watermark).
 
@@ -626,7 +637,7 @@ async def _synthesize_and_write(
     # Single-chunk reports still need shape normalization + caps.
     report = merge_reports([report])
 
-    items = report_to_items(report, node_id=node_id, command_id=command_id)
+    items = report_to_items(report, node_id=node_id, command_id=command_id, node_name=node_name)
     if not items:
         # Nothing report-worthy in the window (e.g. pure noise). Still
         # advance the cursor: the window was consumed, not lost.
@@ -687,6 +698,7 @@ async def run_interview(
     cursor_from: int,
     cursor_to: int,
     events: list[dict],
+    node_name: str | None = None,
 ) -> dict:
     """The full window interview: mask → map → reduce → bulk → watermark.
 
@@ -715,6 +727,7 @@ async def run_interview(
         cursor_to=cursor_to,
         masked_events=masked,
         advance_watermark_after=True,
+        node_name=node_name,
     )
 
 
@@ -731,6 +744,7 @@ async def enqueue_interview_job(
     cursor_from: int,
     cursor_to: int,
     events: list[dict],
+    node_name: str | None = None,
 ) -> str:
     """Persist one (node, window) as a durable ``interview_jobs`` doc.
 
@@ -886,6 +900,7 @@ async def enqueue_interview_job(
                 "fleet_id": fleet_id,
                 "agent_id": agent_id,
                 "node_id": node_id,
+                "node_name": node_name,
                 "command_id": command_id,
                 "cursor_from": cursor_from,
                 "cursor_to": cursor_to,
@@ -1067,6 +1082,8 @@ async def process_interview_job(
                 fleet_id=data.get("fleet_id"),
                 agent_id=str(data.get("agent_id") or ""),
                 node_id=str(data.get("node_id") or ""),
+                # Absent from a job enqueued before #678; its memories go unnamed.
+                node_name=data.get("node_name") or None,
                 command_id=data.get("command_id"),
                 cursor_from=int(data.get("cursor_from") or 0),
                 cursor_to=int(data.get("cursor_to") or 0),

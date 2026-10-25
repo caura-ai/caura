@@ -31,6 +31,7 @@ from tests.test_api_interview import (
     _events,
     _node,
     _payload,
+    _seed_live_node,
 )
 
 # ── helpers ──
@@ -210,6 +211,60 @@ async def test_processing_writes_typed_memories_and_marks_done(
     for row in ours:
         assert (row.get("metadata") or {}).get("node_id") == node_id
         assert (row.get("metadata") or {}).get("written_by") == "interviewer"
+
+
+async def test_the_job_carries_the_node_name_into_the_memories(
+    client, canned_llm, async_submit
+):
+    """#678, on the async path: the name is read at accept time, so it has to
+    travel in the job doc to reach the memories synthesis writes later."""
+    tenant_id, headers = get_test_auth(new_tenant_id())
+    await _enable_interviewer(client, tenant_id, headers)
+    node_name = f"oc-node-{uid()}"
+    node_id = await _seed_live_node(client, tenant_id, headers, node_name)
+    agent_id = f"agent-{uid()}"
+
+    resp = await client.post(
+        "/api/v1/interview/submit",
+        json=_payload(tenant_id, node_id, agent_id),
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    await _drain_inflight()
+    doc_id = interview_job_doc_id(node_id, 0, 10)
+    await process_interview_job(tenant_id, doc_id)
+
+    assert (await _job_doc(tenant_id, doc_id))["data"]["node_name"] == node_name
+    ours = await _interviewer_memories(client, tenant_id, agent_id, headers)
+    assert len(ours) == 3
+    assert {r["metadata"]["node_name"] for r in ours} == {node_name}
+
+
+async def test_a_job_enqueued_before_node_names_still_processes(client, canned_llm):
+    """A job doc written before #678 has no ``node_name`` key at all."""
+    tenant_id, headers = get_test_auth(new_tenant_id())
+    await _enable_interviewer(client, tenant_id, headers)
+    node_id, agent_id = await _node(client, tenant_id, headers), f"agent-{uid()}"
+    doc_id = await interview_service.enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, node_id, agent_id)
+    )
+    doc = await _job_doc(tenant_id, doc_id)
+    legacy = {k: v for k, v in doc["data"].items() if k != "node_name"}
+    await interview_service.get_storage_client().upsert_document(
+        {
+            "tenant_id": tenant_id,
+            "collection": JOBS_COLLECTION,
+            "doc_id": doc_id,
+            "data": legacy,
+        }
+    )
+
+    await process_interview_job(tenant_id, doc_id)
+
+    assert (await _job_doc(tenant_id, doc_id))["data"]["status"] == "done"
+    ours = await _interviewer_memories(client, tenant_id, agent_id, headers)
+    assert len(ours) == 3
+    assert all("node_name" not in r["metadata"] for r in ours)
 
 
 # ── (c) duplicate submits upsert one job; re-synthesis dedups ──
