@@ -10,6 +10,33 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.37.0](https://github.com/caura-ai/caura/compare/backend-v3.36.3...backend-v3.37.0) (2026-10-25)
+
+
+### Features
+
+* **core-api:** name the fleet node on each interviewer memory ([#2189](https://github.com/caura-ai/caura/issues/2189)) ([29303b5](https://github.com/caura-ai/caura/commit/29303b5f1111da36d257b42492e6c82a48126009))
+
+
+### Bug Fixes
+
+* **core-api:** relay settings invalidations over Redis ([#2187](https://github.com/caura-ai/caura/issues/2187)) ([f66feef](https://github.com/caura-ai/caura/commit/f66feef566402b6c34eb1ac9017860ef99e22ea7))
+
+
+### Dependencies
+
+* **actions:** bump the actions group with 4 updates ([#2200](https://github.com/caura-ai/caura/issues/2200)) ([3bbafe9](https://github.com/caura-ai/caura/commit/3bbafe9351cf125f955c85db617294419540d553))
+* **release:** bump setuptools from 84.0.0 to 84.2.1 in /.github/pypi-build in the pypi-build-minor-patch group ([#2194](https://github.com/caura-ai/caura/issues/2194)) ([5ec53ba](https://github.com/caura-ai/caura/commit/5ec53ba98b763de734dc485d02720832f91958b6))
+* update google-cloud-aiplatform requirement from &lt;3,&gt;=2.2.0 to &gt;=2.6.0,&lt;3 ([#2197](https://github.com/caura-ai/caura/issues/2197)) ([bb07df0](https://github.com/caura-ai/caura/commit/bb07df0ec3cf7c923d11189ddc9009e2c8319afc))
+* update google-genai requirement from &gt;=2.31.0 to &gt;=2.32.0 ([#2195](https://github.com/caura-ai/caura/issues/2195)) ([b9f3b72](https://github.com/caura-ai/caura/commit/b9f3b720af0e4bd035660d573bf6a71a268391da))
+* update markdown-it-py requirement from &lt;5,&gt;=4.0 to &gt;=4.2.0,&lt;5 ([#2199](https://github.com/caura-ai/caura/issues/2199)) ([7413efe](https://github.com/caura-ai/caura/commit/7413efe803a921e9e05d1d548e4f0c168fbbbffd))
+* update tiktoken requirement from &lt;1,&gt;=0.10 to &gt;=0.14.0,&lt;1 ([#2196](https://github.com/caura-ai/caura/issues/2196)) ([e0ebbf6](https://github.com/caura-ai/caura/commit/e0ebbf6308daeb7224dcc369fe7a5327d935e38a))
+
+
+### Documentation
+
+* **api:** name every MCP tool in the surface ownership charter ([#2186](https://github.com/caura-ai/caura/issues/2186)) ([fe5970e](https://github.com/caura-ai/caura/commit/fe5970e90bfdd147004f8085cb145690e7bbeef8))
+
 ## [3.36.3](https://github.com/caura-ai/caura/compare/backend-v3.36.2...backend-v3.36.3) (2026-10-25)
 
 
