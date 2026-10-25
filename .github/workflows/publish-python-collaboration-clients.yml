@@ -167,12 +167,12 @@ jobs:
           mv dist/caura_bus_core-* core-dist/
           ls core-dist dist
       - name: Publish caura-bus-core
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: core-dist/
           attestations: true
       - name: Publish caura-bus-mcp, caura-bus-cli, caura-bus-adapter-sdk
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           packages-dir: dist/
           attestations: true
