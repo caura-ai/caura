@@ -66,7 +66,7 @@ structlog>=26.1.0,<27
 # fails when this file falls behind either service again.
 # Document chunking, imported at startup.
 markdown-it-py>=4.2.0,<5
-tiktoken>=0.10,<1
+tiktoken>=0.14.0,<1
 pysbd>=0.3.4,<1
 # The insights discover mode.
 numpy>=2.5.4,<3
