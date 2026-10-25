@@ -17,8 +17,10 @@ rename to ``org_id`` is a follow-up that will touch ~20 call sites).
 Reads go through a per-process ``TTLCache`` (5-min TTL). A write invalidates
 the local entry immediately and broadcasts, and every other process drops its
 copy when the broadcast reaches it (CAURA-571); one the broadcast misses catches
-up on TTL expiry. The hold decision (g2.8) does not rely on either: storage
-checks the settings a live write was decided under (``common.settings_version``).
+up on TTL expiry. The in-process bus reaches no other process, so there the
+broadcast also travels over Redis (``settings_cache_relay``, #663). The hold
+decision (g2.8) does not rely on either: storage checks the settings a live
+write was decided under (``common.settings_version``).
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ from core_api.constants import (
     CRYSTALLIZER_MIN_CLUSTER_SIZE,
     MAX_TRUST_LEVEL,
 )
+from core_api.services.settings_cache_relay import publish_invalidation
 from core_api.services.settings_crypto import (
     decrypt_api_key,
     encrypt_api_keys,
@@ -613,9 +616,11 @@ def _remap_vertex(provider: str) -> str:
 #
 # Per-process cache; each uvicorn worker has its own. A write invalidates it
 # locally and broadcasts ``Org.SETTINGS_CHANGED``, which every other process
-# answers by invalidating its own (CAURA-571). Until the broadcast arrives, or
-# for the TTL (5 min) if it never does, a process answers from the settings it
-# had. See ``common.settings_version`` for how the write hold copes with that.
+# answers by invalidating its own (CAURA-571); on the in-process bus the
+# broadcast reaches the others through Redis instead (#663). Until the
+# broadcast arrives, or for the TTL (5 min) if it never does, a process answers
+# from the settings it had. See ``common.settings_version`` for how the write
+# hold copes with that.
 #
 # No locking: cache misses may issue duplicate DB reads under concurrency, but
 # the query is an indexed PK lookup and the result is identical, so racing
@@ -1628,6 +1633,12 @@ def invalidate_cache(tenant_id: str) -> None:
     logger.info("organization_settings cache invalidated for %s", tenant_id)
 
 
+def clear_cache() -> None:
+    """Evict every tenant's cached settings, for a process that may have missed invalidations."""
+    _settings_cache.clear()
+    logger.info("organization_settings cache cleared")
+
+
 async def resolve_config(tenant_id: str) -> ResolvedConfig:
     """Resolve config for a tenant: tenant override → global env default.
 
@@ -1911,6 +1922,9 @@ async def update_settings(
             tenant_id,
             exc_info=True,
         )
+    # The in-process bus delivered that broadcast to this process alone; Redis
+    # carries it to the others (#663). A no-op on a shared bus.
+    await publish_invalidation(tenant_id)
 
     # M-38: a crystallizer sweep setting is the policy a dedup stamp was settled
     # under, so a change to one reopens the stamped rows for the next run. Keyed

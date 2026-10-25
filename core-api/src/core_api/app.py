@@ -700,8 +700,17 @@ async def lifespan(app):
 
         await event_bus.start()
 
+        # #663: the in-process bus delivers the settings-changed broadcast to
+        # the publishing process alone, so on it sibling workers hear about a
+        # settings write through Redis.
+        from core_api.services import settings_cache_relay
+        from core_api.services.organization_settings import clear_cache, invalidate_cache
+
+        invalidation_listener = settings_cache_relay.start_listener(invalidate_cache, clear_cache)
+
         yield
 
+        await settings_cache_relay.stop_listener(invalidation_listener)
         await _shut_down(
             event_bus,
             audit_queue=audit_queue,

@@ -169,6 +169,39 @@ async def cache_set_nx(key: str, value: str, ttl: int) -> bool:
         return True
 
 
+# ── Pub/sub ──
+
+
+async def cache_publish(channel: str, message: str) -> bool:
+    """PUBLISH ``message`` on ``channel``. Returns True iff Redis accepted it.
+
+    Same fail-quiet contract as its neighbours: no Redis, or a failed PUBLISH,
+    returns False rather than raising.
+    """
+    r = await _get_redis()
+    if r is None:
+        return False
+    try:
+        await r.publish(channel, message)
+        return True
+    except Exception:
+        logger.debug("cache_publish failed for channel=%s", channel, exc_info=True)
+        return False
+
+
+async def cache_pubsub():
+    """A ``PubSub`` on the shared client that skips subscribe confirmations, or
+    None when Redis is not configured or not reachable.
+
+    It holds a connection of its own from the client's pool, so the caller
+    subscribes, reads, and closes it (``aclose``) when done.
+    """
+    r = await _get_redis()
+    if r is None:
+        return None
+    return r.pubsub(ignore_subscribe_messages=True)
+
+
 # ── JSON helpers ──
 
 

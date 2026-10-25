@@ -138,7 +138,7 @@ containers, `storage-secret-init` and `admin-key-init`:
 | Container | Role |
 |---|---|
 | `db` | PostgreSQL 16 + pgvector |
-| `redis` | Cache and rate limiting |
+| `redis` | Cache and rate limiting; carries settings changes to every core-api worker at once |
 | `core-storage-api` | Storage service (SQL + vector search) |
 | `core-api` | REST + MCP surface; embedding and enrichment run in-process (`deployment_mode=inline`) |
 | `core-operations` | Lifecycle scheduler: nightly expiry, stale archival, purge, crystallization, entity linking and insights, plus hourly reconciliation (02:00 UTC by default) |
