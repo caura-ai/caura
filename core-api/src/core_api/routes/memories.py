@@ -439,7 +439,10 @@ async def _resolve_scoped_read(
 
 
 @router.get("/memories", response_model=PaginatedMemoryResponse)
+@search_limit
 async def list_memories(
+    request: Request,
+    response: Response,
     tenant_id: str | None = Query(default=None),
     fleet_id: str | None = Query(default=None),
     agent_id: str | None = Query(default=None),
@@ -487,7 +490,7 @@ async def list_memories(
         pattern=r"^(created_at|weight|memory_type|agent_id|status|recall_count|fleet_id|tenant_id|expires_at|deleted_at)$",
     ),
     order: str = Query(default="desc", pattern=r"^(asc|desc)$"),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=10000),
     limit: int = Query(
         default=DEFAULT_LIST_LIMIT,
         ge=1,
@@ -657,7 +660,8 @@ async def list_memories(
             else None
         ),
     }
-    rows = await get_storage_client().list_memories_by_filters(list_payload)
+    async with per_tenant_slot("search", tenant_id):
+        rows = await get_storage_client().list_memories_by_filters(list_payload)
 
     has_more = len(rows) > limit
     items = [_memory_to_out(m) for m in rows[:limit]]

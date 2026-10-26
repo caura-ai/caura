@@ -61,6 +61,14 @@ USE_LLM_FOR_MEMORY_CREATION=false
 CORS_ORIGINS=http://localhost:8000,http://localhost:3000
 EOF
 
+# The storage service caps memory-map signature queries at 30 seconds by default.
+# Set MEMORY_FIELD_SIGNATURE_TIMEOUT_MS (positive milliseconds) in its environment
+# to tune this for larger corpora. Exceeding it logs a warning, returns storage
+# 503, and becomes a retryable 429 at core-api.
+# Uncached map builds share a five-second tenant-wide cooldown across visibility
+# scopes. Cache hits remain available; cooldown 429s report the remaining seconds
+# in Retry-After.
+
 # 5. Create the database (if it doesn't exist)
 psql -U postgres -c "CREATE USER caura WITH PASSWORD 'changeme';"
 psql -U postgres -c "CREATE DATABASE caura OWNER caura;"

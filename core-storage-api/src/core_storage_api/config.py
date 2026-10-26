@@ -118,6 +118,12 @@ class Settings(BaseSettings):
     # Env: SCORED_SEARCH_STATEMENT_TIMEOUT_MS.
     scored_search_statement_timeout_ms: int = Field(default=30_000, ge=0)
 
+    # Field-signature timeouts surface as storage 503 / core-api 429. Tune this
+    # for large corpora whose full visible-row signature needs more time. The
+    # 30s default matches scored search and stays below core-api's 45s budget.
+    # Env: MEMORY_FIELD_SIGNATURE_TIMEOUT_MS. A positive value keeps work bounded.
+    memory_field_signature_timeout_ms: int = Field(default=30_000, ge=1)
+
     @model_validator(mode="after")
     def resolve_alloydb_database_url(self) -> Settings:
         # Explicit DATABASE_URL wins, even when shared environment files carry

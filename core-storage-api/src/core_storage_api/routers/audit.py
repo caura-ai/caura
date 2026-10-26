@@ -208,8 +208,8 @@ async def verify_audit_chain(
 @router.get("")
 async def list_audit_logs(
     tenant_id: str,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=5000),
+    offset: int = Query(0, ge=0, le=10000),
     action: str | None = None,
     resource_type: str | None = None,
     agent_id: str | None = None,

@@ -4602,6 +4602,12 @@ async def caura_keystones_set(
             _error_response("INVALID_ARGUMENTS", f"Unknown op '{op}'. Expected set|delete."),
             t0,
         )
+    if op == "set" and (
+        (title is not None and len(title) > 200) or (content is not None and len(content) > 2000)
+    ):
+        return _with_latency(
+            _error_response("INVALID_ARGUMENTS", "title must be <= 200 and content <= 2000 characters."), t0
+        )
     if not doc_id:
         return _with_latency(_error_response("INVALID_ARGUMENTS", "doc_id is required."), t0)
     # Slug shape mirrors KeystoneSetRequest.doc_id in routes/keystones.py

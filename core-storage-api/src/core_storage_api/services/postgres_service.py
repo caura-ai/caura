@@ -131,6 +131,7 @@ from common.models.value_metering import AgentSession, MemoryOrigin, MemoryReuse
 from common.organization_settings_merge import diff_settings, merge_settings_update
 from common.settings_version import SETTINGS_VERSION_KEY, version_of
 from core_storage_api.observability import PhaseTimer, db_measure
+from core_storage_api.request_bounds import bound_metadata_merge
 from core_storage_api.schemas import MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.audit_chain import (
     GENESIS_PREV_HASH,
@@ -2744,6 +2745,9 @@ class PostgresService:
                     derived_deleted.extend(deleted)
 
             metadata_patch = _withhold_caller_owned_keys(metadata_patch, row.metadata_)
+            if metadata_patch:
+                # The row lock makes the resulting size check atomic with the merge.
+                bound_metadata_merge(values.get("metadata_", row.metadata_), metadata_patch)
 
             # No-op patches on a live row are valid: existence check
             # already passed, so report success without burning UPDATEs.
@@ -8153,7 +8157,16 @@ class PostgresService:
             ),
             func.sum(func.hashtextextended(shown, literal_column("0"))),
         ).where(*filters)
+        from core_storage_api.config import settings as _field_settings
+
         async with get_read_session() as session:
+            await session.execute(
+                select(
+                    func.set_config(
+                        "statement_timeout", f"{_field_settings.memory_field_signature_timeout_ms}ms", True
+                    )
+                )
+            )
             count, embedded, newest, revision = (await session.execute(stmt)).one()
         return {
             "count": int(count or 0),

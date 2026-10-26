@@ -15,6 +15,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import Request, Response
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -100,6 +101,8 @@ async def test_rest_list_pinned_to_a_sibling_sends_the_home_tenant(monkeypatch):
     # Every parameter explicit: calling the endpoint function directly skips
     # FastAPI's dependency resolution (see test_cross_tenant_audit_surfaces).
     await memories_routes.list_memories(
+        request=Request({"type": "http"}),
+        response=Response(),
         tenant_id="sibling",
         fleet_id=None,
         agent_id=None,

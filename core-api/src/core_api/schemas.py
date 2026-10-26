@@ -22,6 +22,7 @@ from core_api.constants import (
     MIN_TRUST_LEVEL,
     MemoryType,
 )
+from core_api.request_bounds import validate_write_fields
 
 # --- Request-body strictness (SAFE-01) ---
 #
@@ -181,8 +182,8 @@ class MemoryCreate(TenantScopedBody):
     memory_type: MemoryType | None = Field(default=None, description=MEMORY_TYPES_WRITE_DESCRIPTION)
     content: str = Field(min_length=1, max_length=MAX_CONTENT_LENGTH)
     weight: float | None = Field(default=None, ge=0.0, le=1.0)
-    source_uri: str | None = None
-    run_id: str | None = None
+    source_uri: str | None = Field(default=None, max_length=2048)
+    run_id: str | None = Field(default=None, max_length=200)
     metadata: dict | None = Field(default=None, description=CALLER_METADATA_DESCRIPTION)
     origin: OriginReport | None = Field(
         default=None,
@@ -195,8 +196,8 @@ class MemoryCreate(TenantScopedBody):
     expires_at: datetime | None = Field(default=None, description=EXPIRES_AT_DESCRIPTION)
     # RDF triple
     subject_entity_id: UUID | None = None
-    predicate: str | None = None
-    object_value: str | None = None
+    predicate: str | None = Field(default=None, max_length=200)
+    object_value: str | None = Field(default=None, max_length=10000)
     # Temporal validity
     ts_valid_start: datetime | None = None
     ts_valid_end: datetime | None = None
@@ -257,6 +258,13 @@ class MemoryCreate(TenantScopedBody):
                     "the row it supersedes."
                 )
         return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def bound_write_fields(cls, value):
+        if isinstance(value, dict):
+            validate_write_fields(value)
+        return value
 
 
 class BulkMemoryItem(BaseModel):
@@ -421,7 +429,7 @@ class MemoryUpdate(BaseModel):
     content: str | None = Field(default=None, min_length=1, max_length=MAX_CONTENT_LENGTH)
     memory_type: MemoryType | None = Field(default=None, description=MEMORY_TYPES_WRITE_DESCRIPTION)
     weight: float | None = Field(default=None, ge=0.0, le=1.0)
-    title: str | None = None
+    title: str | None = Field(default=None, max_length=500)
     status: str | None = Field(default=None, pattern=MEMORY_STATUSES_PATTERN)
     visibility: str | None = Field(default=None, pattern=MEMORY_VISIBILITIES_PATTERN)
     metadata: dict | None = Field(default=None, description=CALLER_METADATA_DESCRIPTION)
@@ -435,10 +443,10 @@ class MemoryUpdate(BaseModel):
             "column wholesale."
         ),
     )
-    source_uri: str | None = None
+    source_uri: str | None = Field(default=None, max_length=2048)
     subject_entity_id: UUID | None = None
-    predicate: str | None = None
-    object_value: str | None = None
+    predicate: str | None = Field(default=None, max_length=200)
+    object_value: str | None = Field(default=None, max_length=10000)
     ts_valid_start: datetime | None = None
     ts_valid_end: datetime | None = None
     expires_at: datetime | None = Field(default=None, description=EXPIRES_AT_DESCRIPTION)
@@ -479,6 +487,13 @@ class MemoryUpdate(BaseModel):
         ):
             raise ValueError("metadata_mode is only valid when metadata is also provided")
         return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def bound_write_fields(cls, value):
+        if isinstance(value, dict):
+            validate_write_fields(value)
+        return value
 
 
 class EntityLinkOut(BaseModel):
@@ -1207,6 +1222,13 @@ class EntityUpsert(TenantScopedBody):
     entity_type: str
     canonical_name: str
     attributes: dict | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def bound_write_fields(cls, value):
+        if isinstance(value, dict):
+            validate_write_fields(value)
+        return value
 
 
 class RelationOut(BaseModel):

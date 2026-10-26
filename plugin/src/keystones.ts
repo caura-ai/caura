@@ -206,16 +206,8 @@ export function formatKeystones(rules: KeystoneRow[], serverTruncated = false): 
     ? "Warning: the server truncated the rule set; additional rules are not shown.\n"
     : "";
   const maxChars = CAURA_KEYSTONES_TOKEN_CAP * CHARS_PER_TOKEN_ESTIMATE;
-  // Reserve room for the worst-case truncation line up front. The
-  // upper bound on ``N more rules omitted`` is ``sorted.length - 1``
-  // — the line only renders when AT LEAST one rule made it into the
-  // body, so ``N`` can never equal ``sorted.length``. Pre-fix we
-  // reserved bytes for one extra digit/char that the line will never
-  // emit; on the cap boundary this cost us a rule that would
-  // otherwise have fit. ``Math.max(..., 0)`` keeps the formula sound
-  // for the 0-rule case (no truncation line emitted at all).
-  const TRUNCATION_RESERVE =
-    `... (${Math.max(sorted.length - 1, 0)} more rules omitted)\n`.length;
+  // All rules may be omitted; reserve that notice before packing any lines.
+  const TRUNCATION_RESERVE = `... (${sorted.length} more rules omitted)\n`.length;
 
   const lines: string[] = [];
   let charsUsed = header.length + footer.length + serverNotice.length + TRUNCATION_RESERVE;
@@ -224,7 +216,7 @@ export function formatKeystones(rules: KeystoneRow[], serverTruncated = false): 
     const title = sanitizePromptField((rule.data?.title ?? rule.doc_id).trim());
     const content = sanitizePromptField((rule.data?.content ?? "").trim());
     const line = `- ${title}: ${content}\n`;
-    if (charsUsed + line.length > maxChars) break;
+    if (charsUsed + line.length > maxChars) continue;
     lines.push(line);
     charsUsed += line.length;
     included += 1;
@@ -233,14 +225,9 @@ export function formatKeystones(rules: KeystoneRow[], serverTruncated = false): 
   const omitted = sorted.length - included;
   const truncatedLine = omitted > 0 ? `... (${omitted} more rules omitted)\n` : "";
 
-  // If the token cap was smaller than the fixed block overhead (header
-  // + footer + truncation reserve), the loop above included nothing
-  // even though rules exist. Emitting an empty ``<keystone_rules>``
-  // block with just an "N omitted" line is misleading — it makes the
-  // agent think it has rules to follow while showing none. Treat this
-  // the same as ``rules.length === 0``: return ``""`` and let the
-  // caller skip the inject entirely.
-  if (included === 0) return "";
+  if (omitted > 0) {
+    logError("keystones: incomplete rule set", `${omitted} rules omitted (too long for the prompt budget)`);
+  }
 
   return header + lines.join("") + truncatedLine + serverNotice + footer;
 }

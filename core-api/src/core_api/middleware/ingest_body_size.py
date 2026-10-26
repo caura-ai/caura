@@ -1,19 +1,7 @@
-"""Ingest body-size middleware (PR #9).
+"""Bound request bodies before routing, authentication or JSON parsing.
 
-Rejects oversized requests to ``/ingest/preview``, ``/ingest/commit``, and
-``/ingest/file`` before FastAPI parses the body — same pattern as
-``RequestTimeoutMiddleware``: pure ASGI rather than ``BaseHTTPMiddleware``,
-so it runs ahead of body parsing and pydantic validation.
-
-A path-level ``Depends(...)`` doesn't work for this because FastAPI evaluates
-body parameters and path dependencies together; an oversized payload returns
-a 422 from body validation before our 413 dep ever fires. Middleware fixes
-that ordering.
-
-The check rejects an oversized ``Content-Length`` immediately, then buffers at
-most the capped body before handing it to FastAPI. Counting the actual ASGI
-body closes the chunked-transfer and dishonest-header bypasses while keeping
-memory usage bounded by the same 3 MB limit the routes advertise.
+All HTTP routes have a 4 MB budget; ingest retains its advertised 3 MB budget.
+Check Content-Length early and count actual ASGI bytes for chunked bodies.
 """
 
 from __future__ import annotations
@@ -27,6 +15,7 @@ from starlette.types import Message, Receive, Scope, Send
 from core_api.services.ingest_service import INGEST_MAX_INPUT_BYTES
 
 logger = logging.getLogger(__name__)
+MAX_REQUEST_BODY_BYTES = 4_000_000
 
 # Paths this middleware gates. We match by suffix (after the ``/api/v1``
 # prefix is stripped, both styles can exist) so the same middleware works
@@ -44,15 +33,17 @@ def _is_gated(path: str) -> bool:
 
 
 class IngestBodySizeMiddleware:
-    """ASGI middleware that 413s oversized ingest request bodies."""
+    """ASGI middleware that bounds all bodies before FastAPI parses them."""
 
     def __init__(self, app: ASGIApplication) -> None:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or not _is_gated(scope["path"]):
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+
+        cap = INGEST_MAX_INPUT_BYTES if _is_gated(scope["path"]) else MAX_REQUEST_BODY_BYTES
 
         # Scope headers are a list of (bytes, bytes) tuples — Starlette's
         # canonical form. We don't construct a Request object to avoid
@@ -72,8 +63,8 @@ class IngestBodySizeMiddleware:
                 # counter below remains authoritative.
                 pass
 
-        if declared_size is not None and declared_size > INGEST_MAX_INPUT_BYTES:
-            await self._reject(send, scope["path"], declared_size)
+        if declared_size is not None and declared_size > cap:
+            await self._reject(send, scope["path"], declared_size, cap)
             return
 
         body = bytearray()
@@ -81,10 +72,11 @@ class IngestBodySizeMiddleware:
         while True:
             message = await receive()
             if message["type"] == "http.request":
-                body.extend(message.get("body", b""))
-                if len(body) > INGEST_MAX_INPUT_BYTES:
-                    await self._reject(send, scope["path"], len(body))
+                chunk = message.get("body", b"")
+                if len(body) + len(chunk) > cap:
+                    await self._reject(send, scope["path"], len(body) + len(chunk), cap)
                     return
+                body.extend(chunk)
                 if not message.get("more_body", False):
                     break
             elif message["type"] == "http.disconnect":
@@ -111,25 +103,22 @@ class IngestBodySizeMiddleware:
             try:
                 return next(next_message)
             except StopIteration:
-                return {"type": "http.request", "body": b"", "more_body": False}
+                return await receive()
 
         await self.app(scope, replay_receive, send)
 
     @staticmethod
-    async def _reject(send: Send, path: str, size: int) -> None:
+    async def _reject(send: Send, path: str, size: int, cap: int) -> None:
         """Emit the route's stable 413 response without invoking FastAPI."""
-        max_mb = INGEST_MAX_INPUT_BYTES // 1_000_000
-        payload = {
-            "detail": (
-                f"File must be {max_mb} MB or under (got {size:,} bytes, max {INGEST_MAX_INPUT_BYTES:,})."
-            )
-        }
+        max_mb = cap // 1_000_000
+        subject = "File" if _is_gated(path) else "Request body"
+        payload = {"detail": f"{subject} must be {max_mb} MB or under (got {size:,} bytes, max {cap:,})."}
         body = json.dumps(payload).encode()
         logger.info(
-            "ingest body-size cap fired: path=%s body_bytes=%d (max %d)",
+            "request body-size cap fired: path=%s body_bytes=%d (max %d)",
             path,
             size,
-            INGEST_MAX_INPUT_BYTES,
+            cap,
         )
         await send(
             {

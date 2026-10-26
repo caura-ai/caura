@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from core_storage_api.routers._validation import _require
 from core_storage_api.schemas import AGENT_DIGEST_FIELDS, REPORT_FIELDS, orm_to_dict
@@ -75,7 +75,9 @@ async def get_latest_report(
 
 
 @router.get("")
-async def list_reports(tenant_id: str, limit: int = 10, offset: int = 0) -> list[dict]:
+async def list_reports(
+    tenant_id: str, limit: int = Query(10, ge=1, le=5000), offset: int = Query(0, ge=0, le=10000)
+) -> list[dict]:
     """09/02 M-12 — forward the window instead of silently taking the default.
 
     ``report_list_by_tenant`` has always paginated (ORDER BY started_at DESC,

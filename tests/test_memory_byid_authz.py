@@ -1160,6 +1160,11 @@ async def test_rest_install_naming_no_agent_reads_no_private_rows(
     assert mid not in resp.text
     assert victim not in resp.text
 
+    if "/memories/field?" in path:
+        # These authorization checks use two scopes; cooldown is tested separately.
+        from core_api.services.memory_field import _build_started
+
+        _build_started.clear()
     resp = await _read("install-b", victim)
     assert resp.status_code == 200, resp.text
     assert victim in resp.text

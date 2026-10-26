@@ -11,6 +11,8 @@ from uuid import UUID
 
 from fastapi import HTTPException
 
+from core_storage_api.request_bounds import validate_write_fields
+
 
 def _require(body: dict, key: str) -> str:
     """Fail-closed required-field guard — 422 if ``key`` is missing/falsy."""
@@ -73,3 +75,18 @@ def _int_at_least(body: dict, key: str, default: int, minimum: int) -> int:
     if isinstance(val, bool) or not isinstance(val, int) or val < minimum:
         raise HTTPException(status_code=422, detail=f"'{key}' must be an integer >= {minimum}")
     return val
+
+
+def _bounded_int(body: dict, key: str, default: int, maximum: int, minimum: int = 1) -> int:
+    """Validate a count before any storage work starts."""
+    value = _int_at_least(body, key, default, minimum)
+    if value > maximum:
+        raise HTTPException(status_code=422, detail=f"'{key}' must be <= {maximum}")
+    return value
+
+
+def _bounded_write(body: dict) -> None:
+    try:
+        validate_write_fields(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

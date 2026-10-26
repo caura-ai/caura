@@ -471,42 +471,11 @@ DNS_RESOLUTION_TIMEOUT = 5.0
 # this is the only number a caller-supplied chain cannot inflate.
 MAX_INGEST_FETCH_SECONDS = 60.0
 
-# DNS runs HERE rather than on the default executor, and the two protections
-# are not interchangeable:
-#
-#   asyncio.wait_for bounds the REQUEST. It does NOT reclaim the thread — a
-#   concurrent.futures future that is already running cannot be cancelled, so
-#   the worker stays inside getaddrinfo until the resolver answers or the OS
-#   gives up. Measured: after a 0.5s wait_for timeout on a 3s blocking call,
-#   the next task on a 1-worker pool still waited 2.52s for its turn.
-#
-#   The dedicated pool bounds the BLAST RADIUS. Because the timeout cannot free
-#   threads, hostile DNS can pin every worker it is allowed to reach; the only
-#   question is which pool those are. On the default executor that is the one
-#   the whole ASGI app shares, so one tenant's slow resolver could stall
-#   unrelated blocking work — a cross-tenant DoS. Confined here, a saturated
-#   pool degrades ingest (later hops queue, then time out with a 400) and
-#   nothing else.
-#
-# The hostname is attacker-supplied by design on this endpoint, so treat both
-# as load-bearing rather than defensive decoration.
-#
-# KNOWN LIMITATION, recorded because there is no call that fixes it. A worker
-# stuck in getaddrinfo delays interpreter exit: concurrent.futures.thread's
-# atexit hook joins it, so SIGTERM during a hostile-DNS fetch can outlast the
-# shutdown grace period. Registering a shutdown on the app's lifespan does NOT
-# help — a running worker cannot be cancelled, the same limitation that makes
-# the timeout above insufficient on its own. Measured, 5s blocking call, time
-# to process exit: no shutdown 5.03s, shutdown(wait=False) 5.03s,
-# shutdown(wait=False, cancel_futures=True) 5.03s.
-#
-# And do not reach for the workaround: dropping these threads from
-# ``concurrent.futures.thread._threads_queues`` so atexit skips them leaves
-# ``threading._shutdown`` waiting on a non-daemon thread that can no longer be
-# woken, and the process hangs forever instead of for seconds. Measured too.
-#
-# What actually bounds this is the OS resolver's own timeout and max_workers.
+# Resolver workers are isolated from the app's default executor. A tenant's
+# timed-out work keeps its slot until the blocking resolver actually returns.
 _DNS_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ingest-dns")
+_DNS_PENDING: dict[str, int] = {}
+DNS_TENANT_CONCURRENCY = 2
 
 
 def _resolve_and_vet(url: str) -> list[str]:
@@ -553,56 +522,57 @@ def _resolve_and_vet(url: str) -> list[str]:
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror as e:
-        raise HTTPException(status_code=400, detail=f"DNS resolution failed for {host}: {e}")
+        logger.info("ingest DNS lookup failed: host=%s error=%s", host, e)
+        raise HTTPException(status_code=400, detail="URL not allowed") from None
     addrs: list[str] = []
     for _family, _, _, _, sockaddr in infos:
         addr = str(sockaddr[0])
         if _is_blocked_ip(addr) or addr in _CLOUD_METADATA_IPS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Blocked: {host} resolves to {addr} (private/loopback/link-local/metadata)",
-            )
+            logger.info("ingest URL rejected: host=%s address=%s", host, addr)
+            raise HTTPException(status_code=400, detail="URL not allowed")
         if addr not in addrs:
             addrs.append(addr)
     if not addrs:
-        raise HTTPException(status_code=400, detail=f"DNS resolution failed for {host}: no addresses")
+        raise HTTPException(status_code=400, detail="URL not allowed")
     return addrs
 
 
 async def _resolve_and_vet_async(url: str) -> list[str]:
-    """``_resolve_and_vet``, off the event loop.
+    """Resolve with a deadline and two outstanding jobs per authenticated tenant.
 
-    ``socket.getaddrinfo`` blocks and takes no timeout, and M-43's per-hop loop
-    runs it up to ``MAX_INGEST_REDIRECTS + 1`` times where the old code ran it
-    twice. Six blocking resolutions inline is six chances for one tenant's slow
-    DNS to stall every other request sharing the worker — a fair objection to
-    the per-hop check, and cheaper to answer than to argue with.
-
-    A wrapper rather than making the vetting itself async: it is the policy
-    function and its logic has no business knowing about event loops.
-
-    This deliberately has NO branch for "skip pinning". An earlier cut decided
-    that by comparing the module-level checker against a snapshot taken at
-    import, so that tests substituting a yes/no stand-in kept working — which
-    made a security-critical behaviour toggle on whether a private module
-    attribute had been reassigned, silently and without a log line. Tests patch
-    this function or :func:`_resolve_and_vet` instead.
-
-    The timeout and the dedicated pool do two DIFFERENT jobs, and neither
-    substitutes for the other. See :data:`_DNS_EXECUTOR`.
+    Shield the executor future so the completion callback releases the slot
+    only when getaddrinfo finishes, including after a request times out.
     """
+    from core_api.tenant_context import get_current_tenant
+
+    tenant = get_current_tenant() or "standalone"
+    if _DNS_PENDING.get(tenant, 0) >= DNS_TENANT_CONCURRENCY:
+        raise HTTPException(
+            status_code=429, detail="URL resolver is busy; retry shortly", headers={"Retry-After": "5"}
+        )
+    _DNS_PENDING[tenant] = _DNS_PENDING.get(tenant, 0) + 1
     loop = asyncio.get_running_loop()
     try:
-        return await asyncio.wait_for(
-            loop.run_in_executor(_DNS_EXECUTOR, _resolve_and_vet, url),
-            timeout=DNS_RESOLUTION_TIMEOUT,
-        )
-    except TimeoutError:  # asyncio.TimeoutError is an alias of this since 3.11
-        host = urlparse(url).hostname or url
-        raise HTTPException(
-            status_code=400,
-            detail=f"DNS resolution timed out after {DNS_RESOLUTION_TIMEOUT}s for {host}",
-        )
+        work = loop.run_in_executor(_DNS_EXECUTOR, _resolve_and_vet, url)
+    except BaseException:
+        _DNS_PENDING[tenant] -= 1
+        if not _DNS_PENDING[tenant]:
+            del _DNS_PENDING[tenant]
+        raise
+
+    def release(done):
+        _DNS_PENDING[tenant] -= 1
+        if not _DNS_PENDING[tenant]:
+            del _DNS_PENDING[tenant]
+        if not done.cancelled():
+            done.exception()
+
+    work.add_done_callback(release)
+    try:
+        return await asyncio.wait_for(asyncio.shield(work), timeout=DNS_RESOLUTION_TIMEOUT)
+    except TimeoutError:
+        logger.warning("ingest URL lookup timed out")
+        raise HTTPException(status_code=504, detail="URL lookup timed out") from None
 
 
 @asynccontextmanager
@@ -689,11 +659,36 @@ def decode_text_body(body: bytes, mime: str, encoding: str | None = None) -> str
     """
     decoded = body.decode(encoding or "utf-8", errors="replace")
     if mime in ("text/html", "application/xhtml+xml"):
-        text = re.sub(r"<script[^>]*>.*?</script>", "", decoded, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = re.sub(r"\s+", " ", text).strip()
-        return text
+        # Each search starts after the bytes already consumed. In particular,
+        # an unclosed script/style consumes the rest once, however many openers
+        # it contains. ASCII translation preserves offsets in Unicode text.
+        lowered = decoded.translate(str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"))
+        chunks: list[str] = []
+        cursor = 0
+        while cursor < len(decoded):
+            start = decoded.find("<", cursor)
+            if start < 0:
+                chunks.append(decoded[cursor:])
+                break
+            chunks.append(decoded[cursor:start])
+            end = decoded.find(">", start + 1)
+            if end < 0:
+                chunks.append(decoded[start:])
+                break
+            tag = (
+                lowered[start + 1 : end].split(None, 1)[0].rstrip("/")
+                if lowered[start + 1 : end].strip()
+                else ""
+            )
+            if tag in ("script", "style"):
+                close = re.compile(r"</" + tag + r"\s*>").search(lowered, end + 1)
+                if close is None:
+                    break
+                cursor = close.end()
+            else:
+                cursor = end + 1
+            chunks.append(" ")
+        return " ".join("".join(chunks).split())
     return decoded.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
@@ -1076,8 +1071,12 @@ async def ingest_preview(request: IngestRequest) -> dict:
             # Preserve the specific 400/413/422 from _fetch_url_text — these
             # carry meaningful status codes the caller needs to see.
             raise
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Failed to fetch URL: {e}")
+        except (TimeoutError, httpx.TimeoutException):
+            logger.info("ingest URL fetch timed out", exc_info=True)
+            raise HTTPException(status_code=504, detail="URL fetch timed out") from None
+        except Exception:
+            logger.info("ingest URL fetch failed", exc_info=True)
+            raise HTTPException(status_code=502, detail="Could not fetch URL") from None
     elif request.content:
         content = request.content
     else:

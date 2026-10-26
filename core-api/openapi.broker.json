@@ -1421,6 +1421,7 @@
           "object_value": {
             "anyOf": [
               {
+                "maxLength": 10000,
                 "type": "string"
               },
               {
@@ -1432,6 +1433,7 @@
           "predicate": {
             "anyOf": [
               {
+                "maxLength": 200,
                 "type": "string"
               },
               {
@@ -1443,6 +1445,7 @@
           "source_uri": {
             "anyOf": [
               {
+                "maxLength": 2048,
                 "type": "string"
               },
               {
@@ -1478,6 +1481,7 @@
           "title": {
             "anyOf": [
               {
+                "maxLength": 500,
                 "type": "string"
               },
               {
@@ -2550,6 +2554,7 @@
             "required": false,
             "schema": {
               "default": 0,
+              "maximum": 10000,
               "minimum": 0,
               "title": "Offset",
               "type": "integer"

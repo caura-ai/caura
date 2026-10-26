@@ -93,6 +93,7 @@ from core_api.errors import (
     AUTH_FLEET_SCOPE_FORBIDDEN,
     coded_detail,
 )
+from core_api.request_bounds import validate_write_fields
 from core_api.schemas import (
     BulkItemResult,
     BulkMemoryCreate,
@@ -1643,6 +1644,13 @@ async def create_memories_bulk(
     # -- Per-item validation. Short content used to raise a 422 for the
     # whole batch; now it's a per-item "error" result. Indices in this
     # dict are skipped through the embed / enrich / dedup / write path.
+    field_size_errors: dict[int, str] = {}
+    for i, item in enumerate(items):
+        try:
+            validate_write_fields(item.model_dump())
+        except ValueError as exc:
+            field_size_errors[i] = str(exc)
+
     short_content_errors: dict[int, str] = {
         i: f"content too short (minimum {CRYSTALLIZER_SHORT_CONTENT_CHARS} characters)"
         for i, item in enumerate(items)
@@ -1727,6 +1735,7 @@ async def create_memories_bulk(
         and i not in status_errors
         and i not in memory_type_errors
         and i not in unknown_field_errors
+        and i not in field_size_errors
     ]
 
     # -- Deterministic governance gate (eToro). Runs BEFORE embeddings +
@@ -2015,6 +2024,7 @@ async def create_memories_bulk(
                 weight_errors,
                 status_errors,
                 unknown_field_errors,
+                field_size_errors,
             )
             if i in errs
         ]

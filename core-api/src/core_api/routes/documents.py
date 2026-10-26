@@ -6,7 +6,7 @@ from datetime import datetime
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from common.embedding import embedding_configured, get_embedding
 from core_api import openapi_responses as _oar
@@ -27,6 +27,7 @@ from core_api.middleware.idempotency import (
     release_claim_on_error,
 )
 from core_api.middleware.rate_limit import write_limit
+from core_api.request_bounds import bounded_json
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.agent_service import (
     broker_owned_agent_id,
@@ -272,6 +273,11 @@ class DocWriteRequest(TenantScopedBody):
                 "POST /memories, which does take a top-level 'content'."
             )
         raise ValueError(message)
+
+    @field_validator("data")
+    @classmethod
+    def bound_data(cls, value):
+        return bounded_json(value)
 
 
 class DocQueryRequest(TenantScopedBody):

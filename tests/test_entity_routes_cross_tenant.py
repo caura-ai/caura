@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request, Response
 
 from core_api.auth import AuthContext
 from core_api.routes import entities as entities_routes
@@ -83,6 +83,8 @@ async def test_list_entities_single_tenant_blocked_from_foreign(monkeypatch):
     auth = _auth(home="tenant-A")  # readable = ["tenant-A"]
     with pytest.raises(HTTPException) as exc:
         await entities_routes.list_entities(
+            request=Request({"type": "http"}),
+            response=Response(),
             tenant_id="tenant-B",
             fleet_id=None,
             entity_type=None,
@@ -102,6 +104,8 @@ async def test_list_entities_cross_tenant_credential_allowed(monkeypatch):
     auth = _auth(home="tenant-A", readable=["tenant-A", "tenant-B"])
 
     result = await entities_routes.list_entities(
+        request=Request({"type": "http"}),
+        response=Response(),
         tenant_id="tenant-B",
         fleet_id=None,
         entity_type=None,
@@ -129,6 +133,8 @@ async def test_list_entities_home_tenant_does_not_audit(monkeypatch):
     auth = _auth(home="tenant-A", readable=["tenant-A", "tenant-B"])
 
     await entities_routes.list_entities(
+        request=Request({"type": "http"}),
+        response=Response(),
         tenant_id="tenant-A",
         fleet_id=None,
         entity_type=None,
@@ -147,6 +153,8 @@ async def test_list_entities_single_tenant_does_not_audit(monkeypatch):
     auth = _auth(home="tenant-A")  # readable = ["tenant-A"]
 
     await entities_routes.list_entities(
+        request=Request({"type": "http"}),
+        response=Response(),
         tenant_id="tenant-A",
         fleet_id=None,
         entity_type=None,

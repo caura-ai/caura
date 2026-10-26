@@ -29,6 +29,7 @@ from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
+from fastapi import Request, Response
 
 from tests._mcp_test_helpers import stub_storage_client
 
@@ -336,6 +337,8 @@ async def test_rest_memories_list_emits_cross_tenant_audit(monkeypatch):
     # value — which is neither None nor comparable. A new param must be added
     # here too.
     await memories_routes.list_memories(
+        request=Request({"type": "http"}),
+        response=Response(),
         tenant_id=None,  # broad — triggers widening
         fleet_id=None,
         agent_id=None,
