@@ -37,7 +37,7 @@ import re
 import sys
 import threading
 import warnings
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import structlog
 
@@ -465,7 +465,7 @@ def _mask_email(value: str) -> str:
     return _EMAIL.sub(_REDACTED, value)
 
 
-def _scrub(value: Any, depth: int = 0) -> Any:
+def _scrub(value: object, depth: int = 0) -> object:
     if depth > 20:
         return _REDACTED
     if isinstance(value, dict):
@@ -489,12 +489,22 @@ def _scrub(value: Any, depth: int = 0) -> Any:
         return _REDACTED
 
 
-def scrub_log_event(logger: Any, method: str, event: dict[str, Any]) -> dict[str, Any]:
+def scrub_log_event(
+    logger: object, method: str, event: dict[str, object]
+) -> dict[str, object]:
     """Redact nested content fields and email addresses after exception rendering."""
-    return _scrub(event)
+    return cast("dict[str, object]", _scrub(event))
 
 
-def redact_llmobs_span(span: Any) -> Any:
+class _EditableLLMObsSpan(Protocol):
+    input: list[dict[str, str]]
+    output: list[dict[str, str]]
+    metadata: dict[str, object]
+
+    def get_tag(self, key: str) -> object: ...
+
+
+def redact_llmobs_span[SpanT](span: SpanT) -> SpanT | None:
     """Retain operational span metrics while removing messages and documents.
 
     The SDK exposes all message/document/value I/O through ``input`` and
@@ -502,7 +512,8 @@ def redact_llmobs_span(span: Any) -> Any:
     https://docs.datadoghq.com/llm_observability/instrument/sdk/#span-processing
     """
     try:
-        kind = span.get_tag("span.kind")
+        editable = cast("_EditableLLMObsSpan", span)
+        kind = editable.get_tag("span.kind")
         if kind not in {
             "llm",
             "embedding",
@@ -515,16 +526,16 @@ def redact_llmobs_span(span: Any) -> Any:
             return None
         # In the pinned SDK an empty list removes messages/documents, but
         # leaves scalar values unchanged. Scalar spans need a blank message.
-        span.input = (
+        editable.input = (
             [] if kind in {"embedding", "llm"} else [{"role": "user", "content": ""}]
         )
-        span.output = (
+        editable.output = (
             []
             if kind in {"retrieval", "llm"}
             else [{"role": "assistant", "content": ""}]
         )
-        if hasattr(span, "metadata"):
-            span.metadata = {}
+        if hasattr(editable, "metadata"):
+            editable.metadata = {}
         return span
     except Exception:
         # The SDK otherwise fails open on processor exceptions. Drop this span

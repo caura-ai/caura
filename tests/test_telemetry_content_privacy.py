@@ -296,3 +296,19 @@ def test_log_scrubber_preserves_operational_token_counts(key):
     from common.structlog_config import _scrub
 
     assert _scrub({key: 17}) == {key: 17}
+
+
+@pytest.mark.parametrize("name", ["_scrub", "scrub_log_event", "redact_llmobs_span"])
+def test_telemetry_boundaries_use_concrete_annotations(name):
+    from typing import Any, get_args, get_type_hints
+
+    from common import structlog_config
+
+    def contains_any(annotation):
+        return annotation is Any or any(
+            contains_any(arg) for arg in get_args(annotation)
+        )
+
+    hints = get_type_hints(getattr(structlog_config, name))
+    assert hints
+    assert not any(contains_any(hint) for hint in hints.values())
