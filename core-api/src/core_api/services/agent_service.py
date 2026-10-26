@@ -981,6 +981,14 @@ async def enforce_update(
         )
 
 
+#: Statuses an agent may give its OWN memory at the edit bar: a fact it wrote is
+#: superseded, contradicted or abandoned, which is how an agent retires one
+#: (the plugin skill's "Supersede, don't delete"). Archiving and deleting stay at
+#: the delete bar, and so does any non-live status not listed here, including
+#: one added to the vocabulary later.
+OWNER_RETIREMENT_STATUSES = frozenset({"outdated", "conflicted", "cancelled"})
+
+
 async def enforce_transition(
     tenant_id: str,
     agent_id: AgentIdentity,
@@ -993,8 +1001,11 @@ async def enforce_transition(
     (``enforce_update``): the caller's own row, a peer's only at trust 3, and
     nothing at trust 0. A status outside ``LIVE_MEMORY_STATUSES`` also takes the
     row out of search and recall for every reader, which is what a delete does,
-    so it needs what a delete needs as well (``enforce_delete``). Without the
-    second, a status change would let an agent do what ``DELETE`` refuses it.
+    so it needs what a delete needs as well (``enforce_delete``), unless the row
+    is the caller's own and the status is in ``OWNER_RETIREMENT_STATUSES``.
+    Without the delete gate, a status change would let an agent do what
+    ``DELETE`` refuses it. A peer's row needs trust 3 either way, through
+    ``enforce_update``.
 
     REST ``PATCH /memories/{id}/status`` and MCP ``caura_manage`` op=transition
     both call this, so the two surfaces cannot drift apart on the rule.
@@ -1004,8 +1015,13 @@ async def enforce_transition(
     trust level, and keep the authority they already hold.
     """
     await enforce_update(tenant_id, agent_id, memory_owner_agent_id)
-    if status not in LIVE_MEMORY_STATUSES:
-        await enforce_delete(tenant_id, agent_id)
+    if status in LIVE_MEMORY_STATUSES:
+        return
+    # Ownership as ``enforce_update`` decides it; a row with no owner is no one's.
+    own_row = canonical_service_agent_id(agent_id) == memory_owner_agent_id
+    if own_row and status in OWNER_RETIREMENT_STATUSES:
+        return
+    await enforce_delete(tenant_id, agent_id)
 
 
 async def backfill_agents() -> int:

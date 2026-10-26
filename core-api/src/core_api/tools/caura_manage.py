@@ -43,8 +43,8 @@ _SPEC = ToolSpec(
     # the effective threshold. Do not read the zeros as "ungated": ``update``
     # reaches ``enforce_update`` via ``update_memory``; ``transition`` calls
     # ``enforce_transition``, which is ``enforce_update`` plus ``enforce_delete``
-    # for a status outside the live set, so its bar depends on the status asked
-    # for; and ``authorize_memory_access`` consults ``trust_level`` (>= 2 read,
+    # for a status outside the live set (bar an agent retiring its own row), so
+    # its bar depends on the row and the status asked for; and ``authorize_memory_access`` consults ``trust_level`` (>= 2 read,
     # >= 3 write) on cross-fleet rows. Nothing corroborates per-op attribution —
     # invariant 3 asks only whether a tool declaring a threshold reaches SOME
     # trust gate — so this claims no more than the two ``enforce_delete``

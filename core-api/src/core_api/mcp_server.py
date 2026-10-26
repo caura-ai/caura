@@ -2346,9 +2346,10 @@ async def caura_manage(
                     return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
                 # Trust for an agent credential, by the rule REST
                 # ``PATCH /memories/{id}/status`` applies: the edit gate, and
-                # the delete gate for a status that leaves the live set. A
-                # credential with no agent identity carries no trust level and
-                # meets only the row check below.
+                # the delete gate for a status that leaves the live set, unless
+                # the agent is retiring its own row. A credential with no agent
+                # identity carries no trust level and meets only the row check
+                # below.
                 if caller_agent_id:
                     await enforce_transition(tenant_id, caller_agent_id, memory.get("agent_id"), status)
                 # Cross-fleet / scope_agent authorization (write threshold).

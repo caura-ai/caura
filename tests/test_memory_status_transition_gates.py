@@ -7,8 +7,11 @@ A status change edits the row, so an agent credential needs what an edit needs
 (``enforce_update``): its own row, a peer's only at trust 3, and nothing at all
 at trust 0. A status outside ``LIVE_MEMORY_STATUSES`` also takes the row out of
 search and recall for every reader, which is what a delete does, so it needs
-what a delete needs as well (``enforce_delete``, trust 3). Without both, the
-status verb could do what the edit and delete routes refuse.
+what a delete needs as well (``enforce_delete``, trust 3), with one exception:
+an agent may retire its OWN memory as ``outdated``, ``conflicted`` or
+``cancelled`` at the edit bar. That is how an agent supersedes a fact it wrote
+(the plugin skill's "Supersede, don't delete"). Archiving or deleting it, and
+any status not named here, still needs delete trust.
 
 A credential with no agent identity (a tenant key, a person, an install
 credential) has no trust level to compare and keeps the authority it already
@@ -47,6 +50,10 @@ _FLEET = "fleet-alpha"
 _TRUST = {"zero": 0, "alice": 1, "bob": 1, "dana": 2, "carol": 3}
 
 _NOT_LIVE = tuple(s for s in MEMORY_STATUSES if s not in LIVE_MEMORY_STATUSES)
+# The decision under test, written out rather than imported from the gate, so a
+# change to the gate's own list cannot change what these tests expect.
+_OWNER_RETIRES = ("outdated", "conflicted", "cancelled")
+_DELETE_BAR = tuple(s for s in _NOT_LIVE if s not in _OWNER_RETIRES)
 
 
 class _Outcome(NamedTuple):
@@ -140,7 +147,7 @@ def _changed(outcome: _Outcome) -> None:
 
 
 @pytest.mark.parametrize("visibility", ["scope_team", "scope_org"])
-@pytest.mark.parametrize("status", ["confirmed", "archived"])
+@pytest.mark.parametrize("status", ["confirmed", "outdated", "archived"])
 async def test_an_agent_below_trust_3_cannot_change_a_peers_memory_status(
     transition, visibility, status
 ):
@@ -150,15 +157,22 @@ async def test_an_agent_below_trust_3_cannot_change_a_peers_memory_status(
     )
 
 
-async def test_a_trust_0_agent_cannot_change_its_own_memory_status(transition):
-    _refused(
-        await transition("zero", _row("zero"), "confirmed"), AUTH_AGENT_TRUST_TOO_LOW
-    )
+@pytest.mark.parametrize("status", ["confirmed", "outdated"])
+async def test_a_trust_0_agent_cannot_change_its_own_memory_status(transition, status):
+    _refused(await transition("zero", _row("zero"), status), AUTH_AGENT_TRUST_TOO_LOW)
 
 
 @pytest.mark.parametrize("caller", ["alice", "dana"])
-@pytest.mark.parametrize("status", _NOT_LIVE)
-async def test_taking_a_memory_out_of_the_live_statuses_needs_delete_trust(
+@pytest.mark.parametrize("status", _OWNER_RETIRES)
+async def test_an_agent_may_retire_its_own_memory_below_delete_trust(
+    transition, caller, status
+):
+    _changed(await transition(caller, _row(caller), status))
+
+
+@pytest.mark.parametrize("caller", ["alice", "dana"])
+@pytest.mark.parametrize("status", _DELETE_BAR)
+async def test_archiving_or_deleting_its_own_memory_needs_delete_trust(
     transition, caller, status
 ):
     _refused(await transition(caller, _row(caller), status), AUTH_AGENT_TRUST_TOO_LOW)
@@ -187,7 +201,9 @@ async def test_a_credential_without_an_agent_is_not_held_to_the_trust_ladder(
     assert lookups == []
 
 
-def test_the_live_statuses_are_a_proper_subset_of_the_vocabulary():
-    """The not-live cases above are derived, so they must not derive to nothing."""
+def test_the_status_cases_are_drawn_from_the_vocabulary():
+    """The cases above are partly derived, so they must not derive to nothing,
+    and the owner's statuses must be real non-live ones."""
     assert set(LIVE_MEMORY_STATUSES) < set(MEMORY_STATUSES)
-    assert {"outdated", "cancelled", "archived", "deleted"} <= set(_NOT_LIVE)
+    assert set(_OWNER_RETIRES) < set(_NOT_LIVE)
+    assert {"archived", "deleted"} <= set(_DELETE_BAR)
