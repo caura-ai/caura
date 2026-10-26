@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.25.5](https://github.com/caura-ai/caura/compare/plugin-v2.25.4...plugin-v2.25.5) (2026-10-26)
+
+
+### Bug Fixes
+
+* **api:** bound request work and payload sizes ([#2222](https://github.com/caura-ai/caura/issues/2222)) ([27f5bd5](https://github.com/caura-ai/caura/commit/27f5bd541c09e50c12edfad4ee3d31f05787094a))
+
 ## [2.25.4](https://github.com/caura-ai/caura/compare/plugin-v2.25.3...plugin-v2.25.4) (2026-10-25)
 
 

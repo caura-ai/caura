@@ -10,6 +10,25 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.37.2](https://github.com/caura-ai/caura/compare/backend-v3.37.1...backend-v3.37.2) (2026-10-26)
+
+
+### Bug Fixes
+
+* **api:** bound request work and payload sizes ([#2222](https://github.com/caura-ai/caura/issues/2222)) ([27f5bd5](https://github.com/caura-ai/caura/commit/27f5bd541c09e50c12edfad4ee3d31f05787094a))
+
+
+### Dependencies
+
+* **docker:** bump datadog/serverless-init from `161423d` to `30c3fcf` in /core-api ([#2211](https://github.com/caura-ai/caura/issues/2211)) ([b309fd9](https://github.com/caura-ai/caura/commit/b309fd9203ce49516f0ef4e7ebda4353232737c3))
+* **docker:** bump datadog/serverless-init from `161423d` to `30c3fcf` in /core-worker ([#2214](https://github.com/caura-ai/caura/issues/2214)) ([48eface](https://github.com/caura-ai/caura/commit/48eface4efa06bd3c87a338b61c2493d795107f9))
+* **docker:** bump python from `05cda97` to `a0f5706` in /core-operations ([#2213](https://github.com/caura-ai/caura/issues/2213)) ([956bedc](https://github.com/caura-ai/caura/commit/956bedc96bcb5ab8a7e1102f2591f6853112a002))
+* **docker:** bump python from `05cda97` to `a0f5706` in /core-worker ([#2215](https://github.com/caura-ai/caura/issues/2215)) ([bccfdc1](https://github.com/caura-ai/caura/commit/bccfdc150c69d9cc68e138498f29bab1800cce3d))
+* update alembic requirement from &lt;2,&gt;=1.20.0 to &gt;=1.20.1,&lt;2 ([#2208](https://github.com/caura-ai/caura/issues/2208)) ([f23c5ca](https://github.com/caura-ai/caura/commit/f23c5ca3ce35f830e1bc35bde2255ed9d76311df))
+* update httpx2 requirement from &lt;3,&gt;=2.13.1 to &gt;=2.16.0,&lt;3 ([#2206](https://github.com/caura-ai/caura/issues/2206)) ([a011520](https://github.com/caura-ai/caura/commit/a011520d98e41349acacc0700de50e4dfefb8ea7))
+* update openai requirement from &lt;4,&gt;=3.24.0 to &gt;=3.37.0,&lt;4 ([#2207](https://github.com/caura-ai/caura/issues/2207)) ([577e678](https://github.com/caura-ai/caura/commit/577e67824a8e1644ec1746ebf02dba4f2dfd85b3))
+* update pydantic-settings requirement from &lt;3,&gt;=2.16.0 to &gt;=2.16.1,&lt;3 ([#2205](https://github.com/caura-ai/caura/issues/2205)) ([4d43093](https://github.com/caura-ai/caura/commit/4d43093e07fc623d3d3b0fec1c3059d7e25cfaed))
+
 ## [3.37.1](https://github.com/caura-ai/caura/compare/backend-v3.37.0...backend-v3.37.1) (2026-10-26)
 
 
