@@ -65,9 +65,10 @@ semantic recall.
 | **Google Gemini** | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=gemini` | `GEMINI_API_KEY` + `OPENAI_API_KEY` |
 | **OpenRouter** | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=openrouter` | `OPENROUTER_API_KEY` + `OPENAI_API_KEY` |
 | **Atlas Cloud** | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=atlascloud` | `ATLASCLOUD_API_KEY` + `OPENAI_API_KEY` |
+| **Cheaper Inference** | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=cheaperinference` | `CHEAPERINFERENCE_API_KEY` + `OPENAI_API_KEY` |
 | **Self-hosted (TEI / bge-m3)** | `--profile embed-local` + `OPENAI_EMBEDDING_BASE_URL=http://tei:80/v1`<br>+ `OPENAI_EMBEDDING_MODEL=BAAI/bge-m3`<br>+ `OPENAI_EMBEDDING_SEND_DIMENSIONS=false` | none — runs locally |
 
-Gemini, OpenRouter and Atlas Cloud do not provide embedding APIs here, so pair them with
+Gemini, OpenRouter, Atlas Cloud and Cheaper Inference do not provide embedding APIs here, so pair them with
 OpenAI or TEI for embeddings. `ENTITY_EXTRACTION_PROVIDER=anthropic` is not
 supported: enrichment, entity extraction and contradiction detection need
 structured JSON output, which Anthropic's OpenAI-compatible endpoint rejects,

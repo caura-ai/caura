@@ -40,6 +40,10 @@ ATLASCLOUD_CHAT_BASE_URL = "https://api.atlascloud.ai/v1"
 ATLASCLOUD_DEFAULT_MODEL = os.environ.get(
     "ATLASCLOUD_DEFAULT_MODEL", "openai/gpt-4.1-mini"
 )
+CHEAPERINFERENCE_CHAT_BASE_URL = "https://api.cheaperinference.com/v1"
+CHEAPERINFERENCE_DEFAULT_MODEL = os.environ.get(
+    "CHEAPERINFERENCE_DEFAULT_MODEL", "gpt-5.4-nano"
+)
 
 # ── Retry policy ─────────────────────────────────────────────────────
 

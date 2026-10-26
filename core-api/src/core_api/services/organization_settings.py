@@ -1177,6 +1177,7 @@ class ResolvedConfig:
             (ProviderName.GEMINI.value, self.gemini_api_key),
             (ProviderName.OPENROUTER.value, self.openrouter_api_key),
             (ProviderName.ATLASCLOUD.value, self.atlascloud_api_key),
+            (ProviderName.CHEAPERINFERENCE.value, self.cheaperinference_api_key),
         ]
         for prov, key in candidates:
             if prov != primary and key:
@@ -1210,6 +1211,13 @@ class ResolvedConfig:
         return (
             decrypt_api_key(self._ts.get("api_keys", {}).get("atlascloud_api_key"))
             or global_settings.atlascloud_api_key
+        )
+
+    @property
+    def cheaperinference_api_key(self) -> str | None:
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("cheaperinference_api_key"))
+            or global_settings.cheaperinference_api_key
         )
 
     @property
