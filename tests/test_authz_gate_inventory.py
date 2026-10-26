@@ -30,7 +30,7 @@ walked away without the third, so the SECOND visit to one function is what
 found it. Manual sweeps have not converged, and prose in a route docstring is
 not readable by anything.
 
-So: enumerate the surface and make the omissions explicit. Three invariants,
+So: enumerate the surface and make the omissions explicit. Four invariants,
 one mechanism.
 
 The third is not about mutation. ``enforce_self_agent`` (#1364/#1365) asks
@@ -40,6 +40,16 @@ and ``filter_agent_id`` on ``POST /recall`` were both disclosure, not tamper.
 So that invariant is scoped by the route's INTERFACE — does it take a
 caller-supplied agent identity — rather than by verb, and it reads
 ``route.dependant`` rather than the handler body. See ``_identity_params``.
+
+The fourth is ROW authority. The write gate asks whether a credential may
+write at all; it does not ask whether THIS agent may change THIS memory, and a
+status change that skipped that question let any agent retire rows its peers
+wrote, which the edit and delete routes both refuse. So every mutating route
+that changes or retires memory rows must reach a row gate (``ROW_GATES``,
+directly or through a ``ROW_GATE_CARRIERS`` service). A route is in scope when
+it takes a memory id or reaches a memory-row sink (``MEMORY_ROW_SINKS``), so
+renaming the id does not take a route out of it. The names are shared with the
+MCP inventory through ``tests/_memory_row_gates.py``.
 
 WHAT THIS IS NOT. It does not decide whether a gate is the RIGHT one, and it
 cannot: ``skills_inbox`` guards with a module-local ``_require_inbox_admin``
@@ -82,7 +92,15 @@ from collections.abc import Callable
 from typing import NamedTuple
 
 from core_api.app import app
+from core_api.services.memory_service import update_memory
 from tests._legacy_contracts import LEGACY_KEYSTONES_ROUTE
+from tests._memory_row_gates import (
+    MEMORY_ID_PARAMS,
+    MEMORY_ROW_SINKS,
+    ROW_GATE_CARRIERS,
+    ROW_GATES,
+    carriers_called,
+)
 
 MUTATING_VERBS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
@@ -132,6 +150,12 @@ PLANE_GATE_EXEMPT = frozenset({"enforce_admin"})
 # ``DELETE /agents/{id}``, ``PATCH /agents/{id}/fleet``,
 # ``PATCH /agents/{id}/trust``, ``GET /admin/memories``.
 SELF_GATE_EXEMPT = frozenset({"enforce_admin", "enforce_not_agent_credential"})
+
+# The ROW axis is exempt on the same grounds: the row gates govern AGENT
+# credentials (``enforce_delete``'s contract), so a route no agent credential
+# can reach has no caller for them to judge. One route rests on this today,
+# ``POST /admin/memories/{memory_id}/re-extract`` (``enforce_admin``).
+ROW_GATE_EXEMPT = frozenset({"enforce_admin", "enforce_not_agent_credential"})
 
 # Module-level names a settings object is bound to, for the flag scan in
 # ``_classify``. Both spellings are live and neither is the house style:
@@ -508,6 +532,33 @@ SELF_GATE_ALLOWLIST: dict[str, str] = {
     ),
 }
 
+# The ROW axis. Every mutating route that changes or retires memory rows
+# reaches a row gate, refuses agent credentials, or has a line here.
+#
+# Neither line is a KNOWN GAP. Each route holds an agent to a trust bar of its
+# own, written out in the handler rather than spelled through the shared gates,
+# and the line says which bar. Whether those bars are the right ones is a
+# product call this file cannot make; what it records is that the question was
+# asked, by whom it was answered, and what the handler does today.
+ROW_GATE_ALLOWLIST: dict[str, str] = {
+    # Re-homes rows to another agent across fleets: an edit of rows the caller
+    # may not own, at the bar the delete and peer-edit gates both use. The
+    # handler checks it inline on the caller that enforce_self_agent has bound
+    # to the credential.
+    "POST /api/v1/memories/redistribute": (
+        "trust >= 3, checked inline on the caller enforce_self_agent binds"
+    ),
+    # Restores, never retires: a dismissal clears the detector's supersede
+    # edge and returns the loser to ``active``, and only when nothing else has
+    # moved it since. The reviewer bar is trust 2, below the trust 3 a peer's
+    # row needs for an edit; that difference is deliberate (review is the
+    # keystone-author bar, see NON_ADMIN_PLANE_ROUTERS["conflicts"]).
+    "PATCH /api/v1/conflicts/{conflict_id}/resolve": (
+        "returns a loser to active only; the reviewer clears _require_trust at "
+        "trust 2 in _reviewer"
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
 # Route resolution
@@ -831,9 +882,56 @@ def _classify(
     )
 
 
+@functools.cache
+def _called_names(fn, _depth: int = 0) -> frozenset[str]:
+    """Every name the handler calls, as ``f()`` or ``x.f()``.
+
+    For the row axis, which has to see storage calls such as
+    ``sc.update_memory_status`` and imported gates such as ``enforce_delete``;
+    ``_classify`` records only ``auth.enforce_*`` among attribute calls. The
+    traversal is ``_classify``'s: module-local helpers two levels down, and an
+    imported callable is named, not followed. Only a bare-name call is
+    followed, because ``sc.update_memory_status`` must not resolve to a
+    same-named handler in the route module (``update_memory_status`` is both).
+    """
+    tree = _parse(fn)
+    if tree is None:
+        return frozenset()
+    found: set[str] = set()
+    local: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute):
+            found.add(node.func.attr)
+        elif isinstance(node.func, ast.Name):
+            found.add(node.func.id)
+            local.add(node.func.id)
+    if _depth >= 2:
+        return frozenset(found)
+    module_globals = getattr(inspect.getmodule(fn), "__dict__", {})
+    for name in sorted(local - {fn.__name__}):
+        target = module_globals.get(name)
+        if (
+            inspect.isfunction(target)
+            and getattr(target, "__module__", None) == fn.__module__
+        ):
+            found |= _called_names(target, _depth + 1)
+    return frozenset(found)
+
+
+def _row_gates_of(fn) -> frozenset[str]:
+    """The row gates ``fn`` reaches: a gate by either spelling, a carrier only
+    as the service itself (``carriers_called``)."""
+    tree = _parse(fn)
+    carriers = carriers_called((tree,), fn) if tree is not None else frozenset()
+    return (_called_names(fn) & ROW_GATES) | carriers
+
+
 def _row(verb: str, path: str, route) -> dict:
     endpoint = route.endpoint
     gates, helpers, imported, flags, binders = _classify(endpoint)
+    calls = _called_names(endpoint)
     return {
         "key": f"{verb} {path}",
         "router": endpoint.__module__.rsplit(".", 1)[-1],
@@ -844,6 +942,9 @@ def _row(verb: str, path: str, route) -> dict:
         "settings_flags": flags,
         "binders": binders,
         "identity_params": _identity_params(route),
+        "row_targets": (_request_params(route) & MEMORY_ID_PARAMS)
+        | (calls & MEMORY_ROW_SINKS),
+        "row_gates": _row_gates_of(endpoint),
     }
 
 
@@ -881,6 +982,19 @@ def _self_plane_routes() -> list[dict]:
     return rows
 
 
+def _row_gate_routes() -> list[dict]:
+    """Every mutating route that changes or retires memory rows.
+
+    ``row_targets`` is the union of two scans, and each covers the other's
+    blind spot: the parameter scan sees a route whose sink sits behind an
+    imported service it does not follow (``POST /admin/memories/{memory_id}/
+    re-extract``), and the sink scan sees a route that names its rows some
+    other way (``PATCH /conflicts/{conflict_id}/resolve`` takes a conflict id
+    and writes memory statuses).
+    """
+    return [row for row in _mutating_routes() if row["row_targets"]]
+
+
 def _report(row: dict) -> str:
     lines = [
         f"    {row['key']}",
@@ -893,6 +1007,9 @@ def _report(row: dict) -> str:
         binders = sorted(row["imported_calls"] & IDENTITY_BINDERS)
         lines.append(f"        identity params: {sorted(row['identity_params'])}")
         lines.append(f"        identity-binding calls: {binders or 'none'}")
+    if row["row_targets"]:
+        lines.append(f"        memory rows via: {sorted(row['row_targets'])}")
+        lines.append(f"        row gates reached: {sorted(row['row_gates']) or 'NONE'}")
     return "\n".join(lines)
 
 
@@ -922,6 +1039,15 @@ def _unguarded_for_self(row: dict) -> bool:
         and SELF_GATE not in row["gates"]
         and SELF_BINDER not in row["binders"]
         and not (row["gates"] & SELF_GATE_EXEMPT)
+    )
+
+
+def _unguarded_for_row(row: dict) -> bool:
+    """Would this route fail the row invariant without an entry?"""
+    return (
+        bool(row["row_targets"])
+        and not row["row_gates"]
+        and not (row["gates"] & ROW_GATE_EXEMPT)
     )
 
 
@@ -973,6 +1099,13 @@ _ALLOWLISTS = (
         _unguarded_for_self,
         _self_plane_routes,
         4,
+    ),
+    _Axis(
+        "ROW_GATE_ALLOWLIST",
+        ROW_GATE_ALLOWLIST,
+        _unguarded_for_row,
+        _row_gate_routes,
+        0,
     ),
 )
 
@@ -1053,6 +1186,102 @@ def test_routes_taking_an_agent_identity_gate_the_self_plane() -> None:
         + "\n".join(_report(r) for r in offenders)
         + f"\n\nAdd the gate, or add a line to SELF_GATE_ALLOWLIST in {__file__} "
         "saying what this route's agent_id means if not 'act as this agent'."
+    )
+
+
+def test_routes_changing_memory_rows_reach_a_row_gate() -> None:
+    """An agent may change or retire only the memory rows its trust allows.
+
+    The write gate says a credential may write; it says nothing about whose
+    rows. ``PATCH /memories/{id}/status`` passed every check above while any
+    agent in a fleet could retire the rows its peers wrote, a delete by another
+    verb that the edit and delete routes refuse. This is the check that names
+    the next route like it.
+    """
+    offenders = [
+        row
+        for row in _row_gate_routes()
+        if _unguarded_for_row(row) and row["key"] not in ROW_GATE_ALLOWLIST
+    ]
+    assert not offenders, (
+        f"{len(offenders)} route(s) change or retire memory rows without "
+        f"reaching a row gate ({sorted(ROW_GATES)}), a service that applies "
+        "one, or an agent-credential refusal, and are not listed in "
+        "ROW_GATE_ALLOWLIST:\n"
+        + "\n".join(_report(r) for r in offenders)
+        + f"\n\nCall the gate, or add a line to ROW_GATE_ALLOWLIST in {__file__} "
+        "saying which trust bar the route applies instead."
+    )
+
+
+def test_the_row_scope_sees_both_kinds_of_route() -> None:
+    """Guards the guard: each scan behind ``row_targets`` still finds its case.
+
+    The first route is found by the parameter scan only and the last two by
+    the sink scan only, so a scan that stops seeing (a FastAPI upgrade that
+    moves the path params, a storage call renamed out of
+    ``MEMORY_ROW_SINKS``) fails here by name rather than shrinking the
+    invariant above to whatever is left.
+    """
+    rows = {row["key"]: row["row_targets"] for row in _row_gate_routes()}
+    expected = {
+        "POST /api/v1/admin/memories/{memory_id}/re-extract": {"memory_id"},
+        "PATCH /api/v1/memories/{memory_id}/status": {
+            "memory_id",
+            "update_memory_status",
+        },
+        "POST /api/v1/memories/bulk-delete": {"soft_delete_by_ids"},
+        "PATCH /api/v1/conflicts/{conflict_id}/resolve": {"update_memory_status"},
+    }
+    missing = {
+        key: rows.get(key, "not in scope")
+        for key, want in expected.items()
+        if not want <= rows.get(key, set())
+    }
+    assert not missing, (
+        f"the row scope stopped seeing routes it was written for: {missing}\n"
+        "Fix the parameter or sink scan before trusting a green run."
+    )
+
+
+async def _writes_through_storage(sc, memory_id):
+    await sc.update_memory(memory_id, "t", {"status": "archived"})
+
+
+async def _edits_through_the_service(memory_id):
+    await update_memory(memory_id, "t", None)
+
+
+def test_a_carrier_counts_only_as_the_service_itself() -> None:
+    """``update_memory`` names both the gated service and the ungated storage
+    write, and the storage write is also a sink. Credited by name, a handler
+    writing rows straight through storage would bring itself into scope and
+    pass in the same call."""
+    assert _row_gates_of(_writes_through_storage) == frozenset()
+    assert _row_gates_of(_edits_through_the_service) == {"update_memory"}
+
+
+def test_row_gates_are_live_agent_service_functions() -> None:
+    """A misspelled or deleted gate name would credit nothing and fail nothing."""
+    from core_api.services import agent_service
+
+    dead = sorted(n for n in ROW_GATES if not callable(getattr(agent_service, n, None)))
+    assert not dead, f"ROW_GATES names no agent_service function: {dead}"
+
+
+def test_row_gate_carriers_apply_a_row_gate() -> None:
+    """Each carrier is credited as a gate, so its own body must call one."""
+    import importlib
+
+    broken = {}
+    for name, module in ROW_GATE_CARRIERS.items():
+        fn = getattr(importlib.import_module(module), name)
+        called = _called_names(inspect.unwrap(fn))
+        if not called & ROW_GATES:
+            broken[f"{module}.{name}"] = sorted(called)
+    assert not broken, (
+        "ROW_GATE_CARRIERS names functions that apply no row gate, so the routes "
+        f"credited through them are ungated: {broken}"
     )
 
 

@@ -100,6 +100,7 @@ from core_api.services.agent_service import (
     enforce_fleet_read,
     enforce_fleet_read_many,
     enforce_fleet_write,
+    enforce_transition,
     get_or_create_agent,
     lookup_agent,
     memory_reader,
@@ -2358,6 +2359,13 @@ async def update_memory_status(
             status_code=409,
             detail="This memory is part of a held write: release or reject that write instead.",
         )
+    # Trust for an agent credential: a status change is an edit of the row, and
+    # one that leaves the live statuses is a delete by another verb, so the edit
+    # and delete gates apply as they do on those routes. A tenant key, a person
+    # and an install credential carry no trust level; the row check below still
+    # holds them.
+    if auth.agent_id:
+        await enforce_transition(tenant_id, auth.agent_id, memory.get("agent_id"), status)
     # Cross-fleet / scope_agent row authorization for the authenticated agent
     # (no-op for tenant-scoped dashboard credentials, where auth.agent_id is None),
     # and for an install credential, which may not touch another install's

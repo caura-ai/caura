@@ -88,6 +88,7 @@ from core_api.services.agent_service import (
     enforce_document_overwrite,
     enforce_fleet_read_many,
     enforce_fleet_write,
+    enforce_transition,
     lookup_agent,
     memory_reader,
     resolve_write_agent,
@@ -2343,6 +2344,13 @@ async def caura_manage(
                 memory = await sc.get_memory(str(uid), tenant_id)
                 if not memory:
                     return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
+                # Trust for an agent credential, by the rule REST
+                # ``PATCH /memories/{id}/status`` applies: the edit gate, and
+                # the delete gate for a status that leaves the live set. A
+                # credential with no agent identity carries no trust level and
+                # meets only the row check below.
+                if caller_agent_id:
+                    await enforce_transition(tenant_id, caller_agent_id, memory.get("agent_id"), status)
                 # Cross-fleet / scope_agent authorization (write threshold).
                 if not await authorize_memory_access(
                     tenant_id,

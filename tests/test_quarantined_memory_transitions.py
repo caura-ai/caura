@@ -21,6 +21,7 @@ from core_api.auth import AuthContext
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.steps.write import schedule_background_tasks as background
 from core_api.routes import memories as memories_routes
+from core_api.services import agent_service
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -126,8 +127,16 @@ async def test_only_a_person_is_shown_a_held_memory_to_move(storage, auth):
 
 
 @pytest.mark.parametrize("auth", [_PERSON, _AGENT], ids=["person", "agent"])
-async def test_an_ordinary_transition_is_unchanged(storage, auth):
+async def test_an_ordinary_transition_is_unchanged(storage, monkeypatch, auth):
     storage["get"].return_value = _memory("active")
+    # Retiring a row takes an agent's delete trust (see
+    # tests/test_memory_status_transition_gates.py); this test is about the
+    # audit row, so its agent is registered at trust 3.
+    monkeypatch.setattr(
+        agent_service,
+        "lookup_agent",
+        AsyncMock(return_value={"agent_id": "a1", "fleet_id": None, "trust_level": 3}),
+    )
 
     await _set_status(auth, "outdated")
 

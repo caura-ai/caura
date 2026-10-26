@@ -21,7 +21,7 @@ for, and the same argument: manual sweeps have not converged. So this file
 enumerates from the REGISTRY and reads the HANDLERS, and everything it checks is
 a fact about one or the other.
 
-FIVE INVARIANTS.
+SIX INVARIANTS.
 
     1. The ops a tool DECLARES are the ops its handler ACCEPTS.
     2. Every accepted op that mutates passes through the write-scope gate.
@@ -29,6 +29,7 @@ FIVE INVARIANTS.
        can actually reach a trust gate.
     4. Every caller-supplied agent identity is bound to the verified one.
     5. Every caller-supplied agent identity reaches the install-ownership gate.
+    6. Every op that changes or retires memory rows reaches a row gate.
 
 The fourth is the self plane, the axis #1364/#1365 named and #1367 enumerated
 for REST. It reads differently here because the binding is spelled differently:
@@ -54,6 +55,13 @@ the install's own ``broker:<install>`` identity (evolve, insights), and
 ``resolve_write_agent`` does the same while stamping ownership on first touch
 (writes). The check is data flow at the call site: the parameter, or a local
 assigned from it, must be an argument of one of the three in the handler body.
+
+The sixth is the REST inventory's row axis, read per OP. Invariant 3 asks
+whether a tool reaches some trust gate, and ``caura_manage`` always did,
+through ``op=delete``; its ``op=transition`` still let any agent retire the
+rows its peers wrote. So the question is asked of each op's own branch
+(``_op_regions``), and a gate in one op's branch does not cover another. The
+vocabulary is shared with REST through ``tests/_memory_row_gates.py``.
 
 Two axes the REST file has are deliberately ABSENT rather than forgotten.
 ``enforce_not_agent_credential`` has no analogue because ``_check_auth``
@@ -96,6 +104,13 @@ from collections.abc import Callable
 from typing import NamedTuple
 
 import core_api.tools as tools
+from core_api.services.memory_service import update_memory
+from tests._memory_row_gates import (
+    MEMORY_ID_PARAMS,
+    MEMORY_ROW_SINKS,
+    ROW_GATES,
+    carriers_called,
+)
 
 # The gate every mutating tool routes through. A module-local helper in
 # ``mcp_server``, so ``_classify`` below reaches it by name.
@@ -211,6 +226,10 @@ SELF_BIND_ALLOWLIST: dict[str, str] = {
         "tests/test_h06_m30_recall_identity.py and was not traced to SQL here"
     ),
 }
+
+# Invariant 6. Empty: every op that changes or retires memory rows reaches a
+# row gate. Keys are ``tool.op``, or the bare tool name for a tool with no ops.
+ROW_GATE_ALLOWLIST: dict[str, str] = {}
 
 
 # Invariant 5. One entry, for a name the call never acts or reads as. The
@@ -539,6 +558,109 @@ def _owned_params(fn) -> frozenset[str]:
     return frozenset(owned)
 
 
+def _op_branch(stmt) -> str | None:
+    """The op an ``if op == "<name>":`` statement dispatches, else None."""
+    if not isinstance(stmt, ast.If):
+        return None
+    test = stmt.test
+    if (
+        isinstance(test, ast.Compare)
+        and isinstance(test.left, ast.Name)
+        and test.left.id == "op"
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Eq)
+        and isinstance(test.comparators[0], ast.Constant)
+        and isinstance(test.comparators[0].value, str)
+    ):
+        return test.comparators[0].value
+    return None
+
+
+def _op_regions(fn) -> dict[str, list[ast.stmt]]:
+    """The statements each op runs, keyed by op.
+
+    The dispatch is ``if op == "<name>": ... return`` blocks, and the LAST op
+    has no block: it is whatever follows them (``caura_manage``'s ``delete``).
+    So an op's region is its block's body, and the one accepted op no block
+    names gets the statements after the blocks. Code before the dispatch runs
+    for every op and belongs to none, so it is not credited: crediting it, or
+    the whole handler as invariant 3 does, is what let ``op=delete``'s gate
+    stand in for ``op=transition``'s.
+
+    An op the scan cannot place gets no region, and
+    ``test_the_op_region_scan_places_every_mutating_op`` fails on it.
+    """
+    tree = _parse(fn)
+    if tree is None:
+        return {}
+    regions: dict[str, list[ast.stmt]] = {}
+    after: list[ast.stmt] = []
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            stmts = getattr(node, field, None)
+            if not isinstance(stmts, list):
+                continue
+            branches = [(i, op) for i, s in enumerate(stmts) if (op := _op_branch(s))]
+            if not branches:
+                continue
+            for i, op in branches:
+                regions.setdefault(op, []).extend(stmts[i].body)
+            first = branches[0][0]
+            after.extend(s for s in stmts[first:] if _op_branch(s) is None)
+    unplaced = (_accepted_ops(fn) or frozenset()) - set(regions)
+    if len(unplaced) == 1 and after:
+        regions[next(iter(unplaced))] = after
+    return regions
+
+
+def _op_calls(fn) -> dict[str, frozenset[str]]:
+    """Names each op's region calls, through module-local helpers.
+
+    Only a bare-name call is followed, so ``sc.update_memory`` cannot resolve
+    to a same-named function imported into the handler's module.
+    """
+    module_globals = getattr(inspect.getmodule(fn), "__dict__", {})
+    out: dict[str, frozenset[str]] = {}
+    for op, stmts in _op_regions(fn).items():
+        found: set[str] = set()
+        local: set[str] = set()
+        for stmt in stmts:
+            for node in ast.walk(stmt):
+                if not isinstance(node, ast.Call):
+                    continue
+                if isinstance(node.func, ast.Attribute):
+                    found.add(node.func.attr)
+                elif isinstance(node.func, ast.Name):
+                    found.add(node.func.id)
+                    local.add(node.func.id)
+        for name in sorted(local):
+            target = module_globals.get(name)
+            if (
+                inspect.isfunction(target)
+                and getattr(target, "__module__", None) == fn.__module__
+            ):
+                found |= _reachable_calls(target, 1)
+        out[op] = frozenset(found)
+    return out
+
+
+def _op_gates(fn) -> dict[str, frozenset[str]]:
+    """The row gates each op's region reaches: a gate by either spelling, a
+    carrier only as the service itself (``carriers_called``)."""
+    calls = _op_calls(fn)
+    return {
+        op: (calls[op] & ROW_GATES) | carriers_called(stmts, fn)
+        for op, stmts in _op_regions(fn).items()
+    }
+
+
+def _handler_gates(fn, calls: frozenset[str]) -> frozenset[str]:
+    """The row gates a whole handler reaches, for a tool with no ops."""
+    tree = _parse(fn)
+    carriers = carriers_called((tree,), fn) if tree is not None else frozenset()
+    return (calls & ROW_GATES) | carriers
+
+
 class _Tool(NamedTuple):
     name: str
     spec: object
@@ -550,6 +672,10 @@ class _Tool(NamedTuple):
     identity_params: frozenset[str]
     rebound_params: frozenset[str]
     owned_params: frozenset[str]
+    takes_memory_ids: bool
+    op_calls: dict[str, frozenset[str]]
+    op_gates: dict[str, frozenset[str]]
+    row_gates: frozenset[str]
 
     @property
     def ops(self) -> frozenset[str]:
@@ -562,6 +688,7 @@ def _tools() -> list[_Tool]:
     for name, spec in sorted(tools.REGISTRY.items()):
         handler = spec.handler
         guarded, unconditional = _write_scope_coverage(handler)
+        calls = _reachable_calls(handler)
         rows.append(
             _Tool(
                 name=name,
@@ -570,10 +697,16 @@ def _tools() -> list[_Tool]:
                 accepted_ops=_accepted_ops(handler),
                 guarded_ops=guarded,
                 gate_unconditional=unconditional,
-                calls=_reachable_calls(handler),
+                calls=calls,
                 identity_params=_identity_params(handler),
                 rebound_params=_rebound_params(handler),
                 owned_params=_owned_params(handler),
+                takes_memory_ids=bool(
+                    set(inspect.signature(handler).parameters) & MEMORY_ID_PARAMS
+                ),
+                op_calls=_op_calls(handler),
+                op_gates=_op_gates(handler),
+                row_gates=_handler_gates(handler, calls),
             )
         )
     return rows
@@ -608,6 +741,32 @@ def _ownership_ungated(tool: _Tool, param: str) -> bool:
     if (tool.name, param) in SELF_ID_EXCLUDED:
         return False
     return param not in tool.owned_params
+
+
+def _row_scope(tool: _Tool) -> dict[str, tuple[frozenset[str], frozenset[str]]]:
+    """Invariant 6's subjects in this tool, each mapped to ``(calls, row gates)``.
+
+    An op is in scope when it mutates and the tool names memory rows by id, or
+    when its own region reaches a memory-row sink whatever the tool takes. An
+    op-less tool is judged whole, on the same two tests.
+    """
+    if not tool.ops:
+        if (
+            tool.name in MUTATING_TOOLS and tool.takes_memory_ids
+        ) or tool.calls & MEMORY_ROW_SINKS:
+            return {tool.name: (tool.calls, tool.row_gates)}
+        return {}
+    scope = {}
+    for op in sorted(tool.ops):
+        calls = tool.op_calls.get(op, frozenset())
+        if (tool.takes_memory_ids and op in MUTATING_OPS) or calls & MEMORY_ROW_SINKS:
+            scope[f"{tool.name}.{op}"] = (calls, tool.op_gates.get(op, frozenset()))
+    return scope
+
+
+def _row_ungated(gates: frozenset[str]) -> bool:
+    """Invariant 6: reaches neither a row gate nor a service that applies one."""
+    return not gates
 
 
 def _mutating(tool: _Tool) -> frozenset[str]:
@@ -780,6 +939,85 @@ def test_every_caller_supplied_identity_reaches_the_ownership_gate() -> None:
         "read or an update, degrade for a write), or add a line to "
         f"OWNERSHIP_ALLOWLIST in {__file__} saying why the call never acts as it."
     )
+
+
+def test_every_op_changing_memory_rows_reaches_a_row_gate() -> None:
+    """An agent may change or retire only the memory rows its trust allows.
+
+    The MCP half of the REST inventory's row axis. ``caura_manage``'s
+    ``transition`` op wrote any status to any row its fleet could reach, at any
+    trust, while ``update`` and ``delete`` on the same tool refused the same
+    caller. An op satisfies this by calling a row gate in its own region, by
+    calling a service that applies one (``ROW_GATE_CARRIERS``), or by a line
+    in ``ROW_GATE_ALLOWLIST``.
+    """
+    offenders = []
+    for tool in _tools():
+        for key, (calls, gates) in _row_scope(tool).items():
+            if not _row_ungated(gates) or key in ROW_GATE_ALLOWLIST:
+                continue
+            offenders.append(
+                f"{_report(tool)}\n        NO ROW GATE: {key} "
+                f"(memory-row sinks reached: {sorted(calls & MEMORY_ROW_SINKS) or 'none seen'})"
+            )
+    assert not offenders, (
+        f"{len(offenders)} op(s) change or retire memory rows without reaching "
+        f"one of {sorted(ROW_GATES)} or a service that applies one:\n"
+        + "\n".join(offenders)
+        + f"\n\nCall the gate in that op's branch, or add a line to "
+        f"ROW_GATE_ALLOWLIST in {__file__} saying which trust bar it applies instead."
+    )
+
+
+def test_the_op_region_scan_places_every_mutating_op() -> None:
+    """``_op_regions`` crediting too little fails invariant 6 loudly; crediting
+    one op with another's gate passes it silently, so placement is pinned.
+
+    ``enforce_delete`` is called by exactly two ops of ``caura_manage``, one in
+    an ``if op ==`` block and one in the fall-through after them, so it must
+    appear in those two regions and in no other. Every mutating op of a tool
+    that names memory rows by id must be placed at all.
+    """
+    by_name = {tool.name: tool for tool in _tools()}
+    manage = by_name.get("caura_manage")
+    assert manage is not None, "caura_manage is absent from the registry"
+    holding = {op for op, calls in manage.op_calls.items() if "enforce_delete" in calls}
+    assert holding == {"delete", "bulk_delete"}, (
+        f"enforce_delete placed in {sorted(holding)}, want ['bulk_delete', 'delete']. "
+        "Fix _op_regions before trusting a green run."
+    )
+    unplaced = sorted(
+        f"{tool.name}.{op}"
+        for tool in by_name.values()
+        if tool.ops and tool.takes_memory_ids
+        for op in tool.ops & MUTATING_OPS
+        if op not in tool.op_calls
+    )
+    assert not unplaced, (
+        f"mutating op(s) the region scan could not place: {unplaced}\n"
+        "Each is judged on an empty region, so it fails invariant 6 whatever it "
+        "calls. Teach _op_regions the dispatch shape it uses."
+    )
+
+
+async def _manage_shaped(op: str, memory_id: str, sc):
+    _valid_ops = {"update", "edit"}
+    if op not in _valid_ops:
+        return None
+    if op == "update":
+        return await sc.update_memory(memory_id, "t", {"status": "archived"})
+    return await update_memory(memory_id, "t", None)
+
+
+def test_a_carrier_counts_only_as_the_service_itself() -> None:
+    """``update_memory`` names both the gated service and the ungated storage
+    write, and the storage write is also a sink. Credited by name, an op
+    writing rows straight through storage would bring itself into scope and
+    pass in the same call."""
+    assert _op_gates(_manage_shaped) == {
+        "update": frozenset(),
+        "edit": frozenset({"update_memory"}),
+    }
 
 
 def test_the_ownership_scan_follows_derived_names() -> None:
@@ -1053,6 +1291,16 @@ _ALLOWLISTS = (
             f"{t.name}.{p}": _ownership_ungated(t, p)
             for t in _tools()
             for p in t.identity_params
+        },
+        0,
+    ),
+    _Axis(
+        "ROW_GATE_ALLOWLIST",
+        ROW_GATE_ALLOWLIST,
+        lambda: {
+            key: _row_ungated(gates)
+            for t in _tools()
+            for key, (_calls, gates) in _row_scope(t).items()
         },
         0,
     ),

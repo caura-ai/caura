@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from common.constants import LIVE_MEMORY_STATUSES
 from core_api.agent_ids import AgentIdentity, canonical_service_agent_id
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_TRUST_LEVEL
@@ -951,7 +952,7 @@ async def enforce_document_overwrite(
 async def enforce_update(
     tenant_id: str,
     agent_id: str,
-    memory_owner_agent_id: str,
+    memory_owner_agent_id: str | None,
 ) -> None:
     """Enforce update permissions. Level 0-2 can only update own memories; level 3 can update any."""
     agent = await lookup_agent(tenant_id, agent_id)
@@ -978,6 +979,33 @@ async def enforce_update(
                 f"access policy: agent '{agent_id}' may only update its own memories.",
             ),
         )
+
+
+async def enforce_transition(
+    tenant_id: str,
+    agent_id: AgentIdentity,
+    memory_owner_agent_id: str | None,
+    status: str,
+) -> None:
+    """Enforce a memory status change for an AGENT credential.
+
+    A status change edits the row, so it needs what an edit needs
+    (``enforce_update``): the caller's own row, a peer's only at trust 3, and
+    nothing at trust 0. A status outside ``LIVE_MEMORY_STATUSES`` also takes the
+    row out of search and recall for every reader, which is what a delete does,
+    so it needs what a delete needs as well (``enforce_delete``). Without the
+    second, a status change would let an agent do what ``DELETE`` refuses it.
+
+    REST ``PATCH /memories/{id}/status`` and MCP ``caura_manage`` op=transition
+    both call this, so the two surfaces cannot drift apart on the rule.
+
+    Same contract as both gates it applies: invoke only for an authenticated
+    agent identity. A tenant key, a person and an install credential have no
+    trust level, and keep the authority they already hold.
+    """
+    await enforce_update(tenant_id, agent_id, memory_owner_agent_id)
+    if status not in LIVE_MEMORY_STATUSES:
+        await enforce_delete(tenant_id, agent_id)
 
 
 async def backfill_agents() -> int:
