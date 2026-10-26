@@ -37,7 +37,7 @@ argon2-cffi>=25.1.0
 cryptography>=50.0.2
 pyotp>=2.10.0
 # Capped as core-operations caps it (L-166).
-cachetools>=7.2.3,<8
+cachetools>=7.2.4,<8
 
 croniter>=6.2.4
 
