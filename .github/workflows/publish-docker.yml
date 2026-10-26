@@ -1,8 +1,8 @@
 name: publish-docker
 
-# Builds and publishes the core-api, core-storage-api and core-operations
-# container images to GitHub Container Registry (ghcr.io) on every published
-# GitHub Release.
+# Builds and publishes the core-api, core-storage-api, core-operations and
+# core-worker container images to GitHub Container Registry (ghcr.io) on
+# every published GitHub Release.
 #
 # release-please cuts the GitHub Release on release-PR merge — that fires
 # this workflow. Multi-arch (linux/amd64, linux/arm64). Tags are derived
@@ -64,8 +64,8 @@ jobs:
       matrix:
         # ``image`` is the published ghcr repository. The first two keep the
         # names they were published under (rule 3: old names stay readable).
-        # core-operations is new, so it is published under the new brand: rule 7
-        # mints nothing new under the old name (M-109).
+        # core-operations and core-worker are new, so they are published
+        # under the new brand: rule 7 mints nothing new under the old name.
         include:
           - name: core-api
             image: caura-memclaw-core-api # legacy-name-floor: the published ghcr repository name
@@ -76,6 +76,9 @@ jobs:
           - name: core-operations
             image: caura-core-operations
             dockerfile: core-operations/Dockerfile
+          - name: core-worker
+            image: caura-core-worker
+            dockerfile: core-worker/Dockerfile
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
