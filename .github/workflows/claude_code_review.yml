@@ -26,10 +26,11 @@
 # writes the shared review guidance in Caura) from the ``claude-review``
 # environment, which only main can deploy to. Every path here therefore runs
 # main's own workflow and scripts: an ``issue_comment`` always runs the default
-# branch's copy of this file, and capture runs on ``pull_request_target``, which
-# uses the base branch's copy. Neither job checks out the pull request; the
-# review reads its diff through the API. Do not add a ``pull_request`` trigger,
-# or a checkout of a pull request's ref, to a job that reads either key.
+# branch's copy of this file, and capture runs on a push to main. Neither job
+# checks out the pull request; the review reads its diff through the API. Do not
+# add a ``pull_request`` trigger, or a checkout of a pull request's ref, to a job
+# that reads either key. Nor ``pull_request_target``: GitHub turns it off by
+# default in public repositories, so capture would stop without a word.
 #
 # WHO MAY TRIGGER. ``claude-review`` runs only for a comment whose
 # ``author_association`` is MEMBER or OWNER, checked at job level and again in
@@ -43,11 +44,10 @@
 name: Claude Code Review
 
 on:
-  # Merged pull requests feed claude-capture. pull_request_target runs main's copy of this
-  # workflow, which is what lets capture read its key from the main-only environment.
-  pull_request_target:
+  # A merge into main feeds claude-capture. A push to main runs main's copy of this workflow,
+  # which is what lets capture read its key from the main-only environment.
+  push:
     branches: [main]
-    types: [closed]
   issue_comment:
     types: [created]
   # Manual backfill for claude-capture, mirroring the shared pipeline's caller. Two uses: it makes
@@ -55,9 +55,8 @@ on:
   # on demand, since it needs a real merge that happens to carry a declined finding — and it can
   # extract declines from pull requests that merged BEFORE capture existed here.
   #
-  # `required: true` because the only failure mode of an empty value is a confusing one: the script
-  # would request `issues//comments`, get a 404, warn, and exit 0 looking like a repo with nothing
-  # to capture.
+  # `required: true` so an empty value is refused when the run is started; the capture job's lookup
+  # step would otherwise only warn that it is not a pull request number and skip.
   workflow_dispatch:
     inputs:
       pr_number:
@@ -235,20 +234,17 @@ jobs:
   # code-review fleet so future reviews stop re-raising them. The write half of the loop; recall
   # in claude_pr_review.sh is the read half.
   #
-  # `merged == true` rather than just `closed`: a pull request closed WITHOUT merging carries no
-  # accepted judgement, and capturing declines from an abandoned branch would teach the reviewer
-  # from a decision nobody stood behind.
+  # The push says which commit landed, not which pull request, so the first step looks up the
+  # pull request that merged into main as that commit. A pull request closed WITHOUT merging never
+  # produces such a push: it carries no accepted judgement, and capturing declines from an
+  # abandoned branch would teach the reviewer from a decision nobody stood behind.
   #
   # Dark and silent without CAURA_AGENTS_KEY in the claude-review environment: the job still runs
   # and exits 0 having logged that it was dark, which is the diagnosable outcome.
-  # Only this job answers pull_request_target and workflow_dispatch; claude-review needs an
-  # issue_comment, so neither can start a review.
+  # Only this job answers push and workflow_dispatch; claude-review needs an issue_comment, so
+  # neither can start a review.
   claude-capture:
-    if: >-
-      (github.event_name == 'pull_request_target'
-       && github.event.action == 'closed'
-       && github.event.pull_request.merged == true)
-      || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: claude-review
@@ -265,16 +261,46 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
+      # Best-effort like the capture script: a failed lookup warns and leaves the number empty,
+      # which skips the steps below, so a post-merge job never red-Xes a merged pull request.
+      - name: Find the merged pull request
+        id: merged
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MERGE_SHA: ${{ github.sha }}
+          DISPATCH_PR: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          pr=""
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            if [[ "$DISPATCH_PR" =~ ^[1-9][0-9]*$ ]]; then
+              pr="$DISPATCH_PR"
+            else
+              echo "::warning::pr_number must be a pull request number — skipping capture"
+            fi
+          elif pulls=$(gh api "repos/${REPO}/commits/${MERGE_SHA}/pulls"); then
+            # Several pull requests can contain a commit; only one merged into main AS it.
+            pr=$(printf '%s' "$pulls" | jq -r --arg sha "$MERGE_SHA" \
+              'map(select(.merged_at != null and .base.ref == "main" and .merge_commit_sha == $sha))
+               | first | .number // empty') || pr=""
+            [ -n "$pr" ] || echo "::notice::No pull request merged into main as ${MERGE_SHA} — nothing to capture"
+          else
+            echo "::warning::Could not look up the pull request for ${MERGE_SHA} — skipping capture"
+          fi
+          [ -z "$pr" ] || echo "::notice::Capturing from PR #${pr}"
+          echo "pr_number=${pr}" >> "$GITHUB_OUTPUT"
+
       - name: Install Claude CLI
+        if: steps.merged.outputs.pr_number != ''
         run: npm install -g @anthropic-ai/claude-code@2.1.159 # pinned: keep in step with the review job
 
       - name: Capture declined review findings
+        if: steps.merged.outputs.pr_number != ''
         env:
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_CODE_REVIEW_API_KEY }}
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          # pull_request_target supplies the number; on workflow_dispatch that context is absent and the
-          # input takes over. Ordered this way so a merge never reads a stale dispatch input.
-          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          PR_NUMBER: ${{ steps.merged.outputs.pr_number }}
           CAURA_AGENTS_KEY: ${{ secrets.CAURA_AGENTS_KEY }}
         run: bash .github/scripts/claude_pr_capture.sh
