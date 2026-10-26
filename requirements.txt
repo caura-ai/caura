@@ -27,7 +27,7 @@ google-genai>=2.32.0
 # Capped as core-worker caps it (L-166).
 requests>=2.34.2,<3
 openai>=3.37.0,<4
-python-dateutil>=2.9.0.post0,<3
+python-dateutil>=3.0.0,<4
 httpx>=0.28.1,<1
 httpx2>=2.16.0,<3
 mcp>=2.2.0,<3
