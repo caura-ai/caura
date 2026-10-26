@@ -52,7 +52,9 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
+          # The caura-release App's Client ID. It is public, so it lives here; only
+          # the private key is a secret.
+          client-id: Iv23liJAMLLlQtdvIRd0
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           owner: caura-ai
           repositories: caura

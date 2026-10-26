@@ -21,6 +21,14 @@ name: publish-docker
 # branch and ``backend-v*`` tags (a dispatch runs from main; a release runs
 # from its tag). Those rules are repository settings, not this file: they are
 # what applies even to a run whose workflow file was edited on its ref.
+#
+# PUSH CREDENTIAL. The push authenticates with GHCR_PUSH_USERNAME /
+# GHCR_PUSH_TOKEN, secrets of the ``ghcr`` environment: a classic token with
+# only ``write:packages``. The run token gets no ``packages`` grant here or in
+# any other workflow, so a workflow on a branch cannot push an image by asking
+# for that scope. That holds only while the image packages give this
+# repository's Actions no write role of their own, which is a package setting,
+# not this file.
 
 on:
   release:
@@ -52,7 +60,6 @@ jobs:
     environment: ghcr
     permissions:
       contents: read
-      packages: write
     strategy:
       # All-or-nothing publish: if one image fails, abort the others so
       # we don't ship a release where (e.g.) core-api:v1.0.0 exists in
@@ -101,8 +108,8 @@ jobs:
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.GHCR_PUSH_USERNAME }}
+          password: ${{ secrets.GHCR_PUSH_TOKEN }}
 
       # On a ``release`` event, ``github.ref_name`` is the tag (e.g.
       # v1.0.0) and metadata-action's default semver derivation works.

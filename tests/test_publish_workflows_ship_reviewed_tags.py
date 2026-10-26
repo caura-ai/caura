@@ -11,7 +11,11 @@ pin the shape that ties a publish to review instead:
   main (``git merge-base --is-ancestor``), before it builds anything;
 * the job holding the publishing credential runs in a GitHub environment and
   runs no repository code beside it where it does not have to, and npm
-  authenticates by trusted publishing (OIDC) instead of a stored token.
+  authenticates by trusted publishing (OIDC) instead of a stored token;
+* images are pushed with a credential held in the ``ghcr`` environment, and no
+  job asks for the run token's package scope, so the image packages need not
+  give this repository's Actions a write role, which a workflow on any branch
+  could otherwise use by requesting that scope.
 
 WHAT A WORKFLOW FILE CANNOT PROVE, so the green is not read as more than it is:
 that each environment carries required reviewers and a deployment rule, and
@@ -22,6 +26,7 @@ execute the checks pinned here; the environment's rules apply regardless.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -38,6 +43,7 @@ PUBLISH = sorted(WORKFLOWS.glob("publish-*.yml"))
 NPM = [path for path in PUBLISH if path.name.startswith("publish-npm-")]
 PYPI = [path for path in PUBLISH if path.name.startswith("publish-python-")]
 ON_MAIN = "The tag must point at a commit on main"
+GHCR_PUSH_TOKEN = "${{ secrets.GHCR_PUSH_TOKEN }}"
 
 ENVIRONMENT = {
     "publish-docker.yml": "ghcr",
@@ -225,10 +231,42 @@ def test_the_publishing_credential_is_held_only_in_an_environment(
             for scope, level in _permissions(document, job).items()
             if level == "write"
         }
+        or GHCR_PUSH_TOKEN in json.dumps(job)
     ]
     assert holders, f"{path.name}: no job holds a publishing credential"
     for job in holders:
         assert _environment(job) == ENVIRONMENT[path.name]
+
+
+def test_no_job_asks_for_the_run_tokens_package_write() -> None:
+    """Images are pushed with a credential the ``ghcr`` environment holds, so
+    no workflow here needs the run token's package scope, and the packages can
+    deny this repository's Actions write access without breaking a release."""
+    found = [
+        f"{path.name}:{name}"
+        for path in sorted(WORKFLOWS.glob("*.yml"))
+        for name, job in _load(path)["jobs"].items()
+        if _permissions(_load(path), job).get("packages") == "write"
+    ]
+    assert found == []
+
+
+def test_every_registry_login_uses_the_ghcr_environment_credential() -> None:
+    logins = [
+        (path.name, name, job, step.get("with", {}))
+        for path in sorted(WORKFLOWS.glob("*.yml"))
+        for name, job in _load(path)["jobs"].items()
+        for step in job.get("steps", [])
+        if "docker/login-action@" in step.get("uses", "")
+    ]
+    assert logins, "no workflow logs in to a registry; the scan has gone blind"
+    for workflow, name, job, inputs in logins:
+        assert inputs == {
+            "registry": "ghcr.io",
+            "username": "${{ secrets.GHCR_PUSH_USERNAME }}",
+            "password": GHCR_PUSH_TOKEN,
+        }, f"{workflow}:{name}"
+        assert _environment(job) == "ghcr", f"{workflow}:{name}"
 
 
 @pytest.mark.parametrize("path", [*NPM, *PYPI], ids=_ids)
