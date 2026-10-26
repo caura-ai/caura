@@ -10,6 +10,16 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.37.1](https://github.com/caura-ai/caura/compare/backend-v3.37.0...backend-v3.37.1) (2026-10-26)
+
+
+### Dependencies
+
+* **actions:** bump docker/login-action from 4.6.0 to 4.7.0 in the actions group across 1 directory ([#2210](https://github.com/caura-ai/caura/issues/2210)) ([747ad94](https://github.com/caura-ai/caura/commit/747ad94b623fee2497e34de8db508e62e7f43809))
+* **docker:** bump datadog/serverless-init from `161423d` to `30c3fcf` in /core-operations ([#2216](https://github.com/caura-ai/caura/issues/2216)) ([f8906ba](https://github.com/caura-ai/caura/commit/f8906ba922f1baa61523f2006f46ad20af7a1047))
+* **docker:** bump python from `05cda97` to `a0f5706` in /core-api ([#2212](https://github.com/caura-ai/caura/issues/2212)) ([9784c73](https://github.com/caura-ai/caura/commit/9784c73610c385c5ed9328063070865798790f5b))
+* **docker:** bump python from `05cda97` to `a0f5706` in /core-storage-api ([#2218](https://github.com/caura-ai/caura/issues/2218)) ([b70a070](https://github.com/caura-ai/caura/commit/b70a0709d9c3563b7cbfa53bc60bdef6ffaead41))
+
 ## [3.37.0](https://github.com/caura-ai/caura/compare/backend-v3.36.3...backend-v3.37.0) (2026-10-25)
 
 
