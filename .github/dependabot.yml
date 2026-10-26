@@ -48,6 +48,16 @@ updates:
       - "area/infra"
     commit-message:
       prefix: "deps"
+    ignore:
+      # python-dateutil 3.x: google-cloud-bigquery, which core-api installs, requires
+      # python-dateutil<3.0.0 (3.46.2, its latest on 2026-10-27, still does), so no
+      # service can lock 3.x. This file's cap must match the services' lowest
+      # (L-166, tests/test_m01_services_are_checked_against_their_locks.py), and with
+      # no lock here Dependabot bumped it alone (#2209). The uv entry below still
+      # proposes 3.x for the services once bigquery allows it: then drop this, and
+      # raise this file's cap with theirs.
+      - dependency-name: "python-dateutil"
+        update-types: ["version-update:semver-major"]
     groups:
       pip-minor-patch:
         update-types: ["minor", "patch"]
