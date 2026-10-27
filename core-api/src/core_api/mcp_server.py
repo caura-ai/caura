@@ -54,6 +54,8 @@ from core_api.constants import (
     VERSION,
 )
 from core_api.errors import (
+    AUTH_CREDENTIAL_KIND_FORBIDDEN,
+    AUTH_ORG_ADMIN_REQUIRED,
     AUTH_ORG_SUSPENDED,
     AUTH_PLAN_LIMIT,
     EMBEDDING_NOT_CONFIGURED,
@@ -207,6 +209,10 @@ _install_uuid_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # The person the gateway vouched for (X-User-ID), for audit rows only: the twin
 # of ``AuthContext.user_id``, and set under the same stricter rule.
 _user_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("mcp_user_id", default=None)
+# The org role the gateway stamped on a person (X-Org-Role: admin | member), the
+# twin of ``AuthContext.org_role``. Read only to refuse: see
+# ``_refuse_tenant_admin_op``.
+_org_role_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("mcp_org_role", default=None)
 # Read-only verdicts from the platform auth/gateway. A verified reason always
 # enforces license or organization policy. Boolean-only legacy verdicts retain
 # the observe/enforce usage rollout flag.
@@ -595,6 +601,12 @@ class MCPAuthMiddleware:
                 if via_gateway and settings.gateway_shared_secret
                 else None
             )
+            # Gateway path only, with or without the secret, as REST reads it.
+            # It only ever refuses, so a direct caller sending it refuses itself.
+            _org_role_raw = (
+                headers.get(b"x-org-role", b"").decode("latin-1").strip().lower() if via_gateway else ""
+            )
+            _org_role_var.set(_org_role_raw if _org_role_raw in ("admin", "member") else None)
             # Plan-limit read-only mode. Gateway-verified path only, for the
             # same reason as the attributes above but with the direction of the
             # risk reversed: for identity, self-assertion buys access the caller
@@ -748,6 +760,38 @@ async def _refuse_unowned_agent(agent_id: str) -> str | None:
         await enforce_broker_agent_ownership(_get_tenant(), agent_id, _get_install_uuid())
     except HTTPException as e:
         return _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail))
+    return None
+
+
+def _refuse_tenant_admin_op(action: str) -> str | None:
+    """Refuse a caller that is not its tenant's admin, for an op on the admin plane.
+
+    The MCP twin of the REST gates on ``POST /memories/bulk-delete`` and
+    ``DELETE /documents``: ``enforce_tenant_admin_credential`` refuses an install
+    credential and a cross-tenant one (or any whose read scope spans tenants),
+    and the enterprise gateway refuses a person stamped ``member`` by matching
+    the path. Every tool call arrives as ``/mcp``, so this surface checks for
+    itself. Every other caller passes. Returns an error envelope, or ``None`` to
+    proceed.
+    """
+    if _is_install_credential():
+        kind = "install_credential"
+    elif _credential_kind_var.get(None) == "cross_tenant" or len(_get_readable_tenants()) > 1:
+        kind = "cross_tenant"
+    else:
+        kind = None
+    if kind is not None:
+        return _error_response(
+            AUTH_CREDENTIAL_KIND_FORBIDDEN,
+            f"{'Install' if kind == 'install_credential' else 'Cross-tenant'} credentials cannot {action}.",
+            action=action,
+            credential_kind=kind,
+            remediation="Use a credential of this tenant alone: a tenant API key, or an admin's session.",
+        )
+    if _org_role_var.get(None) == "member":
+        return _error_response(
+            AUTH_ORG_ADMIN_REQUIRED, f"Org members cannot {action}; ask an org admin.", action=action
+        )
     return None
 
 
@@ -2138,6 +2182,8 @@ async def caura_manage(
     # to read-only keys.
     if op in {"update", "transition", "delete", "bulk_delete"} and (err := _check_write_scope()):
         return err
+    if op == "bulk_delete" and (refuse := _refuse_tenant_admin_op("bulk-delete memories")):
+        return _with_latency(refuse, t0)
     # bulk_delete uses memory_ids (list); all other ops use memory_id (single UUID).
     # Validate accordingly so a missing memory_id on bulk_delete doesn't fail with
     # a misleading "Invalid UUID" error.
@@ -2892,6 +2938,8 @@ async def caura_doc(
     # remain available to read-only keys.
     if op in {"write", "delete"} and (err := _check_write_scope()):
         return err
+    if op == "delete" and (refuse := _refuse_tenant_admin_op("delete documents")):
+        return _with_latency(refuse, t0)
     tenant_id = _get_tenant()
     # Raw authenticated identity for the delete trust gate (None ⇒ no agent
     # context). Must not fall back to the ``mcp-agent`` default.
