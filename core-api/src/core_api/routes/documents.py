@@ -957,6 +957,7 @@ async def delete_document(
     """
     auth.enforce_tenant(tenant_id)
     auth.enforce_read_only()
+    auth.enforce_tenant_admin_credential("delete documents")
     refuse_system_collection(collection)
     # Bulk/destructive parity with memory deletes: an agent credential needs
     # admin-trust (>= 3) to delete documents (which carry customer records /

@@ -407,6 +407,7 @@ async def create_fleet(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
+    auth.enforce_tenant_admin_credential("create a fleet")
 
     sc = get_storage_client()
 
@@ -469,9 +470,10 @@ async def delete_fleet(
 ):
     """Delete a fleet and all its nodes. Memories are NOT deleted (they retain fleet_id for history).
 
-    Auth: a write-capable tenant-owner key. Agent-scoped credentials are
-    blocked (BFLA) — fleet lifecycle is admin-plane, the same call the sibling
-    ``POST /fleet/{fleet_id}/purge`` makes.
+    Auth: a write-capable tenant-owner key. Agent-scoped, install and
+    cross-tenant credentials are blocked (BFLA) — fleet lifecycle is
+    admin-plane, the same call the sibling ``POST /fleet/{fleet_id}/purge``
+    makes.
 
     Why it is needed rather than implied: ``fleet_id`` is not bound to the
     caller's scope, and ``enforce_tenant`` only compares tenants. So without
@@ -483,6 +485,7 @@ async def delete_fleet(
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
     auth.enforce_not_agent_credential("delete a fleet")
+    auth.enforce_tenant_admin_credential("delete a fleet")
 
     sc = get_storage_client()
 
@@ -519,13 +522,15 @@ async def purge_fleet(
     run-scoped ``nightly-<run_id>-fleet-NN`` fleets at teardown so the shared
     dev tenant doesn't accumulate run data that confounds isolation/trust tests.
 
-    Auth: a write-capable tenant-owner key. Agent-scoped credentials are
-    blocked (BFLA) — a hard fleet purge is an admin-plane operation, on par
-    with bulk memory delete and agent deletion. Idempotent.
+    Auth: a write-capable tenant-owner key. Agent-scoped, install and
+    cross-tenant credentials are blocked (BFLA) — a hard fleet purge is an
+    admin-plane operation, on par with bulk memory delete and agent deletion.
+    Idempotent.
     """
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
     auth.enforce_not_agent_credential("purge fleet data")
+    auth.enforce_tenant_admin_credential("purge fleet data")
 
     sc = get_storage_client()
     counts = await sc.purge_fleet_data(tenant_id, fleet_id)
@@ -1263,21 +1268,14 @@ async def release_node(
     between. Bare, the node is left unbound and its next heartbeat binds it to
     whichever credential sends it first.
 
-    Auth: a write-capable tenant credential. Agent and install credentials are
-    refused, since releasing a node is how one would take it from its owner.
+    Auth: a write-capable tenant credential. Agent, install and cross-tenant
+    credentials are refused, since releasing a node is how one would take it
+    from its owner.
     """
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
     auth.enforce_not_agent_credential("release a fleet node")
-    if auth.is_install_credential:
-        raise HTTPException(
-            status_code=403,
-            detail=coded_detail(
-                errors.AUTH_AGENT_CREDENTIAL_FORBIDDEN,
-                "Install credentials cannot release a fleet node; use a tenant credential.",
-                action="release a fleet node",
-            ),
-        )
+    auth.enforce_tenant_admin_credential("release a fleet node")
 
     if bind_agent_id and bind_install_uuid:
         raise HTTPException(
@@ -1394,9 +1392,10 @@ async def create_command(
 ):
     """Queue a command for a fleet node.
 
-    Auth: a write-capable tenant-owner key. Agent-scoped credentials are
-    blocked (BFLA) — dispatching to a node is admin-plane, the same call
-    ``DELETE /fleet/{fleet_id}`` and ``POST /fleet/{fleet_id}/purge`` make.
+    Auth: a write-capable tenant-owner key. Agent-scoped, install and
+    cross-tenant credentials are blocked (BFLA) — dispatching to a node is
+    admin-plane, the same call ``DELETE /fleet/{fleet_id}`` and
+    ``POST /fleet/{fleet_id}/purge`` make.
     """
     # Queueing a command is a write, and the tenant it lands in comes from the
     # REQUEST BODY. All three gates are required, and the order matters: resolve
@@ -1435,6 +1434,7 @@ async def create_command(
     tenant_id = body.tenant_id or auth.tenant_id
     auth.enforce_tenant(tenant_id)
     auth.enforce_not_agent_credential("queue fleet commands")
+    auth.enforce_tenant_admin_credential("queue fleet commands")
     _enforce_code_delivery_policy(body, auth)
 
     sc = get_storage_client()

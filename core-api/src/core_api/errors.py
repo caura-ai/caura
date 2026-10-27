@@ -142,6 +142,10 @@ AUTH_INTERVIEW_REQUEST_REQUIRED = "INTERVIEW_REQUEST_REQUIRED"
 # a signed-in person's. An agent or an API key can't be given it, so the way
 # out is to act from the dashboard.
 AUTH_PERSON_REQUIRED = "PERSON_REQUIRED"
+# The tenant's admin plane (settings, agent and fleet management, bulk deletes)
+# refuses an install or cross-tenant credential. The way out is a credential of
+# that tenant alone: a tenant API key, or an admin's session.
+AUTH_CREDENTIAL_KIND_FORBIDDEN = "CREDENTIAL_KIND_FORBIDDEN"
 
 
 # ── Code for the request-budget deadline (ax-0917-h-01/h-02) ──────────────

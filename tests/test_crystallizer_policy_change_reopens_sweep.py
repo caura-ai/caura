@@ -59,7 +59,14 @@ async def _settle(background: list) -> None:
 def _storage(monkeypatch, *, changed: bool = True, resets=None) -> AsyncMock:
     sc = AsyncMock()
 
-    async def update_org_settings(tenant_id, new_settings, *, changed_by=None):
+    async def update_org_settings(
+        tenant_id,
+        new_settings,
+        *,
+        changed_by=None,
+        actor_kind=None,
+        actor_credential_id=None,
+    ):
         return {"settings": new_settings, "changed": changed}
 
     sc.update_org_settings = AsyncMock(side_effect=update_org_settings)

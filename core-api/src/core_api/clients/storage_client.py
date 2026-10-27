@@ -3628,10 +3628,18 @@ class CoreStorageClient:
         return result.get("settings", {}), version if isinstance(version, str) else None
 
     async def update_org_settings(
-        self, org_id: str, settings: dict, *, changed_by: str | None = None
+        self,
+        org_id: str,
+        settings: dict,
+        *,
+        changed_by: str | None = None,
+        actor_kind: str | None = None,
+        actor_credential_id: str | None = None,
     ) -> dict:
         """Transactional upsert + audit, server-side. Returns
         ``{"settings": <merged overrides>, "changed": bool}``.
+
+        A storage build without the actor columns ignores the two actor keys.
 
         Non-idempotent ``_post`` (connection-phase retry only): a write whose
         response was lost is never replayed. Re-applying the same payload is a
@@ -3639,7 +3647,12 @@ class CoreStorageClient:
         """
         result = await self._post(
             f"/organization-settings/{org_id}",
-            {"settings": settings, "changed_by": changed_by},
+            {
+                "settings": settings,
+                "changed_by": changed_by,
+                "actor_kind": actor_kind,
+                "actor_credential_id": actor_credential_id,
+            },
         )
         # _post is typed dict | list; the endpoint always returns an object.
         # Guard so an unexpected shape (error envelope, schema drift) fails with

@@ -49,8 +49,9 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # so that index, valid, joins the probe. It is the one probe that can exist before
 # its head: a chain-built database has had it since 001. That is safe here, as
 # 068 does nothing where the index stands valid, so stamping 068 over such a 067
-# database skips no work.
-_HEAD_FINGERPRINT_REVISION = "068"
+# database skips no work. 069 adds ``organization_settings_audit.actor_kind`` and
+# ``actor_credential_id`` in one transaction, so the second joins the probe.
+_HEAD_FINGERPRINT_REVISION = "069"
 _HEAD_FINGERPRINT_SQL: str | None = (
     "SELECT (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -67,7 +68,9 @@ _HEAD_FINGERPRINT_SQL: str | None = (
     "WHERE table_schema = 'public' AND table_name = 'memory_reuse') "
     "AND EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' "
-    "AND c.relname = 'uq_entities_tenant_type_name_fleet' AND i.indisvalid)"
+    "AND c.relname = 'uq_entities_tenant_type_name_fleet' AND i.indisvalid) "
+    "AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' "
+    "AND table_name = 'organization_settings_audit' AND column_name = 'actor_credential_id')"
 )
 
 _engine: AsyncEngine | None = None

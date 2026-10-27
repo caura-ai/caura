@@ -15507,6 +15507,8 @@ class PostgresService:
         org_id: str,
         new_settings: dict,
         changed_by: str | None = None,
+        actor_kind: str | None = None,
+        actor_credential_id: str | None = None,
     ) -> dict:
         """Upsert org overrides + append an audit row, in ONE transaction.
 
@@ -15536,7 +15538,11 @@ class PostgresService:
             async def _write_audit(diff: dict) -> None:
                 await session.execute(
                     pg_insert(OrganizationSettingsAudit).values(
-                        org_id=org_id, changed_by=changed_by, diff=diff
+                        org_id=org_id,
+                        changed_by=changed_by,
+                        actor_kind=actor_kind,
+                        actor_credential_id=actor_credential_id,
+                        diff=diff,
                     )
                 )
 

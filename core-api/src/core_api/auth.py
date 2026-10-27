@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 
 api_key_header = APIKeyHeader(name=API_KEY_HEADER, auto_error=False)
 
+# ``AuthContext.credential_id`` when core-api matched one of its own configured
+# keys (Paths 1 and 2): the setting's name, never the key.
+ADMIN_KEY_CREDENTIAL = "config:admin_api_key"
+CAURA_KEY_CREDENTIAL = "config:caura_api_key"
+
 
 def get_admin_key() -> str | None:
     """Return the configured admin key (prefers admin_api_key, falls back to legacy api_key)."""
@@ -70,6 +75,8 @@ class AuthContext:
         scopes: set[str] | None = None,
         surface: str | None = None,
         is_person: bool = False,
+        credential_kind: str | None = None,
+        credential_id: str | None = None,
     ):
         self.tenant_id = tenant_id
         self.is_demo = is_demo
@@ -137,6 +144,16 @@ class AuthContext:
         # ``agent_id`` on the wire.
         self.is_install_credential = is_install_credential
         self.install_uuid = install_uuid
+        # The gateway's ``X-Caura-Credential-Kind`` (Path 4), lowercased; None on
+        # every other path. Read with or without a gateway secret, like
+        # ``is_install_credential``: gates only REFUSE on it, so a caller naming
+        # a kind it is not gains nothing.
+        self.credential_kind = credential_kind
+        # Which credential authenticated the request, for the settings audit:
+        # the gateway's ``X-Caura-Credential-ID`` on Path 4 behind the gateway
+        # secret only, or ``ADMIN_KEY_CREDENTIAL`` / ``CAURA_KEY_CREDENTIAL``
+        # when core-api matched its own key. None when nothing verified one.
+        self.credential_id = credential_id
         # Tenants this caller may READ from. Always non-empty when tenant_id
         # is set; equal to ``[tenant_id]`` for single-tenant keys.
         if readable_tenant_ids:
@@ -194,6 +211,21 @@ class AuthContext:
     def audit_actor(self) -> dict[str, str | None]:
         """The ``user_id`` and ``surface`` keys for a write's audit ``detail``."""
         return actor_detail(self.user_id, self.surface)
+
+    @property
+    def actor_kind(self) -> str:
+        """The credential label the audit trail records for this request.
+
+        The rule ``get_auth_context`` applies to ``audit_principal``: the
+        gateway's kind only behind the gateway secret, else what the auth path
+        itself establishes (``admin_key``, ``person`` or ``tenant_key``).
+        """
+        verified = bool(settings.gateway_shared_secret and self.agent_id_verified)
+        return audit_credential_kind(
+            self.credential_kind if verified else None,
+            is_admin=self.is_admin,
+            is_person=self.is_person,
+        )
 
     def enforce_read_only(self) -> None:
         """Raise 403 if the caller is not allowed to mutate state.
@@ -354,6 +386,50 @@ class AuthContext:
                     action=action,
                 ),
             )
+
+    def enforce_tenant_admin_credential(self, action: str) -> None:
+        """Raise 403 for a credential that is not its tenant's admin, whatever it may write.
+
+        The tenant's admin plane (settings, agent trust, fleet and deletion,
+        fleet lifecycle and commands, node release, the bulk deletes) is reached
+        through the gateway by two machine credentials that carry ``write`` and
+        no org role, and neither is a tenant admin:
+
+        - an install credential: the Broker's, on every machine that runs it.
+          The Broker's own calls (``core-api/openapi.broker.json``) are memory
+          reads and writes, none of them on this plane.
+        - a cross-tenant credential (``kind=cross_tenant``), or any credential
+          whose read scope spans tenants: read widening for reports and
+          plugins, not administration of its home tenant.
+
+        Every other credential passes, so a tenant API key keeps the OSS
+        contract (tenant key = admin), as do the admin key, ``CAURA_API_KEY``,
+        standalone and a signed-in person. A role-less gateway credential is
+        not refused as a class: core-api cannot see enterprise permissions, so
+        whether such a key may administer a SaaS tenant is the gateway's call.
+        Agent keys and org members are refused by the two gates above.
+        """
+        if self.is_admin:
+            return
+        if self.is_install_credential:
+            kind = "install_credential"
+        elif self.credential_kind == "cross_tenant" or self.is_cross_tenant_read:
+            kind = "cross_tenant"
+        else:
+            return
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                errors.AUTH_CREDENTIAL_KIND_FORBIDDEN,
+                f"{'Install' if kind == 'install_credential' else 'Cross-tenant'} "
+                f"credentials cannot {action}.",
+                action=action,
+                credential_kind=kind,
+                remediation=(
+                    "Use a credential of this tenant alone: a tenant API key, or an admin's session."
+                ),
+            ),
+        )
 
     def enforce_self_agent(
         self,
@@ -708,7 +784,7 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
     if key and admin_key and credential_matches(key, admin_key):
         _set_rate_limit_key(request, f"credential:{key}")
         set_current_tenant(None)  # Admin — RLS bypass
-        return AuthContext(tenant_id=None, is_admin=True)
+        return AuthContext(tenant_id=None, is_admin=True, credential_id=ADMIN_KEY_CREDENTIAL)
 
     # ── Path 2: CAURA_API_KEY gate (optional, for network-exposed OSS) ──
     #
@@ -733,7 +809,12 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
                 await _block_if_suppressed(tenant_id)
                 set_current_tenant(tenant_id)
                 _stash_request_tenant(request, tenant_id)
-                return AuthContext(tenant_id=tenant_id, org_role="admin", agent_id=agent_id)
+                return AuthContext(
+                    tenant_id=tenant_id,
+                    org_role="admin",
+                    agent_id=agent_id,
+                    credential_id=CAURA_KEY_CREDENTIAL,
+                )
             tenant_id = request.headers.get("x-tenant-id")
             if tenant_id:
                 await _block_if_suppressed(tenant_id)
@@ -750,9 +831,10 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
                     agent_id=agent_id,
                     is_read_only=is_read_only,
                     read_only_reason=read_only_reason,
+                    credential_id=CAURA_KEY_CREDENTIAL,
                 )
             set_current_tenant(None)
-            return AuthContext(tenant_id=None, agent_id=agent_id)
+            return AuthContext(tenant_id=None, agent_id=agent_id, credential_id=CAURA_KEY_CREDENTIAL)
         # Key configured but not provided or wrong — reject
         if not key:
             raise HTTPException(
@@ -817,7 +899,7 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
         # an extra DB hop. ``install_credential`` is what caura-daemon
         # uses; ``user_api_key`` (the default) is the dashboard /
         # SDK path.
-        credential_kind = (request.headers.get("x-caura-credential-kind") or "").lower()
+        credential_kind = (request.headers.get("x-caura-credential-kind") or "").strip().lower() or None
         is_install_credential = credential_kind == "install_credential"
         install_uuid = request.headers.get("x-install-uuid") or None
         # Org-level role of the human principal behind the request
@@ -846,6 +928,11 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
         # the caller's word. Without the secret nothing shows the gateway set
         # it, so it is dropped, as the rate-limit bucket drops it.
         user_id = ((request.headers.get("x-user-id") or "").strip() or None) if gw_secret else None
+        # The gateway's id for the API key it accepted. Recorded in the settings
+        # audit, so dropped without the secret for the same reason.
+        credential_id = (
+            ((request.headers.get("x-caura-credential-id") or "").strip() or None) if gw_secret else None
+        )
         set_current_tenant(tenant_id)
         _stash_request_tenant(request, tenant_id)
         return AuthContext(
@@ -866,6 +953,8 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
             install_uuid=install_uuid,
             readable_tenant_ids=readable_tenants or None,
             capabilities=capabilities,
+            credential_kind=credential_kind,
+            credential_id=credential_id,
         )
 
     # No tenant header + no admin key configured = reject.

@@ -1836,8 +1836,13 @@ async def update_settings(
     new_settings: dict,
     *,
     changed_by: str | None = None,
+    actor_kind: str | None = None,
+    actor_credential_id: str | None = None,
 ) -> dict:
     """Upsert tenant overrides + write an audit row with the flat diff.
+
+    The audit row names the person (``changed_by``) and the credential that
+    made the change (``actor_kind``, ``actor_credential_id``).
 
     Writes are a deep MERGE, so an omitted key keeps its current value. The
     reset shape is an explicit ``null``: validation passes ``None`` through
@@ -1893,7 +1898,13 @@ async def update_settings(
     # the settings row nor its audit diff ever holds them in plaintext.
     if isinstance(new_settings.get("api_keys"), dict):
         new_settings = {**new_settings, "api_keys": encrypt_api_keys(new_settings["api_keys"])}
-    result = await get_storage_client().update_org_settings(tenant_id, new_settings, changed_by=changed_by)
+    result = await get_storage_client().update_org_settings(
+        tenant_id,
+        new_settings,
+        changed_by=changed_by,
+        actor_kind=actor_kind,
+        actor_credential_id=actor_credential_id,
+    )
     merged = result["settings"]
     if not result.get("changed"):
         # Identical payload — storage wrote nothing; nothing to invalidate or broadcast.

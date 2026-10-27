@@ -1145,6 +1145,9 @@ async def delete_all_memories(
     """
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
+    # Filtered or not (``?fleet_id=`` included), this is the tenant admin's
+    # bulk delete; an install or cross-tenant credential is neither.
+    auth.enforce_tenant_admin_credential("bulk-delete memories")
     # BFLA gate: a bulk/whole-tenant delete by an *agent* credential requires
     # admin-trust (>= 3), matching single-delete (enforce_delete) and the trust
     # ladder — a routine trust-1 write key must not be able to wipe a fleet or
@@ -1282,6 +1285,7 @@ async def bulk_delete_by_ids(
         raise HTTPException(status_code=400, detail="tenant_id required")
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
+    auth.enforce_tenant_admin_credential("bulk-delete memories")
     # BFLA gate (parity with delete_all_memories / single-delete): an agent
     # credential must be admin-trust (>= 3) to bulk-delete by id; this also
     # closes the cross-fleet/agent delete (the ids are otherwise unscoped).
@@ -3268,6 +3272,7 @@ async def ingest_undo_endpoint(
     """
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
+    auth.enforce_tenant_admin_credential("undo an ingest batch")
     # A batch undo is a bulk delete: an agent credential needs the trust every
     # other delete route requires (trust >= 3). Tenant keys are unaffected —
     # see ``enforce_delete`` for the contract.
