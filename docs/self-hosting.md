@@ -298,10 +298,10 @@ configured browser frontend passes both CORS and the standalone boundary.
 The wildcard `*` does not expand this boundary, and CORS origins do not add
 allowed Host values.
 
-The development Compose API now binds to `127.0.0.1`. To expose that API to a
-network, configure `API_BIND=0.0.0.0`, `CAURA_API_KEY`, and the public API URL
-together. Keep the key private and terminate TLS at the reverse proxy. The stock
-Compose API binding is unchanged by this update.
+The stock and development Compose APIs bind to `127.0.0.1` by default. To expose
+an API to a network, configure `API_BIND=0.0.0.0`, `CAURA_API_KEY`, and
+`PUBLIC_API_URL` together. Keep the key private and terminate TLS at the reverse
+proxy.
 
 ### PostgreSQL transport and migration roles
 
