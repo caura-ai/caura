@@ -146,3 +146,37 @@ jobs:
           path: ${{ runner.temp }}/secret-scan/locations.json
           if-no-files-found: warn
           retention-days: 7
+
+  npm-audit:
+    name: npm dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    concurrency:
+      group: npm-security-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+
+      - name: Prove the dependency gates reject seeded vulnerable versions
+        env:
+          RUN_LIVE_DEPENDENCY_TESTS: "1"
+        run: python3 -m unittest discover -s tests -p test_dependency_audit_runner.py -v
+
+      - name: Audit every tracked production npm lock
+        if: always()
+        run: python3 scripts/audit_npm_dependencies.py --output "$RUNNER_TEMP/npm-audit"
+
+      - name: Retain npm audit JSON
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-audit-reports
+          path: ${{ runner.temp }}/npm-audit/
+          if-no-files-found: warn
+          retention-days: 14

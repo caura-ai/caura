@@ -1,2 +1,14 @@
 # Default owners for the entire repository
 * @caura-ai/r-d
+
+# Explicit ownership for build, deployment, authorization and license policy.
+/.github/workflows/ @caura-ai/r-d
+/.github/actions/ @caura-ai/r-d
+/.github/security-scan/ @caura-ai/r-d
+/.github/dependabot.yml @caura-ai/r-d
+/terraform/ @caura-ai/r-d
+/gateway/ @caura-ai/r-d
+/common/license/ @caura-ai/r-d
+/core-api/src/core_api/routes/ @caura-ai/r-d
+/core-api/src/core_api/mcp_server.py @caura-ai/r-d
+/CODEOWNERS @caura-ai/r-d

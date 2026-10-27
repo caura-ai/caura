@@ -46,6 +46,7 @@ from core_api.clients.storage_client import (
 )
 from core_api.constants import STM_WRITE_ROUTE_NOTE, VERSION, is_mcp_path
 from core_api.consumer import register_consumers
+from core_api.docs import configure_swagger_ui
 from core_api.mcp_server import get_mcp_app, mcp_lifespan
 from core_api.middleware.ingest_body_size import IngestBodySizeMiddleware
 from core_api.middleware.per_tenant_concurrency import per_tenant_storage_slot
@@ -792,12 +793,13 @@ app = FastAPI(
     title="Caura",
     version=VERSION,
     description=_API_DESCRIPTION,
-    docs_url="/api/docs",
+    docs_url=None,
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
     openapi_tags=OPENAPI_TAGS,
     lifespan=lifespan,
 )
+configure_swagger_ui(app)
 
 
 # ── Error responses in the spec (C32 / API-05) ────────────────────────────
