@@ -24,9 +24,9 @@ describe("sanitizeHostname", () => {
     // GCP-style FQDN — the user-meaningful name is the first label.
     assert.equal(
       sanitizeHostname(
-        "erni-openclaw.us-central1-c.c.alpine-theory-469016-c8.internal",
+        "demo-agent.us-central1-c.c.example-project.internal",
       ),
-      "erni-openclaw",
+      "demo-agent",
     );
   });
 
@@ -57,9 +57,9 @@ describe("getDisplayName", () => {
     assert.equal(
       getDisplayName(
         "main",
-        "erni-openclaw.us-central1-c.c.alpine-theory-469016-c8.internal",
+        "demo-agent.us-central1-c.c.example-project.internal",
       ),
-      "erni-openclaw-main",
+      "demo-agent-main",
     );
   });
 

@@ -16,8 +16,8 @@
  *      override, used verbatim. Lets users pick a pseudonymous or
  *      branded label, or pin a stable name when their hostname flaps.
  *   2. ``${shortHostname}-${baseName}`` — shortHostname is the first
- *      label of the OS hostname (so ``erni-openclaw.us-central1-c.c.
- *      alpine-theory-469016-c8.internal`` becomes ``erni-openclaw``).
+ *      label of the OS hostname (so ``demo-agent.us-central1-c.c.
+ *      example-project.internal`` becomes ``demo-agent``).
  *      Cloud-VM FQDNs are noisy in admin UIs; the first label is the
  *      part operators actually call the machine.
  *   3. Just ``baseName`` when no hostname is available.

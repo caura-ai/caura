@@ -36,6 +36,14 @@ Screenshot*.png
 # GCP service account keys
 *-service-account.json
 *-credentials.json
+sa-key.json
+
+# Local credential material
+*.auto.tfvars
+*.pem
+*.key
+kubeconfig*
+id_rsa*
 
 # IDE / tools
 .claude/settings.local.json

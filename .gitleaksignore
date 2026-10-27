@@ -1,0 +1,6 @@
+# Exact historical governance detector fixtures, not a directory or commit exemption.
+# The JWT payloads use explicit dummy signatures; assignments use published test values.
+12860af951539ea2b097f2f2dd9ee7615b1c9464:tests/test_governance_patterns.py:generic-api-key:85
+12860af951539ea2b097f2f2dd9ee7615b1c9464:tests/test_governance_patterns.py:jwt:76
+12860af951539ea2b097f2f2dd9ee7615b1c9464:tests/test_governance_patterns.py:jwt:125
+e7f6f1c6d32b218dfac71843efe906ee8d0316af:tests/test_governance_patterns.py:generic-api-key:199

@@ -1,0 +1,11 @@
+title = "Repository secret scanning"
+
+[extend]
+useDefault = true
+
+# OAuth client secrets have a stable prefix not covered by the default rules.
+[[rules]]
+id = "google-oauth-client-secret"
+description = "Google OAuth client secret"
+regex = '''GOCSPX-[A-Za-z0-9_-]{28,}'''
+keywords = ["gocspx-"]
