@@ -10,6 +10,21 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.37.4](https://github.com/caura-ai/caura/compare/backend-v3.37.3...backend-v3.37.4) (2026-10-27)
+
+
+### Bug Fixes
+
+* **core-api:** let an agent retire its own memory as outdated, conflicted or cancelled ([#2234](https://github.com/caura-ai/caura/issues/2234)) ([10ec907](https://github.com/caura-ai/caura/commit/10ec907073d61a98867893950faf826a0487bb2b))
+
+
+### Dependencies
+
+* update cachetools requirement from &lt;8,&gt;=7.2.3 to &gt;=7.2.4,&lt;8 ([#2230](https://github.com/caura-ai/caura/issues/2230)) ([9ab49fd](https://github.com/caura-ai/caura/commit/9ab49fd6e42ea5c7c617c4b576bb335cf21c7157))
+* update fastapi requirement from &lt;1,&gt;=0.143.0 to &gt;=0.162.0,&lt;1 ([#2233](https://github.com/caura-ai/caura/issues/2233)) ([6904eef](https://github.com/caura-ai/caura/commit/6904eef15f06817573b616b33640aadc5638d8c3))
+* update google-genai requirement from &gt;=2.32.0 to &gt;=2.33.0 ([#2229](https://github.com/caura-ai/caura/issues/2229)) ([482c0a0](https://github.com/caura-ai/caura/commit/482c0a00ca7a46776728845c53e3997fe3072fe4))
+* update sqlalchemy requirement from &lt;2.2,&gt;=2.1.5 to &gt;=2.1.6,&lt;2.2 ([#2232](https://github.com/caura-ai/caura/issues/2232)) ([32135b6](https://github.com/caura-ai/caura/commit/32135b68f40d3de269ee8a47abb07b37029c8459))
+
 ## [3.37.3](https://github.com/caura-ai/caura/compare/backend-v3.37.2...backend-v3.37.3) (2026-10-26)
 
 
