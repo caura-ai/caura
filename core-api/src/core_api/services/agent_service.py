@@ -1008,7 +1008,9 @@ async def enforce_transition(
     ``enforce_update``.
 
     REST ``PATCH /memories/{id}/status`` and MCP ``caura_manage`` op=transition
-    both call this, so the two surfaces cannot drift apart on the rule.
+    both call this, so the two surfaces cannot drift apart on the rule. So does
+    ``memory_service.update_memory`` for an edit that sets a new status (REST
+    ``PATCH /memories/{id}``, MCP op=update).
 
     Same contract as both gates it applies: invoke only for an authenticated
     agent identity. A tenant key, a person and an install credential have no

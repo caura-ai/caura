@@ -4467,9 +4467,20 @@ async def update_memory(
 
     # Trust enforcement -- always runs (access control, not a platform feature)
     if agent_id:
-        from core_api.services.agent_service import authorize_memory_access, enforce_update
+        from core_api.services.agent_service import (
+            authorize_memory_access,
+            enforce_transition,
+            enforce_update,
+        )
 
-        await enforce_update(tenant_id, agent_id, mem.get("agent_id"))
+        # An edit that sets a new status changes it as ``PATCH /memories/{id}/status``
+        # does, so it meets that route's gate. Naming the status the row already
+        # has changes nothing, which keeps a client that sends the whole record
+        # back at the edit bar. A ``null`` status is refused as a bad request below.
+        if data.status is not None and data.status != mem.get("status"):
+            await enforce_transition(tenant_id, agent_id, mem.get("agent_id"), data.status)
+        else:
+            await enforce_update(tenant_id, agent_id, mem.get("agent_id"))
         # Cross-fleet / scope_agent row authorization (write threshold) — the
         # same fleet/scope contract the list/search paths enforce, so a by-id
         # PATCH can't mutate a peer fleet's row.

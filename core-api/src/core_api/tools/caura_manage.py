@@ -41,7 +41,8 @@ _SPEC = ToolSpec(
     # ``trust_required`` is the ladder position each op's OWN branch asserts —
     # ``delete`` and ``bulk_delete`` call ``enforce_delete`` (>= 3) — and NOT
     # the effective threshold. Do not read the zeros as "ungated": ``update``
-    # reaches ``enforce_update`` via ``update_memory``; ``transition`` calls
+    # reaches ``enforce_update`` via ``update_memory``, or ``enforce_transition``
+    # when it sets a new status; ``transition`` calls
     # ``enforce_transition``, which is ``enforce_update`` plus ``enforce_delete``
     # for a status outside the live set (bar an agent retiring its own row), so
     # its bar depends on the row and the status asked for; and ``authorize_memory_access`` consults ``trust_level`` (>= 2 read,
