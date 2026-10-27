@@ -840,15 +840,15 @@ async def test_a_write_capable_credential_can_still_crystallize(client, as_auth)
 
 
 # ---------------------------------------------------------------------------
-# L-70: any agent credential could start a run over every fleet.
+# Who may start a run.
 #
-# A run archives near-duplicate clusters, so it writes every row it reaches,
-# and an omitted ``fleet_id`` reaches every fleet in the tenant. Agent
-# credentials now follow the by-id write ladder: trust >= 3 may run tenant-wide
-# or for any fleet; below that a run stays in the agent's home fleet, pinned
-# there when ``fleet_id`` is omitted. An agent awaiting approval (trust 0)
-# cannot start one at all. ``start_crystallization`` is stubbed so a test can
-# read the fleet the run was started for.
+# With auto-curate on, a run archives near-duplicate clusters, whoever wrote
+# them, and an omitted ``fleet_id`` reaches every fleet in the tenant. Archiving
+# another agent's memory by id needs trust 3, so starting a run does too: an
+# agent at trust 3 may run tenant-wide or for any fleet, and an agent below it
+# cannot start one, in its own fleet or any other. The ladder is for agent
+# credentials only. ``start_crystallization`` is stubbed so a test can read the
+# fleet the run was started for.
 # ---------------------------------------------------------------------------
 
 
@@ -874,52 +874,15 @@ def _run_fleet(resp, start):
     return start.await_args.args[1]
 
 
-async def test_a_low_trust_agent_cannot_crystallize_a_peer_fleet(
-    client, as_auth, sc, monkeypatch
+@pytest.mark.parametrize("home_fleet", ["fleet-a", None])
+@pytest.mark.parametrize("fleet_id", [None, "fleet-a", "fleet-b"])
+@pytest.mark.parametrize("trust", [0, 1, 2])
+async def test_an_agent_below_trust_3_cannot_start_a_run(
+    client, as_auth, sc, monkeypatch, trust, fleet_id, home_fleet
 ):
+    """Its own fleet included: the run archives other agents' memories there."""
     tenant = f"tenant-{_uid()}"
-    await _seed_agent(sc, tenant, "agent-a", 1, fleet_id="fleet-a")
-    resp, start = await _crystallize_as(
-        client, as_auth, monkeypatch, tenant, "agent-a", fleet_id="fleet-b"
-    )
-    _refused(resp, start, errors.AUTH_FLEET_SCOPE_FORBIDDEN)
-
-
-async def test_a_low_trust_agent_run_is_pinned_to_its_home_fleet(
-    client, as_auth, sc, monkeypatch
-):
-    """Omitting ``fleet_id`` meant every fleet; for this caller it means its own."""
-    tenant = f"tenant-{_uid()}"
-    await _seed_agent(sc, tenant, "agent-a", 2, fleet_id="fleet-a")
-    resp, start = await _crystallize_as(client, as_auth, monkeypatch, tenant, "agent-a")
-    assert _run_fleet(resp, start) == "fleet-a"
-
-
-async def test_a_fleetless_low_trust_agent_cannot_start_a_tenant_wide_run(
-    client, as_auth, sc, monkeypatch
-):
-    tenant = f"tenant-{_uid()}"
-    await _seed_agent(sc, tenant, "agent-a", 2)
-    resp, start = await _crystallize_as(client, as_auth, monkeypatch, tenant, "agent-a")
-    _refused(resp, start, errors.AUTH_FLEET_SCOPE_FORBIDDEN)
-
-
-async def test_an_unregistered_agent_credential_cannot_start_a_run(
-    client, as_auth, monkeypatch
-):
-    """Fails closed: an unknown identity cannot prove any fleet is its own."""
-    tenant = f"tenant-{_uid()}"
-    resp, start = await _crystallize_as(client, as_auth, monkeypatch, tenant, "agent-a")
-    _refused(resp, start, errors.AUTH_AGENT_NOT_REGISTERED)
-
-
-@pytest.mark.parametrize("fleet_id", [None, "fleet-a"])
-async def test_an_agent_awaiting_approval_cannot_start_a_run(
-    client, as_auth, sc, monkeypatch, fleet_id
-):
-    """Trust 0 cannot write one memory, so it cannot archive its fleet's either."""
-    tenant = f"tenant-{_uid()}"
-    await _seed_agent(sc, tenant, "agent-a", 0, fleet_id="fleet-a")
+    await _seed_agent(sc, tenant, "agent-a", trust, fleet_id=home_fleet)
     body = {} if fleet_id is None else {"fleet_id": fleet_id}
     resp, start = await _crystallize_as(
         client, as_auth, monkeypatch, tenant, "agent-a", **body
@@ -927,23 +890,21 @@ async def test_an_agent_awaiting_approval_cannot_start_a_run(
     _refused(resp, start, errors.AUTH_AGENT_TRUST_TOO_LOW)
 
 
-async def test_a_low_trust_agent_may_crystallize_its_own_fleet(
-    client, as_auth, sc, monkeypatch
+async def test_an_unregistered_agent_credential_cannot_start_a_run(
+    client, as_auth, monkeypatch
 ):
-    """OVER-REFUSAL GUARD."""
+    """Fails closed: an unknown identity has no trust level to meet the bar."""
     tenant = f"tenant-{_uid()}"
-    await _seed_agent(sc, tenant, "agent-a", 1, fleet_id="fleet-a")
-    resp, start = await _crystallize_as(
-        client, as_auth, monkeypatch, tenant, "agent-a", fleet_id="fleet-a"
-    )
-    assert _run_fleet(resp, start) == "fleet-a"
+    resp, start = await _crystallize_as(client, as_auth, monkeypatch, tenant, "agent-a")
+    _refused(resp, start, errors.AUTH_AGENT_NOT_REGISTERED)
 
 
-@pytest.mark.parametrize("fleet_id", [None, "fleet-b"])
+@pytest.mark.parametrize("fleet_id", [None, "fleet-a", "fleet-b"])
 async def test_a_trust_3_agent_may_crystallize_the_tenant_or_any_fleet(
     client, as_auth, sc, monkeypatch, fleet_id
 ):
-    """OVER-REFUSAL GUARD: trust 3 is the cross-fleet write level."""
+    """OVER-REFUSAL GUARD: trust 3 may archive any agent's memory, so it may
+    start a run anywhere, its own fleet included, and the fleet is not changed."""
     tenant = f"tenant-{_uid()}"
     await _seed_agent(sc, tenant, "agent-a", 3, fleet_id="fleet-a")
     body = {} if fleet_id is None else {"fleet_id": fleet_id}

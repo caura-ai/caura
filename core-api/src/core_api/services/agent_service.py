@@ -446,24 +446,17 @@ async def enforce_fleet_write(
     return agent
 
 
-async def resolve_crystallize_fleet(
-    tenant_id: str,
-    agent_id: AgentIdentity,
-    fleet_id: str | None,
-) -> str | None:
-    """The fleet an agent credential may run crystallization over (L-70).
+async def enforce_crystallize(tenant_id: str, agent_id: AgentIdentity) -> None:
+    """Enforce starting a crystallization run for an AGENT credential.
 
-    A run archives near-duplicate clusters, so it is a write to every row it
-    reaches, and ``fleet_id=None`` reaches every fleet in the tenant. Same ladder
-    as a by-id write (``memory_access_allowed_for_agent``): trust >= 3 may run
-    tenant-wide or for any fleet; below that a run stays in the agent's home
-    fleet, pinned there when ``fleet_id`` is omitted.
+    With auto-curate on, a run archives near-duplicate clusters whoever wrote
+    them, in the fleet asked for or, with no ``fleet_id``, in every fleet of the
+    tenant. Archiving another agent's memory by id needs trust 3, so starting a
+    run needs it too, in any fleet including the agent's own.
 
-    Not :func:`enforce_fleet_write`: that reads ``None`` as a fleet-less write,
-    which is always allowed, where here it means every fleet, and it creates the
-    agent row. An unregistered agent cannot prove any fleet is its own, so it is
-    refused, as ``require_trust`` asks of write paths. An agent awaiting approval
-    (trust 0) is refused too: the memory write routes refuse it a single write.
+    An unregistered agent has no trust level, so it is refused, as
+    ``enforce_delete`` refuses it. Same contract as that gate: invoke only for an
+    authenticated agent identity.
     """
     agent = await lookup_agent(tenant_id, agent_id)
     if not agent:
@@ -474,28 +467,14 @@ async def resolve_crystallize_fleet(
                 "Agent is not registered and cannot start a crystallization run.",
             ),
         )
-    trust = agent.get("trust_level", 0)
-    if trust == 0:
+    if agent.get("trust_level", 0) < 3:
         raise HTTPException(
             status_code=403,
             detail=coded_detail(
                 AUTH_AGENT_TRUST_TOO_LOW,
-                f"Agent '{agent_id}' is not approved and cannot start a crystallization run.",
+                f"Agent '{agent_id}' needs trust level 3 to start a crystallization run.",
             ),
         )
-    if trust >= 3:
-        return fleet_id
-    home_fleet = agent.get("fleet_id")
-    if home_fleet and fleet_id in (None, home_fleet):
-        return home_fleet
-    raise HTTPException(
-        status_code=403,
-        detail=coded_detail(
-            AUTH_FLEET_SCOPE_FORBIDDEN,
-            "fleet-scope policy: below trust level 3 a crystallization run covers only the "
-            f"agent's own fleet ('{home_fleet or 'none'}'), not '{fleet_id or 'every fleet'}'.",
-        ),
-    )
 
 
 async def enforce_fleet_read(

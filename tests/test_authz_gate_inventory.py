@@ -319,7 +319,7 @@ NON_ADMIN_PLANE_ROUTERS: dict[str, str] = {
     "insights": "agent-plane: generated for the calling agent",
     "reports": "agent-plane for the digest trigger; the admin run is enforce_admin",
     "crystallizer": (
-        "trust-plane trigger: below trust 3 an agent runs only its own fleet; "
+        "trust-plane trigger: an agent needs trust 3 to start a run; "
         "the all-tenants sweep is enforce_admin"
     ),
     "interview": "agent-plane submit; the scheduler run is enforce_admin",
