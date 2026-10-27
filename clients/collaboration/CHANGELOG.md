@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.3.3...collaboration-clients-v0.3.4) (2026-10-27)
+
+
+### Bug Fixes
+
+* **clients:** keep credentials private and encode request identifiers ([ab039ac](https://github.com/caura-ai/caura/commit/ab039acec84932acc1aef32b78c7623403d0bef3))
+
 ## [0.3.3](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.3.2...collaboration-clients-v0.3.3) (2026-10-23)
 
 
