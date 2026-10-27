@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.37.5](https://github.com/caura-ai/caura/compare/backend-v3.37.4...backend-v3.37.5) (2026-10-27)
+
+
+### Bug Fixes
+
+* **core-api:** hold an edit that changes a memory's status to the status route's rule ([#2243](https://github.com/caura-ai/caura/issues/2243)) ([c45614e](https://github.com/caura-ai/caura/commit/c45614ecc696e3d94d157df3e519b7f95bd34002))
+
+
+### Dependencies
+
+* update sentry-sdk requirement from &lt;3,&gt;=2.72.0 to &gt;=2.73.0,&lt;3 ([#2231](https://github.com/caura-ai/caura/issues/2231)) ([ca1f786](https://github.com/caura-ai/caura/commit/ca1f7868badb126ec348741847b80c65e785e98e))
+
 ## [3.37.4](https://github.com/caura-ai/caura/compare/backend-v3.37.3...backend-v3.37.4) (2026-10-27)
 
 
