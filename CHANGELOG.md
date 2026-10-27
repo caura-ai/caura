@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.37.6](https://github.com/caura-ai/caura/compare/backend-v3.37.5...backend-v3.37.6) (2026-10-27)
+
+
+### Bug Fixes
+
+* **core-api:** recommend only outdated in caura_manage's transition advice ([#2247](https://github.com/caura-ai/caura/issues/2247)) ([49b12da](https://github.com/caura-ai/caura/commit/49b12da6df8a0361ce2471159c214334c1c62bbb))
+* **core-api:** require trust 3 for an agent to start a crystallization run ([#2246](https://github.com/caura-ai/caura/issues/2246)) ([867aa9b](https://github.com/caura-ai/caura/commit/867aa9b27d7cbe523ce51ee6f827a0d04092cca7))
+
 ## [3.37.5](https://github.com/caura-ai/caura/compare/backend-v3.37.4...backend-v3.37.5) (2026-10-27)
 
 
