@@ -5,7 +5,6 @@ import getpass
 import os
 import stat
 import tempfile
-from types import SimpleNamespace
 
 import pytest
 
@@ -55,17 +54,21 @@ def test_foreign_lock_is_not_reported_as_contention(monkeypatch, capsys):
     import fcntl
 
     real_fstat = os.fstat
-    monkeypatch.setattr(
-        os,
-        "fstat",
-        lambda fd: SimpleNamespace(st_uid=os.getuid() + 1, st_mode=real_fstat(fd).st_mode, st_nlink=1),
-    )
+
+    def foreign_owner(fd):
+        fields = list(real_fstat(fd))
+        fields[stat.ST_UID] = os.getuid() + 1
+        return os.stat_result(fields)
 
     def contended(*args):
         raise OSError(errno.EAGAIN, "busy")
 
-    monkeypatch.setattr(fcntl, "flock", contended)
-    result = cli._acquire_lock()
+    # os is shared with pytest's capture machinery. Restore its real stat
+    # before inspecting captured output or allowing fixture teardown to run.
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fstat", foreign_owner)
+        patch.setattr(fcntl, "flock", contended)
+        result = cli._acquire_lock()
     assert result is not None
     assert "proceeding without it" in capsys.readouterr().err
 
