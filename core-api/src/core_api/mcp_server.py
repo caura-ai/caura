@@ -9,7 +9,6 @@ Mounted onto the main FastAPI app at /mcp.
 import asyncio
 import contextlib
 import contextvars
-import hmac as _hmac
 import json
 import logging
 import re
@@ -21,7 +20,6 @@ from uuid import UUID, uuid4
 import httpx
 from fastapi import HTTPException
 from mcp.server import CacheHint, MCPServer
-from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent
 from pydantic import Field, ValidationError
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -65,6 +63,7 @@ from core_api.errors import (
     read_only_refusal,
 )
 from core_api.heartbeat.clients import record_mcp as _record_mcp_client
+from core_api.http_security import StandaloneHTTPBoundary, credential_matches, transport_security_settings
 from core_api.middleware.idempotency import (
     IdempotencyGuard,
     arguments_hash,
@@ -413,10 +412,16 @@ class MCPAuthMiddleware:
 
             headers = dict(scope.get("headers", []))
 
-            tenant_header = headers.get(b"x-tenant-id", b"").decode()
-            api_key = headers.get(b"x-api-key", b"").decode()
+            if any(
+                not headers.get(name, b"").isascii()
+                for name in (b"x-api-key", b"authorization", b"x-gateway-secret")
+            ):
+                await _send_401(send, "Invalid credential header.")
+                return
+            tenant_header = headers.get(b"x-tenant-id", b"").decode("latin-1")
+            api_key = headers.get(b"x-api-key", b"").decode("latin-1")
             if not api_key:
-                auth_header = headers.get(b"authorization", b"").decode()
+                auth_header = headers.get(b"authorization", b"").decode("latin-1")
                 if auth_header.lower().startswith("bearer "):
                     api_key = auth_header[7:]
             admin_key = get_admin_key()
@@ -437,7 +442,7 @@ class MCPAuthMiddleware:
 
             via_gateway = False
             is_admin_credential = False
-            if admin_key and api_key and _hmac.compare_digest(api_key, admin_key):
+            if admin_key and api_key and credential_matches(api_key, admin_key):
                 # ── Path 1: admin API key (REST ``auth.py`` Path 1) ──
                 _tenant_id_var.set(_ADMIN)
                 is_admin_credential = True
@@ -451,7 +456,7 @@ class MCPAuthMiddleware:
                 # self-asserted identity headers. Previously ``X-Tenant-ID``
                 # was honored first, so on a shared-key deployment with no
                 # gateway secret anyone could name a tenant and be believed.
-                if not (api_key and _hmac.compare_digest(api_key, shared_key)):
+                if not (api_key and credential_matches(api_key, shared_key)):
                     await _send_401(
                         send,
                         "Missing or invalid API key. This deployment sets "
@@ -499,8 +504,8 @@ class MCPAuthMiddleware:
                 # ``_UNAUTH`` would let the request keep going with a
                 # different (attacker-probed) identity resolution.
                 gw_secret = settings.gateway_shared_secret
-                if gw_secret and not _hmac.compare_digest(
-                    headers.get(b"x-gateway-secret", b"").decode(), gw_secret
+                if gw_secret and not credential_matches(
+                    headers.get(b"x-gateway-secret", b"").decode("latin-1"), gw_secret
                 ):
                     await _send_401(send, "Direct access to this service is not permitted.")
                     return
@@ -539,12 +544,14 @@ class MCPAuthMiddleware:
             # identity, which is the authorization principal for scope checks
             # and the delete trust gate. Use the value the resolution above
             # decided; only Path 4 sets it True.
-            agent_header = headers.get(b"x-agent-id", b"").decode() if via_gateway else ""
+            agent_header = headers.get(b"x-agent-id", b"").decode("latin-1") if via_gateway else ""
             _agent_id_var.set(
                 AgentIdentity(canonical_service_agent_id(agent_header)) if agent_header else None
             )
 
-            readable_header = headers.get(b"x-readable-tenant-ids", b"").decode() if via_gateway else ""
+            readable_header = (
+                headers.get(b"x-readable-tenant-ids", b"").decode("latin-1") if via_gateway else ""
+            )
             if readable_header:
                 # Prepend the home tenant so the set is complete even when
                 # the gateway plumbs only the *additional* readable tenants
@@ -560,7 +567,10 @@ class MCPAuthMiddleware:
             # X-Key-Scopes is accepted as a back-compat alias during
             # the gateway rollout window.
             caps_header = (
-                (headers.get(b"x-capabilities", b"").decode() or headers.get(b"x-key-scopes", b"").decode())
+                (
+                    headers.get(b"x-capabilities", b"").decode("latin-1")
+                    or headers.get(b"x-key-scopes", b"").decode("latin-1")
+                )
                 if via_gateway
                 else ""
             )
@@ -570,18 +580,18 @@ class MCPAuthMiddleware:
             # be able to self-assert an install identity and write under a
             # broker's ownership namespace.
             _credential_kind_var.set(
-                (headers.get(b"x-caura-credential-kind", b"").decode().lower() or None)
+                (headers.get(b"x-caura-credential-kind", b"").decode("latin-1").lower() or None)
                 if via_gateway
                 else None
             )
             _install_uuid_var.set(
-                (headers.get(b"x-install-uuid", b"").decode() or None) if via_gateway else None
+                (headers.get(b"x-install-uuid", b"").decode("latin-1") or None) if via_gateway else None
             )
             # Needs the secret as well as the gateway path, as REST's Path 4
             # does: without one nothing shows the gateway set it, and an audit
             # row must not name a person on the caller's word.
             _user_id_var.set(
-                (headers.get(b"x-user-id", b"").decode().strip() or None)
+                (headers.get(b"x-user-id", b"").decode("latin-1").strip() or None)
                 if via_gateway and settings.gateway_shared_secret
                 else None
             )
@@ -598,10 +608,12 @@ class MCPAuthMiddleware:
             # would refuse a paying tenant; a stale False would be a billing
             # bypass. Both are silent, so neither is allowed to depend on a
             # header being present.
-            _read_only_header = headers.get(b"x-org-read-only", b"").decode().lower() if via_gateway else ""
+            _read_only_header = (
+                headers.get(b"x-org-read-only", b"").decode("latin-1").lower() if via_gateway else ""
+            )
             _org_read_only_var.set(_read_only_header == "true")
             reason = (
-                headers.get(b"x-org-read-only-reason", b"").decode().lower()
+                headers.get(b"x-org-read-only-reason", b"").decode("latin-1").lower()
                 if via_gateway and settings.gateway_shared_secret and _read_only_header == "true"
                 else ""
             )
@@ -637,7 +649,7 @@ class MCPAuthMiddleware:
                 {
                     **_audit_actor(),
                     "agent_id": _get_agent_id() if via_gateway and settings.gateway_shared_secret else None,
-                    "credential_id": (headers.get(b"x-caura-credential-id", b"").decode() or None)
+                    "credential_id": (headers.get(b"x-caura-credential-id", b"").decode("latin-1") or None)
                     if via_gateway and settings.gateway_shared_secret
                     else None,
                     "credential_kind": audit_credential_kind(
@@ -648,7 +660,7 @@ class MCPAuthMiddleware:
                         is_person=bool(
                             via_gateway
                             and _get_agent_id() is None
-                            and headers.get(b"x-org-role", b"").decode().strip().lower()
+                            and headers.get(b"x-org-role", b"").decode("latin-1").strip().lower()
                             in {"admin", "member"}
                         ),
                     ),
@@ -5002,12 +5014,12 @@ _mcp_starlette_app = mcp.streamable_http_app(
     streamable_http_path="/",
     json_response=True,
     stateless_http=True,
-    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    transport_security=transport_security_settings(),
 )
 
 
 def get_mcp_app() -> ASGIApp:
-    return MCPAuthMiddleware(_mcp_starlette_app)
+    return StandaloneHTTPBoundary(MCPAuthMiddleware(_mcp_starlette_app))
 
 
 @contextlib.asynccontextmanager

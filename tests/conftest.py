@@ -33,6 +33,8 @@ _TEST_DEFAULTS = {
     "USE_LLM_FOR_MEMORY_CREATION": "false",
     "ADMIN_API_KEY": "test-admin-key",
     "IS_STANDALONE": "true",
+    # Synthetic HTTP clients name these hosts; production defaults stay loopback.
+    "STANDALONE_ALLOWED_HOSTS": "test,testserver",
     "POSTGRES_REQUIRE_SSL": "false",
     "PLATFORM_LLM_PROVIDER": "",
     "PLATFORM_EMBEDDING_PROVIDER": "",

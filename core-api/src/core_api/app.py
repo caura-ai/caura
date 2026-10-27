@@ -1092,6 +1092,9 @@ app.add_middleware(
     RequestTimeoutMiddleware,
     timeout_seconds=app_settings.request_timeout_seconds,
 )
+from core_api.http_security import StandaloneHTTPBoundary
+
+app.add_middleware(StandaloneHTTPBoundary)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,

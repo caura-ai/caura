@@ -129,7 +129,7 @@ services:
       - path: .env.local
         required: false
     ports:
-      - "8000:8000"
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8000}:8000"
     volumes:
       - ./common:/app/common
       - ./core-api/src:/app/core-api/src

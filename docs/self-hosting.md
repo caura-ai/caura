@@ -283,3 +283,72 @@ python scripts/smoke_test.py --url http://localhost:8000 --api-key <admin-key>
 
 CI also runs service-, worker-, operations-, client-, and plugin-specific
 suites from their respective directories.
+
+### Standalone HTTP authority
+
+Standalone REST and MCP accept loopback Host/Origin values by default. The
+shipped development environment also allows `core-api:8000` for sibling containers. For a
+reverse proxy, set `PUBLIC_API_URL` to its externally visible API URL. Additional
+exact authorities and origins can be supplied as comma-separated
+`STANDALONE_ALLOWED_HOSTS` and `STANDALONE_ALLOWED_ORIGINS`; an authority may use
+`:*` to allow any port. Do not add untrusted domains to either list.
+
+Explicit `CORS_ORIGINS` entries are also accepted as Origin values, so a
+configured browser frontend passes both CORS and the standalone boundary.
+The wildcard `*` does not expand this boundary, and CORS origins do not add
+allowed Host values.
+
+The development Compose API now binds to `127.0.0.1`. To expose that API to a
+network, configure `API_BIND=0.0.0.0`, `CAURA_API_KEY`, and the public API URL
+together. Keep the key private and terminate TLS at the reverse proxy. The stock
+Compose API binding is unchanged by this update.
+
+### PostgreSQL transport and migration roles
+
+With `ENVIRONMENT=production` or `sandbox`, storage defaults to
+`POSTGRES_REQUIRE_SSL=true` and verifies the database certificate and hostname.
+Mount the database CA certificate and set `POSTGRES_SSL_ROOT_CERT` to its path
+when it is not in the system trust store. The database URL must use a hostname
+covered by that certificate. Apply this configuration to both writer and reader.
+
+`POSTGRES_SSL_MODE=verify-full` also enables verification in development.
+`verify-ca` verifies the certificate without checking the hostname; `require`
+requires encryption without certificate verification. A stronger mode already
+specified by the URL is preserved. Local Compose explicitly disables the TLS
+requirement for its bridge-network database; deployments can explicitly opt out
+with `POSTGRES_REQUIRE_SSL=false` when necessary during migration to TLS.
+An explicit `POSTGRES_SSL_MODE` independently requests its policy and takes
+precedence over that flag; clear the mode too when opting out of both settings.
+A stronger URL policy is always preserved.
+
+Set `MIGRATION_DATABASE_URL` to a dedicated schema-owner credential. Boot-time
+Alembic and the Alembic CLI use that credential, while request and read pools
+continue using `DATABASE_URL` and `READ_DATABASE_URL`. The migration pool closes
+when startup finishes, including failed startup. Reader-role services never open
+it. With no migration URL, the existing single-credential setup is retained for
+compatibility; configuring the two roles is an operator step.
+
+For a new database, provision separate `caura_migrator` and `caura_runtime` login
+roles through your database administration tooling, with independent passwords.
+Give the migrator ownership of the application schema and migration objects.
+Keep runtime `NOSUPERUSER NOCREATEDB NOCREATEROLE`, without membership in the
+migrator role. Run migrations as the migrator, then grant runtime only the
+application privileges (the following example uses the OSS `public` schema):
+
+```sql
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+GRANT USAGE ON SCHEMA public TO caura_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO caura_runtime;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO caura_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE caura_migrator IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO caura_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE caura_migrator IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO caura_runtime;
+REVOKE ALL ON TABLE public.alembic_version FROM caura_runtime;
+```
+
+On an existing database, review current object ownership and transfer the
+application objects to the migrator before switching the URLs. Verify the runtime
+role can perform application DML but cannot create, alter, or drop a table or
+update `alembic_version`. Review these grants when adding migrations; these
+instructions do not change database users or privileges automatically.

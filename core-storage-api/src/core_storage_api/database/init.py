@@ -147,9 +147,7 @@ def schema_bootstrap_action(
 def _build_engine(url: str) -> AsyncEngine:
     return create_async_engine(
         url,
-        # Empty unless POSTGRES_REQUIRE_SSL is on, so the default deployment's
-        # call is unchanged. ``url`` is passed so a DSN that already asks for
-        # verification keeps it instead of being downgraded to ``require``.
+        # Request and migration pools share the same TLS floor.
         connect_args=db_connect_args(url),
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
@@ -247,12 +245,24 @@ async def init_database() -> None:
         logger.info("Skipping Alembic (role=reader — writer owns schema)")
         return
 
+    # A separate owner pool never becomes the request-serving engine.
+    migration_url = settings.migration_database_url.get_secret_value()
+    if migration_url:
+        engine = _build_engine(migration_url)
+        try:
+            await _init_database(engine)
+        finally:
+            await engine.dispose()
+    else:
+        await _init_database(get_engine())
+
+
+async def _init_database(engine: AsyncEngine) -> None:
     from alembic import command
     from alembic.config import Config
     from alembic.script import ScriptDirectory
     from sqlalchemy import text
 
-    engine = get_engine()
     migrations_dir = str(Path(__file__).parent / "migrations")
 
     alembic_cfg = Config()

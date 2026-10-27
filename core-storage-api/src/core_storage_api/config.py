@@ -9,7 +9,7 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from common.storage_auth import read_shared_secret_file
-from core_storage_api.db_tls import tls_connect_args
+from core_storage_api.db_tls import is_deployed_environment, tls_connect_args
 
 # The "local-dev compatibility default" this preserved is retired: the whole
 # ephemeral local/CI Postgres role+db population (ci.yml, both docker-compose
@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     # we route. A reader (``core_storage_role``) given ``read_database_url``
     # opens every session there and never connects to ``database_url`` (L-139).
     database_url: SecretStr = Field(default=SecretStr(LOCAL_DATABASE_URL), repr=False, exclude=True)
+    # Optional owner credential used only for Alembic; never the request pool.
+    migration_database_url: SecretStr = Field(default=SecretStr(""), repr=False, exclude=True)
     # SaaS can bind only ALLOYDB_PASSWORD from Secret Manager. These remain
     # ordinary settings fields so constructor and .env sources work too.
     alloydb_host: str = ""
@@ -69,26 +71,17 @@ class Settings(BaseSettings):
     # ``DB_POOL_SIZE`` / ``DB_MAX_OVERFLOW`` explicitly; the source
     # default is now the safe baseline rather than a value that
     # requires environment-side correction.
-    # Require TLS on every connection this service opens to Postgres.
-    #
-    # Documented in ``.env.example``, ``AGENT-INSTALL.md`` and both compose
-    # files as "Set true in production" since it was introduced, and read by
-    # nothing: no ``connect_args``, no ``sslmode``, no ``ssl=`` existed
-    # anywhere in the tree. ``extra="ignore"`` above is why that was silent —
-    # pydantic-settings accepted the variable and dropped it, so an operator
-    # who set it got neither TLS nor an error. A security control that cannot
-    # be switched on is worse than an absent one: the absent one does not tell
-    # you it is protecting you.
-    #
-    # ``"require"`` encrypts and refuses a server that will not upgrade, which
-    # is what the name promises. It deliberately does NOT verify the
-    # certificate — that is ``"verify-full"``, and it needs a CA bundle
-    # shipped and configured, so offering it here without one would be the
-    # same empty promise in a new place. Operators who need verification pass
-    # it on the DSN (``?ssl=verify-full``); ``db_tls.tls_connect_args`` leaves
-    # such a DSN alone rather than downgrading it, which takes an explicit
-    # check — see there.
+    # Development/Compose may opt out; deployed connections verify by default.
     postgres_require_ssl: bool = False
+    postgres_ssl_mode: Literal["", "disable", "allow", "prefer", "require", "verify-ca", "verify-full"] = ""
+    postgres_ssl_root_cert: str = ""
+
+    @model_validator(mode="after")
+    def deployed_tls_defaults(self) -> Settings:
+        if "postgres_require_ssl" not in self.model_fields_set:
+            self.postgres_require_ssl = is_deployed_environment(self.environment)
+        return self
+
     db_pool_size: int = 5
     db_max_overflow: int = 5
     db_pool_timeout: int = 60
@@ -235,4 +228,9 @@ def db_connect_args(dsn: str | None = None) -> dict[str, object]:
     where that construction fails — so the two need one shared implementation
     reachable from both, not a copy each.
     """
-    return tls_connect_args(dsn, require=settings.postgres_require_ssl)
+    mode = settings.postgres_ssl_mode
+    if not mode and settings.postgres_require_ssl and is_deployed_environment(settings.environment):
+        mode = "verify-full"
+    return tls_connect_args(
+        dsn, require=settings.postgres_require_ssl, mode=mode, root_cert=settings.postgres_ssl_root_cert
+    )

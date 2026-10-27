@@ -1,5 +1,4 @@
 import asyncio
-import hmac
 import logging
 from typing import Any
 
@@ -17,6 +16,7 @@ from core_api.constants import (
     VERSION,
     VERSION_PATH,
 )
+from core_api.http_security import credential_matches
 from core_api.providers._platform import (
     get_platform_embedding,
     get_platform_init_errors,
@@ -49,7 +49,7 @@ def _gateway_verified(request: Request) -> bool:
     gw_secret = settings.gateway_shared_secret
     if not gw_secret:
         return True
-    return hmac.compare_digest(request.headers.get("x-gateway-secret", ""), gw_secret)
+    return credential_matches(request.headers.get("x-gateway-secret", ""), gw_secret)
 
 
 async def _trust_fields(request: Request, tenant_id: str | None, agent_id: str | None) -> dict[str, Any]:

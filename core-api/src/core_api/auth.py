@@ -1,4 +1,3 @@
-import hmac
 import logging
 
 from fastapi import HTTPException, Request, Security
@@ -17,6 +16,7 @@ from core_api.config import settings
 from core_api.constants import API_KEY_HEADER
 from core_api.errors import coded_detail
 from core_api.heartbeat.clients import record as _record_client_family
+from core_api.http_security import credential_matches
 from core_api.suppression import is_tenant_suppressed
 from core_api.tenant_context import set_current_tenant
 
@@ -705,7 +705,7 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
     capabilities: set[str] | None = set(capability_list) if capability_list else None
 
     # ── Path 1: Admin API key ──
-    if key and admin_key and hmac.compare_digest(key, admin_key):
+    if key and admin_key and credential_matches(key, admin_key):
         _set_rate_limit_key(request, f"credential:{key}")
         set_current_tenant(None)  # Admin — RLS bypass
         return AuthContext(tenant_id=None, is_admin=True)
@@ -723,7 +723,7 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
     # ``mcp_server.py:448`` and keeps ``via_gateway`` False for it.
     mclaw_key = settings.memclaw_api_key  # legacy-name-ok: live compatibility field
     if mclaw_key:
-        if key and hmac.compare_digest(key, mclaw_key):
+        if key and credential_matches(key, mclaw_key):
             _set_rate_limit_key(request, f"credential:{key}")
             # Valid Caura key — resolve tenant from standalone or header
             if settings.is_standalone:
@@ -792,7 +792,7 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
         # impersonate a tenant by setting the identity headers itself. No-op
         # when unset (OSS / standalone / dev).
         gw_secret = settings.gateway_shared_secret
-        if gw_secret and not hmac.compare_digest(request.headers.get("x-gateway-secret") or "", gw_secret):
+        if gw_secret and not credential_matches(request.headers.get("x-gateway-secret") or "", gw_secret):
             raise HTTPException(
                 status_code=401,
                 detail=coded_detail(

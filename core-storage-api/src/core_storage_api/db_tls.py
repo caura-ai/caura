@@ -10,7 +10,9 @@ Keeping the policy here is what lets both do that without a second copy of it.
 
 from __future__ import annotations
 
+import logging
 import os
+import ssl
 from urllib.parse import parse_qs, urlsplit
 
 # asyncpg's TLS modes, weakest first. ``allow`` and ``prefer`` will silently
@@ -18,6 +20,12 @@ from urllib.parse import parse_qs, urlsplit
 TLS_MODES = ("disable", "allow", "prefer", "require", "verify-ca", "verify-full")
 
 _TRUTHY = {"1", "true", "yes", "on"}
+_DEPLOYED_ENVIRONMENTS = {"production", "sandbox"}
+
+
+def is_deployed_environment(environment: str) -> bool:
+    """The environments whose default database policy requires verification."""
+    return environment.strip().lower() in _DEPLOYED_ENVIRONMENTS
 
 
 def dsn_tls_mode(dsn: str | None) -> str | None:
@@ -47,30 +55,42 @@ def dsn_tls_mode(dsn: str | None) -> str | None:
     return normalised if normalised in TLS_MODES else None
 
 
-def tls_connect_args(dsn: str | None, *, require: bool) -> dict[str, object]:
-    """asyncpg connect kwargs for a TLS policy that is a FLOOR, not an override.
+def tls_connect_args(
+    dsn: str | None, *, require: bool, mode: str | None = None, root_cert: str | None = None
+) -> dict[str, object]:
+    """Apply the TLS floor without weakening a stronger DSN policy.
 
-    SQLAlchemy merges ``connect_args`` **on top of** the parameters it parses
-    out of the URL (``immutabledict(cparams).union(connect_args)`` in
-    ``sqlalchemy.engine.create``), so the kwarg wins over the DSN. Returning
-    ``{"ssl": "require"}`` unconditionally would therefore downgrade an
-    operator who set ``POSTGRES_REQUIRE_SSL=true`` *and* asked for
-    ``?ssl=verify-full``, turning certificate verification off in silence —
-    which is the failure this setting exists to stop. So:
-
-    - DSN already at ``require`` or stronger -> hands off, it stays.
-    - DSN weaker, unrecognised, or absent -> ``require``, because none of those
-      is evidence the connection will actually be encrypted.
-
-    Empty when TLS is off, so the engine call is byte-identical to what it was
-    and the default deployment is unchanged.
+    Verified modes use the supplied CA bundle or the system trust store.
+    Explicit local opt-outs preserve asyncpg's own DSN behavior.
     """
-    if not require:
+    if mode is None:
+        mode = tls_mode_from_env(require=require)
+    if root_cert is None:
+        root_cert = os.environ.get("POSTGRES_SSL_ROOT_CERT", "")
+    if mode and mode not in TLS_MODES:
+        raise ValueError("Invalid POSTGRES_SSL_MODE")
+    floor = mode or ("require" if require else "")
+    if require and floor and TLS_MODES.index(floor) < TLS_MODES.index("require"):
+        floor = "require"
+    if not floor:
+        if dsn and urlsplit(dsn).hostname not in {"localhost", "127.0.0.1", "::1", "db", "postgres"}:
+            requested = dsn_tls_mode(dsn)
+            if requested is None or TLS_MODES.index(requested) < TLS_MODES.index("require"):
+                logging.getLogger(__name__).warning(
+                    "PostgreSQL transport may fall back to cleartext; configure verified TLS"
+                )
         return {}
-    mode = dsn_tls_mode(dsn)
-    if mode is not None and TLS_MODES.index(mode) >= TLS_MODES.index("require"):
-        return {}
-    return {"ssl": "require"}
+    requested = dsn_tls_mode(dsn)
+    if requested is not None and TLS_MODES.index(requested) >= TLS_MODES.index(floor):
+        # Preserve stronger DSN policy. A supplied CA bundle must still reach it.
+        if not root_cert or requested not in {"verify-ca", "verify-full"}:
+            return {}
+        floor = requested
+    if floor in {"verify-ca", "verify-full"}:
+        context = ssl.create_default_context(cafile=root_cert or None)
+        context.check_hostname = floor == "verify-full"
+        return {"ssl": context}
+    return {"ssl": floor}
 
 
 def tls_required_from_env() -> bool:
@@ -80,4 +100,23 @@ def tls_required_from_env() -> bool:
     docstring. Everything else must go through ``config.db_connect_args`` so
     the value comes from the one validated place.
     """
-    return os.environ.get("POSTGRES_REQUIRE_SSL", "").strip().lower() in _TRUTHY
+    value = os.environ.get("POSTGRES_REQUIRE_SSL")
+    if value is not None:
+        return value.strip().lower() in _TRUTHY
+    return is_deployed_environment(os.environ.get("ENVIRONMENT", "development"))
+
+
+def tls_mode_from_env(*, require: bool | None = None) -> str:
+    """Read an explicit mode, or derive its default from the caller's policy.
+
+    An explicit mode independently requests TLS even when the require flag is
+    false. With no mode configured, require=False must not be overridden by a
+    second read of the environment's require/default policy.
+    """
+    configured = os.environ.get("POSTGRES_SSL_MODE", "")
+    if configured:
+        return configured
+    required = tls_required_from_env() if require is None else require
+    if required and is_deployed_environment(os.environ.get("ENVIRONMENT", "development")):
+        return "verify-full"
+    return ""

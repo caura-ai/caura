@@ -1,7 +1,6 @@
 """Dedicated collaboration workload using the existing core image and identity boundary."""
 
 import asyncio
-import hmac
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -26,6 +25,7 @@ from core_api.app import app as memory_app
 from core_api.auth import AuthContext, api_key_header, get_auth_context
 from core_api.bus_storage import close_storage_client, get_presence_storage_client, get_storage_client
 from core_api.config import settings
+from core_api.http_security import credential_matches
 from core_api.middleware.request_timeout import RequestTimeoutMiddleware
 from core_api.suppression import use_suppression_lookup
 
@@ -52,7 +52,7 @@ async def measured_auth_context(request: Request, key: str | None = Security(api
 async def bus_principal(request: Request, auth: Annotated[AuthContext, Depends(measured_auth_context)]):
     # Bus requires enterprise agent credentials even if OSS anonymous mode is enabled.
     secret = settings.gateway_shared_secret
-    if not secret or not hmac.compare_digest(request.headers.get("x-gateway-secret", ""), secret):
+    if not secret or not credential_matches(request.headers.get("x-gateway-secret", ""), secret):
         raise HTTPException(401, "Caura gateway authentication is required")
     if (
         request.headers.get("x-caura-credential-kind") != "agent_key"
@@ -70,7 +70,7 @@ async def bus_principal(request: Request, auth: Annotated[AuthContext, Depends(m
 
 async def human_principal(request: Request, auth: Annotated[AuthContext, Depends(measured_auth_context)]):
     secret = settings.gateway_shared_secret
-    if not secret or not hmac.compare_digest(request.headers.get("x-gateway-secret", ""), secret):
+    if not secret or not credential_matches(request.headers.get("x-gateway-secret", ""), secret):
         raise HTTPException(401, "Caura gateway authentication is required")
     # Auth service emits user and role only for human sessions/JWTs; the
     # verified gateway overwrites them. API keys cannot decide for a human.
