@@ -3,16 +3,16 @@
 Apache-2.0 Python packages using the authenticated Caura collaboration API.
 Python 3.12+; no agent has database credentials or direct queue access.
 
+<!-- Update these pins and scripts/caura-join.sh only after successful PyPI publication. -->
+
 Install the released packages. All four share one version and the dependents
 pin `caura-bus-core` exactly; add `caura-bus-adapter-sdk` to build adapters:
 
-<!-- x-release-please-start-version -->
 ```sh
 pip install \
-  "caura-bus-cli==0.3.3" \
-  "caura-bus-mcp==0.3.3"
+  "caura-bus-cli==0.3.1" \
+  "caura-bus-mcp==0.3.1"
 ```
-<!-- x-release-please-end -->
 
 Or work from this source tree:
 
@@ -27,17 +27,22 @@ uv run --no-sync pytest
 
 ## Connect your agent with one command: `caura-bus join`
 
-If your dashboard account can manage API credentials, run this from inside the
-Claude Code or Codex session (or its project directory). Nothing needs to be
-installed first:
+If your dashboard account can manage API credentials, run `join` from a plain
+terminal in the agent's project directory. Before running `join` or `setup` for
+Claude, stop all Claude Code sessions using that config; start Claude Code again
+afterwards. This prevents a running session from overwriting the updated MCP
+configuration. Select the runtime explicitly from the plain terminal.
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first, then
+use the versioned PyPI release, published with package attestations:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/caura-ai/caura/main/scripts/caura-join.sh \
-  | sh -s -- --url https://your-caura.example --email you@example.com
+uvx --from caura-bus-cli==0.3.1 caura-bus join --runtime claude --url https://your-caura.example --email you@example.com
 ```
 
-The script installs `uv` when it is missing, installs this CLI, and runs
-`caura-bus join`, which:
+For Codex, use `--runtime codex` instead and restart Codex after setup.
+
+`caura-bus join`:
 
 1. signs in as you the way the dashboard does. The password comes from
    `CAURA_PASSWORD` or a prompt on the terminal; it is never an argument and
@@ -51,8 +56,8 @@ The script installs `uv` when it is missing, installs this CLI, and runs
    MCP on unless `--no-memory`), for the runtime detected from the environment
    (`--runtime claude|codex` overrides).
 
-An MCP server added while a session runs is loaded only after a restart, so
-restart Claude Code (or run `/mcp`) or Codex afterwards, as `join` prints.
+Start Claude Code in the project after `join` finishes, or restart Codex to
+load the added MCP servers, as `join` prints.
 
 When the Caura broker (`caura`) is on PATH, `join` first prints the equivalent
 `caura agent connect` command, which signs in through the browser and keeps the
@@ -64,16 +69,23 @@ the broker does not take (`--tenant`, `--no-hooks`) are listed as notes.
 ## Connect your agent with an existing key
 
 Get an agent key from your Caura admin (the dashboard's API Credentials page),
-then connect Claude Code or Codex from the project directory it will work in:
+then run `setup` from a plain terminal in its project directory. Keep Claude
+Code stopped during setup and start it again afterwards; restart Codex after
+setup:
 
 ```sh
-uv tool install "git+https://github.com/caura-ai/caura@main#subdirectory=clients/collaboration/cli"
+uv tool install "caura-bus-cli==0.3.1"
 export CAURA_API_KEY=...   # or pass --key; setup prompts when neither is given
 
 caura-bus setup --runtime claude --url https://your-caura.example --dir ~/my-project \
   --description "What this agent knows, written for the peers that will pick it"
 caura-bus setup --runtime codex  --url https://your-caura.example --dir ~/my-project
 ```
+
+The configuration details below describe the current source tree. Published
+0.3.1 still uses the Claude CLI for wiring; direct private-config writes ship
+with the next client release. Update the install pins after that release is
+available on PyPI.
 
 `setup` verifies the key against the server and reads the agent and tenant
 from it (`--agent-id` only asserts the expected value). It then:
@@ -83,9 +95,11 @@ from it (`--agent-id` only asserts the expected value). It then:
    inside; `$XDG_CONFIG_HOME` is honoured, `--config` overrides). Plain `http`
    is accepted only for `localhost`/`127.0.0.1`.
 2. wires the `caura-bus-mcp` server installed next to the CLI:
-   - **claude:** `claude mcp add --scope local caura-bus …` run in `--dir`
-     (default: the current directory). Without `claude` on `PATH` it prints the
-     exact command to run, taking the key from `$CAURA_API_KEY`.
+   - **claude:** writes the local `caura-bus` entry to `~/.claude.json`
+     (`$CLAUDE_CONFIG_DIR` honoured), under the repository root or `--dir`
+     outside a repository. The config and its backup are mode 600. The key
+     is written directly to the private config and never passed on child argv.
+     Stop Claude Code while updating its config; restart it afterwards.
    - **codex:** adds or updates only `[mcp_servers.caura-bus]` in
      `~/.codex/config.toml` (`$CODEX_HOME` honoured). Unrelated settings and
      subtables such as `[mcp_servers.caura-bus.tools.peer]` are kept, a backup
@@ -95,8 +109,8 @@ from it (`--agent-id` only asserts the expected value). It then:
 3. registers the **same server's Caura memory MCP** (`<url>/mcp/`, header
    `X-API-Key: <agent key>`), so the agent's durable memories are saved on this
    server and not on some other Caura. `--no-memory` skips it.
-   - **claude:** `claude mcp add --scope local --transport http caura <url>/mcp/
-     --header "X-API-Key: …"` in `--dir`. The local-scope name `caura`
+   - **claude:** writes the HTTP `caura` entry to the same private config.
+     The local-scope name `caura`
      deliberately overrides a user-scope `caura` entry in this project. `setup`
      warns about user-scope or `.mcp.json` entries named `caura`/`memclaw` that <!-- legacy-name-floor: users' pre-rename MCP entry name -->
      point at a different host; check what the project loads with `claude mcp list`.
@@ -477,3 +491,8 @@ the event and resumes after its watermark. The waker treats it as a wake and
 reconciles. `caura-bus watch` reports the gap. The adapter SDK renews its lease
 to detect a pause that was in the pruned history. The MCP server pulls through
 `wait` and needs no change.
+
+On shared hosts, prefer `caura agent connect` and its OS keychain storage.
+The optional `scripts/caura-join.sh` requires an installed `uv` and defaults to
+the pinned PyPI release. `CAURA_JOIN_REF` is an explicit development override
+for installing from a reviewed Git ref.

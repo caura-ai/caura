@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import re
 
+# Start at the literal URL delimiter so long scheme-like words cannot cause retries.
+_URL_PASSWORD = re.compile(r"://[^/\s:@]*:([^@\s/]+)@")
+
 _PATTERNS = [
+    re.compile(r"\b(?:hf_|GOCSPX-|npm_|pypi-|glpat-)[A-Za-z0-9_\-]{16,}"),
     re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),  # OpenAI / Anthropic-style
     re.compile(r"mc[ai]?_[A-Za-z0-9_\-]{16,}"),  # Caura credentials
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),  # GitHub tokens (classic)
@@ -30,9 +34,7 @@ _PATTERNS = [
     # to EOF, keeping K stray markers in a long transcript at O(K*8k) not
     # O(K*N). RSA-4096 PEM is ~3400 chars, so real keys fit comfortably;
     # a pathological >8k key falls through to the server-side mask.
-    re.compile(
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]{0,8192}?-----END [A-Z ]*PRIVATE KEY-----"
-    ),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]{0,8192}?-----END [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9_\-\.=]{16,}"),
     # Name: also matched at the end of an env-style name (``OPENAI_API_KEY``),
     # where ``_`` before it leaves no ``\b``. Value: base64 / URL-safe
@@ -40,8 +42,12 @@ _PATTERNS = [
     # but not ``:``, so ``secret: https://…`` prose is left alone; the 20-char
     # floor is still what keeps it precise.
     re.compile(
-        r"(?i)(?:\b|(?<=_))(api[_-]?key|token|secret|client[_-]?secret|password|passwd)"
+        r"(?i)(?:\b|(?<=_))(api[_-]?key|token|secret|client[_-]?secret)"
         r"['\"]?\s*[=:]\s*['\"]?[A-Za-z0-9_\-.+/=!@#$%^&*~]{20,}"
+    ),
+    re.compile(
+        r"(?i)(?:\b|(?<=_))(?:password|passwd|pwd)['\"]?\s*[=:]\s*['\"]?"
+        r"[A-Za-z0-9_\-.+/=!?@#$%^&*~]{8,}"
     ),
     re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{5,}\b"),  # JWT
 ]
@@ -51,6 +57,8 @@ REDACTED = "[REDACTED_SECRET]"
 
 def scrub(text: str) -> str:
     """Replace credential-shaped substrings with a redaction token."""
+    # Preserve the address while masking only the password (including escaped bytes).
+    text = _URL_PASSWORD.sub(lambda match: match[0][: match.start(1) - match.start()] + REDACTED + "@", text)
     for pattern in _PATTERNS:
         text = pattern.sub(REDACTED, text)
     return text

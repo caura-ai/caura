@@ -33,7 +33,7 @@ class Server:
         self.calls: list[tuple[str, str, dict | None]] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content) if request.content else None
+        body = json.loads(request.content) if request.content else {}
         self.calls.append((request.method, request.url.path, body))
         if request.headers.get("X-API-Key") != KEY:
             return httpx.Response(401, json={"detail": "invalid key"})
@@ -125,30 +125,14 @@ def test_claude_setup_verifies_writes_private_config_and_wires_local_mcp(env):
     assert "allow_insecure_http" not in config
     assert KEY not in env.config.read_text(encoding="utf-8")
 
-    remove, add, memory_remove, memory_add = calls(env.capture)
-    assert remove["argv"] == ["mcp", "remove", "--scope", "local", "caura-bus"]
-    assert add["cwd"] == str(env.project.resolve()) == remove["cwd"]
-    mcp = add["argv"][add["argv"].index("--") + 1]
-    assert add["argv"][:5] == ["mcp", "add", "--scope", "local", "caura-bus"]
-    assert f"CAURA_API_KEY={KEY}" in add["argv"]
-    assert f"CAURA_BUS_AGENT_CONFIG={env.config}" in add["argv"]
-    assert Path(mcp).is_absolute() and Path(mcp).name == "caura-bus-mcp"
-
-    # The same server's memory MCP, local scope so it overrides a user-scope `caura`.
-    assert memory_remove["argv"] == ["mcp", "remove", "--scope", "local", "caura"]
-    assert memory_add["cwd"] == str(env.project.resolve())
-    assert memory_add["argv"] == [
-        "mcp",
-        "add",
-        "--scope",
-        "local",
-        "--transport",
-        "http",
-        "caura",
-        f"{URL}/mcp/",
-        "--header",
-        f"X-API-Key: {KEY}",
+    servers = json.loads((env.home / ".claude.json").read_text())["projects"][str(env.project.resolve())][
+        "mcpServers"
     ]
+    entry = servers["caura-bus"]
+    assert entry["env"] == {"CAURA_API_KEY": KEY, "CAURA_BUS_AGENT_CONFIG": str(env.config)}
+    assert Path(entry["command"]).is_absolute() and Path(entry["command"]).name == "caura-bus-mcp"
+    assert servers["caura"] == {"type": "http", "url": f"{URL}/mcp/", "headers": {"X-API-Key": KEY}}
+    assert not calls(env.capture)
     assert "claude mcp list" in result.output
 
     text = (env.project / "CLAUDE.md").read_text(encoding="utf-8")
@@ -168,7 +152,11 @@ def test_rerun_is_idempotent(env):
     assert (env.project / "CLAUDE.md").read_text(encoding="utf-8") == first_md
     assert first_md.count(setup_mod.MARK_START) == 1
     # Each run replaces the previous MCP entry instead of adding a second one.
-    assert [c["argv"][1] for c in calls(env.capture)] == ["remove", "add"] * 4
+    servers = json.loads((env.home / ".claude.json").read_text())["projects"][str(env.project.resolve())][
+        "mcpServers"
+    ]
+    assert set(servers) == {"caura-bus", "caura"}
+    assert not calls(env.capture)
 
 
 def test_identity_comes_from_server_and_mismatch_changes_nothing(env):
@@ -249,21 +237,23 @@ def test_dry_run_writes_nothing(env):
     assert [c[1] for c in env.server.calls] == ["/api/v1/bus/identity"] * 2
 
 
-def test_missing_claude_prints_exact_command_without_key(env, monkeypatch):
+def test_missing_claude_can_still_write_private_config(env, monkeypatch):
     monkeypatch.setenv("PATH", str(Path(sys.executable).parent))
     result = invoke("--runtime", "claude", "--dir", str(env.project))
-    assert result.exit_code == 1
+    assert result.exit_code == 0, result.output
     assert KEY not in result.output
-    assert '"CAURA_API_KEY=${CAURA_API_KEY:?export your agent key first}"' in result.output
-    assert "claude mcp add --scope local caura-bus" in result.output
-    assert env.config.exists() and (env.project / "CLAUDE.md").exists()
+    assert (env.home / ".claude.json").exists()
+    assert not calls(env.capture)
 
 
-def test_failing_claude_add_is_reported_and_masked(env, monkeypatch):
-    monkeypatch.setenv("FAKE_CLAUDE_EXIT", "3")
+def test_failing_claude_config_write_is_reported_and_masked(env, monkeypatch):
+    def denied(directory, entries):
+        raise setup_mod.SetupError("could not update private Claude config (PermissionError)")
+
+    monkeypatch.setattr(setup_mod, "wire_claude_entries", denied)
     result = invoke("--runtime", "claude", "--dir", str(env.project))
     assert result.exit_code == 1
-    assert "`claude mcp add` failed (3)" in result.output and KEY not in result.output
+    assert "could not update private Claude config" in result.output and KEY not in result.output
 
 
 def test_codex_updates_only_its_table_keeps_backup_and_is_idempotent(env):
@@ -498,7 +488,10 @@ def test_codex_memory_subtable_header_is_refused_unchanged(env):
 def test_no_memory_skips_the_memory_server(env):
     result = invoke("--runtime", "claude", "--dir", str(env.project), "--no-memory")
     assert result.exit_code == 0, result.output
-    assert [c["argv"][4] for c in calls(env.capture)] == ["caura-bus", "caura-bus"]
+    servers = json.loads((env.home / ".claude.json").read_text())["projects"][str(env.project.resolve())][
+        "mcpServers"
+    ]
+    assert set(servers) == {"caura-bus"}
     assert "claude mcp list" not in result.output
     result = invoke("--runtime", "codex", "--dir", str(env.project), "--no-memory")
     assert result.exit_code == 0, result.output
@@ -558,11 +551,25 @@ def test_codex_warns_about_other_memory_entries(env):
     assert "caura-qa" not in result.output  # same host: not a conflict
 
 
-def test_failing_memory_add_is_reported_masked_and_fails(env, monkeypatch):
-    monkeypatch.setenv("FAKE_CLAUDE_MEMORY_EXIT", "4")
+def test_failed_claude_batch_write_preserves_config_and_backup(env, monkeypatch):
+    path = env.home / ".claude.json"
+    original = '{"theme":"dark"}\n'
+    path.write_text(original, encoding="utf-8")
+    write_private = setup_mod.write_private
+
+    def denied(target, text):
+        if target == path:
+            raise PermissionError("refused")
+        return write_private(target, text)
+
+    monkeypatch.setattr(setup_mod, "write_private", denied)
     result = invoke("--runtime", "claude", "--dir", str(env.project))
     assert result.exit_code == 1
-    assert "for the memory server failed (4)" in result.output and KEY not in result.output
+    assert "could not update private Claude config" in result.output and KEY not in result.output
+    assert path.read_text(encoding="utf-8") == original
+    backup = path.with_name(path.name + ".caura-bus-setup.bak")
+    assert backup.read_text(encoding="utf-8") == original
+    assert mode(backup) == 0o600
 
 
 def test_dry_run_shows_memory_plan_masked(env):
@@ -573,12 +580,70 @@ def test_dry_run_shows_memory_plan_masked(env):
     assert not calls(env.capture) and not env.codex.exists()
 
 
-def test_manual_memory_command_reads_key_from_environment(tmp_path):
-    command = setup_mod.claude_memory_manual_command(tmp_path, URL)
-    assert '"X-API-Key: ${CAURA_API_KEY:?export your agent key first}"' in command
-    assert "--transport http caura https://caura.test/mcp/ --header" in command
-
-
 def test_peer_instructions_point_durable_memory_at_this_server():
     text = setup_mod.peer_template()
     assert "use the `caura` memory tools of THIS Caura server" in text
+
+
+def test_claude_setup_keeps_key_off_child_argv_and_config_private(env):
+    path = env.home / ".claude.json"
+    original = {"theme": "dark", "projects": {"/other": {"mcpServers": {"other": {"command": "keep"}}}}}
+    path.write_text(json.dumps(original), encoding="utf-8")
+    path.chmod(0o644)
+    result = invoke("--runtime", "claude", "--dir", str(env.project))
+    assert result.exit_code == 0, result.output
+    assert all(KEY not in json.dumps(call["argv"]) for call in calls(env.capture))
+    assert mode(path) == 0o600
+    assert mode(path.with_name(path.name + ".caura-bus-setup.bak")) == 0o600
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["theme"] == "dark" and data["projects"]["/other"] == original["projects"]["/other"]
+    servers = data["projects"][str(env.project.resolve())]["mcpServers"]
+    assert servers["caura-bus"]["env"]["CAURA_API_KEY"] == KEY
+    assert servers["caura"]["headers"]["X-API-Key"] == KEY
+
+
+def test_claude_setup_refuses_malformed_config_without_overwriting(env):
+    path = env.home / ".claude.json"
+    path.write_text("{unfinished", encoding="utf-8")
+    result = invoke("--runtime", "claude", "--dir", str(env.project))
+    assert result.exit_code == 1
+    assert path.read_text(encoding="utf-8") == "{unfinished"
+    assert KEY not in result.output
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [[], {"projects": []}, {"projects": {"PROJECT": []}}, {"projects": {"PROJECT": {"mcpServers": []}}}],
+)
+def test_claude_setup_preserves_invalid_config_shapes(env, shape):
+    path = env.home / ".claude.json"
+    text = json.dumps(shape).replace("PROJECT", str(env.project.resolve()))
+    path.write_text(text, encoding="utf-8")
+    result = invoke("--runtime", "claude", "--dir", str(env.project))
+    assert result.exit_code == 1
+    assert path.read_text(encoding="utf-8") == text
+    assert KEY not in result.output
+
+
+def test_claude_local_entries_use_the_repository_root(env):
+    (env.project / ".git").write_text("gitdir: /unused\n", encoding="utf-8")
+    nested = env.project / "src"
+    nested.mkdir()
+    result = invoke("--runtime", "claude", "--dir", str(nested))
+    assert result.exit_code == 0, result.output
+    projects = json.loads((env.home / ".claude.json").read_text())["projects"]
+    assert str(env.project.resolve()) in projects
+    assert str(nested.resolve()) not in projects
+
+
+def test_claude_setup_keeps_the_original_backup_across_both_entries_and_unchanged_reruns(env):
+    path = env.home / ".claude.json"
+    original = '{"theme":"dark","mcpServers":{"existing":{"command":"keep"}}}\n'
+    path.write_text(original, encoding="utf-8")
+    result = invoke("--runtime", "claude", "--dir", str(env.project))
+    assert result.exit_code == 0, result.output
+    backup = path.with_name(path.name + ".caura-bus-setup.bak")
+    assert backup.read_text(encoding="utf-8") == original
+    assert mode(backup) == 0o600
+    assert invoke("--runtime", "claude", "--dir", str(env.project)).exit_code == 0
+    assert backup.read_text(encoding="utf-8") == original

@@ -94,3 +94,48 @@ def test_json_and_url_prose_without_credentials_survive():
         '{"password": "short"}',
     ]:
         assert scrub(text) == text, text
+
+
+def test_url_passwords_are_scrubbed_without_losing_the_address():
+    for host in ("localhost:5432", "10.0.0.5", "cache", "db.internal"):
+        for password in ("Sup3rSecretPassw0rd", "S3cret!Pa$$word", "p%40ss%2Fword"):
+            url = f"postgres://app:{password}@{host}/prod"
+            result = scrub(url)
+            assert password not in result
+            assert result == f"postgres://app:{REDACTED}@{host}/prod"
+    assert scrub("REDIS_URL=redis://:hunter2hunter2hunter2@cache:6379/0") == (
+        f"REDIS_URL=redis://:{REDACTED}@cache:6379/0"
+    )
+
+
+def test_additional_prefixed_tokens_are_scrubbed():
+    for prefix in ("hf_", "GOCSPX-", "npm_", "pypi-", "glpat-"):
+        token = prefix + "aB3cD4eF5gH6iJ7kL8mN9pQ0rS1tU2vW3xY4"
+        assert token not in scrub(f"key {token} rotated")
+
+
+def test_password_assignments_have_a_separate_length_floor():
+    for name in ("password", "passwd", "pwd", "DATABASE_PASSWORD"):
+        for password in ("Tr0ub4dor&3", "abCD12!?", "p%40ss%2Fword"):
+            assert password not in scrub(f'"{name}": "{password}"')
+    for name in ("token", "secret", "api_key"):
+        text = f"{name}: shortValue123"
+        assert scrub(text) == text
+    for text in ("password: short", "secret: https://example.test/path", "https://user@host/path"):
+        assert scrub(text) == text
+
+
+def test_url_password_scan_handles_long_hyphenated_text():
+    import time
+
+    text = "long-name-" * 10_000
+    started = time.monotonic()
+    assert scrub(text) == text
+    assert time.monotonic() - started < 2.0
+
+
+def test_url_passwords_in_compound_and_uppercase_schemes():
+    for scheme in ("POSTGRESQL", "postgresql+asyncpg", "git+https", "custom.scheme", "a" * 1000):
+        assert scrub(f"{scheme}://user:secret-value@localhost/path") == (
+            f"{scheme}://user:{REDACTED}@localhost/path"
+        )

@@ -204,3 +204,27 @@ def test_the_word_test_is_linear_on_a_long_lower_case_run():
     started = time.perf_counter()
     scan("mc_" + body)
     assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.parametrize("host", ["localhost:5432", "10.0.0.5", "cache", "db.internal"])
+@pytest.mark.parametrize(
+    "password", ["Sup3rSecretPassw0rd", "S3cret!Pa$$word", "p%40ss%2Fword"]
+)
+def test_url_userinfo_password_mask(host, password):
+    text = f"DATABASE_URL=postgres://app:{password}@{host}/prod"
+    masked = mask(text, scan(text))
+    assert password not in masked
+    assert masked == f"DATABASE_URL=postgres://app:«SECRET»@{host}/prod"
+
+
+@pytest.mark.parametrize("prefix", ["hf_", "GOCSPX-"])
+def test_additional_provider_tokens(prefix):
+    key = prefix + "aB3cD4eF5gH6iJ7kL8mN9pQ0rS1tU2vW3xY4"
+    assert key not in mask(key, scan(key))
+
+
+def test_url_password_scan_handles_long_hyphenated_text():
+    text = "long-name-" * 10_000
+    started = time.monotonic()
+    assert not scan(text, enabled_categories=[PIICategory.SECRET])
+    assert time.monotonic() - started < 2.0

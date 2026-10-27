@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import builtins
 import subprocess
+import tempfile
+
+import pytest
 
 from caura_client.interviewer import machine
 from caura_client.interviewer.cli import _acquire_lock
+
+
+@pytest.fixture(autouse=True)
+def private_lock_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
 
 
 def test_acquire_lock_proceeds_when_fcntl_unavailable(monkeypatch):
@@ -34,16 +43,11 @@ def test_machine_id_survives_malformed_ioreg(monkeypatch):
         # Quoteless AND single-stray-quote variants: neither may crash,
         # and the stray quote (2 split parts) must NOT return the raw
         # line as a fake UUID — the >= 4 guard requires two quote pairs.
-        stdout = (
-            "  IOPlatformUUID = malformed-without-quotes\n"
-            '  IOPlatformUUID = "\n'
-        )
+        stdout = '  IOPlatformUUID = malformed-without-quotes\n  IOPlatformUUID = "\n'
 
     monkeypatch.setattr(machine, "_MACHINE_ID_SHORT", None)  # bust the per-process cache
     monkeypatch.setattr(machine.sys, "platform", "darwin")
-    monkeypatch.setattr(
-        subprocess, "run", lambda *a, **k: FakeResult()
-    )
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: FakeResult())
     # Falls through ioreg → /etc/machine-id (absent on macOS test) → host fallback.
     mid = machine.machine_id_short()
     assert len(mid) == 12 and all(c in "0123456789abcdef" for c in mid)
@@ -94,14 +98,14 @@ def test_acquire_lock_closes_fd_when_flock_fails(monkeypatch):
 
     monkeypatch.setattr(real_fcntl, "flock", failing_flock)
     opened = []
-    real_open = open
+    real_open = cli_mod.os.fdopen
 
     def tracking_open(*args, **kwargs):
         handle = real_open(*args, **kwargs)
         opened.append(handle)
         return handle
 
-    monkeypatch.setattr("builtins.open", tracking_open)
+    monkeypatch.setattr(cli_mod.os, "fdopen", tracking_open)
     assert cli_mod._acquire_lock() is None
     assert opened and all(h.closed for h in opened)
 
@@ -118,10 +122,14 @@ def test_run_transcript_respects_allowlist(tmp_path):
     rc = main(
         [
             "run",
-            "--transcript", str(transcript),
-            "--projects", "allowed-*",
-            "--api-key", "k",
-            "--tenant-id", "t",
+            "--transcript",
+            str(transcript),
+            "--projects",
+            "allowed-*",
+            "--api-key",
+            "k",
+            "--tenant-id",
+            "t",
             "--dry-run",
         ]
     )
@@ -130,10 +138,14 @@ def test_run_transcript_respects_allowlist(tmp_path):
     rc_ok = main(
         [
             "run",
-            "--transcript", str(transcript),
-            "--projects", "secret-*",
-            "--api-key", "k",
-            "--tenant-id", "t",
+            "--transcript",
+            str(transcript),
+            "--projects",
+            "secret-*",
+            "--api-key",
+            "k",
+            "--tenant-id",
+            "t",
             "--dry-run",
         ]
     )
@@ -142,9 +154,12 @@ def test_run_transcript_respects_allowlist(tmp_path):
     rc_empty = main(
         [
             "run",
-            "--transcript", str(transcript),
-            "--api-key", "k",
-            "--tenant-id", "t",
+            "--transcript",
+            str(transcript),
+            "--api-key",
+            "k",
+            "--tenant-id",
+            "t",
             "--dry-run",
         ]
     )
@@ -153,10 +168,13 @@ def test_run_transcript_respects_allowlist(tmp_path):
     rc_all = main(
         [
             "run",
-            "--transcript", str(transcript),
+            "--transcript",
+            str(transcript),
             "--all-projects",
-            "--api-key", "k",
-            "--tenant-id", "t",
+            "--api-key",
+            "k",
+            "--tenant-id",
+            "t",
             "--dry-run",
         ]
     )
@@ -179,10 +197,13 @@ def test_run_closes_lock_handle_deterministically(tmp_path, monkeypatch):
         rc = cli_mod.main(
             [
                 "run",
-                "--transcript", str(transcript),
+                "--transcript",
+                str(transcript),
                 "--all-projects",
-                "--api-key", "k",
-                "--tenant-id", "t",
+                "--api-key",
+                "k",
+                "--tenant-id",
+                "t",
                 "--dry-run",
             ]
         )
@@ -209,11 +230,15 @@ def test_status_survives_vanished_transcript(tmp_path, monkeypatch):
     rc = cli_mod.main(
         [
             "status",
-            "--projects-root", str(tmp_path),
+            "--projects-root",
+            str(tmp_path),
             "--all-projects",
-            "--since-hours", "0",
-            "--api-key", "k",
-            "--tenant-id", "t",
+            "--since-hours",
+            "0",
+            "--api-key",
+            "k",
+            "--tenant-id",
+            "t",
         ]
     )
     assert rc == 0  # file skipped with a message, command completes

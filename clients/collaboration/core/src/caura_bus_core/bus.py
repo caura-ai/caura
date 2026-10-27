@@ -7,6 +7,7 @@ import json
 import secrets
 from time import monotonic
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -18,6 +19,12 @@ from .retry import Backoff, retry_after_seconds, transient_status
 
 # Sent instead of a gap when retention removed history after the stream cursor.
 RESYNC_EVENT = "stream.resync_required"
+
+
+def _path_segment(value: str) -> str:
+    if value in {".", ".."}:
+        raise ValueError("identifier must not be a dot segment")
+    return quote(value, safe="")
 
 
 def _stream_event(data: str) -> dict | None:
@@ -252,7 +259,7 @@ class Bus:
     async def delivery_action(self, delivery_id: str, action: str, token=None, **params):
         return await self.request(
             "POST",
-            f"deliveries/{delivery_id}/{action}",
+            f"deliveries/{_path_segment(delivery_id)}/{action}",
             json={"lease_token": token, **params},
             retry_safe=action in {"ack", "progress"},
         )
@@ -269,7 +276,7 @@ class Bus:
     ):
         return await self.request(
             "POST",
-            f"deliveries/{delivery_id}/reply",
+            f"deliveries/{_path_segment(delivery_id)}/reply",
             json={"lease_token": token, "body": body, "reply_to": reply_to, "ack": ack},
             headers={"Idempotency-Key": idempotency_key},
             retry_safe=True,
@@ -280,7 +287,7 @@ class Bus:
             raise ValueError("unknown delivery action")
         return await self.request(
             "POST",
-            f"deliveries/{claim.delivery_id}/{action}",
+            f"deliveries/{_path_segment(claim.delivery_id)}/{action}",
             json={"lease_token": claim.lease_token},
             retry_safe=action == "ack",
         )
@@ -346,7 +353,7 @@ class Bus:
         )
 
     async def status(self, message_id: str):
-        return await self.request("GET", f"messages/{message_id}")
+        return await self.request("GET", f"messages/{_path_segment(message_id)}")
 
     async def memory_context(self, *, message_id: str | None = None, delivery_id: str | None = None):
         from .protocol import MemoryContextRequest
