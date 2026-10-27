@@ -26,7 +26,7 @@ _DESCRIPTION = (
     "the supersession chain. "
     "update patches fields and re-embeds if content changes. "
     "transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). "
-    "delete and bulk_delete are soft (prefer transition to outdated/archived)."
+    "delete and bulk_delete are soft (prefer transition to outdated)."
 )
 
 _SPEC = ToolSpec(
