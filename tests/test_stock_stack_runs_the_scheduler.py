@@ -101,8 +101,14 @@ def test_the_scheduler_image_is_published_under_the_new_name():
     )
     matrix = workflow["jobs"]["build-and-push"]["strategy"]["matrix"]["include"]
     images = {entry["name"]: entry.get("image") for entry in matrix}
-    assert set(images) == {"core-api", "core-storage-api", "core-operations"}
+    assert set(images) == {
+        "core-api",
+        "core-storage-api",
+        "core-operations",
+        "core-worker",
+    }
     assert images["core-operations"] == "caura-core-operations"
+    assert images["core-worker"] == "caura-core-worker"
     assert all(images.values()), "every image names its published repository"
 
 
