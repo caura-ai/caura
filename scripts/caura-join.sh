@@ -5,7 +5,7 @@
 set -eu
 
 main() {
-  version="0.3.1" # Update only after the new version is published to PyPI.
+  version="0.3.4" # Update only after the new version is published to PyPI.
   spec="caura-bus-cli==${version}"
   if [ -n "${CAURA_JOIN_REF:-}" ]; then
     spec="git+https://github.com/caura-ai/caura@${CAURA_JOIN_REF}#subdirectory=clients/collaboration/cli"

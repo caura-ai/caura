@@ -10,8 +10,8 @@ pin `caura-bus-core` exactly; add `caura-bus-adapter-sdk` to build adapters:
 
 ```sh
 pip install \
-  "caura-bus-cli==0.3.1" \
-  "caura-bus-mcp==0.3.1"
+  "caura-bus-cli==0.3.4" \
+  "caura-bus-mcp==0.3.4"
 ```
 
 Or work from this source tree:
@@ -37,7 +37,7 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first, the
 use the versioned PyPI release, published with package attestations:
 
 ```sh
-uvx --from caura-bus-cli==0.3.1 caura-bus join --runtime claude --url https://your-caura.example --email you@example.com
+uvx --from caura-bus-cli==0.3.4 caura-bus join --runtime claude --url https://your-caura.example --email you@example.com
 ```
 
 For Codex, use `--runtime codex` instead and restart Codex after setup.
@@ -74,18 +74,13 @@ Code stopped during setup and start it again afterwards; restart Codex after
 setup:
 
 ```sh
-uv tool install "caura-bus-cli==0.3.1"
+uv tool install "caura-bus-cli==0.3.4"
 export CAURA_API_KEY=...   # or pass --key; setup prompts when neither is given
 
 caura-bus setup --runtime claude --url https://your-caura.example --dir ~/my-project \
   --description "What this agent knows, written for the peers that will pick it"
 caura-bus setup --runtime codex  --url https://your-caura.example --dir ~/my-project
 ```
-
-The configuration details below describe the current source tree. Published
-0.3.1 still uses the Claude CLI for wiring; direct private-config writes ship
-with the next client release. Update the install pins after that release is
-available on PyPI.
 
 `setup` verifies the key against the server and reads the agent and tenant
 from it (`--agent-id` only asserts the expected value). It then:
