@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.37.7](https://github.com/caura-ai/caura/compare/backend-v3.37.6...backend-v3.37.7) (2026-10-28)
+
+
+### Documentation
+
+* **clients:** install collaboration release 0.3.4 ([#2258](https://github.com/caura-ai/caura/issues/2258)) ([e2ac4b4](https://github.com/caura-ai/caura/commit/e2ac4b4530e4ef2cab2186f7a74007f291ea0bf9))
+
 ## [3.37.6](https://github.com/caura-ai/caura/compare/backend-v3.37.5...backend-v3.37.6) (2026-10-27)
 
 
