@@ -10,6 +10,7 @@ import uuid
 from core_api.services.organization_settings import invalidate_cache, update_settings
 from core_api.services.tenants import (
     list_active_tenant_ids,
+    list_tenants_with_interviewer_disabled,
     list_tenants_with_purgeable_memories,
     list_tenants_with_skills_factory_enabled,
 )
@@ -45,3 +46,18 @@ async def test_skills_factory_enabled_lists_opted_in_org(db):
     enabled = await list_tenants_with_skills_factory_enabled(db)
     assert org in enabled
     assert enabled == sorted(enabled)
+
+
+async def test_interviewer_disabled_lists_orgs_that_turned_it_off():
+    """The interview sweep's retention pass: an org whose ``interviewer`` block
+    is not enabled is listed; an enabled one and one with no block are not."""
+    off, on, never = _org(), _org(), _org()
+    await update_settings(off, {"interviewer": {"enabled": False}})
+    await update_settings(on, {"interviewer": {"enabled": True}})
+    await update_settings(never, {"agent_digest": {"enabled": True}})
+
+    listed = await list_tenants_with_interviewer_disabled()
+    assert off in listed
+    assert on not in listed
+    assert never not in listed
+    assert listed == sorted(listed)

@@ -12,10 +12,12 @@ import { apiCall } from "./transport.js";
 
 const enabled = process.argv[2] === "enabled";
 const writes: Record<string, unknown>[] = [];
+const sessionHeaders: Array<string | null> = [];
 globalThis.fetch = async (input, init) => {
   assert.equal(new URL(String(input)).pathname, "/api/v1/memories");
   assert.equal(init?.method, "POST");
   writes.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+  sessionHeaders.push(new Headers(init?.headers).get("X-Caura-Session-Id"));
   return new Response(JSON.stringify({ id: "fixture-memory" }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
@@ -46,13 +48,16 @@ try {
   const userMessage = "A user message that should only persist when automatic writing is enabled. ".repeat(3);
   const assistantMessage = "An assistant turn summary with enough content to pass the substantive-turn gate. ".repeat(3);
   const compactionSummary = "A summary of the conversation for compaction.";
+  // One conversation, as OpenClaw names it on every hook call.
+  const sessionKey = "agent:writer:telegram:dm:42";
 
-  await engine.ingest({ role: "user", content: userMessage });
+  await engine.ingest({ role: "user", content: userMessage, sessionKey });
   assert.equal(_sessionKeysForTests().length, 1, "local buffering survives the opt-out");
-  await engine.afterTurn({ messages: [{ role: "assistant", content: assistantMessage }] });
+  await engine.afterTurn({ sessionKey, messages: [{ role: "assistant", content: assistantMessage }] });
   for (const summaryField of ["summary", "compactionSummary"]) {
     const result = await engine.compact({
       [summaryField]: compactionSummary,
+      sessionKey,
       sessionId: "fixture-session",
       sessionFile: join(runtimeRoot, "session.jsonl"),
     });
@@ -72,6 +77,10 @@ try {
       ["auto-ingest", "user-message"], ["auto-turn-summary"],
       ["auto-compaction"], ["auto-compaction"],
     ]);
+    // Automatic writes are private to the agent that captured them, and each
+    // names its conversation, so the server can record where it came from.
+    assert.deepEqual(writes.map(w => w.visibility), Array(4).fill("scope_agent"));
+    assert.deepEqual(sessionHeaders, Array(4).fill(`openclaw:${sessionKey}`));
   }
 
   await apiCall("POST", "/memories", {

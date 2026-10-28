@@ -153,6 +153,8 @@ async def test_doc_write_skills_context_is_the_install_owned_identity(
     """
     tenant, arm = ctx
     await _seed_agent(sc, tenant, "victim", 1, owner_install_uuid="install-B")
+    # The install's own identity, at the trust a skills write needs.
+    await _seed_agent(sc, tenant, "broker:install-A", 2, owner_install_uuid="install-A")
     arm(install_uuid="install-A")
     monkeypatch.setattr(
         mcp_server,

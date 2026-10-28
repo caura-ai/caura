@@ -226,6 +226,14 @@ async def test_a_chain_built_database_short_of_head_is_not_stamped(
     assert await _has_column(scratch_engine, "memories", "embedded_content_hash")
 
 
+async def test_an_empty_database_boots_to_head(scratch_engine: AsyncEngine, scratch_init) -> None:
+    """A fresh database runs the whole chain. The head fingerprint can read
+    tables the chain creates, so boot must not run it before they exist."""
+    await scratch_init()
+
+    assert await _revision(scratch_engine) == _script_head()
+
+
 async def test_a_chain_built_database_at_head_is_still_stamped(
     scratch_engine: AsyncEngine, scratch_init
 ) -> None:

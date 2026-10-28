@@ -19,6 +19,10 @@
         "$comment": "legacy-name-ok: supported configuration alias for existing installs",
         "type": "string",
         "description": "Supported alias for CAURA_AGENT_ID; the new name wins when both are set."
+      },
+      "CAURA_AUTO_WRITE_TURNS": {
+        "type": ["boolean", "string"],
+        "description": "Automatic capture, on by default: the plugin saves user messages, turn summaries and compaction summaries, and runs the pre-compaction flush turn, as memories private to the agent (current servers also scan them for secrets and mark them as captured). Set false (or 0, no, off) to turn all four off; explicit memory tools keep working. A value here wins over the .env file."
       }
     },
     "required": []

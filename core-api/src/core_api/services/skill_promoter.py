@@ -199,6 +199,22 @@ def make_db_status_updater(*, expected_status: str) -> StatusUpdaterCallable:
 # ── Tick entry point ───────────────────────────────────────────────
 
 
+def _scan_warned(doc: dict) -> bool:
+    """True when the candidate's stamped scan counted any warning.
+
+    ``auto_promote_clean`` sends such a candidate to the inbox. The rescan
+    before activation is checked the same way, so a stamp that understates
+    its warnings activates nothing either.
+    """
+    scan = doc.get("scan") or {}
+    if not isinstance(scan, dict):
+        return True
+    try:
+        return int(scan.get("warn", 0) or 0) > 0
+    except (TypeError, ValueError):
+        return True
+
+
 def _scan_is_clean(doc: dict) -> bool:
     """True iff the candidate's stamped Sentinel scan is fully clean
     (``state='clean'`` AND no critical findings).
@@ -342,12 +358,16 @@ async def promote_pending_candidates(
         )
         if gates.promote:
             # Destination: ``active`` when the tenant opted into
-            # auto-promotion AND the stamped Sentinel scan is clean;
+            # auto-promotion AND the Sentinel scan found nothing at all;
             # otherwise the normal HITL ``staged`` path. The candidate
             # has already cleared all six gates by this point —
             # ``auto_promote_clean`` only chooses where it lands, never
             # whether it lands.
-            is_auto = auto_promote_clean and _scan_is_clean(doc)
+            #
+            # Nothing at all, warnings included: M-120 keeps routine admin
+            # lines and URL patterns at warn so a person in the inbox can
+            # accept them, and on this path there is no person.
+            is_auto = auto_promote_clean and _scan_is_clean(doc) and not _scan_warned(doc)
             if is_auto:
                 # M-91: a candidate minted before a scanner fix keeps its old
                 # ``clean`` stamp. Re-run the scan, as the inbox approve does,
@@ -355,19 +375,20 @@ async def promote_pending_candidates(
                 verdict = await rescan_before_apply(
                     doc, body_max_bytes=body_max_bytes, description_max_bytes=description_max_bytes
                 )
-                is_auto = verdict.allow
+                is_auto = verdict.allow and not verdict.findings
                 if not is_auto:
                     # The doc keeps its stale ``clean`` stamp (the status flip
                     # writes nothing else), so say here what held it back: the
-                    # critical and fatal findings, not the warnings. The inbox
-                    # approve rescans before ``active``, so the stamp alone never
-                    # activates it.
+                    # critical and fatal findings when there are any, else the
+                    # warnings. The inbox approve rescans before ``active``, so
+                    # the stamp alone never activates it.
                     blocking = {f.code for f in verdict.findings if f.severity == "critical" or f.fatal}
+                    held_by = blocking or {f.code for f in verdict.findings}
                     logger.warning(
                         "skill_promoter: doc %s held for review: the rescan is %s (%s)",
                         doc_id,
                         verdict.state,
-                        ", ".join(sorted(blocking)) or "fatal finding",
+                        ", ".join(sorted(held_by)) or "fatal finding",
                     )
             target_status = "active" if is_auto else "staged"
             try:

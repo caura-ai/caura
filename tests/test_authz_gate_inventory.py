@@ -772,8 +772,8 @@ def _classify(
 
     A helper is recorded when it calls an ``enforce_*`` itself or raises
     401/403 directly. Note what that does NOT prove: ``_refuses`` accepts any
-    401/403, so a feature-flag check (``_require_skills_factory_enabled``) and
-    a "you must name a tenant" check (``_require_tenant``) both land in
+    401/403, so a feature-flag check and a "you must name a tenant" check
+    (``_require_tenant``) both land in
     ``helpers`` alongside real authz. Hence "refusing helpers" in the report,
     not "guards".
 

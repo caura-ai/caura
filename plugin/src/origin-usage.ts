@@ -13,6 +13,8 @@
  * assistant message of the turn is.
  */
 
+import { createHash } from "crypto";
+
 export interface Origin {
   tokens_in?: number;
   tokens_out?: number;
@@ -108,6 +110,17 @@ export function sessionHeader(sessionKey: string | undefined): Record<string, st
   // core-api accepts visible ASCII up to 200; OpenClaw keys look like "agent:main:telegram:...".
   const safe = sessionKey.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 200);
   return safe ? { "X-Caura-Session-Id": `openclaw:${safe}`.slice(0, 200) } : undefined;
+}
+
+/**
+ * The conversation core-api records on a row this session captured: the first
+ * 32 hex characters of the SHA-256 of the session header above
+ * (``core_api.services.auto_capture.conversation_of``). A hash, so the stored
+ * row does not carry the chat or user the session key names.
+ */
+export function conversationOf(sessionKey: string | undefined): string | undefined {
+  const label = sessionHeader(sessionKey)?.["X-Caura-Session-Id"];
+  return label ? createHash("sha256").update(label).digest("hex").slice(0, 32) : undefined;
 }
 
 export function _resetForTests(): void {

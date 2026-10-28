@@ -12,6 +12,7 @@ from core_api.constants import (
     MEMORY_RECALL_SUMMARY_TEMPERATURE,
 )
 from core_api.providers._retry import call_with_fallback
+from core_api.services.auto_capture import CAPTURE_KEY
 from core_api.services.system_metadata import strip_platform_metadata
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,10 @@ def _format_memories_for_prompt(memories: list) -> str:
             item["title"] = m.title
         if m.status and m.status != "active":
             item["status"] = m.status
+        # Something said in a conversation the plugin captured, not a fact an
+        # agent chose to record (``auto_capture``).
+        if (getattr(m, "system_metadata", None) or {}).get(CAPTURE_KEY):
+            item["auto_captured"] = True
         content = m.content or ""
         ts = getattr(m, "ts_valid_start", None)
         if ts:

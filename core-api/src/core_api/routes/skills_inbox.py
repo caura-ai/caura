@@ -24,10 +24,9 @@ Phase 3 wires the actual harness install on ``staged → active`` —
 this route still flips status; the Phase-3 install worker watches the
 status flip and emits SKILL.md files.
 
-All endpoints require the flag
-``org_settings.skills_factory.enabled == True``; if disabled they
-respond with ``403 SKILLS_FACTORY_DISABLED`` so a curious operator
-gets a clear error instead of a silent 404.
+The inbox serves every tenant, whatever ``org_settings.skills_factory.enabled``
+says: every skills write lands ``staged`` until approved, so a tenant that never
+turned the Skill Factory on needs the inbox too. The flag turns the Forge on.
 """
 
 from __future__ import annotations
@@ -44,7 +43,6 @@ from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import DocumentStatusChangedError, get_storage_client
 from core_api.errors import (
-    AUTH_SKILLS_FACTORY_DISABLED,
     AUTH_SKILLS_INBOX_FORBIDDEN,
     AUTH_TENANT_MISMATCH,
     AUTH_UNAUTHENTICATED,
@@ -55,10 +53,7 @@ from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.audit_service import log_action
 from core_api.services.forge.poison import write_rejected_fingerprint
 from core_api.services.forge.sentinel_scan import scan_skill_doc
-from core_api.services.organization_settings import (
-    get_raw_settings,
-    get_settings_for_display,
-)
+from core_api.services.organization_settings import get_settings_for_display
 from core_api.services.skill_lifecycle import (
     SkillWriteContext,
     validate_and_normalize_skill_write,
@@ -75,28 +70,14 @@ SKILLS_COLLECTION = "skills"
 # ── Flag gate ──────────────────────────────────────────────────────
 
 
-async def _require_skills_factory_enabled(tenant_id: str) -> dict:
-    """Hot-path: read the raw settings row and short-circuit when the
-    feature flag is off. Returns the resolved settings-for-display
-    dict so each endpoint has the per-tenant caps in one fetch.
+async def _inbox_settings(tenant_id: str) -> dict:
+    """The tenant's settings, for the per-tenant caps each endpoint reads.
 
-    Org settings route through core-storage-api (Fix 2 Phase 0), so no DB
-    session is involved.
+    This refused a tenant without ``skills_factory.enabled`` until every skills
+    write was staged whatever the flag says; such a tenant's drafts are
+    approved here too. Org settings route through core-storage-api (Fix 2
+    Phase 0), so no DB session is involved.
     """
-    raw = await get_raw_settings(tenant_id)
-    enabled = (
-        isinstance(raw, dict)
-        and isinstance(raw.get("skills_factory"), dict)
-        and bool(raw["skills_factory"].get("enabled"))
-    )
-    if not enabled:
-        raise HTTPException(
-            status_code=403,
-            detail=coded_detail(
-                AUTH_SKILLS_FACTORY_DISABLED,
-                "SKILLS_FACTORY_DISABLED — set org_settings.skills_factory.enabled=true to use the inbox",
-            ),
-        )
     return await get_settings_for_display(tenant_id)
 
 
@@ -777,7 +758,7 @@ async def list_inbox(
     deferred ones (Eldad, 2026-10-11).
     """
     tenant_id = _require_tenant(auth, tenant_id)
-    settings = await _require_skills_factory_enabled(tenant_id)
+    settings = await _inbox_settings(tenant_id)
     max_pending = (
         ((settings.get("skills_factory") or {}).get("inbox_max_pending"))
         if isinstance(settings, dict)
@@ -859,7 +840,7 @@ async def approve(
     """
     auth.enforce_read_only()
     tenant_id = _require_tenant(auth, tenant_id)
-    settings = await _require_skills_factory_enabled(tenant_id)
+    settings = await _inbox_settings(tenant_id)
     _require_inbox_admin(auth)
     sf = (settings or {}).get("skills_factory") if isinstance(settings, dict) else {}
     body_max = (sf or {}).get("body_max_bytes", 40_000)
@@ -1049,7 +1030,7 @@ async def reject(
     """
     auth.enforce_read_only()
     tenant_id = _require_tenant(auth, tenant_id)
-    settings = await _require_skills_factory_enabled(tenant_id)
+    settings = await _inbox_settings(tenant_id)
     _require_inbox_admin(auth)
     sf = (settings or {}).get("skills_factory") if isinstance(settings, dict) else {}
     default_cooloff = (sf or {}).get("rejection_cooloff_days", 30)
@@ -1221,7 +1202,7 @@ async def quarantine(
     """
     auth.enforce_read_only()
     tenant_id = _require_tenant(auth, tenant_id)
-    await _require_skills_factory_enabled(tenant_id)
+    await _inbox_settings(tenant_id)
     _require_inbox_admin(auth)
     doc = await _load_doc_or_404(tenant_id=tenant_id, slug=slug)
     data = doc.get("data") or {}
@@ -1282,7 +1263,7 @@ async def defer(
     """
     auth.enforce_read_only()
     tenant_id = _require_tenant(auth, tenant_id)
-    await _require_skills_factory_enabled(tenant_id)
+    await _inbox_settings(tenant_id)
     _require_inbox_admin(auth)
     doc = await _load_doc_or_404(tenant_id=tenant_id, slug=slug)
     data = doc.get("data") or {}
@@ -1348,7 +1329,7 @@ async def edit(
     """
     auth.enforce_read_only()
     tenant_id = _require_tenant(auth, tenant_id)
-    settings = await _require_skills_factory_enabled(tenant_id)
+    settings = await _inbox_settings(tenant_id)
     _require_inbox_admin(auth)
     sf = (settings or {}).get("skills_factory") if isinstance(settings, dict) else {}
     desc_max = (sf or {}).get("description_max_bytes", 160)

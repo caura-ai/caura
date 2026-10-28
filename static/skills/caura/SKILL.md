@@ -245,12 +245,16 @@ vocabulary never grows with the library.
 caura_doc op=search collection=skills query="<intent>"
 caura_doc op=read   collection=skills doc_id=<slug>   # full body
 
-# Publish something reusable so the fleet inherits it:
+# Propose something reusable for the fleet (needs trust 2). It lands
+# "staged": no node installs it until an admin approves it in the inbox.
 caura_doc op=write collection=skills doc_id=<slug> \
-  data={ "name": "<slug>",
+  data={ "name": "<slug>", "slug": "<slug>",
+         "description": "<when to use it, at most 160 bytes>",
+         "domain": "<area, e.g. ops>", "kind": "create", "source": "agent",
          "summary": "<1-line, intent-focused — this is what gets embedded>",
          "content": "<full SKILL.md>" }
-# Re-uploading the same doc_id overwrites it (upsert; no version history).
+# Re-uploading your own staged draft replaces it; an approved skill is
+# changed by an admin.
 
 # Remove a wrong/superseded one:
 caura_doc op=delete collection=skills doc_id=<slug>

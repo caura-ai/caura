@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import HTTPException
@@ -49,7 +49,10 @@ from core_api.request_phase import phase
 from core_api.schemas import BulkMemoryCreate, BulkMemoryItem, BulkMemoryResponse
 from core_api.services.memory_service import create_memories_bulk
 from core_api.services.organization_settings import get_settings_for_display, resolve_config
-from core_api.services.tenants import list_tenants_with_interviewer_enabled
+from core_api.services.tenants import (
+    list_tenants_with_interviewer_disabled,
+    list_tenants_with_interviewer_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,13 +72,46 @@ def refuse_system_collection(collection: str) -> None:
     """Refuse a public document write or delete aimed at :data:`SYSTEM_COLLECTIONS`.
 
     Every credential is refused, with the 400 storage gives a ``_``-prefixed
-    collection. Reads stay open: ``caura-interviewer`` reads its watermark.
+    collection. Reads are :func:`refuse_system_read`'s.
     """
     if collection in SYSTEM_COLLECTIONS:
         raise HTTPException(
             status_code=400,
             detail=f"Collection '{collection}' is system-managed; the interview service writes it.",
         )
+
+
+# Collections the public document routes do not read either. A job holds a
+# node's activity window (prompts, tool output, file excerpts, masked) until
+# synthesis commits; the service reads it through storage, and no caller
+# needs it. The watermark stays readable: ``caura-interviewer`` reads its
+# cursor there, and it holds sequence numbers, not content.
+SYSTEM_READ_REFUSED_COLLECTIONS = frozenset({JOBS_COLLECTION})
+
+
+def refuse_system_read(collection: str | None) -> None:
+    """Refuse a public document read (get, list, query, search) of a job.
+
+    Every credential is refused, as for writes, with the same 400.
+    """
+    if collection in SYSTEM_READ_REFUSED_COLLECTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Collection '{collection}' is system-managed; the interview service reads it.",
+        )
+
+
+def without_system_rows(rows: list) -> list:
+    """Drop job documents from a document search that named no collection.
+
+    Search ranks only embedded rows and jobs are written without an embedding,
+    so none is returned today; this keeps it so if that ever changes.
+    """
+
+    def _collection(row):
+        return row.get("collection") if isinstance(row, dict) else getattr(row, "collection", None)
+
+    return [row for row in rows if _collection(row) not in SYSTEM_READ_REFUSED_COLLECTIONS]
 
 
 class InterviewJobPermanentlyFailedError(RuntimeError):
@@ -92,6 +128,14 @@ class InterviewJobPermanentlyFailedError(RuntimeError):
 # double-processed — and even if it were, re-processing is idempotent via
 # the deterministic bulk attempt id.
 INTERVIEW_JOB_STALE_PROCESSING_SECONDS = 600
+# A finished (``done``, its events already dropped) or parked
+# (``failed_permanent``, events kept for an operator to look at) job is deleted
+# by the scheduler sweep once it is this old. A ``done`` job is kept that long
+# so a re-submitted window still finds it and is not synthesized twice.
+INTERVIEW_JOB_RETENTION_DAYS = 14
+TERMINAL_JOB_STATUSES = ("done", "failed_permanent")
+# Jobs deleted per tenant and status per sweep; a backlog drains over ticks.
+INTERVIEW_JOB_PURGE_BATCH = 100
 # Bounded fan-out for the scheduler sweep's job drain (#667): jobs
 # synthesize concurrently (each is an LLM map-reduce plus storage writes,
 # so a strictly sequential drain of a large backlog could outlive the
@@ -996,6 +1040,9 @@ async def process_interview_job(
             # deterministic bulk attempt id.
             return False
         merged = {**base, **state}
+        if merged.get("status") == "done":
+            # The window is now memories; the job keeps only its outcome.
+            merged.pop("events", None)
         if increment_attempts:
             # Increment from the FRESH base, not the caller's stale local
             # snapshot: two concurrent processors would otherwise both read
@@ -1188,6 +1235,48 @@ def _job_processing_is_stale(row: dict, now: datetime) -> bool:
     return (now - started_dt).total_seconds() >= INTERVIEW_JOB_STALE_PROCESSING_SECONDS
 
 
+def _job_last_written(row: dict) -> datetime | None:
+    """When storage last wrote a job doc, or ``None`` if it does not say."""
+    value = row.get("updated_at") or row.get("created_at")
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+async def _purge_terminal_jobs(sc, tenant_id: str, now: datetime) -> int:
+    """Delete one tenant's finished and parked jobs older than the retention window.
+
+    Each delete is guarded by the status it was chosen for, so a job that moved
+    since the query (it cannot leave ``done``, but a guard costs nothing) is left.
+    """
+    cutoff = now - timedelta(days=INTERVIEW_JOB_RETENTION_DAYS)
+    purged = 0
+    for status in TERMINAL_JOB_STATUSES:
+        rows = await sc.query_documents(
+            {
+                "tenant_id": tenant_id,
+                "collection": JOBS_COLLECTION,
+                "where": {"status": status},
+                "order_by": "created_at",
+                "order": "asc",
+                "limit": INTERVIEW_JOB_PURGE_BATCH,
+            }
+        )
+        for row in rows or []:
+            doc_id = str(row.get("doc_id") or "")
+            written = _job_last_written(row)
+            if not doc_id or written is None or written > cutoff:
+                continue
+            if await sc.delete_document(tenant_id, JOBS_COLLECTION, doc_id, require_status=status):
+                purged += 1
+    return purged
+
+
 async def process_pending_interview_jobs(limit_per_tenant: int = 20) -> dict:
     """Drain ``pending`` (and stale ``processing``) interview jobs across
     opted-in tenants (#665).
@@ -1200,7 +1289,8 @@ async def process_pending_interview_jobs(limit_per_tenant: int = 20) -> dict:
     idempotent via the deterministic bulk attempt id, so racing a
     slow-but-alive run wastes work but never duplicates rows. Jobs run
     concurrently, bounded by ``INTERVIEW_SWEEP_CONCURRENCY`` (round 6).
-    Returns a bounded counts summary.
+    Each tenant's finished and parked jobs past ``INTERVIEW_JOB_RETENTION_DAYS``
+    are deleted on the way (``jobs_purged``). Returns a bounded counts summary.
     """
     sc = get_storage_client()
     now = datetime.now(UTC)
@@ -1223,6 +1313,7 @@ async def process_pending_interview_jobs(limit_per_tenant: int = 20) -> dict:
         "jobs_retried": 0,
         "jobs_parked": 0,
         "jobs_skipped": 0,
+        "jobs_purged": 0,
     }
     # Pass 1: collect (tenant, doc, allow_stale) triples across tenants —
     # per-tenant limits and stale filtering identical to the old
@@ -1260,6 +1351,11 @@ async def process_pending_interview_jobs(limit_per_tenant: int = 20) -> dict:
             logger.exception("interview jobs: pending query failed (tenant=%s)", tenant_id)
             summary["tenants_failed"] += 1
             continue
+        # Retention, on its own: a failure here leaves the tenant's queue to run.
+        try:
+            summary["jobs_purged"] += await _purge_terminal_jobs(sc, tenant_id, now)
+        except Exception:
+            logger.exception("interview jobs: purge failed (tenant=%s)", tenant_id)
         stale = [row for row in processing or [] if _job_processing_is_stale(row, now)]
         # allow_stale_processing only for the stale rows: the sweep is the
         # ONE caller allowed to reclaim a stale "processing" doc (the
@@ -1270,6 +1366,19 @@ async def process_pending_interview_jobs(limit_per_tenant: int = 20) -> dict:
             if not doc_id:
                 continue
             jobs.append((tenant_id, doc_id, doc_id in stale_ids))
+
+    # Retention for tenants that turned the interviewer off: their finished and
+    # parked jobs go on the same schedule. Its own failure stops nothing else.
+    try:
+        disabled = await list_tenants_with_interviewer_disabled()
+    except Exception:
+        logger.exception("interview jobs: listing tenants with the interviewer off failed")
+        disabled = []
+    for tenant_id in disabled:
+        try:
+            summary["jobs_purged"] += await _purge_terminal_jobs(sc, tenant_id, now)
+        except Exception:
+            logger.exception("interview jobs: purge failed (tenant=%s)", tenant_id)
 
     # Pass 2: bounded fan-out.
     semaphore = synthesis_sem  # shared with the route's fire-and-forget path

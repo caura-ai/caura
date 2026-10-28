@@ -87,11 +87,11 @@ test("CAURA_AGENT_ID wins over the legacy key, as it does in .env", () => {
 });
 
 interface ConfigSchema {
-  properties?: Record<string, { type?: string }>;
+  properties?: Record<string, { type?: string | string[] }>;
 }
 
 /** Each declared key with its type; the manifest alone carries descriptions. */
-function keyTypes(schema: ConfigSchema): Record<string, string | undefined> {
+function keyTypes(schema: ConfigSchema): Record<string, string | string[] | undefined> {
   return Object.fromEntries(
     Object.entries(schema.properties ?? {}).map(([key, prop]) => [key, prop.type]),
   );
@@ -105,4 +105,32 @@ test("the plugin object declares the config keys the manifest does", () => {
     keyTypes(cauraPlugin.configSchema as ConfigSchema),
     keyTypes(manifest.configSchema),
   );
+});
+
+// The automatic-capture switch is read from the same config block, so an
+// operator who turns it off where the manifest says is obeyed (the value there
+// wins over .env, as CAURA_AGENT_ID's does).
+test("CAURA_AUTO_WRITE_TURNS in the plugin config turns automatic capture off", async () => {
+  const env = await import("./env.js");
+  try {
+    for (const off of [false, "false", "0", "no", "off", "OFF"]) {
+      register({ CAURA_AUTO_WRITE_TURNS: true });
+      assert.equal(env.CAURA_AUTO_WRITE_TURNS, true);
+      register({ CAURA_AUTO_WRITE_TURNS: off });
+      assert.equal(env.CAURA_AUTO_WRITE_TURNS, false, `config value ${JSON.stringify(off)}`);
+    }
+  } finally {
+    register({ CAURA_AUTO_WRITE_TURNS: true });
+  }
+});
+
+test("the manifest documents the automatic-capture switch", () => {
+  const manifest = JSON.parse(
+    readFileSync(join(import.meta.dirname, "..", "openclaw.plugin.json"), "utf-8"),
+  );
+  const prop = manifest.configSchema.properties.CAURA_AUTO_WRITE_TURNS;
+  assert.ok(prop, "configSchema does not declare CAURA_AUTO_WRITE_TURNS");
+  for (const spelling of ["false", "0", "no", "off"]) {
+    assert.match(prop.description, new RegExp(`\\b${spelling}\\b`));
+  }
 });

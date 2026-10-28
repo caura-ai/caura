@@ -106,7 +106,11 @@ from core_api.services.agent_service import resolve_read_fleet_gate as _resolve_
 from core_api.services.audit_service import log_action, log_cross_tenant_read
 from core_api.services.capability_usage import record_usage
 from core_api.services.entity_service import get_entity
-from core_api.services.interview_service import refuse_system_collection
+from core_api.services.interview_service import (
+    refuse_system_collection,
+    refuse_system_read,
+    without_system_rows,
+)
 from core_api.services.memory_service import (
     _memory_to_out,
     create_memories_bulk,
@@ -128,6 +132,7 @@ from core_api.services.organization_settings import (
     validate_search_profile,
 )
 from core_api.services.recall_service import summarize_memories
+from core_api.services.skill_lifecycle import SKILL_WRITE_MIN_TRUST, skill_trust_message
 
 # Re-export so existing `monkeypatch.setattr(mcp_server, "_require_trust", ...)`
 # sites in tests keep working; production callers should import ``require_trust``
@@ -2773,11 +2778,14 @@ SKILLS_COLLECTION = "skills"
 # ``agent/`` prefixes included (L-105).
 _SKILL_SLUG_RE = SKILL_SLUG_RE
 
-# The agent-facing MCP surface only exposes skills in this status. The
-# Skill Factory lifecycle (candidate → staged → active) gates what an
-# agent can discover: candidate/staged/quarantined/rejected skills are
+# The agent-facing MCP surface only exposes skills in this status, for every
+# tenant. The Skill Factory lifecycle (candidate → staged → active) gates what
+# an agent can discover: candidate/staged/quarantined/rejected skills are
 # in-flight or blocked and must NOT surface to agents. Only this filter
-# turns "an operator approved it" into "agents can find it".
+# turns "an operator approved it" into "agents can find it". Every tenant's
+# skill writes land staged, whatever ``skills_factory.enabled`` says, so the
+# read gates below do not read that flag; skills a tenant that never opted in
+# already had were backfilled ``active`` (migration 070).
 _AGENT_VISIBLE_SKILL_STATUS = "active"
 
 
@@ -2785,12 +2793,10 @@ async def _skills_factory_flag(tenant_id: str) -> bool:
     """Strict opt-in check — RAISES on a settings-lookup failure.
 
     Is ``skills_factory.enabled`` true for this tenant? Callers that gate
-    a SECURITY decision (op=write / op=delete) wrap this and **fail
-    closed** (abort the mutation) on error — they must never proceed
-    unvalidated just because the flag couldn't be read. Read-path callers
-    use the lenient ``_skills_factory_enabled`` wrapper instead.
-    ``get_raw_settings`` is cache-first (5-min TTL), so this is a cheap
-    hot-path check.
+    a SECURITY decision (op=delete) wrap this and **fail closed** (abort
+    the mutation) on error — they must never proceed unvalidated just
+    because the flag couldn't be read. ``get_raw_settings`` is cache-first
+    (5-min TTL), so this is a cheap hot-path check.
     """
     raw = await get_raw_settings(tenant_id)
     return (
@@ -2798,34 +2804,6 @@ async def _skills_factory_flag(tenant_id: str) -> bool:
         and isinstance(raw.get("skills_factory"), dict)
         and bool(raw["skills_factory"].get("enabled"))
     )
-
-
-async def _skills_factory_enabled(tenant_id: str) -> bool:
-    """Non-raising opt-in check for the active-only skill-read filter
-    (read / query / search) — fails CLOSED on a settings-lookup failure.
-
-    On success returns the tenant's true ``skills_factory.enabled`` flag,
-    so non-opted-in tenants keep byte-identical (unfiltered) read
-    behavior — the merge-day no-op invariant.
-
-    On a settings-lookup FAILURE it returns ``True`` (assume enabled), so
-    the active-only filter IS applied: a transient settings outage must
-    not let a non-active skill (candidate / staged / quarantined) leak to
-    an agent. The read still succeeds — it's filtered, not 500'd — so the
-    cost is only that, during an outage, a tenant temporarily sees just
-    their ``active`` skills. For non-opted-in tenants that is a near
-    no-op (their skills are all ``active`` post-migration). This keeps
-    ALL skill gates fail-closed: write/delete abort, reads filter.
-    """
-    try:
-        return await _skills_factory_flag(tenant_id)
-    except Exception:
-        logger.warning(
-            "skills_factory flag lookup failed for %s; failing CLOSED — active-only "
-            "filter APPLIED (only status='active' skills surface) until cache recovers",
-            tenant_id,
-        )
-        return True
 
 
 def _safe_int(val: Any, default: int) -> int:
@@ -2859,34 +2837,18 @@ def _doc_field(doc: Any, name: str, default: Any = None) -> Any:
     return getattr(doc, name, default)
 
 
-def _skill_hidden_from_agent(doc: Any, *, caller_tenant_id: str, caller_opted_in: bool) -> bool:
+def _skill_hidden_from_agent(doc: Any) -> bool:
     """Whether a fetched row must NOT surface on the agent MCP skill
-    surface.
-
-    A skills-collection row is hidden when it is non-active AND either:
-
-      • the caller's tenant opted in (the active-only gate applies to
-        the caller's own skills), or
-      • the row belongs to a DIFFERENT tenant than the caller — a
-        sibling tenant's in-flight / blocked skill must never leak
-        through cross-tenant credentials, regardless of the *caller's*
-        own opt-in flag. This is safe: a non-opted-in owning tenant's
-        skills are all ``active`` (backfilled by migration 022), so this
-        only ever hides a genuinely non-active row, never a legitimately
-        visible one.
-
-    Non-skills rows are never hidden. Keyed off the row's own
-    ``tenant_id`` so the decision follows the OWNING tenant, not just
-    the caller's flag (closes the cross-tenant read leak).
+    surface: a skills-collection row that is not ``active``, in any tenant,
+    the caller's own or a sibling's read through cross-tenant credentials.
+    Non-skills rows are never hidden.
 
     Accepts either an ORM Document or a storage-client dict (Fix 2 Phase 4
     routes ``caura_doc`` through the storage HTTP client, which returns
     dicts) — ``_doc_field`` normalises field access across both shapes."""
     if _doc_field(doc, "collection") != SKILLS_COLLECTION:
         return False
-    if (_doc_field(doc, "data") or {}).get("status") == _AGENT_VISIBLE_SKILL_STATUS:
-        return False
-    return caller_opted_in or _doc_field(doc, "tenant_id", caller_tenant_id) != caller_tenant_id
+    return (_doc_field(doc, "data") or {}).get("status") != _AGENT_VISIBLE_SKILL_STATUS
 
 
 async def caura_doc(
@@ -2975,6 +2937,10 @@ async def caura_doc(
 
     async with _no_db():
         try:
+            # The interview service's jobs are not read through here either
+            # (REST refuses them the same way).
+            if op in {"read", "query", "search"}:
+                refuse_system_read(collection)
             if op == "list_collections":
                 collections_resp = await sc.list_document_collections(
                     tenant_id=tenant_id,
@@ -2982,17 +2948,14 @@ async def caura_doc(
                     readable_tenant_ids=readable if op in READ_OPS else None,
                 )
                 rows = [(c["name"], c["count"]) for c in collections_resp.get("collections", [])]
-                # Active-only count correction for skills: an opted-in
-                # tenant's listing must not advertise non-active skills
-                # in the count — they're invisible to read/query/search,
-                # so a count that includes them is misleading. Recompute
-                # the skills row restricted to status='active', over the
-                # same (possibly cross-tenant) scope the listing used.
-                # One COUNT, only when a skills row is present AND the
-                # tenant opted in.
-                if any(name == SKILLS_COLLECTION for name, _ in rows) and await _skills_factory_enabled(
-                    tenant_id
-                ):
+                # Active-only count correction for skills: the listing
+                # must not advertise non-active skills in the count —
+                # they're invisible to read/query/search, so a count that
+                # includes them is misleading. Recompute the skills row
+                # restricted to status='active', over the same (possibly
+                # cross-tenant) scope the listing used. One COUNT, only
+                # when a skills row is present.
+                if any(name == SKILLS_COLLECTION for name, _ in rows):
                     active_count = await sc.document_count_in_collection(
                         tenant_id,
                         SKILLS_COLLECTION,
@@ -3069,6 +3032,16 @@ async def caura_doc(
                         ),
                         t0,
                     )
+                # A skill, once approved, is instructions on every node its
+                # fleet reaches: the cross-agent tier, as on REST.
+                if (
+                    write_collection == SKILLS_COLLECTION
+                    and write_agent.get("trust_level", 0) < SKILL_WRITE_MIN_TRUST
+                ):
+                    return _with_latency(
+                        _error_response("AGENT_TRUST_TOO_LOW", skill_trust_message(agent_id)),
+                        t0,
+                    )
                 # Replacing a document a different agent authored needs the
                 # trust op=delete needs (parity with REST POST /documents); an
                 # unowned, author-less doc does not. Agent credentials only —
@@ -3117,25 +3090,16 @@ async def caura_doc(
                 # is_admin/org_role accessor on this surface — so both
                 # is_admin and is_internal_forge are False. An admin who
                 # needs to author an 'active' skill uses the REST/dashboard
-                # path, which has the real auth context. Gated on the
-                # opt-in flag: non-opted-in tenants skip the validator
-                # entirely (byte-identical legacy behavior). The validator
-                # raises HTTPException (403/422/409/404); the outer
-                # ``except HTTPException`` maps it to the right error code.
+                # path, which has the real auth context. It runs whatever
+                # ``skills_factory.enabled`` says: the flag turns the Forge
+                # on, not the review. The validator raises HTTPException
+                # (403/422/409/404); the outer ``except HTTPException`` maps
+                # it to the right error code.
                 if collection == SKILLS_COLLECTION:
-                    # ONE settings read for both the opt-in flag and the
-                    # per-tenant byte caps. ``get_settings_for_display``
-                    # returns the merged settings (which already include
-                    # ``skills_factory.enabled``), so the write path reads
-                    # the flag from it directly rather than calling
-                    # ``_skills_factory_enabled`` (a second DB-backed
-                    # ``get_raw_settings``) — one fewer cold-cache lookup.
-                    # read/query/search/delete keep the cheap helper since
-                    # they don't need the caps.
-                    # Fail CLOSED: this settings read gates a security
-                    # decision (whether the lifecycle validator runs). If
-                    # it fails we must NOT fall through and upsert the
-                    # skill unvalidated — abort the write instead.
+                    # The settings read is for the per-tenant byte caps.
+                    # Fail CLOSED: without them the validator cannot run,
+                    # and the skill must NOT be upserted unvalidated —
+                    # abort the write instead.
                     try:
                         settings_display = await get_settings_for_display(tenant_id)
                     except Exception:
@@ -3148,104 +3112,104 @@ async def caura_doc(
                             t0,
                         )
                     sf_settings = (
-                        (settings_display.get("skills_factory") or {})
-                        if isinstance(settings_display, dict)
-                        else {}
+                        settings_display.get("skills_factory") if isinstance(settings_display, dict) else None
                     )
-                    if isinstance(sf_settings, dict) and bool(sf_settings.get("enabled")):
-                        # Defense-in-depth: reject a case-variant 'status'
-                        # key (e.g. 'STATUS', 'Status'). The validator
-                        # owns the canonical lowercase 'status' and
-                        # defaults it to 'staged', and every downstream
-                        # gate reads data->>'status' (case-sensitive in
-                        # JSONB), so a variant key cannot self-promote —
-                        # but it WOULD persist as a confusing shadow
-                        # field. Reject it rather than silently store it.
-                        if isinstance(data, dict):
-                            variant = next(
-                                (k for k in data if k != "status" and k.lower() == "status"),
-                                None,
+                    # A malformed block still gets the validator, at its default caps.
+                    if not isinstance(sf_settings, dict):
+                        sf_settings = {}
+                    # Defense-in-depth: reject a case-variant 'status'
+                    # key (e.g. 'STATUS', 'Status'). The validator
+                    # owns the canonical lowercase 'status' and
+                    # defaults it to 'staged', and every downstream
+                    # gate reads data->>'status' (case-sensitive in
+                    # JSONB), so a variant key cannot self-promote —
+                    # but it WOULD persist as a confusing shadow
+                    # field. Reject it rather than silently store it.
+                    if isinstance(data, dict):
+                        variant = next(
+                            (k for k in data if k != "status" and k.lower() == "status"),
+                            None,
+                        )
+                        if variant is not None:
+                            return _with_latency(
+                                _error_response(
+                                    "INVALID_ARGUMENTS",
+                                    f"skills write: ambiguous status key {variant!r}. "
+                                    "Use lowercase 'status' only — and note status is "
+                                    "managed by the lifecycle (an agent write defaults "
+                                    "to 'staged'; transitions go through the Inbox).",
+                                ),
+                                t0,
                             )
-                            if variant is not None:
-                                return _with_latency(
-                                    _error_response(
-                                        "INVALID_ARGUMENTS",
-                                        f"skills write: ambiguous status key {variant!r}. "
-                                        "Use lowercase 'status' only — and note status is "
-                                        "managed by the lifecycle (an agent write defaults "
-                                        "to 'staged'; transitions go through the Inbox).",
-                                    ),
-                                    t0,
-                                )
-                        from core_api.services.skill_lifecycle import (
-                            SkillWriteContext,
-                            validate_and_normalize_skill_write,
-                        )
+                    from core_api.services.skill_lifecycle import (
+                        SkillWriteContext,
+                        validate_and_normalize_skill_write,
+                    )
 
-                        sf_ctx = SkillWriteContext(
-                            caller_agent_id=agent_id,
-                            is_admin=False,
-                            is_internal_forge=False,
-                            description_max_bytes=_safe_int(sf_settings.get("description_max_bytes"), 160),
-                            body_max_bytes=_safe_int(sf_settings.get("body_max_bytes"), 40_000),
-                        )
-                        # For kind='update' the validator needs the live
-                        # skill to bind against its current content_hash.
-                        # Mirror the REST path's read-through storage
-                        # fetch; the validator handles the not-found case.
-                        # ``isinstance`` guards a non-dict data (the
-                        # validator 422s it cleanly rather than us
-                        # AttributeError-ing into a 500 here).
-                        live_doc: dict | None = None
-                        if isinstance(data, dict):
-                            # Fetched for EVERY skills write, not just
-                            # ``kind='update'``. The validator needs it for two
-                            # separate checks: update's hash-binding, and the
-                            # stored-status gate that stops a non-admin
-                            # replacing a live ACTIVE skill. Fetching only on
-                            # update made ``kind='create'`` the way around that
-                            # gate — the validator saw ``None`` and judged the
-                            # write purely on what the caller claimed.
-                            #
-                            # Fail CLOSED, like the settings/flag gates: the
-                            # live-doc fetch now feeds a security gate, so a
-                            # transient DB/network error must abort with a
-                            # curated message rather than fall through with
-                            # ``live_doc=None`` and skip the check.
-                            try:
-                                sc_live = get_storage_client()
-                                live_doc = await sc_live.get_document(
-                                    tenant_id=tenant_id,
-                                    collection=SKILLS_COLLECTION,
-                                    doc_id=doc_id,
-                                    # PRIMARY, not the replica — see the
-                                    # matching note on the REST fetch.
-                                    # This read backs an authorization
-                                    # decision, so replica lag would show
-                                    # the pre-transition status and the
-                                    # gate would authorise the overwrite
-                                    # the transition was meant to forbid.
-                                    read=False,
-                                )
-                            except Exception:
-                                logger.exception(
-                                    "skills live-doc fetch failed for %s/%s; cannot gate skills write",
-                                    tenant_id,
-                                    doc_id,
-                                )
-                                return _with_latency(
-                                    _error_response("INTERNAL_ERROR", "skill lifecycle gate unavailable"),
-                                    t0,
-                                )
-                        normalized, _scan = await validate_and_normalize_skill_write(
-                            data,
-                            ctx=sf_ctx,
-                            live_skill_doc=live_doc,
-                        )
-                        # Swap normalized data in for the rest of the flow
-                        # (embed + upsert). Status/source/scan/content_hash
-                        # and other server-controlled fields are merged.
-                        data = normalized
+                    sf_ctx = SkillWriteContext(
+                        caller_agent_id=agent_id,
+                        is_admin=False,
+                        is_internal_forge=False,
+                        description_max_bytes=_safe_int(sf_settings.get("description_max_bytes"), 160),
+                        body_max_bytes=_safe_int(sf_settings.get("body_max_bytes"), 40_000),
+                    )
+                    # For kind='update' the validator needs the live
+                    # skill to bind against its current content_hash.
+                    # Mirror the REST path's read-through storage
+                    # fetch; the validator handles the not-found case.
+                    # ``isinstance`` guards a non-dict data (the
+                    # validator 422s it cleanly rather than us
+                    # AttributeError-ing into a 500 here).
+                    live_doc: dict | None = None
+                    if isinstance(data, dict):
+                        # Fetched for EVERY skills write, not just
+                        # ``kind='update'``. The validator needs it for two
+                        # separate checks: update's hash-binding, and the
+                        # stored-status gate that stops a non-admin
+                        # replacing a live ACTIVE skill. Fetching only on
+                        # update made ``kind='create'`` the way around that
+                        # gate — the validator saw ``None`` and judged the
+                        # write purely on what the caller claimed.
+                        #
+                        # Fail CLOSED, like the settings/flag gates: the
+                        # live-doc fetch now feeds a security gate, so a
+                        # transient DB/network error must abort with a
+                        # curated message rather than fall through with
+                        # ``live_doc=None`` and skip the check.
+                        try:
+                            sc_live = get_storage_client()
+                            live_doc = await sc_live.get_document(
+                                tenant_id=tenant_id,
+                                collection=SKILLS_COLLECTION,
+                                doc_id=doc_id,
+                                # PRIMARY, not the replica — see the
+                                # matching note on the REST fetch.
+                                # This read backs an authorization
+                                # decision, so replica lag would show
+                                # the pre-transition status and the
+                                # gate would authorise the overwrite
+                                # the transition was meant to forbid.
+                                read=False,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "skills live-doc fetch failed for %s/%s; cannot gate skills write",
+                                tenant_id,
+                                doc_id,
+                            )
+                            return _with_latency(
+                                _error_response("INTERNAL_ERROR", "skill lifecycle gate unavailable"),
+                                t0,
+                            )
+                    normalized, _scan = await validate_and_normalize_skill_write(
+                        data,
+                        ctx=sf_ctx,
+                        live_skill_doc=live_doc,
+                    )
+                    # Swap normalized data in for the rest of the flow
+                    # (embed + upsert). Status/source/scan/content_hash
+                    # and other server-controlled fields are merged.
+                    data = normalized
                 # Resolve which string in `data` gets embedded. The only
                 # embeddable field is data["summary"]; skills writes also
                 # accept data["description"] for back-compat. Non-skills
@@ -3317,6 +3281,20 @@ async def caura_doc(
                 # Storage returns ``{id, created_at, updated_at, xmax}``; ``xmax
                 # == 0`` ⇒ INSERT (new), else the on-conflict UPDATE fired.
                 is_new = int(row["xmax"]) == 0
+                # The audit row REST ``POST /documents`` writes, so a document,
+                # and above all a skill, written here is on the record too.
+                await log_action(
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    action="doc_upsert",
+                    resource_type="document",
+                    resource_id=row.get("id"),
+                    detail={
+                        "collection": write_collection,
+                        "doc_id": doc_id,
+                        "indexed": embedding is not None,
+                    },
+                )
                 # Mint a memory carrying the document body so the BODY becomes
                 # reachable by meaning (only ``data["summary"]`` is embedded on
                 # the doc row, and ``caura_recall`` never returns documents).
@@ -3378,19 +3356,9 @@ async def caura_doc(
                 # candidate / staged / quarantined / rejected skill is
                 # in-flight or blocked and must not surface to agents —
                 # return the same "Not found" as a missing doc so we
-                # don't leak the EXISTENCE of an unapproved skill. The
-                # decision follows the row's OWNING tenant: hidden when
-                # the caller's tenant opted in, OR when the row belongs
-                # to a different tenant (cross-tenant credentials must
-                # never surface a sibling tenant's in-flight skill).
-                # The collection check short-circuits the flag lookup for
-                # non-skills reads.
-                if _doc_field(doc, "collection") == SKILLS_COLLECTION:
-                    caller_opted_in = await _skills_factory_enabled(tenant_id)
-                    if _skill_hidden_from_agent(
-                        doc, caller_tenant_id=tenant_id, caller_opted_in=caller_opted_in
-                    ):
-                        return _with_latency(not_found, t0)
+                # don't leak the EXISTENCE of an unapproved skill.
+                if _skill_hidden_from_agent(doc):
+                    return _with_latency(not_found, t0)
                 return _with_latency(
                     _dumps(
                         {
@@ -3404,60 +3372,28 @@ async def caura_doc(
                 )
             if op == "query":
                 effective_where = dict(where or {})
-                caller_opted_in = False
                 if collection == SKILLS_COLLECTION:
                     caller_status = effective_where.get("status")
                     if caller_status is not None and caller_status != _AGENT_VISIBLE_SKILL_STATUS:
-                        # Security-sensitive REJECTION path: refusing an
-                        # explicit non-active status only makes sense for
-                        # an opted-in tenant — for a tenant that never
-                        # opted in, the "use the Inbox API" message is
-                        # nonsense. So gate it on the STRICT flag and
-                        # fail CLOSED on a settings outage (INTERNAL_ERROR,
-                        # same as op=delete) rather than the lenient helper
-                        # (which assumes-enabled on error and would emit
-                        # the confusing pointer to a non-opted-in tenant).
-                        try:
-                            opted_in = await _skills_factory_flag(tenant_id)
-                        except Exception:
-                            logger.exception(
-                                "skills_factory flag lookup failed for %s; cannot gate query",
-                                tenant_id,
-                            )
-                            return _with_latency(
-                                _error_response("INTERNAL_ERROR", "skill lifecycle gate unavailable"),
-                                t0,
-                            )
-                        if opted_in:
-                            # An agent must not query for staged /
-                            # candidate skills. Reject (rather than
-                            # silently rewriting to 'active', which would
-                            # mislead the caller into thinking they
-                            # queried 'staged' and got nothing).
-                            return _with_latency(
-                                _error_response(
-                                    "INVALID_ARGUMENTS",
-                                    f"collection='skills' on the agent MCP surface only "
-                                    f"exposes status='active' docs; "
-                                    f"where={{'status': {caller_status!r}}} is not supported. "
-                                    "Inspect non-active skills via the Skills Inbox API "
-                                    "(/api/v1/skills-inbox/*).",
-                                ),
-                                t0,
-                            )
-                        # Genuinely not opted in: legacy behavior — the
-                        # caller's explicit status passes through untouched
-                        # (caller_opted_in stays False; the cross-tenant
-                        # net below still hides sibling non-active skills).
-                    else:
-                        # Common, SAFE path (no status, or status='active'
-                        # already): transparently scope to 'active'. Lenient
-                        # helper — fail-closed by FILTERING on a settings
-                        # outage (consistent with op=read), never errors a
-                        # plain query.
-                        caller_opted_in = await _skills_factory_enabled(tenant_id)
-                        if caller_opted_in:
-                            effective_where["status"] = _AGENT_VISIBLE_SKILL_STATUS
+                        # An agent must not query for staged / candidate
+                        # skills. Reject (rather than silently rewriting to
+                        # 'active', which would mislead the caller into
+                        # thinking they queried 'staged' and got nothing).
+                        return _with_latency(
+                            _error_response(
+                                "INVALID_ARGUMENTS",
+                                f"collection='skills' on the agent MCP surface only "
+                                f"exposes status='active' docs; "
+                                f"where={{'status': {caller_status!r}}} is not supported. "
+                                "Inspect non-active skills via the Skills Inbox API "
+                                "(/api/v1/skills-inbox/*).",
+                            ),
+                            t0,
+                        )
+                    # No status, or status='active' already: scope to
+                    # 'active' in the SQL, which also covers sibling tenants'
+                    # rows read through cross-tenant credentials.
+                    effective_where["status"] = _AGENT_VISIBLE_SKILL_STATUS
                 # READ — widens via ``readable_tenant_ids`` for cross-tenant.
                 docs = await sc.query_documents(
                     {
@@ -3474,18 +3410,9 @@ async def caura_doc(
                         "readable_tenant_ids": readable,
                     }
                 )
-                # Cross-tenant safety net: when the caller's tenant is NOT
-                # opted in, the SQL status filter above never ran, so
-                # cross-tenant credentials could pull a sibling tenant's
-                # non-active skills. Drop them (the helper hides only
-                # rows owned by a different tenant in this branch; the
-                # caller's own rows are untouched — invariant preserved).
-                if collection == SKILLS_COLLECTION and not caller_opted_in:
-                    docs = [
-                        d
-                        for d in docs
-                        if not _skill_hidden_from_agent(d, caller_tenant_id=tenant_id, caller_opted_in=False)
-                    ]
+                # The SQL filter above already scopes skills to 'active'; the
+                # per-row check keeps it so whatever storage returns.
+                docs = [d for d in docs if not _skill_hidden_from_agent(d)]
                 items = [{"doc_id": _doc_field(d, "doc_id"), "data": _doc_field(d, "data")} for d in docs]
                 return _with_latency(
                     # ``items`` is canonical everywhere (D1); ``results`` stays for
@@ -3538,12 +3465,7 @@ async def caura_doc(
                 # post-filter alone would silently shrink the result
                 # set). For a broad search (collection=None) we can't
                 # filter in SQL without excluding non-skills collections.
-                search_status = None
-                scoped_skills_opted_in = collection == SKILLS_COLLECTION and await _skills_factory_enabled(
-                    tenant_id
-                )
-                if scoped_skills_opted_in:
-                    search_status = _AGENT_VISIBLE_SKILL_STATUS
+                search_status = _AGENT_VISIBLE_SKILL_STATUS if collection == SKILLS_COLLECTION else None
                 # READ — widens via ``readable_tenant_ids``. Storage returns a
                 # list of doc dicts each carrying an inline ``similarity`` key
                 # (vs the repo's ``(Document, similarity)`` tuples).
@@ -3556,34 +3478,10 @@ async def caura_doc(
                     "readable_tenant_ids": readable,
                     "status": search_status,
                 }
-                pairs = await sc.search_documents_vector(search_data)
-                # Safety net for every skill row that the scoped SQL
-                # filter didn't already remove:
-                #   • broad search (collection=None) — skill rows the SQL
-                #     never touched, hidden when the caller opted in;
-                #   • cross-tenant rows (any search) — a sibling tenant's
-                #     non-active skill, hidden regardless of the caller's
-                #     own opt-in (the SQL status push only ran when the
-                #     CALLER opted in, so a non-opted-in caller reading
-                #     an opted-in sibling's skills would otherwise leak).
-                # ``_skill_hidden_from_agent`` encodes both rules per-row.
-                # The cheap ``any()`` scan short-circuits the cached flag
-                # lookup when no skill rows are present.
-                if any(_doc_field(d, "collection") == SKILLS_COLLECTION for d in pairs):
-                    # For a scoped skills search we already resolved the
-                    # flag; for a broad search resolve it now.
-                    caller_opted_in = (
-                        scoped_skills_opted_in
-                        if collection == SKILLS_COLLECTION
-                        else await _skills_factory_enabled(tenant_id)
-                    )
-                    pairs = [
-                        d
-                        for d in pairs
-                        if not _skill_hidden_from_agent(
-                            d, caller_tenant_id=tenant_id, caller_opted_in=caller_opted_in
-                        )
-                    ]
+                pairs = without_system_rows(await sc.search_documents_vector(search_data))
+                # A broad search (collection=None) has no status filter in
+                # the SQL, so drop the non-active skill rows it returned.
+                pairs = [d for d in pairs if not _skill_hidden_from_agent(d)]
                 source_tenants = [t for t in (readable or []) if t and t != tenant_id]
                 if source_tenants:
                     counts: dict[str, int] = {}
@@ -3650,8 +3548,8 @@ async def caura_doc(
             # the response stays valid JSON. WRITE → home tenant only (deletes
             # never span readable tenants). Fail CLOSED: the status guard is a
             # security gate, so use the strict (raising) flag check and abort
-            # on a settings-lookup failure rather than the lenient helper
-            # (which returns False → no status guard → fail-open delete).
+            # on a settings-lookup failure rather than delete with no status
+            # guard.
             # Short-circuits for non-skills collections (never touches
             # settings).
             try:

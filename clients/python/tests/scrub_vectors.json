@@ -1,0 +1,161 @@
+{
+  "_comment": "Shared secret-scrub vectors. The Python interviewer (caura_client.interviewer.scrub) and the OpenClaw plugin's interview buffer must each turn every input into its expected output. {c*N} stands for the character c repeated N times, so no credential-shaped literal is committed. Change both scrubbers together.",
+  "vectors": [
+    {
+      "input": "context sk-{a*48} more context",
+      "expected": "context [REDACTED_SECRET] more context"
+    },
+    {
+      "input": "context sk-proj-{b*60} more context",
+      "expected": "context [REDACTED_SECRET] more context"
+    },
+    {
+      "input": "context mc_{c*20} more context",
+      "expected": "context [REDACTED_SECRET] more context"
+    },
+    {
+      "input": "context mca_{d*20} more context",
+      "expected": "context [REDACTED_SECRET] more context"
+    },
+    {
+      "input": "context ghp_{e*36} more context",
+      "expected": "context [REDACTED_SECRET] more context"
+    },
+    {
+      "input": "context github_pat_{k*30} more context",
+      "expected": "context [REDACTED_SECRET] more context"
+    },
+    {
+      "input": "context xoxb-{1*10}-{z*10} more context",
+      "expected": "context [REDACTED_SECRET] more context"
+    },
+    {
+      "input": "context AKIA{F*16} more context",
+      "expected": "context [REDACTED_SECRET] more context"
+    },
+    {
+      "input": "aws_secret_access_key = '{m*40}'",
+      "expected": "[REDACTED_SECRET]'"
+    },
+    {
+      "input": "Authorization: Bearer {g*32}",
+      "expected": "Authorization: [REDACTED_SECRET]"
+    },
+    {
+      "input": "api_key = '{h*21}'",
+      "expected": "[REDACTED_SECRET]'"
+    },
+    {
+      "input": "token eyJ{h*20}.{i*20}.{j*10} end",
+      "expected": "token [REDACTED_SECRET] end"
+    },
+    {
+      "input": "here is the key\n-----BEGIN RSA PRIVATE KEY-----\n{Q*16}\n-----END RSA PRIVATE KEY-----\ndone",
+      "expected": "here is the key\n[REDACTED_SECRET]\ndone"
+    },
+    {
+      "input": "{\"api_key\": \"{A*36}\"}",
+      "expected": "{\"[REDACTED_SECRET]\"}"
+    },
+    {
+      "input": "{\"user\": \"ops\", \"password\": \"{t*24}\"}",
+      "expected": "{\"user\": \"ops\", \"[REDACTED_SECRET]\"}"
+    },
+    {
+      "input": "{\"aws_secret_access_key\": \"{w*40}\"}",
+      "expected": "{\"[REDACTED_SECRET]\"}"
+    },
+    {
+      "input": "{'secret': '{Z*24}'}",
+      "expected": "{'[REDACTED_SECRET]'}"
+    },
+    {
+      "input": "\"client_secret\":\"{q*28}\"",
+      "expected": "\"[REDACTED_SECRET]\""
+    },
+    {
+      "input": "OPENAI_API_KEY={o*24}",
+      "expected": "OPENAI_[REDACTED_SECRET]"
+    },
+    {
+      "input": "DB_PASSWORD='{p*8}@{p*8}/{p*8}'",
+      "expected": "DB_[REDACTED_SECRET]'"
+    },
+    {
+      "input": "key sk_live_{s*24} end",
+      "expected": "key [REDACTED_SECRET] end"
+    },
+    {
+      "input": "key rk_test_{r*21} end",
+      "expected": "key [REDACTED_SECRET] end"
+    },
+    {
+      "input": "key AIza{y*35} end",
+      "expected": "key [REDACTED_SECRET] end"
+    },
+    {
+      "input": "key hf_{f*34} rotated",
+      "expected": "key [REDACTED_SECRET] rotated"
+    },
+    {
+      "input": "key GOCSPX-{g*34} rotated",
+      "expected": "key [REDACTED_SECRET] rotated"
+    },
+    {
+      "input": "key glpat-{l*34} rotated",
+      "expected": "key [REDACTED_SECRET] rotated"
+    },
+    {
+      "input": "\"DATABASE_PASSWORD\": \"{d*10}!?\"",
+      "expected": "\"DATABASE_[REDACTED_SECRET]\""
+    },
+    {
+      "input": "postgres://app:{x*19}@db.internal/prod",
+      "expected": "postgres://app:[REDACTED_SECRET]@db.internal/prod"
+    },
+    {
+      "input": "postgres://app:p%40ss%2F{v*10}@10.0.0.5/prod",
+      "expected": "postgres://app:[REDACTED_SECRET]@10.0.0.5/prod"
+    },
+    {
+      "input": "REDIS_URL=redis://:{h*21}@cache:6379/0",
+      "expected": "REDIS_URL=redis://:[REDACTED_SECRET]@cache:6379/0"
+    },
+    {
+      "input": "postgresql+asyncpg://user:secret-value@localhost/path",
+      "expected": "postgresql+asyncpg://user:[REDACTED_SECRET]@localhost/path"
+    },
+    {
+      "input": "We decided to use Postgres for the watermark store, keyed per file.",
+      "expected": "We decided to use Postgres for the watermark store, keyed per file."
+    },
+    {
+      "input": "set token = '{a*12}' in the config",
+      "expected": "set token = '{a*12}' in the config"
+    },
+    {
+      "input": "{\"token_type\": \"bearer\", \"expires_in\": 3600}",
+      "expected": "{\"token_type\": \"bearer\", \"expires_in\": 3600}"
+    },
+    {
+      "input": "The secret: https://docs.example.com/guides/secret-management explains it.",
+      "expected": "The secret: https://docs.example.com/guides/secret-management explains it."
+    },
+    {
+      "input": "{\"password\": \"short\"}",
+      "expected": "{\"password\": \"short\"}"
+    },
+    {
+      "input": "token: shortValue123",
+      "expected": "token: shortValue123"
+    },
+    {
+      "input": "password: short",
+      "expected": "password: short"
+    },
+    {
+      "input": "https://user@host/path",
+      "expected": "https://user@host/path"
+    }
+  ]
+}

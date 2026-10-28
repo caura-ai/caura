@@ -139,3 +139,19 @@ def test_url_passwords_in_compound_and_uppercase_schemes():
         assert scrub(f"{scheme}://user:secret-value@localhost/path") == (
             f"{scheme}://user:{REDACTED}@localhost/path"
         )
+
+
+def test_shared_vectors_match_the_plugin_buffer_scrub():
+    """The OpenClaw plugin's interview buffer is tested against the same file,
+    so the two clients redact the same shapes. ``{c*N}`` is c repeated N times."""
+    import json
+    import re
+    from pathlib import Path
+
+    def expand(template: str) -> str:
+        return re.sub(r"\{(.)\*(\d+)\}", lambda m: m[1] * int(m[2]), template)
+
+    shared = json.loads((Path(__file__).parent / "scrub_vectors.json").read_text(encoding="utf-8"))
+    assert shared["vectors"]
+    for vector in shared["vectors"]:
+        assert scrub(expand(vector["input"])) == expand(vector["expected"]), vector["input"]

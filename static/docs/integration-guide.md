@@ -223,7 +223,7 @@ CAURA_API_KEY=mc_your_key_here                          # tenant-scoped API key
 CAURA_FLEET_ID=fleet-001                                # identifies this fleet
 CAURA_NODE_NAME=my-gateway                              # friendly name shown under Agents › Fleets and machines
 # CAURA_TENANT_ID=                                      # auto-resolved from API key
-# CAURA_AUTO_WRITE_TURNS=true                           # false disables automatic conversation writes
+# CAURA_AUTO_WRITE_TURNS=false                          # false/0/no/off turns automatic capture off
 # CAURA_AUTO_FIX_CONFIG=false                           # set true to auto-fix openclaw.json on startup
 ```
 
@@ -232,9 +232,13 @@ The plugin loads this `.env` file automatically. Both `CAURA_*` and `MEMCLAW_*` 
 Automatic conversation writes include user messages from `ingest`, assistant
 turn summaries, compaction summaries, and the session summary that OpenClaw's
 pre-compaction memory-flush turn asks the agent to write, all stored as episode
-memories with the server's default `scope_team` visibility. Set
-`CAURA_AUTO_WRITE_TURNS=false` and restart the plugin to disable all four;
-OpenClaw then runs no memory-flush turn. Local message buffering, recall,
+memories visible only to the agent that captured them (`scope_agent`). The
+server masks credentials and personal data in them even when the PII gate is
+off and marks them as captured, and the plugin's automatic recall puts a
+captured memory back only into the conversation it came from. Set
+`CAURA_AUTO_WRITE_TURNS=false` (or `0`, `no`, `off`) and restart the plugin to
+disable all four, in `.env` or as `CAURA_AUTO_WRITE_TURNS` in the plugin's
+`config` block below; OpenClaw then runs no memory-flush turn. Local message buffering, recall,
 explicit memory tools and runtime compaction continue to work. This does not
 delete existing memories or disable the separately enabled Interviewer
 (`CAURA_INTERVIEWER`).

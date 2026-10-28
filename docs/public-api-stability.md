@@ -61,10 +61,17 @@ Read by the OpenClaw plugin. The plugin's published name (`memclaw`) and these v
 | `CAURA_TENANT_ID` | Optional pre-resolved tenant id; bypasses lookup. |
 | `CAURA_FLEET_ID` | Default fleet id for writes/heartbeat. |
 | `CAURA_NODE_NAME` | Fleet node identifier reported on heartbeat. |
-| `CAURA_AUTO_WRITE_TURNS` | Automatic conversation-memory writes (default `true`): user messages from `ingest`, assistant turn summaries, compaction summaries, and the session summary that OpenClaw's pre-compaction memory-flush turn asks the agent to write. Set `false` to disable all four; OpenClaw then runs no memory-flush turn. |
+| `CAURA_AUTO_WRITE_TURNS` | Automatic conversation-memory writes (default `true`): user messages from `ingest`, assistant turn summaries, compaction summaries, and the session summary that OpenClaw's pre-compaction memory-flush turn asks the agent to write. Set `false` (or `0`, `no`, `off`, any case; a blank value is off too) to disable all four; OpenClaw then runs no memory-flush turn. It can also be set in the plugin's config block (`plugins.entries.<id>.config`), which wins over the environment. |
 
-The automatic writes create episode memories using the server's default
-visibility (`scope_team`). Ingest saves user messages of at least 100 characters,
+The automatic writes create episode memories visible only to the agent that
+captured them (`scope_agent`); the flush turn's prompt asks for the same. The
+server recognises their tags (`auto-ingest`, `auto-turn-summary`,
+`auto-compaction`) and stores such a row `scope_agent` whatever the request
+says, masks credentials and personal data in it even when the organization's
+PII gate is off, and records `system_metadata.capture` (the trigger and a hash
+of the conversation) where no caller can change it. The plugin's automatic
+recall injects a captured row only into the conversation it came from, and
+marks it as captured. Ingest saves user messages of at least 100 characters,
 truncates them to 500 characters plus an ellipsis, and caps writes at 10 per
 session. Turning this flag off leaves in-memory buffering, recall, explicit
 `caura_write` calls and OpenClaw's runtime compaction available. It does not

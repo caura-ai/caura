@@ -22,6 +22,13 @@ import pytest
 from tests.conftest import get_test_auth
 from tests.conftest import uid as _uid
 
+
+def _lifecycle(slug: str) -> dict:
+    """The lifecycle keys every skills write carries: the validator runs on
+    every one, whatever ``skills_factory.enabled`` says."""
+    return {"slug": slug, "domain": "dev", "kind": "create", "source": "agent"}
+
+
 # ---------------------------------------------------------------------------
 # Slug validation gate
 # ---------------------------------------------------------------------------
@@ -94,6 +101,7 @@ async def test_skills_collection_accepts_safe_slugs(client, good_slug):
                 "name": slug,
                 "description": "Smoke probe for skills slug acceptance.",
                 "content": "# probe\n",
+                **_lifecycle(slug),
             },
         },
         headers=headers,
@@ -123,7 +131,12 @@ async def test_skills_collection_indexes_description_back_compat(client):
             "tenant_id": tenant_id,
             "collection": "skills",
             "doc_id": slug,
-            "data": {"name": slug, "description": description, "content": "# x\n"},
+            "data": {
+                "name": slug,
+                "description": description,
+                "content": "# x\n",
+                **_lifecycle(slug),
+            },
         },
         headers=headers,
     )
@@ -171,6 +184,7 @@ async def test_skills_collection_indexes_summary_when_present(client):
                 # marker would miss.
                 "description": "decoy unrelated-text-xyz",
                 "content": "# x\n",
+                **_lifecycle(slug),
             },
         },
         headers=headers,
@@ -296,9 +310,6 @@ async def test_skills_write_gate_fetch_reads_the_primary(client, monkeypatch):
 
     from core_api.routes import documents as docs
 
-    async def _raw(tenant_id):
-        return {"skills_factory": {"enabled": True}}
-
     async def _display(tenant_id):
         return {
             "skills_factory": {
@@ -308,7 +319,6 @@ async def test_skills_write_gate_fetch_reads_the_primary(client, monkeypatch):
             }
         }
 
-    monkeypatch.setattr(docs, "get_raw_settings", _raw)
     monkeypatch.setattr(docs, "get_settings_for_display", _display)
 
     # The fetch aborts the request, so the assertion below is about the call
@@ -357,9 +367,6 @@ async def test_skills_write_fails_closed_when_the_live_doc_fetch_errors(
 
     from core_api.routes import documents as docs
 
-    async def _raw(tenant_id):
-        return {"skills_factory": {"enabled": True}}
-
     async def _display(tenant_id):
         return {
             "skills_factory": {
@@ -369,7 +376,6 @@ async def test_skills_write_fails_closed_when_the_live_doc_fetch_errors(
             }
         }
 
-    monkeypatch.setattr(docs, "get_raw_settings", _raw)
     monkeypatch.setattr(docs, "get_settings_for_display", _display)
 
     sc = MagicMock(name="storage_client")
@@ -401,4 +407,44 @@ async def test_skills_write_fails_closed_when_the_live_doc_fetch_errors(
     )
     assert "unavailable" in resp.text.lower()
     # The decisive assertion: nothing was written.
+    sc.upsert_document_xmax.assert_not_awaited()
+
+
+async def test_skills_write_fails_closed_when_the_settings_lookup_errors(
+    client, monkeypatch
+):
+    """The settings read supplies the validator's byte caps. When it fails the
+    write is refused, not stored without the lifecycle gate."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from core_api.routes import documents as docs
+
+    async def _display(tenant_id):
+        raise RuntimeError("settings unreachable")
+
+    monkeypatch.setattr(docs, "get_settings_for_display", _display)
+
+    sc = MagicMock(name="storage_client")
+    sc.get_document = AsyncMock(return_value=None)
+    sc.upsert_document_xmax = AsyncMock(return_value={"xmax": 0})
+    monkeypatch.setattr(docs, "get_storage_client", lambda: sc)
+
+    tenant_id, headers = get_test_auth()
+    slug = f"settings-down-{_uid()[:6]}"
+    resp = await client.post(
+        "/api/v1/documents",
+        json={
+            "tenant_id": tenant_id,
+            "collection": "skills",
+            "doc_id": slug,
+            "data": {
+                "name": "Settings down probe",
+                "description": "Short trigger description.",
+                "content": "## When to use\nStep 1.\n",
+                **_lifecycle(slug),
+            },
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 503, resp.text
     sc.upsert_document_xmax.assert_not_awaited()

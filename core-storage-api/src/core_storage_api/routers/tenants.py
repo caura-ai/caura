@@ -59,7 +59,8 @@ async def list_agent_digest_enabled_orgs() -> OrgIdsResponse:
 
 
 @router.get("/interviewer-enabled")
-async def list_interviewer_enabled_orgs() -> OrgIdsResponse:
+async def list_interviewer_enabled_orgs(enabled: bool = True) -> OrgIdsResponse:
     """Orgs whose ``interviewer.enabled`` setting is True (interviewer
-    schedule-tick target)."""
-    return OrgIdsResponse(org_ids=await _svc.tenants_list_interviewer_enabled())
+    schedule-tick target); ``enabled=false`` lists the orgs that turned it off
+    (the sweep's retention pass)."""
+    return OrgIdsResponse(org_ids=await _svc.tenants_list_interviewer_enabled(enabled=enabled))

@@ -946,6 +946,8 @@ async def test_process_pending_jobs_returns_counts_summary(client, canned_llm):
         "jobs_retried",
         "jobs_parked",
         "jobs_skipped",
+        # Finished and parked jobs deleted once past the retention window.
+        "jobs_purged",
     }
     assert summary["tenants_failed"] == 0
     assert summary["tenants"] >= 1

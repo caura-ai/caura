@@ -1,5 +1,6 @@
 """E2E install-plugin script generation tests through HTTP API."""
 
+import re
 import shlex
 
 import pytest
@@ -171,6 +172,27 @@ async def test_script_contains_correct_env_vars(client):
         "CAURA_NODE_NAME",
     ):
         assert var in script, f"Missing {var} in script"
+
+
+async def test_env_file_documents_the_automatic_capture_switch(client):
+    """The installed .env names the switch that turns automatic capture off,
+    commented out so the default stays as shipped, with the spellings it takes."""
+    resp = await client.post(
+        "/api/v1/install-plugin",
+        json={"fleet_id": "f", "api_url": "https://x.com", "api_key": "k"},
+    )
+    assert resp.status_code == 200
+    env_block = resp.text.split('cat > "$PLUGIN_DIR/.env" << ENV_EOF', 1)[1].split(
+        "\nENV_EOF", 1
+    )[0]
+    lines = env_block.splitlines()
+    switch = [line for line in lines if "CAURA_AUTO_WRITE_TURNS" in line]
+    assert switch == ["# CAURA_AUTO_WRITE_TURNS=false"], lines
+    note = " ".join(
+        line for line in lines[: lines.index(switch[0])] if line.startswith("#")
+    )
+    for spelling in ("false", "0", "no", "off"):
+        assert re.search(rf"\b{spelling}\b", note), note
 
 
 # ---------------------------------------------------------------------------

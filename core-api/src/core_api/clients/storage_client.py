@@ -3737,6 +3737,13 @@ class CoreStorageClient:
             raise RuntimeError("core-storage-api /tenants/interviewer-enabled returned 404")
         return result.get("org_ids", [])
 
+    async def list_interviewer_disabled_orgs(self) -> list[str]:
+        """Orgs with an ``interviewer`` settings block that is not enabled."""
+        result = await self._get("/tenants/interviewer-enabled", enabled="false")
+        if result is None:
+            raise RuntimeError("core-storage-api /tenants/interviewer-enabled returned 404")
+        return result.get("org_ids", [])
+
     # =====================================================================
     # Reports
     # =====================================================================

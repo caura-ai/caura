@@ -1245,10 +1245,9 @@ app.include_router(agents_router, prefix="/api/v1")
 app.include_router(fleet_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
-# Skill Factory Phase 2 — HITL Skills Inbox. Routes flag-gated at
-# request time via ``org_settings.skills_factory.enabled``; non-opted-in
-# tenants receive 403 SKILLS_FACTORY_DISABLED, ensuring zero behavior
-# change until they explicitly enable the feature.
+# Skill Factory Phase 2 — HITL Skills Inbox. Serves every tenant: every
+# skills write is staged until approved here, whatever
+# ``org_settings.skills_factory.enabled`` says.
 app.include_router(skills_inbox_router, prefix="/api/v1")
 app.include_router(keystones_router, prefix="/api/v1")
 app.include_router(keystone_versions_router, prefix="/api/v1")

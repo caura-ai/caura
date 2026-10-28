@@ -15730,17 +15730,24 @@ class PostgresService:
             )
             return sorted(row[0] for row in result.all())
 
-    async def tenants_list_interviewer_enabled(self) -> list[str]:
+    async def tenants_list_interviewer_enabled(self, *, enabled: bool = True) -> list[str]:
         """``org_id`` values whose ``interviewer.enabled`` JSONB flag is True,
         sorted. The interviewer schedule tick uses this so a tenant that hasn't
         opted in pays zero cost. Orgs with no settings row are excluded
-        (default off)."""
+        (default off).
+
+        ``enabled=False`` lists the orgs that carry an ``interviewer`` block that
+        is not enabled instead: the sweep purges their finished jobs past
+        retention, so turning the interviewer off keeps none. A tenant that never
+        had the block has no jobs."""
+        flag = OrganizationSettings.settings["interviewer"]["enabled"].as_boolean()
+        where = (
+            [flag.is_(True)]
+            if enabled
+            else [OrganizationSettings.settings.has_key("interviewer"), flag.is_not(True)]
+        )
         async with get_read_session() as session:
-            result = await session.execute(
-                select(OrganizationSettings.org_id).where(
-                    OrganizationSettings.settings["interviewer"]["enabled"].as_boolean().is_(True)
-                )
-            )
+            result = await session.execute(select(OrganizationSettings.org_id).where(*where))
             return sorted(row[0] for row in result.all())
 
     # ══════════════════════════════════════════════════════════════════════

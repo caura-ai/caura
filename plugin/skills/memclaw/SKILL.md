@@ -22,7 +22,7 @@ turns (§11), and writes a short **turn summary** afterward as a backstop
 (`CAURA_AUTO_WRITE_TURNS`, on by default). The same switch also controls
 automatic saves of user messages and compaction summaries, and the
 memory-flush turn that asks you to save a session summary before compaction;
-set it to `false` and restart the plugin to disable all four. Treat the
+set it to `false` (or `0`, `no`, `off`) and restart the plugin to disable all four. Treat the
 automatic layer as a floor, not a substitute. You still call the `caura_*` tools **directly** whenever you need
 to interact deliberately — above all to **write the high-value memories the
 auto-summary won't** (a decision and its *why*, an outcome, a rule), and to
@@ -318,12 +318,14 @@ Rolling skip counters (`recall_metrics`) ride the heartbeat for per-fleet
 visibility.
 
 The plugin also automatically saves **user messages**, short **assistant turn
-summaries** and **compaction summaries** as episode memories with the server's
-default `scope_team` visibility. User-message saves require at least 100
+summaries** and **compaction summaries** as episode memories private to you
+(`scope_agent`), scanned for secrets and marked as captured; automatic recall
+puts a captured memory back only into the conversation it came from. Anything
+the team should know, write deliberately. User-message saves require at least 100
 characters, are truncated to 500 characters plus an ellipsis, and are capped
 at 10 per session. Before OpenClaw compacts a long session, a **memory-flush
-turn** asks you to save a session summary with `caura_write`.
-`CAURA_AUTO_WRITE_TURNS=false` disables all four automatic writes, the flush
+turn** asks you to save a session summary with `caura_write`, private to you.
+`CAURA_AUTO_WRITE_TURNS=false` (or `0`, `no`, `off`) disables all four automatic writes, the flush
 turn included, after a plugin restart. Local buffering, recall, explicit memory tools
 and runtime compaction remain available; existing memories are not deleted.
 The separately enabled Interviewer (`CAURA_INTERVIEWER`) is unaffected.
@@ -342,12 +344,16 @@ vocabulary never grows with the library.
 caura_doc op=search collection=skills query="<intent>"
 caura_doc op=read   collection=skills doc_id=<slug>   # full body
 
-# Publish something reusable so the fleet inherits it:
+# Propose something reusable for the fleet (needs trust 2). It lands
+# "staged": no node installs it until an admin approves it in the inbox.
 caura_doc op=write collection=skills doc_id=<slug> \
-  data={ "name": "<slug>",
+  data={ "name": "<slug>", "slug": "<slug>",
+         "description": "<when to use it, at most 160 bytes>",
+         "domain": "<area, e.g. ops>", "kind": "create", "source": "agent",
          "summary": "<1-line, intent-focused — this is what gets embedded>",
          "content": "<full SKILL.md>" }
-# Re-uploading the same doc_id overwrites it (upsert; no version history).
+# Re-uploading your own staged draft replaces it; an approved skill is
+# changed by an admin.
 
 # Remove a wrong/superseded one:
 caura_doc op=delete collection=skills doc_id=<slug>

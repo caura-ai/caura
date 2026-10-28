@@ -228,17 +228,11 @@ def settings(monkeypatch):
             "description_max_bytes": 160,
         }
     }
-    state = {"enabled": True}
-
-    async def raw(tenant_id):
-        return {"skills_factory": {"enabled": state["enabled"]}}
 
     async def for_display(tenant_id):
         return display
 
-    monkeypatch.setattr(si, "get_raw_settings", raw)
     monkeypatch.setattr(si, "get_settings_for_display", for_display)
-    display["_flag_state"] = state
     return display
 
 
@@ -513,19 +507,24 @@ async def test_list_caps_at_inbox_max_pending(storage, settings):
 
 
 # ---------------------------------------------------------------------------
-# Gates — feature flag and RBAC
+# Gates — RBAC (the inbox does not depend on the Skill Factory flag)
 # ---------------------------------------------------------------------------
 
 
-async def test_flag_disabled_403_everywhere(storage, settings):
-    settings["_flag_state"]["enabled"] = False
+async def test_the_inbox_serves_a_tenant_with_the_flag_off(
+    storage, settings, side_effects
+):
+    """Every skills write is staged until approved, whatever
+    ``skills_factory.enabled`` says, so the inbox that approves them answers a
+    tenant that never turned the Skill Factory on."""
+    settings["skills_factory"]["enabled"] = False
+    storage.seed(forge_doc())
+    storage.query_rows = [forge_doc()]
     async with make_client() as client:
         r_list = await client.get(BASE)
-        r_action = await client.post(f"{BASE}/{SLUG}/approve")
-    assert r_list.status_code == 403
-    assert r_list.json()["detail"].startswith("SKILLS_FACTORY_DISABLED")
-    assert r_action.status_code == 403
-    assert r_action.json()["detail"].startswith("SKILLS_FACTORY_DISABLED")
+        r_action = await client.post(f"{BASE}/{SLUG}/defer", json=None)
+    assert r_list.status_code == 200, r_list.text
+    assert r_action.status_code == 200, r_action.text
 
 
 async def test_list_open_to_non_admin_members(storage, settings):
@@ -575,11 +574,9 @@ async def test_legacy_is_admin_flag_also_grants_actions(
 # point: they are what a direct caller or a future ingress could present, and
 # the gate has to hold for them.
 #
-# These assert the ERROR CODE, not just 403. Three other refusals on this path
-# also answer 403 — ``SKILLS_FACTORY_DISABLED`` from the settings gate is the
-# reachable collision for these callers, since a caller with
-# ``org_role="admin"`` never trips the admin gate — so a status-only test would
-# pass against a version that refused for the wrong reason.
+# These assert the ERROR CODE, not just 403. Other refusals on this path also
+# answer 403 (the admin gate among them), so a status-only test would pass
+# against a version that refused for the wrong reason.
 # ---------------------------------------------------------------------------
 
 _NON_WRITING = [

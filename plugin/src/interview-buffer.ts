@@ -21,9 +21,14 @@
  * Writes are serialized through a promise chain so concurrent ingest
  * calls can't interleave partial lines; reads/prunes join the same chain
  * so they always observe a consistent file.
+ *
+ * The buffer holds raw transcripts and task prompts until the server takes
+ * them, so every text field is scrubbed (``scrubSecrets``) before it is
+ * written, and the files are the gateway user's alone: ``0600`` in a ``0700``
+ * directory, like the plugin's ``.env`` and agent secrets.
  */
 
-import { appendFile, mkdir, readFile, rename, stat, writeFile } from "fs/promises";
+import { appendFile, chmod, mkdir, readFile, rename, stat, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 
 import { getPluginDir } from "./paths.js";
@@ -51,6 +56,49 @@ export interface InterviewEventInput {
   content: string;
   tool?: string;
   outcome?: string;
+}
+
+// --- Secret scrub ---
+//
+// The Python interviewer's rules (caura_client/interviewer/scrub.py), in the
+// same order, so both capture paths redact the same shapes before anything
+// leaves the machine; clients/python/tests/scrub_vectors.json holds the cases
+// both are tested against. Patterns favour precision (long, prefixed token
+// shapes): the server masks again, broadly, on receipt.
+
+const REDACTED = "[REDACTED_SECRET]";
+
+// From the URL delimiter, so a long scheme-like word cannot cause retries; only
+// the password is replaced, the address is kept.
+const URL_PASSWORD = /:\/\/[^/\s:@]*:([^@\s/]+)@/g;
+
+const SECRET_PATTERNS: readonly RegExp[] = [
+  /\b(?:hf_|GOCSPX-|npm_|pypi-|glpat-)[A-Za-z0-9_\-]{16,}/g,
+  /sk-[A-Za-z0-9_\-]{20,}/g, // OpenAI / Anthropic-style
+  /mc[ai]?_[A-Za-z0-9_\-]{16,}/g, // Caura credentials
+  /gh[pousr]_[A-Za-z0-9]{20,}/g, // GitHub tokens (classic)
+  /github_pat_[A-Za-z0-9_]{20,}/g, // GitHub fine-grained PAT
+  /\baws[_-]?secret[_-]?access[_-]?key['"]?\s*[=:]\s*['"]?[A-Za-z0-9/+]{39,41}/gi,
+  /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}/g, // Stripe secret / restricted
+  /\bAIza[0-9A-Za-z_\-]{35}/g, // Google API key
+  /xox[a-z]-[A-Za-z0-9\-]{10,}/g, // Slack tokens
+  /AKIA[0-9A-Z]{16}/g, // AWS access key id
+  // Bounded span, so an unmatched BEGIN scans 8192 characters, not to the end.
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]{0,8192}?-----END [A-Z ]*PRIVATE KEY-----/g,
+  /\bbearer\s+[A-Za-z0-9_\-.=]{16,}/gi,
+  /(?:\b|(?<=_))(api[_-]?key|token|secret|client[_-]?secret)['"]?\s*[=:]\s*['"]?[A-Za-z0-9_\-.+/=!@#$%^&*~]{20,}/gi,
+  /(?:\b|(?<=_))(?:password|passwd|pwd)['"]?\s*[=:]\s*['"]?[A-Za-z0-9_\-.+/=!?@#$%^&*~]{8,}/gi,
+  /\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{5,}\b/g, // JWT
+];
+
+/** Replace credential-shaped substrings with a redaction token. */
+export function scrubSecrets(text: string): string {
+  let out = text.replace(
+    URL_PASSWORD,
+    (match: string, password: string) => match.slice(0, match.length - password.length - 1) + REDACTED + "@",
+  );
+  for (const pattern of SECRET_PATTERNS) out = out.replace(pattern, REDACTED);
+  return out;
 }
 
 /** ~/.openclaw/plugins/memclaw/interview-buffer.jsonl */ // legacy-name-floor: frozen install path
@@ -121,22 +169,43 @@ async function _readMetaNextSeq(): Promise<number> {
   }
 }
 
+const PRIVATE_FILE = 0o600;
+const PRIVATE_DIR = 0o700;
+
+/** Create the buffer's directory, if missing, as the gateway user's alone. */
+async function _ensureDir(path: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: PRIVATE_DIR });
+}
+
+/** Make an existing file the gateway user's alone (a missing one is fine). */
+async function _makePrivate(path: string): Promise<void> {
+  try {
+    await chmod(path, PRIVATE_FILE);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+}
+
 async function _writeMetaNextSeq(nextSeq: number): Promise<void> {
   const path = getInterviewMetaPath();
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify({ next_seq: nextSeq }), "utf-8");
+  await _ensureDir(path);
+  await writeFile(path, JSON.stringify({ next_seq: nextSeq }), { encoding: "utf-8", mode: PRIVATE_FILE });
 }
 
 async function _ensureSeeded(): Promise<void> {
   if (_nextSeq !== undefined) return;
   const path = getInterviewBufferPath();
+  // A buffer an older plugin wrote at the process umask is tightened once per
+  // process; every file written from here on is created private.
+  await _makePrivate(path);
+  await _makePrivate(getInterviewMetaPath());
   // Self-heal a torn final line that lacks its newline (crash mid-append):
   // without this, the NEXT append concatenates onto the torn fragment and
   // the merged line swallows one real event. Found by the VM wet test.
   try {
     const raw = await readFile(path, "utf-8");
     if (raw.length > 0 && !raw.endsWith("\n")) {
-      await appendFile(path, "\n", "utf-8");
+      await appendFile(path, "\n", { encoding: "utf-8", mode: PRIVATE_FILE });
     }
   } catch (err: unknown) {
     // Only a missing file is benign. A FAILED heal (disk full, EACCES)
@@ -161,8 +230,11 @@ async function _rewrite(events: InterviewEvent[]): Promise<void> {
   const path = getInterviewBufferPath();
   const tmp = `${path}.tmp`;
   const body = events.map((e) => JSON.stringify(e)).join("\n") + (events.length ? "\n" : "");
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(tmp, body, "utf-8");
+  await _ensureDir(path);
+  await writeFile(tmp, body, { encoding: "utf-8", mode: PRIVATE_FILE });
+  // A tmp a crash left behind keeps its old mode; this one's is set before it
+  // becomes the buffer.
+  await _makePrivate(tmp);
   await rename(tmp, path); // atomic swap — a crash never leaves a torn file
   _approxBytes = Buffer.byteLength(body);
 }
@@ -182,14 +254,16 @@ export function appendInterviewEvent(input: InterviewEventInput): Promise<number
       session_id: input.session_id ?? null,
       role: (input.role || "unknown").slice(0, 64),
       kind: (input.kind || "message").slice(0, 64),
-      content: (input.content || "").slice(0, INTERVIEW_EVENT_MAX_CHARS),
+      // Scrubbed whole, then cut: a cut first could split a token so that
+      // neither half matches.
+      content: scrubSecrets(input.content || "").slice(0, INTERVIEW_EVENT_MAX_CHARS),
     };
-    if (input.tool) ev.tool = input.tool.slice(0, INTERVIEW_FIELD_MAX_CHARS);
-    if (input.outcome) ev.outcome = input.outcome.slice(0, INTERVIEW_FIELD_MAX_CHARS);
+    if (input.tool) ev.tool = scrubSecrets(input.tool).slice(0, INTERVIEW_FIELD_MAX_CHARS);
+    if (input.outcome) ev.outcome = scrubSecrets(input.outcome).slice(0, INTERVIEW_FIELD_MAX_CHARS);
     const line = JSON.stringify(ev) + "\n";
     const path = getInterviewBufferPath();
-    await mkdir(dirname(path), { recursive: true });
-    await appendFile(path, line, "utf-8");
+    await _ensureDir(path);
+    await appendFile(path, line, { encoding: "utf-8", mode: PRIVATE_FILE });
     _approxBytes += Buffer.byteLength(line);
     // Size guard: a node that is never interviewed (or whose tenant is
     // enabled but scheduler is down) must not grow the file unbounded.

@@ -8,7 +8,11 @@
  *
  * Security:
  * - Automatic user-message, turn-summary and compaction-summary writes are
- *   enabled by default; opt out with CAURA_AUTO_WRITE_TURNS=false.
+ *   enabled by default; opt out with CAURA_AUTO_WRITE_TURNS=false (or 0, no,
+ *   off). They are written ``scope_agent`` with the conversation's session
+ *   header; core-api marks them as captured and records the conversation.
+ * - Automatic recall injects a captured row only into the conversation it
+ *   came from (``recallableInConversation``).
  * - Recall timeout enforced via AbortController
  */
 
@@ -44,7 +48,7 @@ import { getTenantPrefix, getSessionKey } from "./context-engine.internal.js";
 import { logError, logErrorCritical } from "./logger.js";
 import { fetchKeystonesBlock, sanitizePromptField } from "./keystones.js";
 import { getOpenClawSdk } from "./openclaw-sdk-bridge.js";
-import { recordTurn, sessionHeader, takeOrigin } from "./origin-usage.js";
+import { conversationOf, recordTurn, sessionHeader, takeOrigin } from "./origin-usage.js";
 
 // --- Typed interfaces for ContextEngine hooks ---
 
@@ -528,6 +532,10 @@ function trimToTokenBudget(text: string, maxTokens: number): string {
 
 const RECALL_CACHE_MAX_ENTRIES = 200;
 const recallCache = new Map<string, { text: string; ts: number }>();
+// Rows injected per turn, and rows fetched to find them: captured rows from
+// other conversations are dropped after the search.
+const RECALL_INJECT_K = 5;
+const RECALL_FETCH_K = 10;
 
 // --- Recall block ---
 
@@ -552,7 +560,10 @@ export function formatRecallBlock(results: Record<string, unknown>[]): string {
     const content = sanitizePromptField(
       typeof m.content === "string" ? m.content : "",
     ).slice(0, MAX_RECALL_CONTENT_LENGTH);
-    return `- [${type}] ${content}`;
+    // A captured row is something said in the conversation, not a fact the
+    // agent chose to record: say so, so it is weighed as such.
+    const marker = captureOf(m) ? ", auto-captured" : "";
+    return `- [${type}${marker}] ${content}`;
   });
   return (
     "\n## Recalled Memory Context\n" +
@@ -564,6 +575,50 @@ export function formatRecallBlock(results: Record<string, unknown>[]): string {
     lines.join("\n") +
     `\n${RECALL_BLOCK_CLOSE}\n`
   );
+}
+
+// The tags this plugin puts on its automatic writes (ingest, afterTurn,
+// compact). core-api recognises the same set (``auto_capture.AUTO_CAPTURE_TAGS``).
+const AUTO_CAPTURE_TAGS: ReadonlySet<string> = new Set([
+  "auto-ingest",
+  "auto-turn-summary",
+  "auto-compaction",
+]);
+
+/**
+ * The capture record of a row the plugin wrote on its own, or undefined for a
+ * deliberate write. core-api stamps ``system_metadata.capture`` with the
+ * conversation; a row captured before it did carries only the tag, and so no
+ * conversation (``null``).
+ */
+function captureOf(row: Record<string, unknown>): { conversation: unknown } | undefined {
+  const system = row.system_metadata as Record<string, unknown> | null | undefined;
+  const capture = system?.capture;
+  if (capture && typeof capture === "object") {
+    return { conversation: (capture as Record<string, unknown>).conversation ?? null };
+  }
+  const tags = (row.metadata as Record<string, unknown> | null | undefined)?.tags;
+  if (Array.isArray(tags) && tags.some((t) => typeof t === "string" && AUTO_CAPTURE_TAGS.has(t))) {
+    return { conversation: null };
+  }
+  return undefined;
+}
+
+/**
+ * The rows automatic recall may inject into ``conversation``. One agent serves
+ * many conversations (``agent:NAME:CHANNEL:...``), and a captured row is what
+ * someone said in one of them, so it goes back only into that one. A captured
+ * row that names no conversation goes into none. Deliberate writes are the
+ * agent's knowledge and are kept everywhere.
+ */
+function recallableInConversation(
+  rows: Record<string, unknown>[],
+  conversation: string | undefined,
+): Record<string, unknown>[] {
+  return rows.filter((row) => {
+    const capture = captureOf(row);
+    return !capture || (conversation !== undefined && capture.conversation === conversation);
+  });
 }
 
 // --- ContextEngine class ---
@@ -640,6 +695,7 @@ export class CauraContextEngine {
     console.log(
       `[caura] ContextEngine bootstrap: agent=${bootAgentId}, ` +
         `fleet=${CAURA_FLEET_ID || "(unset)"}, ` +
+        `auto-capture=${CAURA_AUTO_WRITE_TURNS ? "on" : "off"}, ` +
         `config keys=${Object.keys(this.config || {}).join(",") || "(empty)"}`,
     );
 
@@ -780,15 +836,27 @@ export class CauraContextEngine {
           content.length > MAX_TURN_SUMMARY_LENGTH
             ? content.slice(0, MAX_TURN_SUMMARY_LENGTH) + "..."
             : content;
-        await apiCall("POST", "/memories", {
-          tenant_id: tid,
-          agent_id: agentId,
-          fleet_id: CAURA_FLEET_ID || undefined,
-          content: truncated,
-          memory_type: "episode",
-          // SAFE-01 — see the bootstrap smoke-test write above.
-          metadata: { tags: ["auto-ingest", "user-message"] },
-        });
+        const ingestSession = sessionKeyOf(message);
+        await apiCall(
+          "POST",
+          "/memories",
+          {
+            tenant_id: tid,
+            agent_id: agentId,
+            fleet_id: CAURA_FLEET_ID || undefined,
+            content: truncated,
+            memory_type: "episode",
+            // Captured, not chosen: private to this agent (see afterTurn).
+            visibility: "scope_agent",
+            // SAFE-01 — see the bootstrap smoke-test write above.
+            metadata: { tags: ["auto-ingest", "user-message"] },
+          },
+          undefined,
+          undefined,
+          undefined,
+          // The conversation it came from, which core-api records on the row.
+          sessionHeader(ingestSession),
+        );
         sessionIngestCounts.set(sessionKey, writeCount + 1);
       } catch (e: unknown) {
         logError("Failed to persist ingested message", e);
@@ -1030,7 +1098,10 @@ export class CauraContextEngine {
     const queryFromMessages = buildQueryFromMessages(sessionKey, prompt);
     const searchQuery = queryFromMessages || prompt || agentId;
     const tenantPrefix = getTenantPrefix(this.config);
-    const cacheKey = `${tenantPrefix}:${agentId}:${searchQuery}`;
+    // The conversation this turn belongs to. Captured rows are recalled only
+    // into theirs, so the cache is per conversation too.
+    const conversation = conversationOf(sessionKeyOf(params));
+    const cacheKey = `${tenantPrefix}:${agentId}:${conversation ?? "-"}:${searchQuery}`;
     const cached = recallCache.get(cacheKey);
     let recallBlock = "";
 
@@ -1051,14 +1122,19 @@ export class CauraContextEngine {
         const searchBody: Record<string, unknown> = {
           tenant_id: tid,
           query: searchQuery,
-          top_k: 5,
+          // Over-fetch: rows captured in other conversations are dropped below.
+          top_k: RECALL_FETCH_K,
         };
         // Self-filter (agent silo) unless cross-agent recall is enabled. When
         // enabled, omit filter_agent_id so the agent can retrieve sibling
         // agents' knowledge — still bounded by the server-side fleet/trust
         // scope. Opt-in (RECALL_CROSS_AGENT); pairs with the A43 freshness cap.
+        // It still reads as itself, so its own ``scope_agent`` rows (what it
+        // captured) stay visible to it.
         if (!RECALL_CROSS_AGENT) {
           searchBody.filter_agent_id = agentId;
+        } else {
+          searchBody.caller_agent_id = agentId;
         }
         const sr = (await apiCall(
           "POST",
@@ -1070,7 +1146,9 @@ export class CauraContextEngine {
           // Value metering: this recall belongs to the OpenClaw session.
           sessionHeader(sessionKey),
         )) as Record<string, unknown> | Record<string, unknown>[];
-        recallBlock = formatRecallBlock(parseSearchItems(sr));
+        recallBlock = formatRecallBlock(
+          recallableInConversation(parseSearchItems(sr), conversation).slice(0, RECALL_INJECT_K),
+        );
         if (recallBlock) {
           if (recallCache.size >= RECALL_CACHE_MAX_ENTRIES) {
             const oldest = recallCache.keys().next().value;
@@ -1220,6 +1298,8 @@ export class CauraContextEngine {
             fleet_id: CAURA_FLEET_ID || undefined,
             content: summary,
             memory_type: "episode",
+            // Captured, not chosen: private to this agent (see afterTurn).
+            visibility: "scope_agent",
             // SAFE-01 — see the bootstrap smoke-test write above.
             metadata: { tags: ["auto-compaction"] },
             ...(origin ? { origin } : {}),
@@ -1429,6 +1509,11 @@ export class CauraContextEngine {
           fleet_id: CAURA_FLEET_ID || undefined,
           content: turnSummary,
           memory_type: "episode",
+          // The model may have been led to say anything in its reply (by a
+          // page or file it read), and nobody chose to store it: keep it
+          // private to this agent. Older servers take the field as sent;
+          // current ones also scan the row and mark it as captured.
+          visibility: "scope_agent",
           // SAFE-01 — see the bootstrap smoke-test write above.
           metadata: { tags: ["auto-turn-summary"] },
           ...(origin ? { origin } : {}),

@@ -50,8 +50,14 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # its head: a chain-built database has had it since 001. That is safe here, as
 # 068 does nothing where the index stands valid, so stamping 068 over such a 067
 # database skips no work. 069 adds ``organization_settings_audit.actor_kind`` and
-# ``actor_credential_id`` in one transaction, so the second joins the probe.
-_HEAD_FINGERPRINT_REVISION = "069"
+# ``actor_credential_id`` in one transaction, so the second joins the probe. 070
+# changes data only: it marks status-less skills ``active`` in tenants that never
+# turned the Skill Factory on. Its probe is that no such row is left, which is
+# exactly when stamping 070 skips no work, as with 068. It reads ``documents``
+# and ``organization_settings`` (001 and 014), so boot runs the probe only where
+# the stamp branch can use it, after 019's sentinel; an empty database has
+# neither table.
+_HEAD_FINGERPRINT_REVISION = "070"
 _HEAD_FINGERPRINT_SQL: str | None = (
     "SELECT (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -70,7 +76,10 @@ _HEAD_FINGERPRINT_SQL: str | None = (
     "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' "
     "AND c.relname = 'uq_entities_tenant_type_name_fleet' AND i.indisvalid) "
     "AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' "
-    "AND table_name = 'organization_settings_audit' AND column_name = 'actor_credential_id')"
+    "AND table_name = 'organization_settings_audit' AND column_name = 'actor_credential_id') "
+    "AND NOT EXISTS (SELECT 1 FROM documents WHERE collection = 'skills' "
+    "AND ((data::jsonb) ->> 'status') IS NULL AND tenant_id NOT IN ("
+    "SELECT org_id FROM organization_settings WHERE (settings -> 'skills_factory' ->> 'enabled') = 'true'))"
 )
 
 _engine: AsyncEngine | None = None
@@ -384,9 +393,17 @@ async def _init_database(engine: AsyncEngine) -> None:
                 )
                 # The head fingerprint is only meaningful for the head it was
                 # written for: a stale entry proves nothing about this head, so
-                # it counts as no evidence and the stamp branch refuses.
+                # it counts as no evidence and the stamp branch refuses. It is
+                # read only where that branch is reachable, since a probe may
+                # read tables the chain creates.
                 has_head_evidence = False
-                if _HEAD_FINGERPRINT_SQL is not None and schema_head == _HEAD_FINGERPRINT_REVISION:
+                if (
+                    _HEAD_FINGERPRINT_SQL is not None
+                    and schema_head == _HEAD_FINGERPRINT_REVISION
+                    and has_tables
+                    and not has_alembic
+                    and has_chain_evidence
+                ):
                     has_head_evidence = bool(await work_conn.scalar(text(_HEAD_FINGERPRINT_SQL)))
                 # End the implicit read tx so Alembic owns transaction lifecycle
                 # on this connection — required for ``autocommit_block``.

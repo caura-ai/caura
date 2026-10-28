@@ -114,6 +114,7 @@ from core_api.search_trim import (
     resolve_include_derived,
     trim_reserving_fts_matches,
 )
+from core_api.services.auto_capture import CAPTURE_KEY, capture_of, stamp_capture
 from core_api.services.contradiction_detector import _pick_older, revert_unheld_loser
 from core_api.services.entity_extraction_worker import process_entity_extraction
 from core_api.services.entity_tokens import extract_entity_tokens
@@ -909,6 +910,12 @@ async def create_memory(data: MemoryCreate, *, is_inferred: bool = False) -> Mem
     # needs its own call and its own route-level test.
     if data.metadata:
         data.metadata = sanitize_caller_metadata(data.metadata)
+        # A row the plugin captured on its own is made private and marked here,
+        # once its metadata is the caller's alone; the scan and the hold read
+        # the mark (``auto_capture``).
+        from core_api.session_context import current_session_id
+
+        stamp_capture(data, current_session_id())
     out = await _run_write_pipeline(data, is_inferred=is_inferred)
     # Value metering: where this memory came from (its session's work), once.
     from core_api.services.value_ledger import schedule_origin
@@ -4876,6 +4883,15 @@ async def update_memory(
             # platform — omit it from a replace and the next enrichment fills it.
             if patch["metadata_"] is not None:
                 mark_caller_owned(patch["metadata_"], claimed)
+            # Except where the row came from: a captured row stays marked as
+            # captured, whatever its metadata is replaced with (``auto_capture``).
+            captured = capture_of(old_meta)
+            if captured is not None:
+                replaced = patch["metadata_"] or {}
+                patch["metadata_"] = {
+                    **replaced,
+                    SYSTEM_NAMESPACE: {**(replaced.get(SYSTEM_NAMESPACE) or {}), CAPTURE_KEY: captured},
+                }
         elif data.metadata is None:
             # Surface the breaking change explicitly: pre-PR
             # ``{"metadata": null}`` cleared the column. The

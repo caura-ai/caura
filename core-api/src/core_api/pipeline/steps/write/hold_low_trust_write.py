@@ -5,6 +5,7 @@ from __future__ import annotations
 from common.constants import HOLD_KEY, QUARANTINED_MEMORY_STATUS
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
+from core_api.services.auto_capture import capture_of
 from core_api.services.system_metadata import SYSTEM_NAMESPACE
 from core_api.services.write_hold import hold_for
 
@@ -30,6 +31,7 @@ class HoldLowTrustWrite:
             data.fleet_id,
             ctx.tenant_config,
             is_inferred=bool(ctx.data.get("is_inferred")),
+            captured=capture_of(getattr(data, "metadata", None)) is not None,
         )
         if hold is None:
             return None

@@ -659,11 +659,9 @@ def _skill_hit(
 
 
 def _patch_flag(monkeypatch, enabled: bool):
-    """Force the opt-in check to a fixed bool. Patches BOTH the lenient
-    ``_skills_factory_enabled`` (read/query/search/delete gates) and the
-    strict ``_skills_factory_flag`` (query's explicit-status rejection
-    path), so a test's ``enabled`` is honored consistently across both."""
-    monkeypatch.setattr(mcp_server, "_skills_factory_enabled", _async_return(enabled))
+    """Force the opt-in check to a fixed bool. Only op=delete still reads it;
+    the read, query, search and list_collections gates apply to every
+    tenant, so a test's flag shows they do not depend on it."""
     monkeypatch.setattr(mcp_server, "_skills_factory_flag", _async_return(enabled))
 
 
@@ -734,16 +732,18 @@ async def test_skill_read_returns_active_when_flag_on(mcp_env, monkeypatch):
     assert payload["data"]["status"] == "active"
 
 
-async def test_skill_read_no_filter_when_flag_off(mcp_env, monkeypatch):
-    # Non-opted-in tenant: byte-identical to pre-Skill-Factory — a
-    # staged (or status-less) skill is still readable.
+async def test_skill_read_hides_non_active_when_flag_off(mcp_env, monkeypatch):
+    # Every tenant's skill writes land staged, so the read gate applies
+    # whatever the flag says: a staged skill reads as missing.
     _patch_flag(monkeypatch, False)
     stub_storage_client(
         monkeypatch, get_document=_skill_doc("forge/x", status="staged")
     )
     out = await mcp_server.caura_doc(op="read", collection="skills", doc_id="forge/x")
-    payload = parse_envelope(out)
-    assert payload["doc_id"] == "forge/x"
+    assert parse_envelope(out)["error"] == {
+        "code": "NOT_FOUND",
+        "message": "Not found: skills/forge/x",
+    }
 
 
 # ── op=query ───────────────────────────────────────────────────────
@@ -780,24 +780,25 @@ async def test_skill_query_scopes_to_active_when_no_status_when_flag_on(
     assert sent["where"]["domain"] == "ops"
 
 
-async def test_skill_query_no_filter_when_flag_off(mcp_env, monkeypatch):
+async def test_skill_query_is_active_only_when_flag_off(mcp_env, monkeypatch):
     _patch_flag(monkeypatch, False)
     sc = stub_storage_client(monkeypatch, query_documents=[])
-    await mcp_server.caura_doc(
+    out = await mcp_server.caura_doc(
         op="query", collection="skills", where={"status": "staged"}
     )
-    # Genuinely not opted in → caller's where passes through untouched
-    # (legacy), NOT the confusing Inbox-API rejection.
-    assert sc.query_documents.await_args.args[0]["where"] == {"status": "staged"}
+    assert parse_envelope(out)["error"]["code"] == "INVALID_ARGUMENTS"
+    sc.query_documents.assert_not_awaited()
+
+    await mcp_server.caura_doc(op="query", collection="skills", where={"domain": "ops"})
+    assert sc.query_documents.await_args.args[0]["where"] == {
+        "domain": "ops",
+        "status": "active",
+    }
 
 
-async def test_skill_query_explicit_status_fails_closed_on_settings_error(
-    mcp_env, monkeypatch
-):
-    # An explicit non-active status query is the security-sensitive
-    # rejection path: a settings outage must fail CLOSED (INTERNAL_ERROR),
-    # NOT emit the Inbox-API pointer to a tenant we can't confirm opted
-    # in. Uses the strict _skills_factory_flag.
+async def test_skill_query_gate_needs_no_settings_lookup(mcp_env, monkeypatch):
+    # The read gates no longer read the opt-in flag, so a settings outage
+    # changes nothing: an explicit non-active status is refused as usual.
     async def _boom(*_a, **_k):
         raise RuntimeError("settings store down")
 
@@ -806,8 +807,7 @@ async def test_skill_query_explicit_status_fails_closed_on_settings_error(
     out = await mcp_server.caura_doc(
         op="query", collection="skills", where={"status": "staged"}
     )
-    payload = parse_envelope(out)
-    assert payload["error"]["code"] == "INTERNAL_ERROR"
+    assert parse_envelope(out)["error"]["code"] == "INVALID_ARGUMENTS"
     sc.query_documents.assert_not_awaited()
 
 
@@ -837,14 +837,16 @@ async def test_skill_search_scoped_passes_active_status_when_flag_on(
     assert sc.search_documents_vector.await_args.args[0]["status"] == "active"
 
 
-async def test_skill_search_scoped_no_status_when_flag_off(mcp_env, monkeypatch):
+async def test_skill_search_scoped_passes_active_status_when_flag_off(
+    mcp_env, monkeypatch
+):
     _patch_flag(monkeypatch, False)
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
     sc = stub_storage_client(monkeypatch, search_documents_vector=[])
     await mcp_server.caura_doc(op="search", collection="skills", query="deploy eu-west")
-    assert sc.search_documents_vector.await_args.args[0]["status"] is None
+    assert sc.search_documents_vector.await_args.args[0]["status"] == "active"
 
 
 # ── op=search (broad / cross-collection) ───────────────────────────
@@ -869,17 +871,18 @@ async def test_skill_search_broad_drops_non_active_when_flag_on(mcp_env, monkeyp
     assert ("skills", "forge/staged") not in returned  # in-flight skill never leaks
 
 
-async def test_skill_search_broad_no_filter_when_flag_off(mcp_env, monkeypatch):
+async def test_skill_search_broad_drops_non_active_when_flag_off(mcp_env, monkeypatch):
     _patch_flag(monkeypatch, False)
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    hits = [_skill_hit("forge/staged", status="staged", similarity=0.7)]
+    hits = [
+        _skill_hit("forge/active", status="active", similarity=0.8),
+        _skill_hit("forge/staged", status="staged", similarity=0.7),
+    ]
     stub_storage_client(monkeypatch, search_documents_vector=hits)
     out = await mcp_server.caura_doc(op="search", query="anything")
-    payload = parse_envelope(out)
-    # Flag off → no broad post-filter; the staged skill surfaces as before.
-    assert payload["results"][0]["doc_id"] == "forge/staged"
+    assert [r["doc_id"] for r in parse_envelope(out)["results"]] == ["forge/active"]
 
 
 # ── op=write (self-promotion guard) ────────────────────────────────
@@ -1106,26 +1109,65 @@ async def test_skill_update_write_fails_closed_on_live_doc_fetch_error(
     sc.upsert_document_xmax.assert_not_awaited()
 
 
-async def test_skill_write_status_allowed_when_flag_off(mcp_env, monkeypatch):
-    # Non-opted-in tenant: validator is skipped entirely, legacy
-    # behavior — a minimal body with a caller-set status passes through
-    # unchanged (byte-identical to pre-Skill-Factory behavior).
+async def test_skill_write_status_is_gated_when_flag_off(mcp_env, monkeypatch):
+    # Not opted in to the Skill Factory: the lifecycle validator runs all the
+    # same. A caller-set ``active`` is an admin's call, and a write without one
+    # lands ``staged``, out of every node's catalog until approved.
     _patch_flag(monkeypatch, False)
     _patch_sf_settings(monkeypatch, enabled=False)
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
+    sc = stub_storage_client(
+        monkeypatch, upsert_document_xmax={"xmax": 0}, get_document=None
+    )
     out = await mcp_server.caura_doc(
         op="write",
         collection="skills",
         doc_id="forge-x",
-        data={"slug": "forge-x", "summary": "s", "status": "active"},
+        data=_valid_skill_data(status="active"),
     )
-    payload = parse_envelope(out)
-    assert payload["ok"] is True
-    # Untouched: no validator ran, so status stays exactly as supplied.
-    assert sc.upsert_document_xmax.await_args.args[0]["data"]["status"] == "active"
+    assert "error" in parse_envelope(out)
+    sc.upsert_document_xmax.assert_not_awaited()
+
+    out = await mcp_server.caura_doc(
+        op="write", collection="skills", doc_id="forge-x", data=_valid_skill_data()
+    )
+    assert parse_envelope(out)["ok"] is True
+    assert sc.upsert_document_xmax.await_args.args[0]["data"]["status"] == "staged"
+
+
+async def test_skill_write_with_a_malformed_settings_block_is_still_gated(
+    mcp_env, monkeypatch
+):
+    # A ``skills_factory`` value that is not an object (a hand-edited setting)
+    # gets the lifecycle validator at its default caps, not a pass.
+    _patch_flag(monkeypatch, False)
+    monkeypatch.setattr(
+        mcp_server,
+        "get_settings_for_display",
+        _async_return({"skills_factory": "on"}),
+    )
+    monkeypatch.setattr(
+        "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
+    )
+    sc = stub_storage_client(
+        monkeypatch, upsert_document_xmax={"xmax": 0}, get_document=None
+    )
+    out = await mcp_server.caura_doc(
+        op="write",
+        collection="skills",
+        doc_id="forge-x",
+        data=_valid_skill_data(status="active"),
+    )
+    assert "error" in parse_envelope(out)
+    sc.upsert_document_xmax.assert_not_awaited()
+
+    out = await mcp_server.caura_doc(
+        op="write", collection="skills", doc_id="forge-x", data=_valid_skill_data()
+    )
+    assert parse_envelope(out)["ok"] is True
+    assert sc.upsert_document_xmax.await_args.args[0]["data"]["status"] == "staged"
 
 
 # ── op=delete (active-only existence gate) ─────────────────────────
@@ -1203,34 +1245,26 @@ async def test_skill_read_hides_cross_tenant_non_active_even_when_caller_off(
     assert "Not found: skills/forge/x" in strip_latency(out)
 
 
-async def test_skill_query_drops_cross_tenant_non_active_when_caller_off(
-    mcp_env, monkeypatch
-):
+async def test_skill_query_drops_non_active_from_every_tenant(mcp_env, monkeypatch):
     _patch_flag(monkeypatch, False)
     monkeypatch.setattr(
         mcp_server, "_get_readable_tenants", lambda: ["test-tenant", "sibling"]
     )
     rows = [
         _skill_doc("own/active", status="active", tenant_id="test-tenant"),
-        _skill_doc(
-            "own/staged", status="staged", tenant_id="test-tenant"
-        ),  # kept: caller off, same tenant
-        _skill_doc(
-            "sib/staged", status="staged", tenant_id="sibling"
-        ),  # dropped: cross-tenant non-active
-        _skill_doc("sib/active", status="active", tenant_id="sibling"),  # kept: active
+        _skill_doc("own/staged", status="staged", tenant_id="test-tenant"),
+        _skill_doc("sib/staged", status="staged", tenant_id="sibling"),
+        _skill_doc("sib/active", status="active", tenant_id="sibling"),
     ]
-    stub_storage_client(monkeypatch, query_documents=rows)
+    sc = stub_storage_client(monkeypatch, query_documents=rows)
     out = await mcp_server.caura_doc(op="query", collection="skills")
-    payload = parse_envelope(out)
-    ids = {r["doc_id"] for r in payload["results"]}
-    assert "sib/staged" not in ids  # cross-tenant non-active leaked → blocked
-    assert ids == {"own/active", "own/staged", "sib/active"}
+    assert sc.query_documents.await_args.args[0]["where"] == {"status": "active"}
+    # The stub ignores ``where``; the per-row check still drops the staged rows.
+    ids = {r["doc_id"] for r in parse_envelope(out)["results"]}
+    assert ids == {"own/active", "sib/active"}
 
 
-async def test_skill_search_drops_cross_tenant_non_active_when_caller_off(
-    mcp_env, monkeypatch
-):
+async def test_skill_search_drops_non_active_from_every_tenant(mcp_env, monkeypatch):
     _patch_flag(monkeypatch, False)
     monkeypatch.setattr(
         mcp_server, "_get_readable_tenants", lambda: ["test-tenant", "sibling"]
@@ -1250,8 +1284,7 @@ async def test_skill_search_drops_cross_tenant_non_active_when_caller_off(
     out = await mcp_server.caura_doc(op="search", query="deploy")
     payload = parse_envelope(out)
     ids = {r["doc_id"] for r in payload["results"]}
-    assert "sib/staged" not in ids  # cross-tenant non-active dropped
-    assert ids == {"sib/active", "own/staged"}  # own staged stays (caller off)
+    assert ids == {"sib/active"}
 
 
 # ── op=list_collections (active-only count for skills) ─────────────────
@@ -1279,18 +1312,19 @@ async def test_list_collections_skill_count_active_only_when_flag_on(
     assert counts["customers"] == 5  # non-skills untouched
 
 
-async def test_list_collections_skill_count_unchanged_when_flag_off(
+async def test_list_collections_skill_count_active_only_when_flag_off(
     mcp_env, monkeypatch
 ):
     _patch_flag(monkeypatch, False)
     stub_storage_client(
         monkeypatch,
         list_document_collections={"collections": [{"name": "skills", "count": 9}]},
+        document_count_in_collection=3,
     )
     out = await mcp_server.caura_doc(op="list_collections")
     payload = parse_envelope(out)
     counts = {c["name"]: c["count"] for c in payload["collections"]}
-    assert counts["skills"] == 9  # legacy: full count, no recount
+    assert counts["skills"] == 3
 
 
 # ── op=write (case-variant status key) ─────────────────────────────────
@@ -1328,20 +1362,6 @@ async def test_safe_int_degrades_bool_and_garbage_to_default():
     # Valid values still pass through (ints and numeric strings).
     assert mcp_server._safe_int(40_000, 160) == 40_000
     assert mcp_server._safe_int("4096", 160) == 4096
-
-
-async def test_skills_factory_enabled_fails_closed_on_settings_error(
-    mcp_env, monkeypatch
-):
-    # The read-path helper must fail CLOSED: if the strict flag lookup
-    # raises, assume enabled (True) so the active-only filter is applied
-    # and non-active skills can't leak during a settings outage.
-    async def _boom(*_a, **_k):
-        raise RuntimeError("settings store down")
-
-    monkeypatch.setattr(mcp_server, "_skills_factory_flag", _boom)
-    result = await mcp_server._skills_factory_enabled("test-tenant")
-    assert result is True
 
 
 async def test_skill_read_hides_non_active_when_flag_lookup_errors(
@@ -1466,12 +1486,15 @@ async def test_doc_write_skips_mint_for_skills_collection(
 ):
     """Skills keep their staged -> active approval lifecycle: a recallable memory
     would route around it."""
-    stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
+    _patch_sf_settings(monkeypatch, enabled=False)
+    stub_storage_client(
+        monkeypatch, upsert_document_xmax={"xmax": 0}, get_document=None
+    )
     out = await mcp_server.caura_doc(
         op="write",
         collection="skills",
         doc_id="my-skill",
-        data={"summary": "A skill.", "content": "# Steps"},
+        data=_valid_skill_data(slug="my-skill"),
     )
 
     assert parse_envelope(out)["ok"] is True

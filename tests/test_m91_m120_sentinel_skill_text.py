@@ -540,6 +540,37 @@ async def test_auto_promote_rescans_instead_of_trusting_the_stamp():
     assert result.auto_approved == 0
 
 
+async def test_auto_promote_holds_a_candidate_with_only_warnings():
+    """M-120 keeps routine admin lines and URL patterns at warn, so the inbox
+    approve lets a person accept them. The automatic path has no person, so a
+    candidate whose rescan finds anything at all goes to the inbox."""
+    for body in (
+        "Clean up:\n\n    rm -rf /var/lib/apt/lists/*\n",
+        "Then share the report at https://transfer.sh/report.txt for the team.\n",
+    ):
+        doc = _candidate_doc(content=body)
+        updates: list[tuple] = []
+
+        async def updater(t, c, d, s, _updates=updates):
+            _updates.append((t, c, d, s))
+
+        with _patch_candidates([_doc_row("forge/warned", doc)]):
+            result = await promote_pending_candidates(
+                tenant_id="t1",
+                fleet_id=None,
+                poison_checker=_fake_poison_never,
+                live_data_fetcher=await _fake_live_data_returns(None),
+                status_updater=updater,
+                min_cluster_size=3,
+                min_distinct_agents=3,
+                freshness_window_days=14,
+                auto_promote_clean=True,
+            )
+
+        assert updates == [("t1", "skills", "forge/warned", "staged")], body
+        assert result.auto_approved == 0
+
+
 async def test_a_candidate_the_rescan_holds_back_is_logged(caplog):
     """Second review of caura PR #1864: the stored scan still says ``clean``, so
     the log is where an operator sees why the candidate went to the inbox. It

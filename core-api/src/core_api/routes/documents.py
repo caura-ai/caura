@@ -36,19 +36,24 @@ from core_api.services.agent_service import (
     enforce_fleet_write,
 )
 from core_api.services.audit_service import log_action, log_cross_tenant_read
-from core_api.services.interview_service import refuse_system_collection
+from core_api.services.interview_service import (
+    refuse_system_collection,
+    refuse_system_read,
+    without_system_rows,
+)
 
 # Skill Factory SF-002 — imported at module scope (rather than lazily
 # inside the handler) so a broken import surfaces at server startup
-# rather than on the first skills-collection write. The flag-gate
-# below still ensures non-skills writes pay zero settings-fetch cost.
+# rather than on the first skills-collection write. Only skills writes
+# read the settings.
 from core_api.services.organization_settings import (
-    get_raw_settings,
     get_settings_for_display,
     resolve_config,
 )
 from core_api.services.skill_lifecycle import (
+    SKILL_WRITE_MIN_TRUST,
     SkillWriteContext,
+    skill_trust_message,
     validate_and_normalize_skill_write,
 )
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
@@ -491,6 +496,13 @@ async def upsert_document(
                     f"Agent '{author}' is not approved. Contact tenant admin to set trust_level >= 1.",
                 ),
             )
+        # A skill, once approved, is instructions on every node its fleet
+        # reaches: the cross-agent tier keystones need (``skill_lifecycle``).
+        if body.collection == SKILLS_COLLECTION and write_agent.get("trust_level", 0) < SKILL_WRITE_MIN_TRUST:
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(AUTH_AGENT_TRUST_TOO_LOW, skill_trust_message(author)),
+            )
         if not body.fleet_id and write_agent.get("fleet_id"):
             body.fleet_id = write_agent["fleet_id"]
         # Replacing a document a different agent authored, or forcing past
@@ -533,106 +545,101 @@ async def _upsert_document_claimed(
         )
 
     # ── Skill Factory SF-002: 7 adjustments on every skills-collection
-    # write, gated by ``org_settings.skills_factory.enabled`` (default
-    # False). Existing tenants that have never opted in see ZERO behavior
-    # change.
-    #
-    # Hot-path note: we check the flag via ``get_raw_settings`` (returns
-    # just the tenant's override dict — typically ``{}`` for never-
-    # configured tenants, cheap to load and aggressively cached). Only
-    # when the flag is true do we materialize the full merged settings
-    # via ``get_settings_for_display`` to read the per-tenant caps.
-    # Disabled tenants pay one TTL-cached lookup + one dict-get, not
-    # the full DEFAULT_SETTINGS deep-merge per write.
+    # write, whatever ``org_settings.skills_factory.enabled`` says: the
+    # flag turns the Forge on, not the review. A write lands ``staged``
+    # unless an org admin sets ``active``, and only ``active`` skills reach a
+    # node (``/skills/installable``). The settings read is for the
+    # per-tenant byte caps; it fails closed.
     if body.collection == SKILLS_COLLECTION:
-        raw_settings = await get_raw_settings(body.tenant_id)
-        sf_enabled = raw_settings.get("skills_factory", {}).get("enabled") is True
-        if sf_enabled:
+        try:
             settings_display = await get_settings_for_display(body.tenant_id)
-            sf_settings = settings_display.get("skills_factory", {})
-            # ``forge`` source is reserved for the internal lifecycle
-            # worker; no external HTTP caller is treated as internal in
-            # Phase 0 — the Forge resident lands in Phase 1 with its
-            # own auth identity. Until then the validator will 403 any
-            # external source='forge' attempt.
-            is_internal_forge = False
-            sf_ctx = SkillWriteContext(
-                caller_agent_id=author,
-                is_admin=auth.is_org_admin,
-                is_internal_forge=is_internal_forge,
-                description_max_bytes=int(sf_settings.get("description_max_bytes", 160)),
-                body_max_bytes=int(sf_settings.get("body_max_bytes", 40_000)),
-            )
+        except Exception:
+            logger.exception("skills settings lookup failed for %s; cannot gate skills write", body.tenant_id)
+            raise HTTPException(status_code=503, detail="skill lifecycle gate unavailable") from None
+        sf_settings = settings_display.get("skills_factory", {})
+        # ``forge`` source is reserved for the internal lifecycle
+        # worker; no external HTTP caller is treated as internal in
+        # Phase 0 — the Forge resident lands in Phase 1 with its
+        # own auth identity. Until then the validator will 403 any
+        # external source='forge' attempt.
+        is_internal_forge = False
+        sf_ctx = SkillWriteContext(
+            caller_agent_id=author,
+            is_admin=auth.is_org_admin,
+            is_internal_forge=is_internal_forge,
+            description_max_bytes=int(sf_settings.get("description_max_bytes", 160)),
+            body_max_bytes=int(sf_settings.get("body_max_bytes", 40_000)),
+        )
 
-            # Fetch the live skill for EVERY skills write, not just
-            # ``kind='update'``. Two checks need it and they need it for
-            # different reasons:
-            #
-            #   - ``kind='update'`` binds to the current content_hash;
-            #   - ANY kind aimed at an existing doc_id is a full replace,
-            #     so the validator has to see the stored status before
-            #     letting a non-admin overwrite it. Fetching only on
-            #     update meant ``kind='create'`` was the way around the
-            #     status RBAC: the validator was handed ``None`` and
-            #     judged the request purely on what the caller claimed.
-            #
-            # One extra read on skill creates, on a HITL-gated authoring
-            # path — not the hot path.
-            #
-            # Guarded by ``isinstance(body.data, dict)`` — a non-dict
-            # body.data is a legitimate input (the validator below
-            # rejects it with 422), but calling ``.get`` on it would
-            # AttributeError into a 500 first. Cleanly punt that
-            # rejection to the validator instead of crashing.
-            #
-            # Fail CLOSED, matching the MCP path: the fetch now feeds a
-            # security gate, so a transient storage error must abort with
-            # a curated message rather than fall through with
-            # ``live_doc=None`` and skip the check. An unhandled error
-            # here would already abort the write with a bare 500 — this
-            # keeps the two write paths identical and gets the failure
-            # into the log with the tenant and doc that hit it.
-            live_doc: dict | None = None
-            if isinstance(body.data, dict):
-                try:
-                    sc_live = get_storage_client()
-                    live_doc = await sc_live.get_document(
-                        tenant_id=body.tenant_id,
-                        collection=SKILLS_COLLECTION,
-                        doc_id=body.doc_id,
-                        # PRIMARY, not the replica. ``get_document``
-                        # defaults to ``read=True``; this fetch now backs
-                        # an authorization decision, so replica lag would
-                        # not be a benign stale read — it would show the
-                        # PRE-transition status (a staged row an admin
-                        # just approved to active) and the gate would
-                        # authorise the overwrite the transition was
-                        # meant to forbid. The upsert that follows does
-                        # no CAS on status, so nothing downstream catches
-                        # it. Same reason the inline dedup lookups pin
-                        # the primary.
-                        read=False,
-                    )
-                except Exception:
-                    logger.exception(
-                        "skills live-doc fetch failed for %s/%s; cannot gate skills write",
-                        body.tenant_id,
-                        body.doc_id,
-                    )
-                    raise HTTPException(
-                        status_code=503,
-                        detail="skill lifecycle gate unavailable",
-                    ) from None
+        # Fetch the live skill for EVERY skills write, not just
+        # ``kind='update'``. Two checks need it and they need it for
+        # different reasons:
+        #
+        #   - ``kind='update'`` binds to the current content_hash;
+        #   - ANY kind aimed at an existing doc_id is a full replace,
+        #     so the validator has to see the stored status before
+        #     letting a non-admin overwrite it. Fetching only on
+        #     update meant ``kind='create'`` was the way around the
+        #     status RBAC: the validator was handed ``None`` and
+        #     judged the request purely on what the caller claimed.
+        #
+        # One extra read on skill creates, on a HITL-gated authoring
+        # path — not the hot path.
+        #
+        # Guarded by ``isinstance(body.data, dict)`` — a non-dict
+        # body.data is a legitimate input (the validator below
+        # rejects it with 422), but calling ``.get`` on it would
+        # AttributeError into a 500 first. Cleanly punt that
+        # rejection to the validator instead of crashing.
+        #
+        # Fail CLOSED, matching the MCP path: the fetch now feeds a
+        # security gate, so a transient storage error must abort with
+        # a curated message rather than fall through with
+        # ``live_doc=None`` and skip the check. An unhandled error
+        # here would already abort the write with a bare 500 — this
+        # keeps the two write paths identical and gets the failure
+        # into the log with the tenant and doc that hit it.
+        live_doc: dict | None = None
+        if isinstance(body.data, dict):
+            try:
+                sc_live = get_storage_client()
+                live_doc = await sc_live.get_document(
+                    tenant_id=body.tenant_id,
+                    collection=SKILLS_COLLECTION,
+                    doc_id=body.doc_id,
+                    # PRIMARY, not the replica. ``get_document``
+                    # defaults to ``read=True``; this fetch now backs
+                    # an authorization decision, so replica lag would
+                    # not be a benign stale read — it would show the
+                    # PRE-transition status (a staged row an admin
+                    # just approved to active) and the gate would
+                    # authorise the overwrite the transition was
+                    # meant to forbid. The upsert that follows does
+                    # no CAS on status, so nothing downstream catches
+                    # it. Same reason the inline dedup lookups pin
+                    # the primary.
+                    read=False,
+                )
+            except Exception:
+                logger.exception(
+                    "skills live-doc fetch failed for %s/%s; cannot gate skills write",
+                    body.tenant_id,
+                    body.doc_id,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="skill lifecycle gate unavailable",
+                ) from None
 
-            normalized, _scan = await validate_and_normalize_skill_write(
-                body.data,
-                ctx=sf_ctx,
-                live_skill_doc=live_doc,
-            )
-            # Swap the normalized body in for the rest of the flow
-            # (embedding + storage round-trip). Sentinel scan and
-            # server-controlled fields are already merged inside.
-            body.data = normalized
+        normalized, _scan = await validate_and_normalize_skill_write(
+            body.data,
+            ctx=sf_ctx,
+            live_skill_doc=live_doc,
+        )
+        # Swap the normalized body in for the rest of the flow
+        # (embedding + storage round-trip). Sentinel scan and
+        # server-controlled fields are already merged inside.
+        body.data = normalized
 
     if auth.tenant_id:
         await check_and_increment(body.tenant_id, "write")
@@ -821,6 +828,7 @@ async def get_document(
     behavior unchanged.
     """
     auth.enforce_readable_tenant(tenant_id)
+    refuse_system_read(collection)
     sc = get_storage_client()
     doc = await sc.get_document(tenant_id=tenant_id, collection=collection, doc_id=doc_id)
     if not doc:
@@ -840,6 +848,7 @@ async def query_documents(
     widening lives on the direct-DB ``caura_doc`` MCP path).
     """
     auth.enforce_readable_tenant(body.tenant_id)
+    refuse_system_read(body.collection)
 
     sc = get_storage_client()
     docs = await sc.query_documents(
@@ -867,47 +876,22 @@ async def installable_skills(
 
     The push-to-disk install path (the OpenClaw plugin reconciler)
     consumes this instead of a raw ``/documents/query`` so the active-only
-    + opt-in gate is enforced server-side — the SAME contract the MCP pull
-    surface applies (PR #315). One enforcement point for both delivery
-    modes; the client carries no policy and cannot widen the filter.
+    gate is enforced server-side — the SAME contract the MCP pull
+    surface applies to opted-in tenants (PR #315). The client carries no
+    policy and cannot widen the filter.
 
-    - **Opted-in** tenant (``skills_factory.enabled``): only
-      ``status='active'`` skills are returned — ``candidate`` / ``staged``
-      / ``quarantined`` never reach a node's disk or the agent's palette.
-    - **Not opted in**: every visible skill is returned, byte-identical to
-      the legacy reconcile (``where={}``) — preserves the merge-day no-op
-      invariant (a non-opted-in tenant's legacy skills may lack a
-      ``status`` field; forcing ``status='active'`` would wrongly drop
-      them, so we don't filter at all in this case).
-    - **Fail CLOSED**: a settings-lookup failure raises 503. The
-      reconciler fails *safe* on a non-2xx (it preserves on-disk skills
-      and adds nothing), so an outage can never push a non-active skill
-      to disk.
+    Only ``status='active'`` skills are returned, for every tenant: a
+    ``candidate`` / ``staged`` / ``quarantined`` skill is unreviewed
+    instructions and never reaches a node's disk or an agent's palette.
+    ``skills_factory.enabled`` turns the Forge on; it no longer decides
+    whether a person reviews what nodes install. Skills a tenant that never
+    opted in had on its nodes were backfilled ``active`` (migration 070), so
+    none was removed.
 
     Fleet/tenant visibility scoping is identical to ``/documents/query``.
     """
     auth.enforce_readable_tenant(body.tenant_id)
-
-    # Opt-in gate, server-owned and fail-closed. Mirrors the upsert
-    # path's cache-first ``get_raw_settings`` (returns just the tenant's
-    # override dict — cheap, aggressively cached).
-    try:
-        raw_settings = await get_raw_settings(body.tenant_id)
-    except Exception:
-        logger.exception(
-            "skills_factory flag lookup failed for %s; cannot gate installable skills",
-            body.tenant_id,
-        )
-        raise HTTPException(status_code=503, detail="skill lifecycle gate unavailable") from None
-
-    sf_enabled = (
-        isinstance(raw_settings, dict)
-        and isinstance(raw_settings.get("skills_factory"), dict)
-        and raw_settings["skills_factory"].get("enabled") is True
-    )
-
-    # Opted-in → active-only; otherwise no status filter (legacy no-op).
-    where = {"status": "active"} if sf_enabled else {}
+    where = {"status": "active"}
 
     sc = get_storage_client()
     docs = await sc.query_documents(
@@ -937,6 +921,7 @@ async def list_documents(
     (one-tenant-at-a-time; the aggregate ``list_collections`` view widens).
     """
     auth.enforce_readable_tenant(tenant_id)
+    refuse_system_read(collection)
     sc = get_storage_client()
     docs = await sc.list_documents(
         tenant_id=tenant_id, collection=collection, fleet_id=fleet_id, limit=limit, offset=offset
@@ -1006,6 +991,8 @@ async def search_documents(
     collections in the tenant; supplying ``collection`` scopes the search.
     """
     auth.enforce_readable_tenant(body.tenant_id)
+    if body.collection is not None:
+        refuse_system_read(body.collection)
     if auth.tenant_id:
         # Rate-limit against the home tenant (not every tenant in the
         # readable set) — mirrors recall's pattern. The home tenant pays
@@ -1041,16 +1028,18 @@ async def search_documents(
             detail=("embedding provider returned no vector (check provider config / quota); search aborted"),
         )
     sc = get_storage_client()
-    pairs = await sc.search_documents_vector(
-        {
-            "tenant_id": body.tenant_id,
-            "collection": body.collection,
-            "query_embedding": query_embedding,
-            "top_k": body.top_k,
-            "fleet_id": body.fleet_id,
-            "readable_tenant_ids": (auth.readable_tenant_ids if auth.is_cross_tenant_read else None),
-            "status": None,
-        }
+    pairs = without_system_rows(
+        await sc.search_documents_vector(
+            {
+                "tenant_id": body.tenant_id,
+                "collection": body.collection,
+                "query_embedding": query_embedding,
+                "top_k": body.top_k,
+                "fleet_id": body.fleet_id,
+                "readable_tenant_ids": (auth.readable_tenant_ids if auth.is_cross_tenant_read else None),
+                "status": None,
+            }
+        )
     )
     items = [
         {

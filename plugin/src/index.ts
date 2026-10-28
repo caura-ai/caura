@@ -142,6 +142,7 @@ const cauraPlugin = {
     properties: {
       CAURA_AGENT_ID: { type: "string" },
       MEMCLAW_AGENT_ID: { type: "string" },  // legacy-name-ok: supported configuration alias for existing installs
+      CAURA_AUTO_WRITE_TURNS: { type: ["boolean", "string"] },
     },
     required: [] as string[],
   },
@@ -572,7 +573,7 @@ const cauraPlugin = {
         "Call caura_write with a summary of: decisions made, tasks completed, bugs found, " +
         "configuration changes, and any commitments or deadlines discovered in this session. " +
         "Include your agent_id, specific names, dates, paths, and outcomes. " +
-        "Use memory_type 'episode' and tag with 'pre-compaction'. " +
+        "Use memory_type 'episode', visibility 'scope_agent', and tag with 'pre-compaction'. " +
         "Do NOT reply to the user from this turn.",
       systemPrompt:
         "You are running inside an OpenClaw memory-flush turn. Your only job is to " +
