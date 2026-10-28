@@ -93,7 +93,10 @@ from common.entity_naming import (
     normalize_entity_name,
     same_identifier_signature,
 )
-from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
+from common.events.lifecycle_purge_request import (
+    MEMORY_RETENTION_MAX_DAYS,
+    MEMORY_RETENTION_MIN_DAYS,
+)
 from common.models import (
     Agent,
     AgentActivityDigest,
@@ -15684,15 +15687,16 @@ class PostgresService:
             return sorted(row[0] for row in result.all())
 
     async def tenants_list_purgeable(self) -> list[str]:
-        """Distinct ``tenant_id`` from soft-deleted memories older than the max
-        retention window (``MEMORY_RETENTION_MAX_DAYS``), sorted.
+        """Distinct ``tenant_id`` from soft-deleted memories older than the
+        minimum retention window (``MEMORY_RETENTION_MIN_DAYS``), sorted.
 
-        Orgs whose soft-deleted rows are all newer than the max window are
-        guaranteed no-ops on the purge primitive, so excluding them keeps the
-        discovery scan bounded as ``memories`` grows. ``func.now()`` (DB clock)
-        matches the purge primitive's cutoff and avoids client-clock drift.
+        Orgs whose soft-deleted rows are all newer than the minimum window are
+        guaranteed no-ops on the purge primitive for any allowed retention, so
+        excluding them keeps the discovery scan bounded as ``memories`` grows.
+        ``func.now()`` (DB clock) matches the purge primitive's cutoff and
+        avoids client-clock drift.
         """
-        cutoff = func.now() - timedelta(days=MEMORY_RETENTION_MAX_DAYS)
+        cutoff = func.now() - timedelta(days=MEMORY_RETENTION_MIN_DAYS)
         async with get_read_session() as session:
             result = await session.execute(
                 select(Memory.tenant_id)
