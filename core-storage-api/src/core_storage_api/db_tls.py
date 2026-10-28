@@ -19,6 +19,11 @@ from urllib.parse import parse_qs, urlsplit
 # fall back to cleartext, so neither satisfies a setting named "require".
 TLS_MODES = ("disable", "allow", "prefer", "require", "verify-ca", "verify-full")
 
+# Where a self-hosted stack reaches Postgres without TLS on purpose: this
+# machine, or a compose service name.
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "db", "postgres"}
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
 _TRUTHY = {"1", "true", "yes", "on"}
 _DEPLOYED_ENVIRONMENTS = {"production", "sandbox"}
 
@@ -61,7 +66,11 @@ def tls_connect_args(
     """Apply the TLS floor without weakening a stronger DSN policy.
 
     Verified modes use the supplied CA bundle or the system trust store.
-    Explicit local opt-outs preserve asyncpg's own DSN behavior.
+    Explicit local opt-outs preserve asyncpg's own DSN behavior. An explicit
+    ``disable`` to a loopback host is honoured even under the floor: a
+    database proxy listening there takes plaintext and encrypts the hop
+    onward itself. A mode that may fall back to cleartext to any host outside
+    ``_LOCAL_HOSTS`` is logged as a warning.
     """
     if mode is None:
         mode = tls_mode_from_env(require=require)
@@ -69,18 +78,24 @@ def tls_connect_args(
         root_cert = os.environ.get("POSTGRES_SSL_ROOT_CERT", "")
     if mode and mode not in TLS_MODES:
         raise ValueError("Invalid POSTGRES_SSL_MODE")
+    host = urlsplit(dsn).hostname if dsn else None
     floor = mode or ("require" if require else "")
-    if require and floor and TLS_MODES.index(floor) < TLS_MODES.index("require"):
+    if (
+        require
+        and floor
+        and TLS_MODES.index(floor) < TLS_MODES.index("require")
+        and not (floor == "disable" and host in _LOOPBACK_HOSTS)
+    ):
         floor = "require"
-    if not floor:
-        if dsn and urlsplit(dsn).hostname not in {"localhost", "127.0.0.1", "::1", "db", "postgres"}:
-            requested = dsn_tls_mode(dsn)
-            if requested is None or TLS_MODES.index(requested) < TLS_MODES.index("require"):
-                logging.getLogger(__name__).warning(
-                    "PostgreSQL transport may fall back to cleartext; configure verified TLS"
-                )
-        return {}
     requested = dsn_tls_mode(dsn)
+    # asyncpg uses the stronger of the two, and with neither its own default, prefer.
+    strongest = max((TLS_MODES.index(m) for m in (floor, requested) if m), default=TLS_MODES.index("prefer"))
+    if dsn and host not in _LOCAL_HOSTS and strongest < TLS_MODES.index("require"):
+        logging.getLogger(__name__).warning(
+            "PostgreSQL transport may fall back to cleartext; configure verified TLS"
+        )
+    if not floor:
+        return {}
     if requested is not None and TLS_MODES.index(requested) >= TLS_MODES.index(floor):
         # Preserve stronger DSN policy. A supplied CA bundle must still reach it.
         if not root_cert or requested not in {"verify-ca", "verify-full"}:

@@ -24,6 +24,7 @@ fine).
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -37,7 +38,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 import core_storage_api.config as config_module
 import core_storage_api.scripts.preflight_012 as preflight
 from core_storage_api.config import Settings, db_connect_args
-from core_storage_api.db_tls import tls_required_from_env
+from core_storage_api.db_tls import tls_connect_args, tls_required_from_env
 
 _ENV_EXAMPLE = Path(__file__).resolve().parents[2] / ".env.example"
 
@@ -200,6 +201,59 @@ def test_a_mis_cased_dsn_mode_is_still_recognised_as_stronger(
     """
     monkeypatch.setattr(config_module.settings, "postgres_require_ssl", True)
     assert db_connect_args(f"{_NO_TLS_DSN}?ssl={cased}") == {}
+
+
+def _dsn(host: str, query: str = "") -> str:
+    return f"postgresql+asyncpg://u:p@{host}:5432/db{query}"
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "[::1]", "localhost"])
+def test_an_explicit_disable_reaches_a_loopback_listener_under_require(host: str) -> None:
+    """A database proxy on the same host, such as a managed database's auth
+    proxy, encrypts and authenticates the hop to the database itself and accepts
+    only plaintext locally. Raising ``disable`` to ``require`` would make
+    every connection to it fail, so the only way to use one was to turn the
+    whole floor off."""
+    assert tls_connect_args(_dsn(host), require=True, mode="disable") == {"ssl": "disable"}
+
+
+@pytest.mark.parametrize("host", ["db.example", "10.0.0.5", "db", "postgres"])
+def test_an_explicit_disable_to_any_other_host_still_gets_require(host: str) -> None:
+    """The exemption is loopback only. Compose service names are not
+    loopback: under the floor they keep getting ``require``, as before."""
+    assert tls_connect_args(_dsn(host), require=True, mode="disable") == {"ssl": "require"}
+
+
+@pytest.mark.parametrize("mode", ["allow", "prefer"])
+def test_a_mode_that_may_fall_back_is_raised_even_on_loopback(mode: str) -> None:
+    """Only ``disable`` says plaintext on purpose; ``allow`` and ``prefer``
+    leave it to the server."""
+    assert tls_connect_args(_dsn("127.0.0.1"), require=True, mode=mode) == {"ssl": "require"}
+
+
+@pytest.mark.parametrize("mode", ["disable", "allow", "prefer"])
+def test_an_explicit_weak_mode_to_a_remote_host_is_reported(
+    caplog: pytest.LogCaptureFixture, mode: str
+) -> None:
+    """With the floor off the mode is honoured, as before, but it no longer
+    passes in silence: it now gets the same warning as a weak DSN does."""
+    with caplog.at_level(logging.WARNING, logger="core_storage_api.db_tls"):
+        assert tls_connect_args(_dsn("db.example"), require=False, mode=mode) == {"ssl": mode}
+    assert "may fall back to cleartext" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("host", "query"),
+    [("127.0.0.1", ""), ("localhost", ""), ("db", ""), ("postgres", ""), ("db.example", "?ssl=require")],
+)
+def test_no_warning_for_a_local_host_or_a_dsn_that_guarantees_tls(
+    caplog: pytest.LogCaptureFixture, host: str, query: str
+) -> None:
+    """Self-host compose stacks reach Postgres by service name without TLS
+    on purpose, and a DSN that asks for ``require`` itself is what connects."""
+    with caplog.at_level(logging.WARNING, logger="core_storage_api.db_tls"):
+        tls_connect_args(_dsn(host, query), require=False, mode="disable")
+    assert caplog.text == ""
 
 
 @pytest.mark.parametrize(
