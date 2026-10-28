@@ -81,7 +81,10 @@ def test_a_gemini_env_model_is_still_the_gemini_default(monkeypatch):
 
 def test_an_explicit_same_family_override_is_honoured(core_api_env):
     cfg = core_api_env.ResolvedConfig(
-        {"enrichment": {"provider": "gemini", "model": "gemini-2.0-flash"}}
+        {
+            "enrichment": {"provider": "gemini", "model": "gemini-2.0-flash"},
+            "api_keys": {"gemini_api_key": "synthetic-tenant-key"},
+        }
     )
 
     provider = registry.get_llm_provider(

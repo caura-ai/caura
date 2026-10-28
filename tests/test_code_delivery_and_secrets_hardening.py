@@ -181,13 +181,13 @@ def test_keys_are_encrypted_and_round_trip(monkeypatch):
     assert settings_crypto.decrypt_api_key(stored["openai_api_key"]) == "sk-real"
 
 
-def test_a_non_fernet_key_string_still_works(monkeypatch):
+def test_a_non_fernet_key_string_is_refused_for_new_writes(monkeypatch):
     monkeypatch.setattr(
         settings, "settings_encryption_key", "just-a-long-random-operator-string"
     )
     settings_crypto._fernet_for.cache_clear()
-    stored = settings_crypto.encrypt_api_keys({"openai_api_key": "sk-real"})
-    assert settings_crypto.decrypt_api_key(stored["openai_api_key"]) == "sk-real"
+    with pytest.raises(ValueError, match="Fernet"):
+        settings_crypto.encrypt_api_keys({"openai_api_key": "sk-real"})
 
 
 def test_legacy_plaintext_values_still_read(monkeypatch):
@@ -215,7 +215,8 @@ def test_undecryptable_value_never_returns_ciphertext(monkeypatch):
     monkeypatch.setattr(
         settings, "settings_encryption_key", Fernet.generate_key().decode()
     )
-    assert settings_crypto.decrypt_api_key(stored) is None
+    with pytest.raises(ValueError, match="decrypt"):
+        settings_crypto.decrypt_api_key(stored)
 
 
 def test_audit_diff_never_records_provider_key_values():

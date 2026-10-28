@@ -64,7 +64,7 @@ from common.constants import (
     CONTRADICTION_CANDIDATE_MAX,
     CONTRADICTION_SIMILARITY_THRESHOLD,
     DEFAULT_RELATION_TYPE_WEIGHT,
-    ENCRYPTED_SETTING_PREFIX,
+    ENCRYPTED_SETTING_PREFIXES,
     ENTITY_RESOLUTION_CANDIDATE_LIMIT,
     GRAPH_MAX_ENTITIES,
     GRAPH_MAX_EXPANDED_ENTITIES,
@@ -15649,7 +15649,8 @@ class PostgresService:
             swap = {
                 name: encrypted[name]
                 for name, value in expected.items()
-                if encrypted.get(name, "").startswith(ENCRYPTED_SETTING_PREFIX) and stored.get(name) == value
+                if encrypted.get(name, "").startswith(ENCRYPTED_SETTING_PREFIXES)
+                and stored.get(name) == value
             }
             if not swap:
                 return []

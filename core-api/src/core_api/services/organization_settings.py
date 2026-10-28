@@ -26,6 +26,7 @@ write was decided under (``common.settings_version``).
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 
 from cachetools import TTLCache
@@ -43,6 +44,7 @@ from common.events.topics import Topics
 from common.governance import PIICategory
 from common.organization_settings_merge import deep_merge as _deep_merge
 from common.provider_names import ProviderName
+from common.settings_crypto import PROVIDER_KEY_FIELDS, ProviderKeyDecryptionError
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings as global_settings
 from core_api.constants import (
@@ -594,6 +596,59 @@ PROVIDER_OPTIONS = {
 }
 
 
+def _validate_provider_models(payload: dict, current: dict | None = None) -> None:
+    catalogs = {
+        **PROVIDER_OPTIONS,
+        "governance.non_business.pregate": PROVIDER_OPTIONS["fallback_llm"],
+    }
+    current = current or {}
+    digest = payload.get("agent_digest")
+    if isinstance(digest, dict):
+        for field in ("provider", "model"):
+            value = digest.get(field)
+            if value is not None and value not in (
+                DEFAULT_SETTINGS["agent_digest"].get(field),
+                current.get("agent_digest", {}).get(field),
+            ):
+                raise ValueError("Agent digest provider and model are server-managed")
+    for section, options in catalogs.items():
+        previous = current
+        for part in section.split("."):
+            previous = previous.get(part, {}) if isinstance(previous, dict) else {}
+        if not isinstance(previous, dict):
+            previous = {}
+        values = payload
+        for part in section.split("."):
+            if not isinstance(values, dict):
+                raise ValueError(f"Settings key '{section}' must be an object")
+            values = values.get(part)
+            if values is None:
+                break
+        if values is None:
+            continue
+        if not isinstance(values, dict):
+            raise ValueError(f"Settings key '{section}' must be an object")
+        provider = values.get("provider")
+        if provider is not None and (
+            not isinstance(provider, str)
+            or (provider not in (*options, "none", "fake") and provider != previous.get("provider"))
+        ):
+            raise ValueError(f"Settings key '{section}.provider' is not a supported provider")
+        provider = values.get("provider", previous.get("provider"))
+        model = values.get("model")
+        allowed = (
+            options.get(provider, []) if provider else [m for models in options.values() for m in models]
+        )
+        if model is not None and (
+            not isinstance(model, str)
+            or (
+                model not in allowed
+                and not (model == previous.get("model") and provider == previous.get("provider"))
+            )
+        ):
+            raise ValueError(f"Settings key '{section}.model' is not a supported model")
+
+
 def _remap_vertex(provider: str) -> str:
     """Remap deprecated tenant-tier ``vertex`` provider to ``openai``.
 
@@ -1083,9 +1138,29 @@ class ResolvedConfig:
         return _GovNBPregate(
             enabled=bool(g.get("enabled", False)),
             provider=g.get("provider") or None,
-            model=g.get("model") or None,
+            model=self._tenant_model(
+                "governance.non_business.pregate", g.get("provider") or self.enrichment_provider
+            ),
             min_confidence=g.get("min_confidence"),
             fail_closed=bool(g.get("fail_closed", False)),
+        )
+
+    def _tenant_model(self, section: str, provider: str | None, default: str | None = None) -> str | None:
+        stored_key = self._ts.get("api_keys", {}).get(f"{provider}_api_key")
+        if stored_key:
+            decrypt_api_key(stored_key)  # A configured but unreadable key must fail closed.
+            values = self._ts
+            for part in section.split("."):
+                values = values.get(part, {})
+            model = values.get("model")
+            options = PROVIDER_OPTIONS.get(section, PROVIDER_OPTIONS["fallback_llm"])
+            if model in options.get(provider, []):
+                return model
+        return default
+
+    def encrypted_provider_keys(self) -> dict:
+        return encrypt_api_keys(
+            {name: getattr(self, name) for name in PROVIDER_KEY_FIELDS if getattr(self, name)}
         )
 
     # Enrichment
@@ -1097,7 +1172,12 @@ class ResolvedConfig:
 
     @property
     def enrichment_model(self) -> str:
-        return self._ts.get("enrichment", {}).get("model") or global_settings.entity_extraction_model
+        return (
+            self._tenant_model(
+                "enrichment", self.enrichment_provider, global_settings.entity_extraction_model
+            )
+            or global_settings.entity_extraction_model
+        )
 
     @property
     def enrichment_enabled(self) -> bool:
@@ -1115,7 +1195,10 @@ class ResolvedConfig:
 
     @property
     def recall_model(self) -> str:
-        return self._ts.get("recall", {}).get("model") or global_settings.entity_extraction_model
+        return (
+            self._tenant_model("recall", self.recall_provider, global_settings.entity_extraction_model)
+            or global_settings.entity_extraction_model
+        )
 
     @property
     def recall_premise_guard(self) -> bool:
@@ -1135,7 +1218,7 @@ class ResolvedConfig:
 
     @property
     def embedding_model(self) -> str | None:
-        return self._ts.get("embedding", {}).get("model")
+        return self._tenant_model("embedding", self.embedding_provider)
 
     # Entity extraction
     @property
@@ -1147,7 +1230,12 @@ class ResolvedConfig:
 
     @property
     def entity_extraction_model(self) -> str:
-        return self._ts.get("entity_extraction", {}).get("model") or global_settings.entity_extraction_model
+        return (
+            self._tenant_model(
+                "entity_extraction", self.entity_extraction_provider, global_settings.entity_extraction_model
+            )
+            or global_settings.entity_extraction_model
+        )
 
     @property
     def entity_extraction_enabled(self) -> bool:
@@ -1163,7 +1251,7 @@ class ResolvedConfig:
 
     @property
     def fallback_llm_model(self) -> str | None:
-        return self._ts.get("fallback_llm", {}).get("model")
+        return self._tenant_model("fallback_llm", self.fallback_llm_provider)
 
     def resolve_fallback(self) -> tuple[str | None, str | None]:
         provider = self.fallback_llm_provider
@@ -1724,7 +1812,11 @@ async def _encrypt_legacy_api_keys(tenant_id: str, stored: dict) -> dict:
     plaintext = {name: value for name, value in api_keys.items() if needs_encryption(value)}
     if not plaintext:
         return stored
-    encrypted = encrypt_api_keys(plaintext)
+    try:
+        encrypted = encrypt_api_keys(plaintext)
+    except ProviderKeyDecryptionError:
+        # Preserve the row for display and explicit repair; provider resolution refuses it.
+        return stored
     try:
         swapped = await get_storage_client().encrypt_org_api_keys(
             tenant_id, expected=plaintext, encrypted=encrypted, changed_by="system:encrypt-legacy-api-keys"
@@ -1810,8 +1902,25 @@ async def get_settings_for_display(tenant_id: str) -> dict:
     ``api_keys`` values are masked (C36) — internal readers that need the real
     keys go through ``ResolvedConfig`` / ``get_raw_settings``, never this view.
     """
-    raw = await get_raw_settings(tenant_id)
-    return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, _without_retired(raw)))
+    return _settings_display_with_status(await get_raw_settings(tenant_id))
+
+
+def _settings_display_with_status(raw: dict) -> dict:
+    displayed = _settings_display_view(_deep_merge(DEFAULT_SETTINGS, _without_retired(raw)))
+    sources = {}
+    for name in (*PROVIDER_KEY_FIELDS, "atlascloud_api_key"):
+        value = raw.get("api_keys", {}).get(name)
+        try:
+            source = "tenant" if value and decrypt_api_key(value) else "server"
+        except ProviderKeyDecryptionError:
+            source = "unavailable"
+        sources[name.removesuffix("_api_key")] = source
+    displayed["provider_credentials"] = {
+        "encryption_enabled": encryption_enabled(),
+        "sources": sources,
+        "embedding_managed": bool(os.environ.get("OPENAI_EMBEDDING_BASE_URL")),
+    }
+    return displayed
 
 
 #: The crystallizer settings a dedup stamp was settled under (M-38).
@@ -1871,6 +1980,8 @@ async def update_settings(
     # ``_settings_display_view`` (and for the same reason).
     filtered: dict = {}
     for section, content in new_settings.items():
+        if section == "provider_credentials":
+            continue  # Display-only metadata is never persisted.
         if section == "api_keys" and isinstance(content, dict):
             kept = {k: v for k, v in content.items() if not _is_display_mask(v)}
             if kept:
@@ -1879,6 +1990,13 @@ async def update_settings(
             filtered[section] = content
     new_settings = filtered
 
+    try:
+        _validate_provider_models(new_settings)
+    except ValueError:
+        # Only legacy values need a writer read; newly changed values still
+        # require the catalog. Never use the display view or stale TTL cache.
+        current, _ = await get_storage_client().get_org_settings_versioned(tenant_id)
+        _validate_provider_models(new_settings, current)
     _check_keys(new_settings, DEFAULT_SETTINGS)
     _validate_api_keys(new_settings)
     _validate_leaf_types(new_settings)
@@ -1908,7 +2026,7 @@ async def update_settings(
     merged = result["settings"]
     if not result.get("changed"):
         # Identical payload — storage wrote nothing; nothing to invalidate or broadcast.
-        return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, _without_retired(merged)))
+        return _settings_display_with_status(merged)
 
     # Invalidate THIS process's cache immediately...
     invalidate_cache(tenant_id)
@@ -1947,4 +2065,4 @@ async def update_settings(
     if _SWEEP_POLICY_KEYS & set(new_settings.get("crystallizer") or {}):
         track_task(tracked_task(_reopen_dedup_sweep(tenant_id), "crystallizer_reopen_sweep", None, tenant_id))
 
-    return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, _without_retired(merged)))
+    return _settings_display_with_status(merged)

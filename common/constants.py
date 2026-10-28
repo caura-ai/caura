@@ -873,9 +873,10 @@ NODE_PRINCIPAL_TENANT = "tenant"
 # ---------------------------------------------------------------------------
 
 # Prefix of an ``api_keys`` value core-api encrypted with SETTINGS_ENCRYPTION_KEY
-# (``enc:v1:<Fernet token>``). Here so storage can tell a legacy plaintext key
+# (v1 or v2). Here so storage can tell a legacy plaintext key
 # from an encrypted one without holding the key (M-99).
 ENCRYPTED_SETTING_PREFIX = "enc:v1:"
+ENCRYPTED_SETTING_PREFIXES = (ENCRYPTED_SETTING_PREFIX, "enc:v2:")
 
 
 # ---------------------------------------------------------------------------

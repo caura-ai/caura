@@ -15,6 +15,7 @@ dependencies = [
     "httpx2>=2,<3",
     "structlog>=25.4,<27",
     "openai>=3,<4",
+    "cryptography>=42.0",
     # CAURA-595: ``common.enrichment.service._parse_temporal`` validates
     # the LLM's ``ts_valid_*`` output via ``dateutil.parser`` — runtime
     # dep dragged in by the extraction. Same version pin as

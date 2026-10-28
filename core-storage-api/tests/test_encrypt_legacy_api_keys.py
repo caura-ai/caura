@@ -67,9 +67,10 @@ async def test_a_key_is_swapped_only_while_it_still_holds_the_value_read(client:
     assert await _stored_keys(client, org) == {"openai_api_key": "sk-new", "anthropic_api_key": "enc:v1:ant"}
 
 
-async def test_the_swap_is_audited_masked_and_runs_once(client: AsyncClient) -> None:
+@pytest.mark.parametrize("prefix", ["enc:v1:", "enc:v2:test-key-id:"])
+async def test_the_swap_is_audited_masked_and_runs_once(client: AsyncClient, prefix: str) -> None:
     org = await _org(client, {"api_keys": {"openai_api_key": "sk-old"}})
-    expected, encrypted = {"openai_api_key": "sk-old"}, {"openai_api_key": "enc:v1:x"}
+    expected, encrypted = {"openai_api_key": "sk-old"}, {"openai_api_key": prefix + "x"}
 
     assert await _swap(client, org, expected, encrypted) == ["openai_api_key"]
     assert await _swap(client, org, expected, encrypted) == []

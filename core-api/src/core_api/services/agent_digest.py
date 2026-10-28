@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -241,8 +242,10 @@ async def generate_for_org(
     # durable rows (its work IS episodic). Below it the agent still lists.
     event_floor = int(config.get("event_floor") or _EVENT_FLOOR_DEFAULT)
     listed_max = int(config.get("listed_max") or _LISTED_MAX_DEFAULT)
-    model = config.get("model") or "gpt-5.4-mini"
-    provider = config.get("provider") or "openai"
+    # Digests use server credentials (tenant_config=None), so their model is
+    # selected by the operator rather than by a tenant settings row.
+    model = os.environ.get("AGENT_DIGEST_MODEL") or "gpt-5.4-mini"
+    provider = os.environ.get("AGENT_DIGEST_PROVIDER") or "openai"
     max_cost = float(config.get("max_cost_per_run_usd") or 0)
 
     agents = await sc.list_agents(org_id)

@@ -7,13 +7,9 @@ validates the envelope's ``payload`` against this model before invoking
 consumer surfaces as a Pydantic ``ValidationError`` instead of a runtime
 ``KeyError`` deep inside the worker.
 
-Per the locked design (CAURA-595 Q1=C), the publisher resolves the
-tenant's enrichment provider/model/keys and bakes them into the payload
-so the worker stays stateless w.r.t. tenants — no DB read, no
-``ResolvedConfig`` import, no shared cache. The price is sensitive
-material on the wire: keys live in encrypted Pub/Sub at rest and in
-flight, but anyone with subscription read access can see them. Same
-exposure surface as core-api's settings/logs.
+The publisher encrypts resolved credentials. The worker reads encrypted fields
+and, for one transition release, the legacy plaintext fields. Deploy the worker
+before the publisher; old workers cannot consume encrypted tenant credentials.
 
 Fallback resolution moves to publish time too — the publisher calls its
 own ``ResolvedConfig.resolve_fallback()`` and ships the resolved tuple
@@ -89,34 +85,18 @@ class MemoryEnrichRequest(BaseModel):
     enrichment_provider: str | None = None
     enrichment_model: str | None = None
 
-    # Per-tenant credentials. Only the keys the tenant has configured
-    # are populated; the rest stay ``None`` and the worker resolves
-    # them via the standard fallback chain (platform singleton → fake).
-    #
-    # SECURITY: defence-in-depth applies in two places:
-    #   1. ``repr=False`` (Pydantic ``Field`` config below) keeps an
-    #      accidental ``logger.info("got %s", request)`` from leaking
-    #      the secret via Python's ``repr()``.
-    #   2. ``_redact_secrets`` (the field_serializer below) redacts
-    #      these fields in *every* ``model_dump()`` call by default.
-    #      The publisher passes ``context={"include_secrets": True}``
-    #      on the wire-format dump so Pub/Sub still sees the raw
-    #      values; any other code path (logs, audit dumps, debugging
-    #      tools that ``json.dumps()`` the model) gets ``"***"``.
-    # Wire-format keys still travel in the Pub/Sub message body — the
-    # CAURA-595 design (Q1=C) accepts this in exchange for a
-    # stateless worker; the wire-level IAM includes a publisher binding
-    # on the target topic and a subscriber binding on the dedicated
-    # subscription. Enterprise Terraform derives matching twin resource
-    # bindings from the legacy mappings. The production worker also retains
-    # project-level Pub/Sub roles (tracked in caura-enterprise#1449), so the
-    # scoped bindings are not yet the sole enforcement boundary.
+    # Read-only compatibility with messages already on the subscription.
+    # New publishers leave these fields empty. Default dumps redact all keys.
+    encrypted_api_keys: dict[str, str] = Field(default_factory=dict, repr=False)
+    credential_error: bool = False
+
     openai_api_key: str | None = Field(default=None, repr=False)
     anthropic_api_key: str | None = Field(default=None, repr=False)
     openrouter_api_key: str | None = Field(default=None, repr=False)
     gemini_api_key: str | None = Field(default=None, repr=False)
 
     @field_serializer(
+        "encrypted_api_keys",
         "openai_api_key",
         "anthropic_api_key",
         "openrouter_api_key",
@@ -124,20 +104,18 @@ class MemoryEnrichRequest(BaseModel):
         when_used="always",
     )
     def _redact_secrets(
-        self, value: str | None, info: SerializationInfo
-    ) -> str | None:
-        """Redact API keys from ``model_dump()`` unless explicitly opted-in.
+        self, value: str | dict[str, str] | None, info: SerializationInfo
+    ) -> str | dict[str, str] | None:
+        """Redact by default. The publisher's wire context exposes ciphertext only.
 
-        Pub/Sub publish path passes
-        ``context={"include_secrets": True}`` so the wire payload
-        still carries the raw values; everything else (logs, audit,
-        ad-hoc ``json.dumps``) gets ``"***"``. ``None`` passes
-        through unchanged so an absent key stays distinguishable from
-        a redacted one.
+        ``include_secrets`` remains solely for older callers constructing legacy
+        payloads during the transition release; the new publisher never uses it.
         """
         if value is None:
             return None
         ctx = info.context or {}
+        if isinstance(value, dict):
+            return value if ctx.get("wire") else dict.fromkeys(value, "***")
         return value if ctx.get("include_secrets") else "***"
 
     # Pre-resolved fallback target — publisher calls

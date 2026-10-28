@@ -184,6 +184,23 @@ def _validate_startup_settings(app_settings) -> None:  # type: ignore[no-untyped
             "each write publishes would reach no subscriber. Set EVENT_BUS_BACKEND=pubsub with "
             "core-worker subscribed, or DEPLOYMENT_MODE=inline."
         )
+    from common.settings_crypto import SettingsCipher
+
+    key = app_settings.settings_encryption_key or ""
+    try:
+        SettingsCipher(key, _os.environ.get("SETTINGS_ENCRYPTION_PREVIOUS_KEYS", ""))
+    except ValueError:
+        if (
+            app_settings.environment == "production"
+            or _os.getenv("EVENT_BUS_BACKEND", "").lower() == "pubsub"
+            or _os.getenv("REQUIRE_SETTINGS_ENCRYPTION", "").lower() == "true"
+        ):
+            raise RuntimeError(
+                "SETTINGS_ENCRYPTION_KEY must be set to a valid Fernet key when encryption is required; configure legacy read keys before migration"
+            )
+        logger.warning(
+            "SETTINGS_ENCRYPTION_KEY is missing or invalid; provider key encryption is unavailable"
+        )
     if app_settings.environment == "development":
         return
     # Hosted from here: production, and ``sandbox``, which staging and every
@@ -231,10 +248,7 @@ def _validate_startup_settings(app_settings) -> None:  # type: ignore[no-untyped
             "fronted by the gateway."
         )
     if app_settings.environment != "production":
-        # ADMIN_API_KEY and SETTINGS_ENCRYPTION_KEY stay production-only, by
-        # decision: whether staging and the sandboxes set them lives in their
-        # Cloud Run state, outside this repo, and a guard that fails there takes
-        # the deployment down rather than warning.
+        # Non-production installs warn above; the admin guard remains production-only.
         return
     if _os.getenv("TESTING") == "1":
         # TESTING=1 registers the test-only ``/testing`` routes (time-warp

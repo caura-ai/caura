@@ -107,24 +107,26 @@ async def test_update_persists_overrides():
     tid = _tid()
     await update_settings(
         tid,
-        {"enrichment": {"provider": "vertex", "model": "gemini-2.0-flash"}},
+        {"enrichment": {"provider": "gemini", "model": "gemini-2.0-flash"}},
     )
 
     raw = await get_raw_settings(tid)
-    assert raw["enrichment"]["provider"] == "vertex"
+    assert raw["enrichment"]["provider"] == "gemini"
     assert raw["enrichment"]["model"] == "gemini-2.0-flash"
 
 
 async def test_update_merges_nested_keys():
     """Partial update of one nested key doesn't wipe sibling keys in the same block."""
     tid = _tid()
-    await update_settings(tid, {"enrichment": {"provider": "openai", "model": "gpt-4"}})
+    await update_settings(
+        tid, {"enrichment": {"provider": "openai", "model": "gpt-4o-mini"}}
+    )
     invalidate_cache(tid)
-    await update_settings(tid, {"enrichment": {"provider": "vertex"}})
+    await update_settings(tid, {"enrichment": {"provider": "gemini"}})
 
     raw = await get_raw_settings(tid)
-    assert raw["enrichment"]["provider"] == "vertex"
-    assert raw["enrichment"]["model"] == "gpt-4"  # preserved
+    assert raw["enrichment"]["provider"] == "gemini"
+    assert raw["enrichment"]["model"] == "gpt-4o-mini"  # preserved
 
 
 async def test_update_partial_preserves_other_features():
@@ -143,7 +145,7 @@ async def test_audit_row_written_on_change(db):
     tid = _tid()
     await update_settings(
         tid,
-        {"enrichment": {"provider": "vertex"}},
+        {"enrichment": {"provider": "gemini"}},
         changed_by="user-123",
     )
 
@@ -157,13 +159,13 @@ async def test_audit_row_written_on_change(db):
     row = result.first()
     assert row is not None
     assert row.changed_by == "user-123"
-    assert row.diff == {"enrichment.provider": [None, "vertex"]}
+    assert row.diff == {"enrichment.provider": [None, "gemini"]}
 
 
 async def test_audit_no_row_on_noop(db):
     """PUT with identical payload to the current state writes neither row."""
     tid = _tid()
-    await update_settings(tid, {"enrichment": {"provider": "vertex"}})
+    await update_settings(tid, {"enrichment": {"provider": "gemini"}})
 
     before = await db.execute(
         text("SELECT count(*) FROM organization_settings_audit WHERE org_id = :tid"),
@@ -172,7 +174,7 @@ async def test_audit_no_row_on_noop(db):
     before_count = before.scalar() or 0
 
     invalidate_cache(tid)
-    await update_settings(tid, {"enrichment": {"provider": "vertex"}})
+    await update_settings(tid, {"enrichment": {"provider": "gemini"}})
 
     after = await db.execute(
         text("SELECT count(*) FROM organization_settings_audit WHERE org_id = :tid"),

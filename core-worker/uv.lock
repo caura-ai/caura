@@ -321,6 +321,7 @@ version = "3.37.6"
 source = { editable = "." }
 dependencies = [
     { name = "cachetools" },
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "httpx2" },
@@ -366,6 +367,7 @@ vertex = [
 requires-dist = [
     { name = "cachetools", specifier = ">=7.1.7" },
     { name = "core-worker", extras = ["test", "pubsub"], marker = "extra == 'dev'" },
+    { name = "cryptography", specifier = ">=42.0" },
     { name = "ddtrace", marker = "extra == 'datadog'", specifier = ">=4.12.2" },
     { name = "fastapi", specifier = ">=0.141.1,<1" },
     { name = "google-cloud-pubsub", marker = "extra == 'pubsub'", specifier = ">=2.39.1,<3" },

@@ -540,6 +540,10 @@ class SettingsResponse(BaseModel):
     entity_blocklist: list[str]
     governance: dict
     api_keys: dict = Field(description="Per-tenant provider key overrides (open object).")
+    provider_credentials: dict | None = Field(
+        default=None,
+        description="Read-only encryption availability, provider credential source, and server-managed embedding status.",
+    )
 
 
 class FleetDistributionItem(BaseModel):

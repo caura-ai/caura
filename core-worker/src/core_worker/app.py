@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException
@@ -88,6 +89,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "would omit X-Storage-Secret and protected storage services would reject them"
         )
         raise RuntimeError("CORE_STORAGE_SHARED_SECRET is required for core-worker")
+
+    if os.environ.get("EVENT_BUS_BACKEND") == "pubsub":
+        from common.settings_crypto import cipher_from_environment
+
+        # No subscription work starts before the worker can read new credentials.
+        cipher_from_environment()
 
     # Eager platform-provider init: builds BOTH the embedding and LLM
     # singletons from ``PLATFORM_EMBEDDING_*`` / ``PLATFORM_LLM_*``. The
