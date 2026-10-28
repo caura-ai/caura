@@ -135,8 +135,9 @@ AUTH_FLEET_NODE_BOUND = "FLEET_NODE_BOUND_TO_OTHER_CREDENTIAL"
 # M-85 — an install credential with no install UUID has nothing a node can be
 # bound to, so it may not act as one.
 AUTH_INSTALL_UUID_MISSING = "INSTALL_UUID_MISSING"
-# M-86 — an agent or install credential's interview window for a fleet node
-# must cite an unused interview_request that was delivered to that node.
+# M-86 — an interview window for a fleet node must cite an unused
+# interview_request that was delivered to that node, whatever the credential
+# apart from the admin key.
 AUTH_INTERVIEW_REQUEST_REQUIRED = "INTERVIEW_REQUEST_REQUIRED"
 # g2.9 — the review of held memories (listing them, rolling a session back) is
 # a signed-in person's. An agent or an API key can't be given it, so the way
@@ -146,6 +147,10 @@ AUTH_PERSON_REQUIRED = "PERSON_REQUIRED"
 # refuses an install or cross-tenant credential. The way out is a credential of
 # that tenant alone: a tenant API key, or an admin's session.
 AUTH_CREDENTIAL_KIND_FORBIDDEN = "CREDENTIAL_KIND_FORBIDDEN"
+# The tenant's non-business content policy kept a memory to its writer, and an
+# edit asked to share it. The way out is the policy: while it says
+# ``keep_private`` the row stays private, whoever asks.
+AUTH_KEPT_PRIVATE_BY_POLICY = "KEPT_PRIVATE_BY_POLICY"
 
 
 # ── Code for the request-budget deadline (ax-0917-h-01/h-02) ──────────────

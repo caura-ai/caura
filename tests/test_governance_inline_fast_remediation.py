@@ -245,7 +245,7 @@ async def test_keep_private_downgrades_visibility_instead_of_dropping():
     )
     sc.soft_delete_memory.assert_not_awaited()
     assert any(
-        call.args[0] == str(mid) and call.args[2] == {"visibility": "scope_agent"}
+        call.args[0] == str(mid) and call.args[2].get("visibility") == "scope_agent"
         for call in sc.update_memory.await_args_list
         if len(call.args) > 2
     ), f"keep_private did not downgrade visibility: {sc.update_memory.await_args_list}"

@@ -41,7 +41,7 @@ AgentIdentity = NewType("AgentIdentity", str)
 DEFAULT_AGENT_ID = "mcp-agent"
 
 # Trust tier the insighter self-registers at: service level, granting cross-fleet
-# read (>=2, needed for scope='all') and write (>=3, it persists scope_org
+# read (>=2) and write (>=3, which scope='all' needs: it persists scope_org
 # insights). The automated path calls the service directly and bypasses the
 # route trust gate, so this is future-proofing for any gated re-route.
 INSIGHTER_TRUST_LEVEL = 3

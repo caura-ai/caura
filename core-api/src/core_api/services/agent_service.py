@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from common.constants import LIVE_MEMORY_STATUSES
 from core_api.agent_ids import AgentIdentity, canonical_service_agent_id
 from core_api.clients.storage_client import get_storage_client
-from core_api.constants import DEFAULT_TRUST_LEVEL
+from core_api.constants import DEFAULT_TRUST_LEVEL, MEMORY_VISIBILITY_SCOPE_ORG
 from core_api.errors import (
     AUTH_AGENT_IDENTITY_MISMATCH,
     AUTH_AGENT_NOT_REGISTERED,
@@ -446,6 +446,41 @@ async def enforce_fleet_write(
     return agent
 
 
+async def enforce_visibility_write(
+    tenant_id: str,
+    agent_id: str,
+    visibility: str | None,
+    *,
+    agent: dict | None = None,
+) -> None:
+    """Enforce the visibility tier an AGENT writes a memory at.
+
+    Every fleet of the tenant reads a ``scope_org`` row, so writing one is a
+    write into every fleet, and the ladder keeps that for level 3, as
+    ``enforce_fleet_write`` does for a row placed in another fleet. The tier is
+    the writer's choice on every write surface, so without this a level-1 agent
+    reached every fleet by naming ``scope_org`` where naming another fleet is
+    refused. ``scope_team`` and ``scope_agent`` stay within the writer's reach
+    and pass.
+
+    ``agent`` is the row the write path already holds for ``agent_id``; it is
+    looked up when not given. An unregistered agent has no level and is refused.
+    """
+    if visibility != MEMORY_VISIBILITY_SCOPE_ORG:
+        return
+    if agent is None:
+        agent = await lookup_agent(tenant_id, agent_id, read=False)
+    if not agent or agent.get("trust_level", 0) < 3:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_FLEET_SCOPE_FORBIDDEN,
+                f"visibility 'scope_org' is read by every fleet of the tenant; agent '{agent_id}' "
+                "needs trust level 3 to write it. Use 'scope_team' to share within your fleet.",
+            ),
+        )
+
+
 async def enforce_crystallize(tenant_id: str, agent_id: AgentIdentity) -> None:
     """Enforce starting a crystallization run for an AGENT credential.
 
@@ -458,7 +493,7 @@ async def enforce_crystallize(tenant_id: str, agent_id: AgentIdentity) -> None:
     ``enforce_delete`` refuses it. Same contract as that gate: invoke only for an
     authenticated agent identity.
     """
-    agent = await lookup_agent(tenant_id, agent_id)
+    agent = await lookup_agent(tenant_id, agent_id, read=False)
     if not agent:
         raise HTTPException(
             status_code=403,
@@ -473,6 +508,30 @@ async def enforce_crystallize(tenant_id: str, agent_id: AgentIdentity) -> None:
             detail=coded_detail(
                 AUTH_AGENT_TRUST_TOO_LOW,
                 f"Agent '{agent_id}' needs trust level 3 to start a crystallization run.",
+            ),
+        )
+
+
+def refuse_restricted_reader(agent: dict | None, agent_id: str) -> None:
+    """Refuse a read by an agent at trust level 0.
+
+    Level 0 is "restricted: no read or write access": the way an admin disables
+    an agent, and where ``agents.require_agent_approval`` holds a new one until
+    it is approved. The write paths refuse it, and so do the trust-gated reads
+    (``require_trust``); the search-shaped and list-shaped reads call this so
+    that none of them is the way round the others.
+
+    ``agent`` is the caller's row as the route already read it. An unregistered
+    identity (``None``) has no level and is not refused here: registration
+    happens on writes, and the reads keep their soft-pass for it.
+    """
+    if agent and agent.get("trust_level", 0) < 1:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW,
+                f"Agent '{agent_id}' is restricted (trust level 0) and cannot read memories. "
+                "Contact the tenant admin to set trust_level >= 1.",
             ),
         )
 
@@ -712,11 +771,10 @@ async def authorize_memory_access(
         if is_install_credential and visibility == "scope_agent":
             return await install_owns_agent(tenant_id, owner_agent_id, install_uuid)
         return True
-    # scope_team / unknown visibility is fleet-gated by the trust ladder, which
-    # needs the caller's agent row; the other two branches need none.
-    agent: dict | None = None
-    if visibility not in ("scope_agent", "scope_org"):
-        agent = await lookup_agent(tenant_id, caller_agent_id)
+    # Every visibility needs the caller's row: scope_team is fleet-gated by the
+    # trust ladder, and an agent at trust 0 reads no row of any visibility. From
+    # the primary, so a just-disabled agent is not served by a lagging replica.
+    agent = await lookup_agent(tenant_id, caller_agent_id, read=False)
     return memory_access_allowed_for_agent(
         agent,
         caller_agent_id,
@@ -756,7 +814,13 @@ def memory_access_allowed_for_agent(
     read is a different author (M-94). Both are required, so no caller can
     leave the pairing out; ``caller_tenant_id=None`` pairs nothing, for a caller
     with no home tenant.
+
+    A registered agent at trust 0 may access no row, its own private ones
+    included (:func:`refuse_restricted_reader`). Its writes are refused before
+    this by the write gates, so here that is the read half.
     """
+    if agent and agent.get("trust_level", 0) < 1:
+        return False
     if visibility == "scope_agent":
         if caller_tenant_id and row_tenant_id != caller_tenant_id:
             return False
@@ -798,7 +862,8 @@ async def memory_reader(
         authors = {row.get("agent_id") for row in rows if row.get("visibility") == "scope_agent"}
         owned = {a for a in authors if await install_owns_agent(tenant_id, a, install_uuid)}
         return lambda row: row.get("visibility") != "scope_agent" or row.get("agent_id") in owned
-    agent = await lookup_agent(tenant_id, caller_agent_id)
+    # From the primary, as ``authorize_memory_access`` reads it.
+    agent = await lookup_agent(tenant_id, caller_agent_id, read=False)
 
     def can_read(row: dict) -> bool:
         return memory_access_allowed_for_agent(
@@ -832,8 +897,12 @@ async def enforce_delete(
     it: a gate a caller can opt into by naming an identity is not a gate. See
     ``routes.memories.delete_memory`` and the three MCP sites in
     ``mcp_server`` for the guard shape this contract expects.
+
+    The agent row is read from the primary: a demotion lands there, and a
+    replica that has not caught up would let the demoted agent delete for as
+    long as it lags.
     """
-    agent = await lookup_agent(tenant_id, agent_id)
+    agent = await lookup_agent(tenant_id, agent_id, read=False)
     if not agent:
         raise HTTPException(
             status_code=403,
@@ -933,8 +1002,11 @@ async def enforce_update(
     agent_id: str,
     memory_owner_agent_id: str | None,
 ) -> None:
-    """Enforce update permissions. Level 0-2 can only update own memories; level 3 can update any."""
-    agent = await lookup_agent(tenant_id, agent_id)
+    """Enforce update permissions. Level 0-2 can only update own memories; level 3 can update any.
+
+    The agent row comes from the primary, as in ``enforce_delete``.
+    """
+    agent = await lookup_agent(tenant_id, agent_id, read=False)
     if not agent:
         raise HTTPException(
             status_code=403,

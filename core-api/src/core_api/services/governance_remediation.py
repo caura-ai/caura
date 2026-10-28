@@ -30,8 +30,26 @@ from core_api.services.governance_gate import (
     llm_pii_audit_detail,
     nonbusiness_audit_detail,
 )
+from core_api.services.system_metadata import NONBUSINESS_KEPT_PRIVATE_KEY, SYSTEM_NAMESPACE
 
 logger = logging.getLogger(__name__)
+
+
+def _keep_private_patch() -> dict:
+    """Narrow a row to its writer and mark it kept private.
+
+    ``GovernanceDecision`` marks the rows it keeps private at write time; this
+    marks the ones narrowed after it, so the edit path can tell them apart and
+    keep them narrowed while the policy stands. Storage merges ``_system`` one
+    level deep, so the mark joins the namespace rather than replacing it.
+    """
+    return {
+        "visibility": "scope_agent",
+        "metadata_patch": {
+            NONBUSINESS_KEPT_PRIVATE_KEY: True,
+            SYSTEM_NAMESPACE: {NONBUSINESS_KEPT_PRIVATE_KEY: True},
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -318,7 +336,7 @@ async def _privatise_children(
             failed.append("<no id>")
             continue
         try:
-            await sc.update_memory(cid, tenant_id, {"visibility": "scope_agent"})
+            await sc.update_memory(cid, tenant_id, _keep_private_patch())
             detail = detail_for(child.get("content") or "")
             detail["cascaded_from"] = parent_id
             await emit_governance_audit(
@@ -559,7 +577,7 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> RemediationOutco
             return RemediationOutcome(dropped=True)
         if nb_cfg.disposition == "keep_private":
             children = await _pre_verdict_children(sc, memory_id, tenant_id, md)
-            await sc.update_memory(memory_id, tenant_id, {"visibility": "scope_agent"})
+            await sc.update_memory(memory_id, tenant_id, _keep_private_patch())
             # The parent's OWN audit comes before the cascade, and the ordering
             # is load-bearing rather than tidy. ``_privatise_children`` raises
             # when a child fails, so with the cascade in between, one failed

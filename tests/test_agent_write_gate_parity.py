@@ -25,7 +25,11 @@ Each route here held an agent-scoped credential to less than its neighbours:
   service's own collections (M-86).
 
 Tenant credentials (no agent identity) keep their tenant-wide authority on
-every one of these routes; each group pins that alongside the new gate.
+every one of these routes; each group pins that alongside the new gate. The one
+exception is the interview stream: a fleet node's window cites the
+``interview_request`` the node was sent, and an adapter stream is continued
+only as the agent that last advanced it, whatever the credential, because a
+watermark that only moves forward is not undone by authority to write.
 
 Agent rows are seeded through the storage client (``sc``) so the in-process
 storage app sees them; ``as_auth`` stands in for the gateway's header-trust
@@ -664,7 +668,9 @@ async def test_search_first_touch_registers_at_trust_0_under_approval(
     resp = await client.post(
         "/api/v1/search", json={"tenant_id": tenant, "query": "anything"}
     )
-    assert resp.status_code == 200, resp.text
+    # Registered at 0, and so refused the read it registered on: an agent
+    # awaiting approval reads nothing (tests/test_trust_zero_reads_nothing.py).
+    assert resp.status_code == 403, resp.text
 
     agent = await sc.get_agent("newbie", tenant, read=False)
     assert agent is not None
@@ -912,12 +918,47 @@ async def test_a_request_for_another_node_admits_nothing(
     assert await interview_service.read_watermark(tenant, node_id) == -1
 
 
-async def test_a_tenant_credential_submits_a_fleet_node_window_directly(
+async def test_a_tenant_credential_cannot_submit_a_fleet_node_window_uninvited(
     client, as_auth, interview_tenant
 ):
-    """OVER-REFUSAL GUARD: tenant credentials keep tenant-wide authority."""
+    """A tenant credential cites the request too. Its tenant-wide authority
+    is to write memories, not to move a node's cursor past events that node
+    has not reported: the watermark only moves forward."""
     tenant, node_id = interview_tenant
     as_auth(tenant)
+
+    resp = await client.post(
+        "/api/v1/interview/submit", json=_submit(tenant, node_id, "worker")
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == errors.AUTH_INTERVIEW_REQUEST_REQUIRED
+    assert await interview_service.read_watermark(tenant, node_id) == -1
+
+
+async def test_a_tenant_credential_submits_the_window_it_was_asked_for(
+    client, as_auth, interview_tenant
+):
+    """OVER-REFUSAL GUARD: the plugin on a tenant key cites its request."""
+    tenant, node_id = interview_tenant
+    command_id = await _delivered_request(client, as_auth, tenant, node_id)
+    as_auth(tenant)
+
+    resp = await client.post(
+        "/api/v1/interview/submit",
+        json=_submit(tenant, node_id, "worker", command_id=command_id),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert await interview_service.read_watermark(tenant, node_id) == 2
+
+
+async def test_the_admin_key_submits_a_fleet_node_window_directly(
+    client, as_auth, interview_tenant
+):
+    """OVER-REFUSAL GUARD: the admin key is the operator's, as everywhere."""
+    tenant, node_id = interview_tenant
+    as_auth(tenant, is_admin=True)
 
     resp = await client.post(
         "/api/v1/interview/submit", json=_submit(tenant, node_id, "worker")
@@ -978,6 +1019,27 @@ async def test_an_agent_cannot_continue_another_agents_adapter_stream(
     assert job is None
 
 
+async def test_a_tenant_credential_continues_its_own_adapter_stream(
+    client, as_auth, interview_tenant
+):
+    """OVER-REFUSAL GUARD: ``caura-interviewer`` on a tenant key keeps one agent."""
+    tenant, _node = interview_tenant
+    stream = _adapter_stream()
+    as_auth(tenant)
+    first = await client.post(
+        "/api/v1/interview/submit", json=_submit(tenant, stream, "owner")
+    )
+    assert first.status_code == 200, first.text
+
+    resp = await client.post(
+        "/api/v1/interview/submit",
+        json=_submit(tenant, stream, "owner", events=_events(start_seq=3)),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert await interview_service.read_watermark(tenant, stream) == 5
+
+
 async def test_an_install_cannot_continue_another_installs_adapter_stream(
     client, as_auth, interview_tenant
 ):
@@ -1015,9 +1077,11 @@ async def test_an_agent_continues_its_own_adapter_stream(
     assert await interview_service.read_watermark(tenant, stream) == 5
 
 
-async def test_a_tenant_credential_continues_any_adapter_stream(
+async def test_a_tenant_credential_cannot_continue_another_agents_adapter_stream(
     client, as_auth, sc, interview_tenant
 ):
+    """A tenant credential names the agent it writes as, so naming another
+    agent than the stream's is the jump an agent credential is refused."""
     tenant, _node = interview_tenant
     await _seed_agent(sc, tenant, "owner", 1)
     stream = _adapter_stream()
@@ -1032,8 +1096,8 @@ async def test_a_tenant_credential_continues_any_adapter_stream(
         "/api/v1/interview/submit",
         json=_submit(tenant, stream, "peer", events=_events(start_seq=3)),
     )
-    assert resp.status_code == 200, resp.text
-    assert await interview_service.read_watermark(tenant, stream) == 5
+    assert resp.status_code == 409, resp.text
+    assert await interview_service.read_watermark(tenant, stream) == 2
 
 
 # ---------------------------------------------------------------------------

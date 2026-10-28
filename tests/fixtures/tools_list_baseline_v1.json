@@ -179,7 +179,7 @@
   {
     "name": "caura_evolve",
     "title": null,
-    "description": "Report what happened after acting on memories. related_ids = the memory UUIDs that influenced the action (use IDs from your most recent caura_recall). scope: agent (default, trust ≥ 1)|fleet|all (trust ≥ 2; fleet_id required when scope='fleet'). Weight adjustments and rule generation are scoped — agents can only evolve memories they own (scope=agent), their fleet (scope=fleet), or any (scope=all).",
+    "description": "Report what happened after acting on memories. related_ids = the memory UUIDs that influenced the action (use IDs from your most recent caura_recall). scope: agent (default, trust ≥ 1)|fleet (trust ≥ 2; fleet_id required)|all (trust ≥ 3). Weight adjustments and rule generation are scoped — agents can only evolve memories they own (scope=agent), their fleet (scope=fleet), or any (scope=all).",
     "inputSchema": {
       "properties": {
         "outcome": {
@@ -264,7 +264,7 @@
   {
     "name": "caura_insights",
     "title": null,
-    "description": "Reflect over your memory store. scope: agent (default, trust ≥ 1)|fleet|all (trust ≥ 2; divergence requires fleet/all). Findings are saved as insight-type memories for future runs to build on.",
+    "description": "Reflect over your memory store. scope: agent (default, trust ≥ 1)|fleet (trust ≥ 2)|all (trust ≥ 3; divergence requires fleet/all). Findings are saved as insight-type memories for future runs to build on.",
     "inputSchema": {
       "properties": {
         "focus": {
@@ -1165,7 +1165,7 @@
   {
     "name": "caura_write",
     "title": null,
-    "description": "Store NEW memories. Provide exactly one of {content, items} (batch ≤100). System auto-classifies type, importance, title, dates. visibility: scope_team (default) / scope_org / scope_agent. Prefer team/org for sharing. If the response has metadata.embedding_pending=true the memory is saved but not yet semantically searchable (~15-20s); it is already findable by keyword and in caura_list, so do not re-write it. Pass write_mode='strong' to embed inline when you must recall it now. Unknown keys are rejected, not ignored: put your own under metadata.",
+    "description": "Store NEW memories. Provide exactly one of {content, items} (batch ≤100). System auto-classifies type, importance, title, dates. visibility: scope_team (default) / scope_agent / scope_org (trust ≥ 3). Prefer team for sharing. If the response has metadata.embedding_pending=true the memory is saved but not yet semantically searchable (~15-20s); it is already findable by keyword and in caura_list, so do not re-write it. Pass write_mode='strong' to embed inline when you must recall it now. Unknown keys are rejected, not ignored: put your own under metadata.",
     "inputSchema": {
       "properties": {
         "content": {

@@ -322,6 +322,12 @@ async def test_rest_memories_list_emits_cross_tenant_audit(monkeypatch):
     from core_api.routes import memories as memories_routes
 
     spy = _spy_log(monkeypatch, memories_routes)
+    # The read gate looks the caller up (an agent at trust 0 reads nothing).
+    monkeypatch.setattr(
+        memories_routes,
+        "lookup_agent",
+        AsyncMock(return_value={"agent_id": "a1", "fleet_id": None, "trust_level": 1}),
+    )
     # The route does a late import of ``memory_repo`` so we patch it
     # at the source.
     monkeypatch.setattr(

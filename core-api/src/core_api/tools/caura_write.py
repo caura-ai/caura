@@ -13,7 +13,7 @@ from ._types import ToolSpec
 _DESCRIPTION = (
     "Store NEW memories. Provide exactly one of {content, items} (batch ≤100). "
     "System auto-classifies type, importance, title, dates. "
-    "visibility: scope_team (default) / scope_org / scope_agent. Prefer team/org for sharing. "
+    "visibility: scope_team (default) / scope_agent / scope_org (trust ≥ 3). Prefer team for sharing. "
     "If the response has metadata.embedding_pending=true the memory is saved but not yet "
     "semantically searchable (~15-20s); it is already findable by keyword and in caura_list, "
     "so do not re-write it. Pass write_mode='strong' to embed inline when you must recall it now. "

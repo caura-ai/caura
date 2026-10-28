@@ -113,6 +113,11 @@ PLATFORM_ONLY_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# The mark the non-business ``keep_private`` disposition leaves on a row it
+# narrowed to its writer (``GovernanceDecision``, the fast-mode remediation).
+# The edit path reads it to keep the row narrowed while the policy stands.
+NONBUSINESS_KEPT_PRIVATE_KEY = "nonbusiness_kept_private"
+
 # Caller-ownable keys the platform also produces.
 CALLER_OWNABLE_KEYS: frozenset[str] = frozenset({"summary", "tags"})
 

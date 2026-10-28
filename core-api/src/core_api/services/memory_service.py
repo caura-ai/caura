@@ -79,6 +79,7 @@ from core_api.constants import (
     MEMORY_STATUSES,
     MEMORY_TYPES,
     MEMORY_VISIBILITIES,
+    MEMORY_VISIBILITY_SCOPE_AGENT,
     MIN_SEARCH_SIMILARITY,
     OPENAI_EMBEDDING_MODEL,
     RECALL_BOOST_CAP,
@@ -91,6 +92,7 @@ from core_api.constants import (
 )
 from core_api.errors import (
     AUTH_FLEET_SCOPE_FORBIDDEN,
+    AUTH_KEPT_PRIVATE_BY_POLICY,
     coded_detail,
 )
 from core_api.request_bounds import validate_write_fields
@@ -116,11 +118,13 @@ from core_api.services.contradiction_detector import _pick_older, revert_unheld_
 from core_api.services.entity_extraction_worker import process_entity_extraction
 from core_api.services.entity_tokens import extract_entity_tokens
 from core_api.services.governance_gate import (
+    ACTION_NB_KEEP_PRIVATE,
     ACTION_PII_DROP,
     ACTION_PII_FLAG,
     ACTION_PII_MASK,
     emit_governance_audit,
     mark_pii_flagged,
+    nonbusiness_audit_detail,
     pii_audit_detail,
 )
 from core_api.services.hooks import get_hooks
@@ -128,6 +132,7 @@ from core_api.services.organization_settings import ResolvedConfig, validate_sea
 from core_api.services.rules_receipt import RULES_RECEIPT_KEY, rules_receipt_from
 from core_api.services.system_metadata import (
     CALLER_OWNABLE_KEYS,
+    NONBUSINESS_KEPT_PRIVATE_KEY,
     SYSTEM_NAMESPACE,
     caller_owned_keys,
     extract_system_metadata,
@@ -3849,6 +3854,21 @@ async def _record_enrich_stranded(
     )
 
 
+def _kept_private(metadata: dict | None) -> bool:
+    """Whether the non-business policy narrowed this row to its writer.
+
+    ``GovernanceDecision`` and the fast-mode remediation both mark it, in the
+    legacy top-level key and in ``_system``. The key is platform-only, so no
+    caller can set or clear it.
+    """
+    if not metadata:
+        return False
+    nested = metadata.get(SYSTEM_NAMESPACE)
+    return metadata.get(NONBUSINESS_KEPT_PRIVATE_KEY) is True or (
+        isinstance(nested, dict) and nested.get(NONBUSINESS_KEPT_PRIVATE_KEY) is True
+    )
+
+
 def _merged_metadata(stored: dict, metadata_patch: dict) -> dict:
     """``metadata_patch`` over ``stored``, merged the way storage merges it.
 
@@ -4471,6 +4491,7 @@ async def update_memory(
             authorize_memory_access,
             enforce_transition,
             enforce_update,
+            enforce_visibility_write,
         )
 
         # An edit that sets a new status changes it as ``PATCH /memories/{id}/status``
@@ -4500,6 +4521,11 @@ async def update_memory(
                     f"Agent '{agent_id}' cannot modify memory in fleet '{mem.get('fleet_id')}'.",
                 ),
             )
+        # Every fleet reads a scope_org row, so an edit that leaves the row
+        # there needs what creating one needs (trust 3): setting scope_org, or
+        # editing a row that already is. Narrowing it away needs nothing more.
+        visibility_after = data.visibility if "visibility" in data.model_fields_set else mem.get("visibility")
+        await enforce_visibility_write(tenant_id, agent_id, visibility_after)
     elif is_install_credential:
         from core_api.services.agent_service import authorize_memory_access
 
@@ -4552,6 +4578,36 @@ async def update_memory(
             status_code=400,
             detail=f"{', '.join(nulled)} cannot be null; omit the field to leave it unchanged",
         )
+
+    # The non-business policy kept this row to its writer. Widening it changes
+    # no content, so nothing would run the policy again: while the tenant's
+    # policy still keeps such content private, the widening is refused, for any
+    # credential. An admin who wants the row shared changes the policy.
+    if (
+        "visibility" in fields_set
+        and data.visibility != MEMORY_VISIBILITY_SCOPE_AGENT
+        and _kept_private(mem.get("metadata_") or mem.get("metadata"))
+    ):
+        nb_cfg = (await resolve_config(tenant_id)).governance_non_business
+        if nb_cfg.enabled and nb_cfg.disposition == "keep_private":
+            await emit_governance_audit(
+                tenant_id=tenant_id,
+                agent_id=agent_id or mem.get("agent_id"),
+                action=ACTION_NB_KEEP_PRIVATE,
+                detail={
+                    **nonbusiness_audit_detail(ACTION_NB_KEEP_PRIVATE, mem.get("content") or "", None),
+                    "refused_visibility": data.visibility,
+                },
+                resource_id=str(memory_id),
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    AUTH_KEPT_PRIVATE_BY_POLICY,
+                    "This memory was kept private by the tenant's non-business content policy "
+                    "and cannot be shared while that policy stands.",
+                ),
+            )
 
     # Snapshot old values for audit diff
     changes: dict = {}

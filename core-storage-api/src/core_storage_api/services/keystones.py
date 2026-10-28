@@ -151,7 +151,10 @@ async def list_keystones(
     truncation hides governance gaps.
     """
     stmt = _list_statement(tenant_id=tenant_id, fleet_id=fleet_id, agent_id=agent_id)
-    async with get_read_session() as session:
+    # The primary, where a keystone set or deleted lands: from a replica that
+    # has not caught up, a revoked rule keeps being served, and a new one is
+    # missing, for as long as it lags.
+    async with get_session() as session:
         result = await session.execute(stmt)
         rows = list(result.scalars().all())
     truncated = len(rows) > KEYSTONE_MAX_RESULTS

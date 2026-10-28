@@ -86,6 +86,7 @@ _SPEC = ToolSpec(
         "FLEET_SCOPE_FORBIDDEN",
         "FORBIDDEN",
         "INVALID_ARGUMENTS",
+        "KEPT_PRIVATE_BY_POLICY",
         "MISSING_AGENT_ID",
         "NOT_FOUND",
         "ORG_ADMIN_REQUIRED",

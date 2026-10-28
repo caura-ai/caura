@@ -30,7 +30,7 @@ from core_api.errors import (
     coded_detail,
 )
 from core_api.services.agent_service import broker_owned_agent_id, enforce_broker_agent_ownership
-from core_api.services.trust_service import parse_trust_error, require_trust
+from core_api.services.trust_service import parse_trust_error, require_trust, run_scope_trust
 
 logger = logging.getLogger(__name__)
 
@@ -103,8 +103,8 @@ async def resolve_caller_and_gate(
     outcome or insights to a placeholder, or got a 403 naming an agent the
     caller never mentioned.
     Returns the resolved ``caller_agent_id``; raises 403 when the resolved agent
-    isn't registered or lacks the required trust (``min_level`` is 1 for
-    ``scope=agent``, else 2).
+    isn't registered or lacks the required trust (``run_scope_trust``: 1 for
+    ``scope=agent``, 2 for ``fleet``, 3 for ``all``).
 
     For an install-credential (broker) caller the resolved id first passes
     through the broker ownership gate (``broker_owned_agent_id``): a foreign or
@@ -152,7 +152,7 @@ async def resolve_caller_and_gate(
     if auth.is_install_credential:
         caller_agent_id = await broker_owned_agent_id(caller_agent_id, auth.install_uuid, tenant_id)
 
-    min_level = 1 if scope == "agent" else 2
+    min_level = run_scope_trust(scope)
     # Write paths must pin identity: outcome/insight memories + an audit-log row
     # are keyed to caller_agent_id, so an unregistered name corrupts the audit
     # trail. require_trust soft-passes a missing row (read ergonomics), so

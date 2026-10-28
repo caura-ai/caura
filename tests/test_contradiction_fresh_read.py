@@ -23,9 +23,12 @@ from core_storage_api.services import postgres_service as ps
 pytestmark = pytest.mark.unit
 
 
+# ``hybrid`` serves the writer's traffic too, on one URL, so it cannot tell a
+# caller that asked for the writer from one that did not: it reads the primary.
+# Only a reader, which serves no writer traffic, reads its replica.
 @pytest.mark.parametrize(
     ("role", "expected"),
-    [("writer", "primary"), ("reader", "replica"), ("hybrid", "replica")],
+    [("writer", "primary"), ("reader", "replica"), ("hybrid", "primary")],
 )
 async def test_by_id_read_uses_the_primary_on_the_writer(monkeypatch, role, expected):
     used: list[str] = []

@@ -33,7 +33,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
 def _patch_lookup(monkeypatch, return_value):
-    async def _fake_lookup(tenant_id, agent_id):
+    async def _fake_lookup(tenant_id, agent_id, *, read=True):
         return return_value
 
     # require_trust does ``from core_api.services.agent_service import lookup_agent``

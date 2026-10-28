@@ -97,13 +97,14 @@ from core_api.services.agent_service import (
     broker_label,
     broker_owned_agent_id,
     enforce_delete,
-    enforce_fleet_read,
     enforce_fleet_read_many,
     enforce_fleet_write,
     enforce_transition,
+    enforce_visibility_write,
     get_or_create_agent,
     lookup_agent,
     memory_reader,
+    refuse_restricted_reader,
     resolve_read_fleet_gate,
     resolve_write_agent,
 )
@@ -338,23 +339,37 @@ async def _gate_fleet_read(
     caller_agent_id: AgentIdentity | None,
     fleet_id: str | None,
 ) -> None:
-    """Apply the fleet-read trust gate, under the condition it needs to be
-    meaningful — in one place, because three read routes had to agree on it.
+    """Apply the read trust gates, under the condition they need to be
+    meaningful — in one place, because four read routes had to agree on it.
 
-    The four-term condition is not a style choice. The gate resolves a trust
-    ladder for a *verifiable* caller, so it needs an authenticated tenant, a
-    resolved tenant to check against, an agent identity to resolve, and a fleet
-    to resolve it for. A tenant/user credential has no agent identity and is
-    tenant-wide by design; there is nothing for the ladder to rank.
+    The condition is not a style choice. The gates resolve a trust ladder for a
+    *verifiable* caller, so they need an authenticated tenant, a resolved tenant
+    to check against, and an agent identity to resolve. A tenant/user credential
+    that names no agent is tenant-wide by design; there is nothing to rank.
+
+    Two gates. An agent at trust 0 reads nothing, with or without a fleet
+    (``refuse_restricted_reader``), unless the caller is a signed-in person: a
+    person's ``agent_id`` filters the rows, it does not choose what the person
+    may see, so a disabled agent's rows stay listable from the dashboard. And a
+    named fleet goes through the cross-fleet ladder (``enforce_fleet_read_many``).
 
     ``_resolve_scoped_read`` below states this same condition in prose as the
     thing its callers are expected to match. This makes the prose executable:
-    the list, stats and count routes now match it by calling one function
-    rather than by three copies staying in step. Count is the route that proves
-    the point — it is the neighbour that never got the gate at all.
+    the list, stats, count and map routes match it by calling one function
+    rather than by copies staying in step. Count is the route that proves the
+    point — it is the neighbour that never got the gate at all.
     """
-    if auth.tenant_id and tenant_id and caller_agent_id and fleet_id:
-        await enforce_fleet_read(tenant_id, caller_agent_id, fleet_id)
+    if not (auth.tenant_id and tenant_id and caller_agent_id):
+        return
+    if auth.is_person and not fleet_id:
+        return
+    # The primary, as for every trust decision: trust 0 disables an agent, and
+    # a replica that lags would let a just-disabled one keep reading.
+    agent = await lookup_agent(tenant_id, caller_agent_id, read=False)
+    if not auth.is_person:
+        refuse_restricted_reader(agent, caller_agent_id)
+    if fleet_id and agent is not None:
+        await enforce_fleet_read_many(tenant_id, caller_agent_id, [fleet_id], agent=agent)
 
 
 async def _effective_include_deleted(auth: AuthContext, include_deleted: bool) -> bool:
@@ -1724,6 +1739,8 @@ async def _write_memory_inner(
     usage = None
     if auth.tenant_id:  # skip enforcement + metering for admin
         await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id, agent=agent)
+        # scope_org reaches every fleet, so it needs what a cross-fleet write needs.
+        await enforce_visibility_write(body.tenant_id, body.agent_id, body.visibility, agent=agent)
     _observe_rest_reserved_write(auth, body.agent_id or chosen_agent_id)
     result = await create_memory(body)
     # Metered only after the write succeeded, like the bulk route: a write that
@@ -2003,6 +2020,8 @@ async def _write_memories_bulk_inner(
         body.fleet_id = agent["fleet_id"]
     if auth.tenant_id:  # skip enforcement for admin
         await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id, agent=agent)
+        # The batch's one visibility, as on the single write.
+        await enforce_visibility_write(body.tenant_id, body.agent_id, body.visibility, agent=agent)
 
     # Metering deliberately does NOT happen here — see after the write. This
     # used to be ``usage = await bulk_check_and_increment(...)`` on this line,
@@ -2894,6 +2913,10 @@ async def _search_inner(
             _agent = await get_or_create_agent(
                 body.tenant_id, eff_agent_id, fleet_id_hint, registration_ctx=_agent_reg
             )
+            # Trust 0 reads nothing; a person reading as a named agent is not
+            # that agent (see ``_gate_fleet_read``).
+            if not auth.is_person:
+                refuse_restricted_reader(_agent, eff_agent_id)
             if not body.fleet_ids and _agent.get("fleet_id") and _agent.get("trust_level", 0) < 2:
                 body.fleet_ids = [_agent["fleet_id"]]  # Force fleet scoping for trust < 2
             # EVERY requested fleet, not just the single-fleet case. Gating only
@@ -3350,6 +3373,9 @@ async def recall_endpoint(
             _agent = await get_or_create_agent(
                 body.tenant_id, eff_agent_id, fleet_id_hint, registration_ctx=_agent_reg
             )
+            # Trust 0 reads nothing, as on /search.
+            if not auth.is_person:
+                refuse_restricted_reader(_agent, eff_agent_id)
             if not body.fleet_ids and _agent.get("fleet_id") and _agent.get("trust_level", 0) < 2:
                 body.fleet_ids = [_agent["fleet_id"]]
             # Both halves matter and they are independent: EVERY requested

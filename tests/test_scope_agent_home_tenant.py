@@ -20,8 +20,18 @@ from fastapi import Request, Response
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
-async def test_by_id_gate_refuses_a_sibling_tenants_private_row():
+async def test_by_id_gate_refuses_a_sibling_tenants_private_row(monkeypatch):
+    from core_api.services import agent_service
     from core_api.services.agent_service import authorize_memory_access
+
+    # The gate reads the caller's row (an agent at trust 0 reads nothing).
+    monkeypatch.setattr(
+        agent_service,
+        "lookup_agent",
+        AsyncMock(
+            return_value={"agent_id": "rollup-bot", "fleet_id": None, "trust_level": 1}
+        ),
+    )
 
     kwargs = {
         "visibility": "scope_agent",

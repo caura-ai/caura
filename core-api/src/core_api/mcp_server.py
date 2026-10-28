@@ -90,8 +90,10 @@ from core_api.services.agent_service import (
     enforce_fleet_read_many,
     enforce_fleet_write,
     enforce_transition,
+    enforce_visibility_write,
     lookup_agent,
     memory_reader,
+    refuse_restricted_reader,
     resolve_write_agent,
 )
 
@@ -130,7 +132,7 @@ from core_api.services.recall_service import summarize_memories
 # Re-export so existing `monkeypatch.setattr(mcp_server, "_require_trust", ...)`
 # sites in tests keep working; production callers should import ``require_trust``
 # directly from ``core_api.services.trust_service``.
-from core_api.services.trust_service import parse_trust_error
+from core_api.services.trust_service import parse_trust_error, run_scope_trust
 from core_api.services.trust_service import require_trust as _require_trust
 from core_api.services.usage_service import (
     MutatingOp,
@@ -1602,8 +1604,13 @@ async def caura_recall(
         # (search + audit) widens via ``readable_tenant_ids`` exactly as before.
         config = await resolve_config(tenant_id)
         # Agent profile + fleet-scope signals are HOME-tenant only — never
-        # widened by the readable set.
-        _ag = await lookup_agent(tenant_id, agent_id)
+        # widened by the readable set. From the primary: the row decides the
+        # trust-0 refusal below, and a lagging replica would let a
+        # just-disabled agent keep recalling.
+        _ag = await lookup_agent(tenant_id, agent_id, read=False)
+        # Trust 0 reads nothing (parity with REST /search and /recall). Before
+        # the meter, so a refused recall is not charged.
+        refuse_restricted_reader(_ag, agent_id)
         agent_profile = None
         if _ag:
             agent_profile = _ag.get("search_profile")
@@ -1912,6 +1919,9 @@ async def caura_write(
                     ),
                     t0,
                 )
+            # scope_org reaches every fleet: trust 3, as on REST. One visibility
+            # covers the single write and the batch alike.
+            await enforce_visibility_write(tenant_id, agent_id, visibility, agent=agent)
             # Trust gating for cross-fleet writes — same surface the REST write
             # path uses — on the row ``resolve_write_agent`` registered and
             # returned above, which is not read a second time (L-178).
@@ -4102,8 +4112,8 @@ async def caura_insights(
     """Analyze the memory store for patterns, contradictions, stale knowledge,
     or unexpected clusters; persist findings as ``insight`` memories.
     Consolidates onto the Karpathy Loop reflection step.
-    scope='agent' (default) requires trust ≥ 1; scope='fleet'/'all' requires
-    trust ≥ 2.
+    scope='agent' (default) requires trust ≥ 1, scope='fleet' trust ≥ 2 and
+    scope='all' trust ≥ 3: its findings are saved as ``scope_org`` rows.
     """
     t0 = time.perf_counter()
     if err := _check_auth():
@@ -4144,8 +4154,8 @@ async def caura_insights(
             t0,
         )
 
-    # Dynamic trust: scope='agent' requires trust ≥ 1, 'fleet'/'all' requires ≥ 2.
-    min_level = 1 if scope == "agent" else 2
+    # Dynamic trust, as REST: 1 for scope='agent', 2 for 'fleet', 3 for 'all'.
+    min_level = run_scope_trust(scope)
 
     # Audit finding P3 (insights portion): the prior implementation held a
     # single ``_mcp_session()`` open across the multi-second LLM analysis
@@ -4305,7 +4315,8 @@ async def caura_evolve(
     Karpathy Loop feedback edge.
 
     scope='agent' (default) requires trust ≥ 1 and limits adjustments to
-    memories the caller wrote. scope='fleet'/'all' requires trust ≥ 2.
+    memories the caller wrote. scope='fleet' requires trust ≥ 2 and
+    scope='all' trust ≥ 3: its outcome and rule memories are ``scope_org``.
 
     ``idempotency_key`` makes a retry safe (L-30, Eldad 2026-10-11). Every
     report adjusts weights, by design: the same outcome reported after two
@@ -4349,8 +4360,8 @@ async def caura_evolve(
             _error_response("INVALID_ARGUMENTS", "fleet_id is required when scope is 'fleet'."), t0
         )
 
-    # Dynamic trust: scope='agent' requires trust ≥ 1, 'fleet'/'all' requires ≥ 2.
-    min_level = 1 if scope == "agent" else 2
+    # Dynamic trust, as REST: 1 for scope='agent', 2 for 'fleet', 3 for 'all'.
+    min_level = run_scope_trust(scope)
 
     # Audit finding P3 (evolve portion): prior implementation held a
     # single ``_mcp_session()`` open across the rule-generation LLM

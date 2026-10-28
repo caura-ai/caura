@@ -4,7 +4,8 @@ Records a real-world outcome against the memories that influenced an
 action: adjusts weights, optionally generates preventive rules on
 failure/partial outcomes.
 
-scope='agent' (default) at trust ≥ 1; scope='fleet'/'all' requires trust ≥ 2.
+scope='agent' (default) at trust ≥ 1, scope='fleet' at trust ≥ 2, scope='all' at
+trust ≥ 3 (its outcome and rule memories are saved as scope_org rows).
 Exposed via both MCP and REST (``/api/v1/evolve/report``).
 """
 
@@ -17,8 +18,8 @@ from ._types import ToolSpec
 _DESCRIPTION = (
     "Report what happened after acting on memories. "
     "related_ids = the memory UUIDs that influenced the action (use IDs from your most recent "
-    "caura_recall). scope: agent (default, trust ≥ 1)|fleet|all (trust ≥ 2; fleet_id required "
-    "when scope='fleet'). Weight adjustments and rule generation are scoped — agents can only "
+    "caura_recall). scope: agent (default, trust ≥ 1)|fleet (trust ≥ 2; fleet_id required)|"
+    "all (trust ≥ 3). Weight adjustments and rule generation are scoped — agents can only "
     "evolve memories they own (scope=agent), their fleet (scope=fleet), or any (scope=all)."
 )
 

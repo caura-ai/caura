@@ -342,12 +342,14 @@ Caura enforces a 4-tier trust system for agents. Agents are auto-registered on t
 | 0 | `restricted` | No read or write access. Use to temporarily disable an agent |
 | 1 | `standard` | Read and write within own fleet only (default for new agents) |
 | 2 | `cross_fleet` | Read across all fleets in the tenant; write within own fleet only |
-| 3 | `admin` | Read and write across all fleets; can delete memories |
+| 3 | `admin` | Read and write across all fleets, `scope_org` memories included; can delete memories |
 
 ### How it works
 
 - On first write, the agent is auto-registered with trust level 1 and the `fleet_id` from that write becomes its "home fleet"
 - When the tenant setting `agents.require_agent_approval` is on, a new agent is registered at trust level 0 instead — on whichever call first names it (a write, a search or recall, a fleet heartbeat, `caura_tune`, a document write) — and stays there until an admin raises it
+- At trust level 0 an agent reads nothing as well as writing nothing. `POST /search`, `POST /recall`, `GET /memories` (with or without `scope`), `/memories/stats`, `/memories/count` and `/memories/field` answer 403 `AGENT_TRUST_TOO_LOW`; `caura_recall` returns `AGENT_TRUST_TOO_LOW` and `caura_list` / `caura_stats` return `FORBIDDEN`; a read by id (`GET /memories/{id}`, `caura_manage` op=read) answers 404. That includes an agent awaiting approval: a REST search or recall registers it at level 0 and is refused. Keystones stay readable. A signed-in person who filters by a restricted agent still sees its memories
+- Writing or editing a `scope_org` memory needs trust level 3 (see [Memory visibility](#memory-visibility)). So does `caura_insights` or `caura_evolve` with `scope=all`, which saves its findings or outcome as `scope_org`; `scope=fleet` needs level 2 and `scope=agent` level 1
 - Trust level is enforced on every API call — an agent at level 1 attempting a cross-fleet search gets a 403
 - Documents follow the delete bar: an agent below level 3 may create documents and update the ones it wrote or that another agent of its own fleet wrote, but replacing a document an agent of another fleet authored (or `force=true` on `POST /documents`) needs level 3. Documents with no recorded author stay writable. Graph writes (`POST /entities/upsert`, `POST /relations/upsert`) and document writes into a fleet other than the agent's own need level 3, as memory writes do
 - Soft-deleted rows (`include_deleted=true` on `GET /memories`, `GET /memories/stats`, `caura_list`, `caura_stats`) and `POST /ingest/undo/{run_id}` need level 3 for an agent credential
@@ -396,7 +398,7 @@ AFTER completing work:
 - Dates auto-extracted: "deadline March 30" → ts_valid_end
 - Contradictions auto-detected: conflicting older memories marked outdated
 - Long content (>2000 chars) is auto-chunked into atomic facts when the tenant turns auto-chunking on (off by default)
-- Set visibility: "scope_agent" (you only), "scope_team" (default), "scope_org" (all fleets)
+- Set visibility: "scope_agent" (you only), "scope_team" (default), "scope_org" (all fleets; needs trust level 3)
 - Optionally override `memory_type` with a caller-writeable type (`fact`,
   `episode`, `decision`, `preference`, `task`, `plan`, or `action`), plus
   `weight` and `status`. `outcome`, `rule`, and `insight` are server-reserved.
@@ -418,7 +420,7 @@ STATUS LIFECYCLE:
 
 VISIBILITY & CROSS-FLEET:
 - Default visibility is "scope_team" — shared within your fleet
-- Set visibility: "scope_org" to share across all fleets in the organization
+- Set visibility: "scope_org" to share across all fleets in the organization (needs trust level 3)
 - Set visibility: "scope_agent" for agent-only notes
 - Use fleet_ids in recall to query multiple fleets at once
 
@@ -448,7 +450,7 @@ OUTCOME REPORTING (Karpathy Loop):
 
 **Scenario:** Researcher discovers info, Planner uses it, Support benefits later.
 
-**Step 1 — Researcher stores a finding (visible to all fleets):**
+**Step 1 — Researcher stores a finding (visible to all fleets; the researcher is at trust level 3):**
 
 ```json
 {
@@ -659,6 +661,8 @@ Controls who can see a memory. Set on write via `visibility` field.
 | `scope_agent` | Only the creating agent | Personal notes, drafts, scratch work |
 | `scope_team` | All agents in the same fleet (default) | Team-scoped knowledge |
 | `scope_org` | All agents across all fleets | Company-wide facts, cross-team decisions |
+
+Writing or editing a `scope_org` memory needs trust level 3, as a write into another fleet does: every fleet reads it. Below that the write is refused with `FLEET_SCOPE_FORBIDDEN`; an agent may still narrow a `scope_org` memory it wrote to `scope_team` or `scope_agent`.
 
 Search respects visibility automatically. Agents see: all `scope_org` memories + `scope_team` memories in their fleet + their own `scope_agent` memories. Admin API key sees all except `scope_agent`.
 

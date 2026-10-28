@@ -176,8 +176,10 @@ You auto-register at **trust 1** on your first write.
 Operations that escalate the required level:
 - `caura_list` / `caura_stats` for another fleet, or either tool with
   `scope="all"` → trust 2; `scope="fleet"` for your own fleet stays at trust 1
-- `caura_insights` with `scope="fleet"` or `"all"` → trust 2
-- reporting outcomes (`caura_evolve`) at `scope="fleet"` / `"all"` → trust 2 (default `scope="agent"` needs only trust 1)
+- `caura_insights` with `scope="fleet"` → trust 2; with `scope="all"` → trust 3,
+  because its findings are saved as `scope_org`
+- reporting outcomes (`caura_evolve`) at `scope="fleet"` → trust 2; at `scope="all"`
+  → trust 3, as for `caura_insights` (default `scope="agent"` needs only trust 1)
 - authoring your **own** `scope=agent` keystone → trust 1 — you must pass `agent_id=<you>`; authoring `scope=fleet` / `scope=tenant` / another agent's keystone, or a `scope=agent` rule with `agent_id` left out → trust 2
 - `caura_manage op=delete` → trust 3
 
@@ -197,15 +199,15 @@ is still your only source of truth; the trust-ladder errors do name both levels
 than silently retrying at a narrower scope.
 
 **Visibility (on write)** decides who can see a memory: `scope_agent` (private)
-· `scope_team` *(default — your fleet)* · `scope_org` (all fleets in tenant).
+· `scope_team` *(default — your fleet)* · `scope_org` (all fleets in tenant; needs trust 3).
 **Scope (on read):** `agent` · `fleet` · `all`. What an omitted `scope` means
 depends on the tool and the transport, so pass it when the trust boundary
 matters: `caura_insights` and `caura_evolve` default to `agent` on every
 surface, but `caura_list` / `caura_stats` default to `agent` only on MCP —
 over REST and the plugin, an omitted scope filters by `agent_id` with no trust
 gate. For `caura_list` / `caura_stats`, your own fleet needs trust 1; another
-fleet or `all` needs trust 2. `caura_insights` requires trust 2 for `fleet` or
-`all`.
+fleet or `all` needs trust 2. `caura_insights` and `caura_evolve` need trust 2
+for `fleet` and trust 3 for `all`.
 Prefer `scope_team` on write and `scope=agent` on read unless you need
 cross-agent context. *Naming caveat:* three different axes share the word
 `scope`, and the one place they collide is a single request. Writes take

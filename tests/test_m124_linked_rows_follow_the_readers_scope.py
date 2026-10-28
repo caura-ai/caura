@@ -26,7 +26,7 @@ def patch_lookup(monkeypatch):
     """``lookup_agent`` answers with the caller in ``fleet_id`` at ``trust_level``."""
 
     def _set(*, fleet_id: str, trust_level: int) -> None:
-        async def fake_lookup(_tenant_id, agent_id):
+        async def fake_lookup(_tenant_id, agent_id, *, read=True):
             return {
                 "agent_id": agent_id,
                 "fleet_id": fleet_id,

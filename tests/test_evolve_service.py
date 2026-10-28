@@ -1002,8 +1002,9 @@ class TestMCPHandlerTrustGating:
         assert captured["min_level"] == 2
 
     @pytest.mark.asyncio
-    async def test_scope_all_requires_trust_2(self, monkeypatch, mcp_env):
-        """scope='all' also escalates to trust 2."""
+    async def test_scope_all_requires_trust_3(self, monkeypatch, mcp_env):
+        """scope='all' escalates to trust 3: its outcome and rule memories are
+        saved as scope_org, which every fleet reads."""
         from unittest.mock import AsyncMock
 
         from core_api import mcp_server
@@ -1027,7 +1028,7 @@ class TestMCPHandlerTrustGating:
             outcome_type="success",
             scope="all",
         )
-        assert captured["min_level"] == 2
+        assert captured["min_level"] == 3
 
     @pytest.mark.asyncio
     async def test_trust_denial_returns_403_envelope(self, monkeypatch, mcp_env):
