@@ -116,19 +116,27 @@ async def test_storage_failure_is_swallowed():
 
 
 @pytest.mark.asyncio
-async def test_record_conflict_from_verdict_supersede():
-    """Detector-confirmed conflict (no second LLM) -> exact_value / temporal_change
-    / supersede, aligned with the detector's supersede effect."""
+async def test_record_conflict_from_verdict_uses_actual_classification():
+    """A confirmed pair's audit labels must reflect classification, not a fixed template."""
+    from core_api.services.contradiction.diagnosis import ClassifyResult
+
     sc = _mock_storage()
-    with patch.object(rv, "get_storage_client", return_value=sc):
+    with (
+        patch.object(
+            rv,
+            "classify",
+            new=AsyncMock(return_value=ClassifyResult("negation", 0.82, "correction", 0.76)),
+        ),
+        patch.object(rv, "get_storage_client", return_value=sc),
+    ):
         await rv.record_conflict_from_verdict(
             _mem("n"), _mem("c"), tenant_id="t", fleet_id="f", confidence=0.7
         )
     p = sc.record_memory_conflict.await_args.args[0]
-    assert p["relationship"] == "exact_value"
-    assert p["diagnosis"] == "temporal_change"
-    assert p["action"] == "supersede"
-    assert p["relationship_confidence"] == 0.7
+    assert p["relationship"] == "negation"
+    assert p["diagnosis"] == "correction"
+    assert p["action"] == "replace"
+    assert p["relationship_confidence"] == 0.82
 
 
 @pytest.mark.asyncio

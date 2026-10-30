@@ -181,6 +181,141 @@ async def test_entity_aware_judge_used_when_both_contexts_present():
     assert any(e.get("entity_id") == "ent:priya" for e in old_entities_arg)
 
 
+
+def test_known_slot_guard_preserves_aliases_and_fails_open_without_known_predicates():
+    from core_api.services.contradiction_detector import _known_single_value_slots_disjoint
+
+    assert _known_single_value_slots_disjoint(
+        {"predicate": "status"}, {"predicate": "role"}
+    )
+    assert not _known_single_value_slots_disjoint(
+        {"predicate": "status"}, {"predicate": "current_status"}
+    )
+    assert not _known_single_value_slots_disjoint(
+        {"predicate": None}, {"predicate": "role"}
+    )
+    assert not _known_single_value_slots_disjoint(
+        {"predicate": "unrecognized_left"}, {"predicate": "unrecognized_right"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_shared_object_entity_and_same_slot_without_subject_cannot_demote_memory():
+    """CAURA-2129 — shared objects plus a matching predicate still don't prove same subject."""
+    from core_api.services.contradiction_detector import (
+        detect_contradictions_by_entities_async,
+    )
+
+    new_id, cand_id = uuid4(), uuid4()
+    new_mem = _make_new_memory(
+        new_id,
+        subject_entity_id=None,
+        content="Reviewed PR 142 for the Atlas repository.",
+    )
+    cand = _make_candidate(
+        cand_id,
+        subject_entity_id=None,
+        content="Merged PR 87 for the Atlas repository.",
+    )
+    # Both rows have the same recognised slot, but no resolved subject identity.
+    # A shared predicate must not substitute for evidence of a shared subject.
+    new_mem["predicate"] = "status"
+    cand["predicate"] = "status"
+    # The only overlap is an object-role entity (the repository), not a subject.
+    links = {
+        str(new_id): [{"entity_id": "ent:atlas", "role": "object"}],
+        str(cand_id): [{"entity_id": "ent:atlas", "role": "object"}],
+    }
+    sc = _sc(new_mem, [cand], links)
+    base_judge = AsyncMock(return_value=(True, 0.99))
+    entity_aware_judge = AsyncMock(return_value=(True, 0.99))
+
+    with (
+        patch("core_api.services.contradiction_detector.get_storage_client", return_value=sc),
+        patch("core_api.services.contradiction_detector._llm_contradiction_check", base_judge),
+        patch(
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
+            entity_aware_judge,
+        ),
+        patch(
+            "core_api.services.contradiction_detector.resolve_config",
+            new_callable=AsyncMock,
+            return_value=None,
+            create=True,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._acquire_entity_lock",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+    ):
+        await detect_contradictions_by_entities_async(new_id, "t1", "f1")
+
+    entity_aware_judge.assert_called_once()
+    base_judge.assert_not_called()
+    # The deliberately false-positive judge verdict must not reach status/edge writes.
+    sc.batch_update_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_distinct_known_single_value_slots_are_dropped_before_judging():
+    """CAURA-2129 — sharing an entity must not turn different attributes into a conflict.
+
+    Both memories refer to the same project, but ``status`` and ``role`` are
+    different single-value slots. Path C must reject the candidate before either
+    LLM judge can mark the older row conflicted.
+    """
+    from core_api.services.contradiction_detector import (
+        detect_contradictions_by_entities_async,
+    )
+
+    new_id, cand_id = uuid4(), uuid4()
+    new_mem = _make_new_memory(
+        new_id,
+        subject_entity_id=None,
+        content="Project Atlas status is shipped.",
+    )
+    new_mem["predicate"] = "status"
+    cand = _make_candidate(
+        cand_id,
+        subject_entity_id=None,
+        content="Project Atlas role is reviewer.",
+    )
+    cand["predicate"] = "role"
+    links = {
+        str(new_id): [{"entity_id": "ent:atlas", "role": "subject"}],
+        str(cand_id): [{"entity_id": "ent:atlas", "role": "subject"}],
+    }
+    sc = _sc(new_mem, [cand], links)
+    base_judge = AsyncMock(return_value=(True, 0.99))
+    entity_aware_judge = AsyncMock(return_value=(True, 0.99))
+
+    with (
+        patch("core_api.services.contradiction_detector.get_storage_client", return_value=sc),
+        patch("core_api.services.contradiction_detector._llm_contradiction_check", base_judge),
+        patch(
+            "core_api.services.contradiction_detector._llm_entity_aware_contradiction_check",
+            entity_aware_judge,
+        ),
+        patch(
+            "core_api.services.contradiction_detector.resolve_config",
+            new_callable=AsyncMock,
+            return_value=None,
+            create=True,
+        ),
+        patch(
+            "core_api.services.contradiction_detector._acquire_entity_lock",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+    ):
+        await detect_contradictions_by_entities_async(new_id, "t1", "f1")
+
+    base_judge.assert_not_called()
+    entity_aware_judge.assert_not_called()
+    sc.batch_update_status.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # Fallback paths — base judge runs when contexts are unavailable
 # ---------------------------------------------------------------------------
@@ -362,6 +497,9 @@ async def test_fallback_to_base_judge_when_context_fetch_fails(caplog):
     # Fetch failure → entity-aware path bypassed; base judge runs.
     base_judge.assert_called_once()
     entity_aware_judge.assert_not_called()
+    # No structured subject or slot evidence is available, so fail-open to the
+    # judge must not mean fail-open to a destructive status update.
+    sc.batch_update_status.assert_not_awaited()
 
     # CAURA-134 — WARNING in grep-friendly key=value form, mirroring
     # the retraction-path's ``PATH_C_RETRACTION context_fetch_failed``
