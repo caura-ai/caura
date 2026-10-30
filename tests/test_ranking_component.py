@@ -8,9 +8,14 @@ provider that violates the length contract.
 
 from __future__ import annotations
 
+import importlib
+import os
+from unittest.mock import patch
+
 import pytest
 
 from common.ranking import RankCandidate, get_ranking
+from common.ranking import constants as ranking_constants
 from common.ranking.protocols import RankProvider
 from common.ranking.providers.fake import FakeRanker
 from common.ranking.providers.noop import NoopRanker
@@ -120,3 +125,29 @@ async def test_local_provider_missing_dependency_is_permanent(monkeypatch, caplo
         out = await get_ranking("q", [_cand("a", "x", 0.5)])
     assert out is None
     assert any("not retrying" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.parametrize("raw", ["0", "-3"])
+def test_rank_retry_attempts_below_one_clamps_to_one(raw):
+    """RANK_RETRY_ATTEMPTS counts attempts, so at least one must always run.
+
+    With 0 (or a negative value) the retry loop in ``get_ranking`` would be
+    empty: the provider is never called and every search logs
+    "Ranking failed after 0 attempt(s)". The value is read at import time,
+    so reloading the module under the env value is the only way to reach it.
+    """
+    try:
+        with patch.dict(os.environ, {"RANK_RETRY_ATTEMPTS": raw}):
+            importlib.reload(ranking_constants)
+            assert ranking_constants.RANK_RETRY_ATTEMPTS == 1
+    finally:
+        importlib.reload(ranking_constants)
+
+
+def test_rank_retry_attempts_keeps_values_above_one():
+    try:
+        with patch.dict(os.environ, {"RANK_RETRY_ATTEMPTS": "3"}):
+            importlib.reload(ranking_constants)
+            assert ranking_constants.RANK_RETRY_ATTEMPTS == 3
+    finally:
+        importlib.reload(ranking_constants)
