@@ -6,7 +6,7 @@ fastapi>=0.162.0,<1
 # this code cannot actually run on. Container images do not resolve from this
 # file — they install frozen from each service's uv.lock — but this is the
 # local-dev install path (AGENT-INSTALL.md) and it should not lie either.
-uvicorn[standard]>=0.53.0,<1
+uvicorn[standard]>=0.54.0,<1
 # Capped as core-api and core-storage-api cap it (L-166).
 sqlalchemy[asyncio]>=2.1.6,<2.2
 asyncpg>=0.32.0,<1
