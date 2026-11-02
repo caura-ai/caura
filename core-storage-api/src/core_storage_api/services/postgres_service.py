@@ -956,6 +956,37 @@ _SYSTEM_NAMESPACE = "_system"
 _CALLER_OWNED_KEY = "caller_owned"
 _CALLER_OWNABLE_KEYS: frozenset[str] = frozenset({"summary", "tags"})
 
+# The metadata a governance-dropped row keeps (``memory_drop``), at the top level
+# and in ``_system``: its lineage, so the derived-row cascade and the graph purge
+# still find it, and the verdicts that explain the drop. Nothing made from the
+# text: summaries, tags, retrieval hints and atomic facts all are.
+_DROPPED_ROW_METADATA_KEYS: frozenset[str] = frozenset(
+    {
+        "parent_memory_id",
+        "auto_chunked",
+        "child_count",
+        "source",
+        "write_mode",
+        "contains_pii",
+        "pii_types",
+        "pii_flagged_by",
+        "business_relevance",
+        "governance_llm_uncertain",
+    }
+)
+
+
+def _dropped_row_metadata(metadata: dict | None) -> dict:
+    """``metadata`` cut to ``_DROPPED_ROW_METADATA_KEYS``, ``_system`` included."""
+    stored = metadata or {}
+    kept = {k: v for k, v in stored.items() if k in _DROPPED_ROW_METADATA_KEYS}
+    system = stored.get(_SYSTEM_NAMESPACE)
+    if isinstance(system, dict):
+        kept_system = {k: v for k, v in system.items() if k in _DROPPED_ROW_METADATA_KEYS}
+        if kept_system:
+            kept[_SYSTEM_NAMESPACE] = kept_system
+    return kept
+
 
 def _withhold_caller_owned_keys(metadata_patch: dict | None, stored: dict | None) -> dict | None:
     """Drop top-level ``summary``/``tags`` a PLATFORM patch must not mirror.
@@ -7753,6 +7784,60 @@ class PostgresService:
         return await self._soft_delete(
             tenant_id, lambda m: [m.run_id == run_id, m.metadata_["source"].astext == metadata_source]
         )
+
+    async def memory_drop(self, tenant_id: str, memory_id: UUID) -> bool:
+        """Soft-delete one memory a governance policy dropped, and clear its text.
+
+        A policy drop is not a delete anyone may take back, so unlike a plain
+        soft delete it keeps nothing for the undo window: ``content`` becomes
+        ``''`` (the column is NOT NULL), and the title, embedding, both content
+        hashes and the triple's predicate and object become NULL. The metadata
+        keeps only ``_DROPPED_ROW_METADATA_KEYS``, ``_system`` included. The id, owner, lineage and
+        timestamps stay, so the audit row, the graph purge and the derived-row
+        cascade still find the row. ``search_vector`` is rebuilt from the
+        cleared text by its trigger.
+
+        Matched whether or not the row is already soft-deleted, since a delete
+        that landed before the verdict left the text in place. A held row
+        (``QUARANTINED_MEMORY_STATUS``) is never matched: it leaves quarantine
+        only by a person's decision, as ``_soft_delete`` says. Derived rows are
+        the caller's: governance audits each one before it drops it.
+
+        Returns whether a row matched.
+        """
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    select(Memory.metadata_)
+                    .where(
+                        Memory.tenant_id == tenant_id,
+                        Memory.id == memory_id,
+                        Memory.status != QUARANTINED_MEMORY_STATUS,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if row is None:
+                return False
+            now = datetime.now(UTC)
+            await session.execute(
+                sql_update(Memory)
+                .where(Memory.tenant_id == tenant_id, Memory.id == memory_id)
+                .values(
+                    content="",
+                    title=None,
+                    embedding=None,
+                    content_hash=None,
+                    embedded_content_hash=None,
+                    predicate=None,
+                    object_value=None,
+                    metadata_=_dropped_row_metadata(row.metadata_),
+                    deleted_at=func.coalesce(Memory.deleted_at, now),
+                    status="deleted",
+                    status_changed_at=now,
+                )
+            )
+            return True
 
     async def memory_redistribute(
         self,

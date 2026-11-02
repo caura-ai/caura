@@ -540,6 +540,19 @@ async def purge_entity_artifacts(request: Request) -> dict:
     )
 
 
+@router.post("/drop")
+async def drop_memory(request: Request) -> dict:
+    """A governance drop: soft-delete one memory and clear its text (``memory_drop``).
+
+    Body carries ``tenant_id`` and ``memory_id``. ``{"dropped": false}`` when
+    nothing matched (no such memory, another tenant's, or held), not a 404, so a
+    replay of a drop that already landed is not an error.
+    """
+    body: dict = await request.json()
+    dropped = await _svc.memory_drop(_require(body, "tenant_id"), _require_uuid(body, "memory_id"))
+    return {"dropped": dropped}
+
+
 @router.post("/find-successors")
 async def find_successors(request: Request) -> list[dict]:
     body: dict = await request.json()
