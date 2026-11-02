@@ -50,6 +50,7 @@ from core_api.services.organization_settings import (
     get_settings_for_display,
     resolve_config,
 )
+from core_api.services.pii_update_gate import apply_pii_policy_to_fields
 from core_api.services.skill_lifecycle import (
     SKILL_WRITE_MIN_TRUST,
     SkillWriteContext,
@@ -543,6 +544,12 @@ async def _upsert_document_claimed(
                 "Slugs become directory names on each plugin node."
             ),
         )
+
+    # The tenant's PII policy, as a memory write gets it: before the skills
+    # validator hashes the body, and before anything is embedded or stored.
+    body.data = await apply_pii_policy_to_fields(
+        tenant_id=body.tenant_id, agent_id=author, data=body.data, write_mode="document", subject="Document"
+    )
 
     # ── Skill Factory SF-002: 7 adjustments on every skills-collection
     # write, whatever ``org_settings.skills_factory.enabled`` says: the
