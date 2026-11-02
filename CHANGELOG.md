@@ -10,6 +10,28 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.37.8](https://github.com/caura-ai/caura/compare/backend-v3.37.7...backend-v3.37.8) (2026-11-02)
+
+
+### Bug Fixes
+
+* **common:** name both IAM grants in the broadcast subscription error ([#2280](https://github.com/caura-ai/caura/issues/2280)) ([19f45d8](https://github.com/caura-ai/caura/commit/19f45d8228c5b720a5fb9dea9251d3d2fc1650bb))
+
+
+### Dependencies
+
+* bump pyasn1 to 0.6.5 for four DoS advisories ([#2267](https://github.com/caura-ai/caura/issues/2267)) ([bfd9dc8](https://github.com/caura-ai/caura/commit/bfd9dc800b6baa6f8c189b3a89dfa6c841748620))
+* **ci:** bump pytest from 9.1.1 to 9.2.0 in /.github/legacy-name-ratchet in the legacy-name-ratchet-minor-patch group ([#2277](https://github.com/caura-ai/caura/issues/2277)) ([2343c8a](https://github.com/caura-ai/caura/commit/2343c8af365bfdd6c3310ea1ea0b93d859119060))
+* **clients:** bump @types/node from 26.6.5 to 26.6.6 in /clients/typescript in the clients-npm-minor-patch group across 1 directory ([#2276](https://github.com/caura-ai/caura/issues/2276)) ([5c9b7d2](https://github.com/caura-ai/caura/commit/5c9b7d2b4c731018762c99bb256263c63e4c26f3))
+* **dependabot:** stop proposing new Python minors for the images ([#2278](https://github.com/caura-ai/caura/issues/2278)) ([e4ac29e](https://github.com/caura-ai/caura/commit/e4ac29e4081c307f4902b06788ca980a955e2776))
+* **plugin:** bump @types/node from 26.6.5 to 26.6.6 in /plugin in the npm-minor-patch group across 1 directory ([#2269](https://github.com/caura-ai/caura/issues/2269)) ([ca0898d](https://github.com/caura-ai/caura/commit/ca0898de496dcaf321f3bd5e99b16365b03ddf32))
+* update google-cloud-aiplatform requirement from &lt;3,&gt;=2.6.0 to &gt;=2.7.0,&lt;3 ([#2274](https://github.com/caura-ai/caura/issues/2274)) ([1ba92b7](https://github.com/caura-ai/caura/commit/1ba92b7e1c96f13849322bbbdcf6138caeb8ac75))
+* update google-genai requirement from &gt;=2.33.0 to &gt;=2.34.0 ([#2270](https://github.com/caura-ai/caura/issues/2270)) ([e13277a](https://github.com/caura-ai/caura/commit/e13277a1489bb11921ebf397c1107a75243bdf5f))
+* update mcp requirement from &lt;3,&gt;=2.2.0 to &gt;=2.3.0,&lt;3 ([#2279](https://github.com/caura-ai/caura/issues/2279)) ([09e3556](https://github.com/caura-ai/caura/commit/09e355668e8a634343d4ec33afb5ead8cbdb041a))
+* update openai requirement from &lt;4,&gt;=3.37.0 to &gt;=3.41.0,&lt;4 ([#2272](https://github.com/caura-ai/caura/issues/2272)) ([4e9b2d4](https://github.com/caura-ai/caura/commit/4e9b2d4cc81fa8346272797f5247aa746130e5f5))
+* update pydantic requirement from &lt;3,&gt;=2.14.1 to &gt;=2.14.2,&lt;3 ([#2271](https://github.com/caura-ai/caura/issues/2271)) ([61c9f9e](https://github.com/caura-ai/caura/commit/61c9f9ecffe3e2d9aa7892cccb2c55e6c5e90564))
+* update uvicorn requirement from &lt;1,&gt;=0.53.0 to &gt;=0.54.0,&lt;1 ([#2273](https://github.com/caura-ai/caura/issues/2273)) ([53e4046](https://github.com/caura-ai/caura/commit/53e40461d27075a36b596482463b7ef97ec70f2a))
+
 ## [3.37.7](https://github.com/caura-ai/caura/compare/backend-v3.37.6...backend-v3.37.7) (2026-10-28)
 
 

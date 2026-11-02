@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.25.7](https://github.com/caura-ai/caura/compare/plugin-v2.25.6...plugin-v2.25.7) (2026-11-02)
+
+
+### Dependencies
+
+* **plugin:** bump @types/node from 26.6.5 to 26.6.6 in /plugin in the npm-minor-patch group across 1 directory ([#2269](https://github.com/caura-ai/caura/issues/2269)) ([ca0898d](https://github.com/caura-ai/caura/commit/ca0898de496dcaf321f3bd5e99b16365b03ddf32))
+
 ## [2.25.6](https://github.com/caura-ai/caura/compare/plugin-v2.25.5...plugin-v2.25.6) (2026-10-27)
 
 
