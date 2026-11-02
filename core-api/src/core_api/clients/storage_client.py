@@ -887,6 +887,21 @@ class CoreStorageClient:
         """
         return await self._delete(f"/memories/{memory_id}", tenant_id=tenant_id)
 
+    async def drop_memory(self, memory_id: str, tenant_id: str) -> bool:
+        """A governance drop: soft-delete one memory and clear its text.
+
+        Unlike ``soft_delete_memory``, nothing is kept for an undo window (see
+        ``PostgresService.memory_drop``). False when nothing matched: no such
+        memory, another tenant's, or held for review. ``idempotent=True``: a
+        replay finds the text already cleared and clears nothing more.
+        """
+        result = await self._post(
+            "/memories/drop",
+            {"tenant_id": tenant_id, "memory_id": memory_id},
+            idempotent=True,
+        )
+        return isinstance(result, dict) and bool(result.get("dropped"))
+
     async def set_subject_entity_if_null(
         self, memory_id: str, tenant_id: str, subject_entity_id: str, *, content: str | None = None
     ) -> bool:

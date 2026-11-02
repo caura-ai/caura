@@ -355,7 +355,9 @@ def test_the_writer_session_population_is_pinned() -> None:
     # reported Evolve outcome.
     # 140 -> 141 (pure 60 -> 61): ``is_tenant_suppressed`` moved to the writer
     # on purpose; see its ``_MUST_STAY_ON_THE_WRITER`` entry.
-    assert len(methods) == 141, f"{len(methods)} methods open a writer session"
+    # 141 -> 142 (pure unchanged at 61): ``memory_drop`` is new. It locks one
+    # row ``with_for_update`` and clears its text with ``sql_update``, a write.
+    assert len(methods) == 142, f"{len(methods)} methods open a writer session"
     assert len(pure) == 61, f"{len(pure)} of them show no write marker"
 
 

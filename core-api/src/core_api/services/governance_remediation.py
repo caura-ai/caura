@@ -153,9 +153,9 @@ async def _drop_children(
     action: str,
     detail_for: Any,
 ) -> None:
-    """Soft-delete each derived row, auditing before the delete as the parent does.
+    """Drop each derived row, auditing before the drop as the parent does.
 
-    Per child rather than one rolled-up row: each is a separate soft-delete, and
+    Per child rather than one rolled-up row: each is a separate drop, and
     an audit log that recorded one deletion while N happened would misstate the
     compliance record in the direction that matters.
 
@@ -244,7 +244,7 @@ async def _drop_children(
         # Separate block on purpose: past this point the audit EXISTS, so a
         # failure here is a different state to report, not the same one.
         try:
-            await sc.soft_delete_memory(cid, tenant_id)
+            await sc.drop_memory(cid, tenant_id)
         except Exception:
             logger.exception(
                 "governance: audit RECORDS derived row %s of %s as %s, but the delete "
@@ -508,11 +508,13 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> RemediationOutco
                 action=ACTION_PII_DROP,
                 detail=llm_pii_audit_detail(ACTION_PII_DROP, pii_types, content, "fast"),
                 resource_id=memory_id,
-                # Destructive: the soft-delete below removes the row, so this
+                # Destructive: the drop below clears the row's text, so this
                 # audit is the only trace — must survive queue overflow.
                 critical=True,
             )
-            await sc.soft_delete_memory(memory_id, tenant_id)
+            # ``drop_memory``, not ``soft_delete_memory``: a policy drop keeps no
+            # copy of the text for an undo window (``memory_drop``).
+            await sc.drop_memory(memory_id, tenant_id)
             logger.info("governance: dropped fast-mode memory %s (pii)", memory_id)
             # Purge BEFORE the cascade, not after. ``_drop_children`` raises once
             # any child fails, so ordering it first would skip this parent's own
@@ -562,7 +564,7 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> RemediationOutco
                 # Destructive: see the PII-drop branch — audit is the only trace.
                 critical=True,
             )
-            await sc.soft_delete_memory(memory_id, tenant_id)
+            await sc.drop_memory(memory_id, tenant_id)
             logger.info("governance: dropped fast-mode memory %s (non-business)", memory_id)
             # Purge before the cascade — see the PII-drop branch above.
             await _purge_entity_artifacts(sc, memory_id, tenant_id, ACTION_NB_DROP)
