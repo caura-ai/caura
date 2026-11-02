@@ -614,6 +614,16 @@ def _entity_compatible_groups(cluster_ids: list[UUID], names: dict[UUID, str]) -
 _CRYSTALLIZER_SHARED_VISIBILITIES = ("scope_team", "scope_org")
 
 
+# The rows Forge may distil into skill candidates, which any credential of the
+# tenant can read: shared, not deleted, not held for review. Not the live-status
+# filter the crystallizer uses: an outdated or conflicted row is how a session
+# that went wrong shows up, and its author shared it. ``{m}`` is the memories
+# alias; binds ``:shared_visibilities`` (``_SHARED_VISIBILITIES``).
+_FORGE_CORPUS_ROWS = (
+    "{m}.visibility = ANY(:shared_visibilities) AND {m}.deleted_at IS NULL AND {m}.status <> 'quarantined'"
+)
+
+
 # The rows the expiry sweep archives: either column ends a row's life, and every
 # live status is a candidate. ``memory_find_expired_still_active`` reports
 # exactly these (L-148), so the hygiene report and the sweep cannot disagree.
@@ -12725,8 +12735,11 @@ class PostgresService:
         Ports ``session_trace._query_memories_in_window`` verbatim. Rows
         carry ``memory_id, run_id, agent_id, fleet_id, created_at``; the
         builder groups them by ``(run_id, agent_id)``.
+
+        Forge distils these traces into skill candidates any credential of
+        the tenant can read, so only shared rows (``_FORGE_CORPUS_ROWS``).
         """
-        sql = """
+        sql = f"""
             SELECT
                 m.id           AS memory_id,
                 m.run_id       AS run_id,
@@ -12739,6 +12752,7 @@ class PostgresService:
               AND m.created_at <  :w_end
               AND m.run_id IS NOT NULL
               AND (CAST(:fleet_id AS text) IS NULL OR m.fleet_id = :fleet_id OR m.fleet_id IS NULL)
+              AND {_FORGE_CORPUS_ROWS.format(m="m")}
             ORDER BY m.run_id, m.agent_id, m.created_at ASC
         """
         async with get_read_session() as session:
@@ -12750,6 +12764,7 @@ class PostgresService:
                         "fleet_id": fleet_id,
                         "w_start": window_start,
                         "w_end": window_end,
+                        "shared_visibilities": list(_SHARED_VISIBILITIES),
                     },
                 )
             ).fetchall()
@@ -12794,17 +12809,25 @@ class PostgresService:
         (text[] → uuid[]) preserves the btree index on ``memories.id``.
         Scoped to ``tenant_id`` so the HTTP boundary can't return another
         tenant's content for a smuggled id. Empty input → empty list.
+
+        Only shared rows (``_FORGE_CORPUS_ROWS``): a trace may list a member
+        that was made private, deleted or held after it was built, and its id
+        is simply absent from the result.
         """
         if not memory_ids:
             return []
         sql = (
             "SELECT id::text AS id, content FROM memories "
-            "WHERE id = ANY(CAST(:ids AS uuid[])) AND tenant_id = :tenant_id"
+            "WHERE id = ANY(CAST(:ids AS uuid[])) AND tenant_id = :tenant_id "
+            f"AND {_FORGE_CORPUS_ROWS.format(m='memories')}"
         )
+        params = {
+            "ids": list(memory_ids),
+            "tenant_id": tenant_id,
+            "shared_visibilities": list(_SHARED_VISIBILITIES),
+        }
         async with get_read_session() as session:
-            rows = (
-                await session.execute(text(sql), {"ids": list(memory_ids), "tenant_id": tenant_id})
-            ).fetchall()
+            rows = (await session.execute(text(sql), params)).fetchall()
         return [{"id": r.id, "content": r.content if r.content is not None else ""} for r in rows]
 
     async def outcome_contradiction_signals(
