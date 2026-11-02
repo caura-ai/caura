@@ -14,13 +14,13 @@ ARG DD_APM_ENABLED=false
 FROM datadog/serverless-init:1@sha256:30c3fcfd9c642ae064f716f6dcb05d9b11ce232146cc71fecb47e09b23b242f0 AS dd-bin
 # python:3.12-slim (3.12.15 on 2026-10-07) and uv are pinned by digest, as their
 # tags move (L-67); Dependabot's docker updates propose each new digest.
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS dd-apm-true
+FROM python:3.15-slim@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913 AS dd-apm-true
 COPY --from=dd-bin /datadog-init /dd/datadog-init
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS dd-apm-false
+FROM python:3.15-slim@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913 AS dd-apm-false
 RUN mkdir -p /dd
 FROM dd-apm-${DD_APM_ENABLED} AS dd-apm-src
 
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS builder
+FROM python:3.15-slim@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913 AS builder
 
 WORKDIR /app
 
@@ -88,7 +88,7 @@ COPY static/ /app/static/
 
 
 # ── Production image ──
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS runtime
+FROM python:3.15-slim@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913 AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
