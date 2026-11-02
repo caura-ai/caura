@@ -91,6 +91,7 @@ async def patch_agent_trust(
     # be able to PATCH its own (or a peer's) trust_level to self-promote.
     auth.enforce_not_agent_credential("change agent trust levels")
     auth.enforce_not_org_member("change agent trust levels")
+    auth.enforce_tenant_admin_credential("change agent trust levels")
     # The prior values, for the audit row below. Primary: a lagged replica
     # would record the wrong "before" for the change being audited.
     before = await lookup_agent(tenant_id, agent_id, read=False)
@@ -138,6 +139,7 @@ async def update_agent_fleet(
     # must not be able to relocate itself/a peer to reach another fleet's data.
     auth.enforce_not_agent_credential("reassign agent fleets")
     auth.enforce_not_org_member("reassign agent fleets")
+    auth.enforce_tenant_admin_credential("reassign agent fleets")
     fleet_id = body.fleet_id
 
     sc = get_storage_client()
@@ -310,6 +312,7 @@ async def delete_agent(
     # evade controls.
     auth.enforce_not_agent_credential("delete agents")
     auth.enforce_not_org_member("delete agents")
+    auth.enforce_tenant_admin_credential("delete agents")
     sc = get_storage_client()
     agent = await lookup_agent(tenant_id, agent_id, read=False)
     if not agent:

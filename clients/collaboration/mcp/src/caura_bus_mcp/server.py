@@ -22,7 +22,7 @@ from caura_bus_core.protocol import MemoryContextRequest, StrictModel
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.exceptions import ToolError
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_validator
 
 from .delivery import DeliverySession
 from .presence import PRESENCE_ENV_VAR, PresenceHeartbeat, presence_enabled, presence_profile, waiting_file
@@ -96,6 +96,13 @@ Opcode = Literal[
 class Arguments(StrictModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
+    @field_validator("delivery_id", "message_id", check_fields=False)
+    @classmethod
+    def no_dot_segments(cls, value):
+        if value in {".", ".."}:
+            raise ValueError("identifier must not be a dot segment")
+        return value
+
 
 # Directory pages stay small enough for a model context; agents follow
 # ``next_cursor`` instead of receiving the whole directory at once.
@@ -135,7 +142,7 @@ class Wait(Arguments):
 
 
 class Ack(Arguments):
-    delivery_id: str = Field(min_length=1, max_length=80)
+    delivery_id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_:.\-]+$")
 
 
 class Reply(Ack):
@@ -168,7 +175,7 @@ class Recent(Arguments):
 
 
 class Collect(Arguments):
-    message_id: str = Field(min_length=1, max_length=80)
+    message_id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_:.\-]+$")
     timeout: float = Field(default=DEFAULT_COLLECT_SECONDS, ge=0, le=MAX_COLLECT_SECONDS)
     expected: list[str] | None = Field(default=None, min_length=1, max_length=100)
 
@@ -188,11 +195,11 @@ class Requests(Arguments):
 
 
 class Status(Arguments):
-    message_id: str = Field(min_length=1, max_length=80)
+    message_id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_:.\-]+$")
 
 
 class Human(Arguments):
-    delivery_id: str = Field(min_length=1, max_length=80)
+    delivery_id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_:.\-]+$")
     reason: str = Field(min_length=1, max_length=2000)
 
 

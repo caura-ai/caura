@@ -16,6 +16,7 @@ from common.constants import DOCUMENT_STATUS_CHANGED, MEMORY_CONTENT_CHANGED
 from common.settings_version import SETTINGS_CHANGED
 from common.structlog_config import configure_logging
 from core_storage_api.config import settings
+from core_storage_api.request_bounds import RequestFieldSizeError
 from core_storage_api.services.postgres_service import (
     BulkRowShapeError,
     DocumentStatusChangedError,
@@ -251,6 +252,10 @@ def create_app() -> FastAPI:
             status_code=409,
             content={"detail": {"error": MEMORY_CONTENT_CHANGED, "message": str(exc)}},
         )
+
+    @app.exception_handler(RequestFieldSizeError)
+    async def _field_size_handler(request: Request, exc: RequestFieldSizeError) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
 
     @app.exception_handler(BulkRowShapeError)
     async def _bulk_row_shape_handler(request: Request, exc: BulkRowShapeError) -> JSONResponse:

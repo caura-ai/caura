@@ -541,6 +541,10 @@ CAURA_API_KEY=$CAURA_API_KEY
 CAURA_FLEET_ID=$CAURA_FLEET_ID
 CAURA_TENANT_ID=$CAURA_TENANT_ID
 CAURA_NODE_NAME=$CAURA_NODE_NAME
+# Automatic capture is on by default: user messages, turn summaries and
+# compaction summaries are saved as memories private to this node's agent.
+# To turn it off, set false (or 0, no, off) and restart the gateway.
+# CAURA_AUTO_WRITE_TURNS=false
 ENV_EOF
 chmod 600 "$PLUGIN_DIR/.env"
 

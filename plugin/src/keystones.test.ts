@@ -116,6 +116,26 @@ describe("formatKeystones", () => {
     assert.match(out, /more rules omitted/);
   });
 
+  test("skips an oversized first rule and still includes later rules", () => {
+    const out = formatKeystones([
+      { doc_id: "large", data: { content: "x".repeat(10000), weight: 100 } },
+      { doc_id: "small", data: { content: "Keep this rule.", weight: 1 } },
+    ]);
+    assert.match(out, /<keystone_rules>/);
+    assert.match(out, /small: Keep this rule/);
+    assert.match(out, /1 more rules omitted/);
+    assert.ok(out.length <= 120 * 4);
+  });
+
+  test("retains a visible omission notice when every rule is oversized", () => {
+    const out = formatKeystones([
+      { doc_id: "large", data: { content: "x".repeat(10000), weight: 100 } },
+    ]);
+    assert.match(out, /<keystone_rules>/);
+    assert.match(out, /1 more rules omitted/);
+    assert.ok(out.length <= 120 * 4);
+  });
+
   test("falls back to doc_id when title is missing", () => {
     const out = formatKeystones([
       { doc_id: "no-secrets", data: { content: "Never.", weight: 5 } },
@@ -182,7 +202,7 @@ describe("fetchKeystonesBlock", () => {
   test("logs server truncation even when no rule fits the local token cap", async () => {
     installFetch([{ doc_id: "large", data: { content: "x".repeat(500) } }], 200,
       { "X-Truncated": "true" });
-    assert.equal(await fetchKeystonesBlock({ agentId: "a", fleetId: undefined }), "");
+    assert.match(await fetchKeystonesBlock({ agentId: "a", fleetId: undefined }), /more rules omitted/);
     assert.ok(warnings.some((w) => w.includes("server truncated the response")));
   });
 

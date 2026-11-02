@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException
@@ -39,7 +40,7 @@ from common.events.lifecycle_handlers import (
     register_consumers as register_lifecycle_consumers,
 )
 from common.llm import init_platform_providers
-from common.structlog_config import configure_logging
+from common.structlog_config import configure_llmobs_privacy, configure_logging
 from common.usage import UsageAggregator, set_usage_sink
 from core_worker.clients.storage_client import close_storage_client, flush_usage, get_storage_client
 from core_worker.config import Settings
@@ -56,6 +57,8 @@ configure_logging(
     json_logs=settings.log_format_json,
     log_file=settings.log_file or None,
 )
+
+configure_llmobs_privacy()
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +89,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "would omit X-Storage-Secret and protected storage services would reject them"
         )
         raise RuntimeError("CORE_STORAGE_SHARED_SECRET is required for core-worker")
+
+    if os.environ.get("EVENT_BUS_BACKEND") == "pubsub":
+        from common.settings_crypto import cipher_from_environment
+
+        # No subscription work starts before the worker can read new credentials.
+        cipher_from_environment()
 
     # Eager platform-provider init: builds BOTH the embedding and LLM
     # singletons from ``PLATFORM_EMBEDDING_*`` / ``PLATFORM_LLM_*``. The

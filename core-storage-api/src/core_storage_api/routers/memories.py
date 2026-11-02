@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re as _re
 import time
 from datetime import UTC, datetime, timedelta
@@ -23,13 +24,22 @@ from common.events.lifecycle_purge_request import (
     MEMORY_RETENTION_MIN_DAYS,
 )
 from core_storage_api.observability import bind_timer, log_request
-from core_storage_api.routers._validation import _int_at_least, _require, _require_dict, _require_uuid
+from core_storage_api.routers._validation import (
+    _bounded_int,
+    _bounded_write,
+    _int_at_least,
+    _require,
+    _require_dict,
+    _require_uuid,
+)
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import (
     MISSING_PROVENANCE_PREDICATE_SQL,
     BulkValidationError,
     PostgresService,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/memories", tags=["Memories"])
 _svc = PostgresService()
@@ -107,6 +117,7 @@ def _created_window(body: dict) -> tuple[datetime | None, datetime | None]:
 @router.post("")
 async def create_memory(request: Request) -> dict:
     body: dict = await request.json()
+    _bounded_write(body)
     _parse_datetimes(body)
     # ``DuplicateContentHashError`` (migration 040's unique index) is handled
     # app-wide so its 409 body can carry structured fields beside the message —
@@ -131,9 +142,14 @@ async def create_memories_bulk(request: Request) -> list[dict]:
     (False) without a second roundtrip. The full ORM dict was the prior
     contract; downstream callers reconstruct any other fields from the
     request payload they already hold.
+
+    core-api filters field-size errors into per-item results before this call.
+    Direct service callers get an atomic 422 for an invalid batch; no rows are
+    inserted until every item passes these defence-in-depth guards.
     """
     body: list[dict] = await request.json()
     for item in body:
+        _bounded_write(item)
         _parse_datetimes(item)
     try:
         return await _svc.memory_add_all(body)
@@ -766,6 +782,7 @@ async def set_predicate_if_null(memory_id: UUID, request: Request) -> dict:
     absent / deleted / foreign-tenant / already-set / edited rows alike.
     """
     body: dict = await request.json()
+    _bounded_write(body)
     updated = await _svc.memory_set_predicate_if_null(
         memory_id=memory_id,
         tenant_id=body["tenant_id"],
@@ -834,10 +851,12 @@ async def check_near_duplicates(request: Request) -> dict:
     rows = await _svc.memory_find_near_duplicate_pairs(
         tenant_id=body["tenant_id"],
         fleet_id=body.get("fleet_id"),
-        batch_size=_int_at_least(body, "batch_size", 100, 1),
+        batch_size=_bounded_int(body, "batch_size", 100, 5000),
+        # This service-authenticated sweep must page the whole tenant, even
+        # past the public list offset cap. Batch size and fan-out stay bounded.
         offset=_int_at_least(body, "offset", 0, 0),
         threshold=body.get("threshold", 0.95),
-        neighbor_limit=body.get("neighbor_limit", 5),
+        neighbor_limit=_bounded_int(body, "neighbor_limit", 5, 100),
     )
 
     candidate_ids: list[str] = []
@@ -1663,8 +1682,8 @@ async def admin_list(request: Request) -> list[dict]:
         include_deleted=bool(body.get("include_deleted", False)),
         sort=body.get("sort", "created_at"),
         order=body.get("order", "desc"),
-        offset=_int_at_least(body, "offset", 0, 0),
-        limit=_int_at_least(body, "limit", 50, 1),
+        offset=_bounded_int(body, "offset", 0, 10000, 0),
+        limit=_bounded_int(body, "limit", 50, 5000),
         cursor_ts=cursor_ts,
         cursor_id=cursor_id,
     )
@@ -1748,7 +1767,7 @@ async def list_by_filters(request: Request) -> list[dict]:
         sort=body.get("sort", "created_at"),
         order=body.get("order", "desc"),
         limit=limit,
-        offset=_int_at_least(body, "offset", 0, 0),
+        offset=_bounded_int(body, "offset", 0, 10000, 0),
         cursor_ts=cursor_ts,
         cursor_id=cursor_id,
         readable_tenant_ids=body.get("readable_tenant_ids"),
@@ -1783,7 +1802,17 @@ async def field_signature(request: Request) -> dict:
     body: dict = await request.json()
     tenant_id = _require(body, "tenant_id")
     args = _field_scope_args(tenant_id, body)
-    return await _svc.memory_field_signature(**args)
+    try:
+        return await _svc.memory_field_signature(**args)
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) == "57014":
+            logger.warning("Memory map signature exceeded its configured statement timeout")
+            raise HTTPException(
+                status_code=503,
+                detail="Memory map signature is busy; retry shortly",
+                headers={"Retry-After": "1"},
+            ) from exc
+        raise
 
 
 @router.post("/field-page")
@@ -2235,6 +2264,7 @@ async def get_memory(memory_id: UUID, tenant_id: str, include_held: bool = False
 @router.patch("/{memory_id}")
 async def update_memory(memory_id: UUID, request: Request) -> dict:
     body: dict = await request.json()
+    _bounded_write(body)
     # Tenant guard: ``tenant_id`` is the row's home tenant, popped out of
     # the body so it scopes the UPDATE rather than landing as a patched
     # column (``Memory`` has a ``tenant_id`` column). A PATCH for a row

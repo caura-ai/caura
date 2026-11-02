@@ -42,7 +42,7 @@ def _prod(*, compat_api_key=None, **overrides):
     base = {
         "environment": "production",
         "is_standalone": False,
-        "settings_encryption_key": "a-real-fernet-key",
+        "settings_encryption_key": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
         "admin_api_key": "a-real-admin-key",
         "gateway_shared_secret": "a-real-gateway-secret",
         LEGACY_API_KEY_FIELD: compat_api_key,

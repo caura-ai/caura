@@ -98,7 +98,7 @@ class TestHostnameSafetyCheck:
             _resolve_and_vet("http://127.0.0.1:8000/health")
         # The exception is a starlette HTTPException — check the status_code attr
         assert exc.value.status_code == 400
-        assert "127.0.0.1" in exc.value.detail
+        assert exc.value.detail == "URL not allowed"
 
     def test_rejects_rfc1918_hostname(self) -> None:
         # Use the explicit IP as the hostname — getaddrinfo will return it back
@@ -965,7 +965,7 @@ class TestAddressPinning:
         with pytest.raises(HTTPException) as exc:
             await _fetch_url_text("https://example.com/")
         assert exc.value.status_code == 400
-        assert "169.254.169.254" in exc.value.detail
+        assert exc.value.detail == "URL not allowed"
 
 
 @pytest.mark.unit
@@ -1408,7 +1408,7 @@ class TestDnsTimeout:
     the BLAST RADIUS.
     """
 
-    async def test_a_hanging_resolver_becomes_a_400(self, monkeypatch) -> None:
+    async def test_a_hanging_resolver_becomes_a_504(self, monkeypatch) -> None:
         import time
 
         def hang(url: str) -> list[str]:
@@ -1422,8 +1422,8 @@ class TestDnsTimeout:
 
         with pytest.raises(HTTPException) as exc:
             await _fetch_url_text("https://slow-dns.example/")
-        assert exc.value.status_code == 400
-        assert "timed out" in exc.value.detail.lower()
+        assert exc.value.status_code == 504
+        assert exc.value.detail == "URL lookup timed out"
 
     async def test_dns_does_not_run_on_the_shared_default_executor(
         self, monkeypatch

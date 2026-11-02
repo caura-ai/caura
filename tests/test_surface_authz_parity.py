@@ -14,6 +14,8 @@ write while REST 403'd the same credential.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from core_api import mcp_server
@@ -297,6 +299,14 @@ async def _count_with(monkeypatch, auth, *, fleet_id=None) -> dict:
             return 7
 
     monkeypatch.setattr(mem_routes, "get_storage_client", lambda: _SC())
+    # The read gate looks the caller up: trust 0 reads nothing.
+    monkeypatch.setattr(
+        mem_routes,
+        "lookup_agent",
+        AsyncMock(
+            return_value={"agent_id": "agent-a", "fleet_id": "home", "trust_level": 1}
+        ),
+    )
     await mem_routes.memory_count(
         tenant_id="t1", fleet_id=fleet_id, status=None, auth=auth
     )
@@ -315,10 +325,10 @@ async def test_count_applies_the_fleet_read_gate(monkeypatch):
 
     calls: list[tuple] = []
 
-    async def spy_gate(tenant_id, agent_id, fleet_id):
-        calls.append((tenant_id, str(agent_id), fleet_id))
+    async def spy_gate(tenant_id, agent_id, fleet_ids, *, agent=None):
+        calls.append((tenant_id, str(agent_id), list(fleet_ids)))
 
-    monkeypatch.setattr(mem_routes, "enforce_fleet_read", spy_gate)
+    monkeypatch.setattr(mem_routes, "enforce_fleet_read_many", spy_gate)
 
     await _count_with(
         monkeypatch,
@@ -326,7 +336,7 @@ async def test_count_applies_the_fleet_read_gate(monkeypatch):
         fleet_id="other-fleet",
     )
 
-    assert calls == [("t1", "agent-a", "other-fleet")], (
+    assert calls == [("t1", "agent-a", ["other-fleet"])], (
         f"expected one fleet-read gate call, got {calls!r}"
     )
 

@@ -188,6 +188,10 @@ class Settings(BaseSettings):
     caura_telemetry_state_dir: str = str(Path(tempfile.gettempdir()) / "caura-heartbeat")
     redis_url: str = ""  # e.g. redis://localhost:6379/0. Empty = in-memory fallback.
     cors_origins: str = "http://localhost:3000"
+    # Additional exact authorities/origins for a standalone reverse proxy.
+    # Loopback is allowed by default; PUBLIC_API_URL is also recognized.
+    standalone_allowed_hosts: str = ""
+    standalone_allowed_origins: str = ""
     # Extra origins the installer endpoints (``/install-plugin``,
     # ``/install-skill``) may bake into a generated script via ``api_url``,
     # comma-separated, e.g. ``https://caura.example.com``. The origin that

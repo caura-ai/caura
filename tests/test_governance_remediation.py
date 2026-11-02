@@ -15,6 +15,16 @@ from core_api.services.organization_settings import ResolvedConfig
 
 pytestmark = pytest.mark.asyncio
 
+# The patch a keep_private narrowing writes: the visibility, and the mark the
+# edit path reads to keep the row narrowed while the policy stands.
+_KEPT_PRIVATE = {
+    "visibility": "scope_agent",
+    "metadata_patch": {
+        "nonbusiness_kept_private": True,
+        "_system": {"nonbusiness_kept_private": True},
+    },
+}
+
 
 @pytest.fixture
 def emitted(monkeypatch):
@@ -671,7 +681,7 @@ async def test_a_failed_cascade_never_erases_the_parents_own_audit(
         await governance_remediation.remediate_after_enrichment(mem, cfg)
 
     # The parent WAS narrowed...
-    assert ("update", "m1", "t1", {"visibility": "scope_agent"}) in storage
+    assert ("update", "m1", "t1", _KEPT_PRIVATE) in storage
     # ...so the record of that narrowing must exist.
     assert any(c.get("resource_id") == "m1" for c in emitted), (
         f"the parent's visibility changed with no audit row: {emitted}"
@@ -754,7 +764,7 @@ async def test_nonbusiness_keep_private_updates_visibility(emitted, storage):
     mem = _mem(metadata={"business_relevance": "personal"})
     outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
     assert outcome.dropped is False
-    assert ("update", "m1", "t1", {"visibility": "scope_agent"}) in storage
+    assert ("update", "m1", "t1", _KEPT_PRIVATE) in storage
     assert any(c["action"] == "nonbusiness_keep_private" for c in emitted)
 
 

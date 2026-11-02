@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from core_storage_api.routers._validation import _require, _require_uuid
 from core_storage_api.schemas import FLEET_COMMAND_FIELDS, FLEET_NODE_FIELDS, orm_to_dict
@@ -179,7 +179,7 @@ async def list_commands(
     node_id: UUID | None = None,
     status: str | None = None,
     command: str | None = None,
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=10000),
     owner_principal: str | None = None,
 ) -> list[dict]:
     # ``node_id`` accepted directly (OSS 09/02 M-26) as well as by name. The

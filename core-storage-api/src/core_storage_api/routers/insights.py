@@ -51,8 +51,8 @@ def _scope_args(body: dict) -> tuple[str | None, str, str]:
 
 def _max_memories(body: dict) -> int:
     val = body.get("max_memories")
-    if not isinstance(val, int) or val < 1:
-        raise HTTPException(status_code=422, detail="max_memories (int >= 1) is required")
+    if isinstance(val, bool) or not isinstance(val, int) or not 1 <= val <= 5000:
+        raise HTTPException(status_code=422, detail="max_memories must be an integer between 1 and 5000")
     return val
 
 
@@ -182,8 +182,8 @@ async def insights_discover_sample(request: Request) -> list[dict]:
     tenant_id = _require(body, "tenant_id")
     fleet_id, agent_id, scope = _scope_args(body)
     sample_size = body.get("sample_size")
-    if not isinstance(sample_size, int) or sample_size < 1:
-        raise HTTPException(status_code=422, detail="sample_size (int >= 1) is required")
+    if isinstance(sample_size, bool) or not isinstance(sample_size, int) or not 1 <= sample_size <= 5000:
+        raise HTTPException(status_code=422, detail="sample_size must be an integer between 1 and 5000")
     return await _svc.insights_discover_sample(
         tenant_id=tenant_id,
         fleet_id=fleet_id,

@@ -117,8 +117,8 @@ class KeystoneSetRequest(TenantScopedBody):
     # length (1 leading char + up to 99 trailing), so explicit ``min_length``
     # / ``max_length`` would be redundant.
     doc_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,99}$")
-    title: str = Field(min_length=1)
-    content: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=2000)
     scope: Literal["tenant", "fleet", "agent"]
     weight: Literal["low", "med", "high"]
     # Accepted so existing clients keep working, and ignored: the author recorded

@@ -3,7 +3,8 @@
 LLM-driven analysis over targeted memory subsets. Findings are persisted
 as ``insight``-typed memories so they compound across sessions.
 
-scope='agent' at trust ≥ 1; scope='fleet'/'all' requires trust ≥ 2.
+scope='agent' at trust ≥ 1, scope='fleet' at trust ≥ 2, scope='all' at trust ≥ 3
+(its findings are saved as scope_org rows).
 Exposed via both MCP and REST (``/api/v1/insights/generate``).
 """
 
@@ -15,7 +16,7 @@ from ._types import ToolSpec
 
 _DESCRIPTION = (
     "Reflect over your memory store. "
-    "scope: agent (default, trust ≥ 1)|fleet|all (trust ≥ 2; "
+    "scope: agent (default, trust ≥ 1)|fleet (trust ≥ 2)|all (trust ≥ 3; "
     "divergence requires fleet/all). "
     "Findings are saved as insight-type memories for future runs to build on."
 )

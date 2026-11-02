@@ -24,6 +24,7 @@ _SPEC = ToolSpec(
     trust_required=0,
     error_codes=(
         "AGENT_IDENTITY_MISMATCH",
+        "AGENT_TRUST_TOO_LOW",
         "BAD_REQUEST",
         "FLEET_SCOPE_FORBIDDEN",
         "FORBIDDEN",

@@ -834,6 +834,45 @@ class PubSubEventBus(EventBus):
         return self._publish_executor
 
     async def publish(self, topic: str, event: Event) -> None:
+        await self._enqueue_publish(topic, event)
+
+    async def publish_confirmed(self, topic: str, event: Event) -> None:
+        """Wait for broker acceptance before retiring a legacy input message."""
+        future = await self._enqueue_publish(topic, event)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            self._get_publish_executor(), functools.partial(future.result, timeout=30)
+        )
+
+    async def _replace_legacy_enrich_retry(self, event: Event) -> bool:
+        if event.event_type != "caura.memory.enrich-requested":
+            return False
+        from common.settings_crypto import PROVIDER_KEY_FIELDS, cipher_from_environment
+
+        legacy = {
+            name: event.payload.get(name)
+            for name in PROVIDER_KEY_FIELDS
+            if isinstance(event.payload.get(name), str) and event.payload.get(name)
+        }
+        if not legacy:
+            return False
+        # Mutating the decoded payload cannot change Pub/Sub's retained original.
+        # Confirm an encrypted replacement before acknowledging that original.
+        cipher = cipher_from_environment()
+        encrypted = dict(event.payload.get("encrypted_api_keys") or {})
+        for name, value in legacy.items():
+            if isinstance(value, str):
+                encrypted.setdefault(name, cipher.encrypt(value))
+        payload = {
+            **event.payload,
+            **dict.fromkeys(PROVIDER_KEY_FIELDS),
+            "encrypted_api_keys": encrypted,
+        }
+        replacement = event.model_copy(update={"payload": payload})
+        await self.publish_confirmed(event.event_type, replacement)
+        return True
+
+    async def _enqueue_publish(self, topic: str, event: Event) -> Any:
         # Misconfiguration signal: handlers were registered but start()
         # was never called, so no pull loop exists. Publishing still
         # works (separate publisher/subscriber role) but a single-process
@@ -907,6 +946,7 @@ class PubSubEventBus(EventBus):
         future.add_done_callback(
             functools.partial(self._report_publish_result, topic, event.event_id)
         )
+        return future
 
     @staticmethod
     def _report_publish_result(topic: str, event_id: uuid.UUID, future: Any) -> None:
@@ -1448,10 +1488,21 @@ class PubSubEventBus(EventBus):
                     if success:
                         ack_ids.append(received.ack_id)
                     else:
-                        delay = _nack_delay_seconds(
-                            getattr(received, "delivery_attempt", 0)
-                        )
-                        nack_ids.setdefault(delay, []).append(received.ack_id)
+                        try:
+                            replaced = await self._replace_legacy_enrich_retry(event)
+                        except Exception:
+                            # Preserve delivery if the replacement could not be confirmed.
+                            logger.error(
+                                "Legacy enrich retry replacement failed; preserving original delivery"
+                            )
+                            replaced = False
+                        if replaced:
+                            ack_ids.append(received.ack_id)
+                        else:
+                            delay = _nack_delay_seconds(
+                                getattr(received, "delivery_attempt", 0)
+                            )
+                            nack_ids.setdefault(delay, []).append(received.ack_id)
 
                 # DRAIN the keeper before the acks, and above all before the
                 # nack. Signalled and AWAITED, not cancelled: ``cancel()`` only

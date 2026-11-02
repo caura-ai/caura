@@ -49,8 +49,15 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # so that index, valid, joins the probe. It is the one probe that can exist before
 # its head: a chain-built database has had it since 001. That is safe here, as
 # 068 does nothing where the index stands valid, so stamping 068 over such a 067
-# database skips no work.
-_HEAD_FINGERPRINT_REVISION = "068"
+# database skips no work. 069 adds ``organization_settings_audit.actor_kind`` and
+# ``actor_credential_id`` in one transaction, so the second joins the probe. 070
+# changes data only: it marks status-less skills ``active`` in tenants that never
+# turned the Skill Factory on. Its probe is that no such row is left, which is
+# exactly when stamping 070 skips no work, as with 068. It reads ``documents``
+# and ``organization_settings`` (001 and 014), so boot runs the probe only where
+# the stamp branch can use it, after 019's sentinel; an empty database has
+# neither table.
+_HEAD_FINGERPRINT_REVISION = "070"
 _HEAD_FINGERPRINT_SQL: str | None = (
     "SELECT (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -67,7 +74,12 @@ _HEAD_FINGERPRINT_SQL: str | None = (
     "WHERE table_schema = 'public' AND table_name = 'memory_reuse') "
     "AND EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' "
-    "AND c.relname = 'uq_entities_tenant_type_name_fleet' AND i.indisvalid)"
+    "AND c.relname = 'uq_entities_tenant_type_name_fleet' AND i.indisvalid) "
+    "AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' "
+    "AND table_name = 'organization_settings_audit' AND column_name = 'actor_credential_id') "
+    "AND NOT EXISTS (SELECT 1 FROM documents WHERE collection = 'skills' "
+    "AND ((data::jsonb) ->> 'status') IS NULL AND tenant_id NOT IN ("
+    "SELECT org_id FROM organization_settings WHERE (settings -> 'skills_factory' ->> 'enabled') = 'true'))"
 )
 
 _engine: AsyncEngine | None = None
@@ -147,9 +159,7 @@ def schema_bootstrap_action(
 def _build_engine(url: str) -> AsyncEngine:
     return create_async_engine(
         url,
-        # Empty unless POSTGRES_REQUIRE_SSL is on, so the default deployment's
-        # call is unchanged. ``url`` is passed so a DSN that already asks for
-        # verification keeps it instead of being downgraded to ``require``.
+        # Request and migration pools share the same TLS floor.
         connect_args=db_connect_args(url),
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
@@ -247,12 +257,24 @@ async def init_database() -> None:
         logger.info("Skipping Alembic (role=reader — writer owns schema)")
         return
 
+    # A separate owner pool never becomes the request-serving engine.
+    migration_url = settings.migration_database_url.get_secret_value()
+    if migration_url:
+        engine = _build_engine(migration_url)
+        try:
+            await _init_database(engine)
+        finally:
+            await engine.dispose()
+    else:
+        await _init_database(get_engine())
+
+
+async def _init_database(engine: AsyncEngine) -> None:
     from alembic import command
     from alembic.config import Config
     from alembic.script import ScriptDirectory
     from sqlalchemy import text
 
-    engine = get_engine()
     migrations_dir = str(Path(__file__).parent / "migrations")
 
     alembic_cfg = Config()
@@ -371,9 +393,17 @@ async def init_database() -> None:
                 )
                 # The head fingerprint is only meaningful for the head it was
                 # written for: a stale entry proves nothing about this head, so
-                # it counts as no evidence and the stamp branch refuses.
+                # it counts as no evidence and the stamp branch refuses. It is
+                # read only where that branch is reachable, since a probe may
+                # read tables the chain creates.
                 has_head_evidence = False
-                if _HEAD_FINGERPRINT_SQL is not None and schema_head == _HEAD_FINGERPRINT_REVISION:
+                if (
+                    _HEAD_FINGERPRINT_SQL is not None
+                    and schema_head == _HEAD_FINGERPRINT_REVISION
+                    and has_tables
+                    and not has_alembic
+                    and has_chain_evidence
+                ):
                     has_head_evidence = bool(await work_conn.scalar(text(_HEAD_FINGERPRINT_SQL)))
                 # End the implicit read tx so Alembic owns transaction lifecycle
                 # on this connection — required for ``autocommit_block``.

@@ -37,8 +37,17 @@ async def get_tenant_settings(
     tenant_id: str | None = None,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Get tenant settings (API keys masked). Admin can query any tenant."""
+    """Get tenant settings (API keys masked). Admin can query any tenant.
+
+    Install and cross-tenant credentials and org members are refused, as on
+    ``PUT``; agent credentials, which ``PUT`` also refuses, may still read.
+    Core-api cannot see the enterprise permissions that decide which settings
+    groups a member may read, so it shows a member none. The dashboard reads
+    settings through admin-api, which narrows them per permission.
+    """
     tid = _resolve_tenant(auth, tenant_id)
+    auth.enforce_tenant_admin_credential("read tenant settings")
+    auth.enforce_not_org_member("read tenant settings")
     return await get_settings_for_display(tid)
 
 
@@ -78,6 +87,9 @@ async def update_tenant_settings(
     Audit attribution: honours ``X-Changed-By`` only when the caller is
     authenticated via the admin API key (i.e. the enterprise admin-api proxy).
     Regular user requests always use ``auth.user_id`` regardless of the header.
+    Every change also records the credential that made it (``actor_kind`` and,
+    when core-api knows it, ``actor_credential_id``), so a change made with an
+    API key, which names no person, still names its key.
     """
     tid = _resolve_tenant(auth, tenant_id)
     # ``enforce_read_only`` rather than the ``is_demo`` check this replaced: that
@@ -102,6 +114,7 @@ async def update_tenant_settings(
     # (L-72): the Skills Inbox already keeps its actions to org admins.
     auth.enforce_not_agent_credential("change tenant settings")
     auth.enforce_not_org_member("change tenant settings")
+    auth.enforce_tenant_admin_credential("change tenant settings")
     # Only trust X-Changed-By from admin-key callers (the enterprise proxy).
     # Regular users could forge this header otherwise.
     changed_by: str | None
@@ -113,7 +126,13 @@ async def update_tenant_settings(
     # so the allowlist check in update_settings doesn't reject it.
     body.pop("tenant_id", None)
     try:
-        return await update_settings(tid, body, changed_by=changed_by)
+        return await update_settings(
+            tid,
+            body,
+            changed_by=changed_by,
+            actor_kind=auth.actor_kind,
+            actor_credential_id=auth.credential_id,
+        )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 

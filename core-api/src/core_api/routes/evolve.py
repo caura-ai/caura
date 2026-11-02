@@ -52,7 +52,7 @@ class EvolveRequest(TenantScopedBody):
         description=(
             "Scope: 'agent' (default, requires trust ≥ 1, touches caller-owned memories only), "
             "'fleet' (requires trust ≥ 2, touches memories in fleet_id), or "
-            "'all' (requires trust ≥ 2, tenant-wide)."
+            "'all' (requires trust ≥ 3, tenant-wide)."
         ),
     )
     agent_id: str | None = Field(
@@ -112,8 +112,8 @@ async def report_outcome_endpoint(
     correspond to an existing agent in the tenant that meets the scope's
     trust requirement.
 
-    Trust gating: scope='agent' requires trust ≥ 1, scope='fleet'/'all'
-    requires trust ≥ 2. Admin keys bypass.
+    Trust gating: scope='agent' requires trust ≥ 1, scope='fleet' trust ≥ 2
+    and scope='all' trust ≥ 3 (it saves ``scope_org`` rows). Admin keys bypass.
 
     Every report adjusts weights, by design: the same outcome reported after
     two different actions is two reports. A retry after a timeout is the same

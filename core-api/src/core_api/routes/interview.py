@@ -171,16 +171,16 @@ async def submit_interview(
     writes as itself; install credentials get the broker ownership boundary),
     and an agent awaiting approval is refused (403). A UUID ``node_id`` must
     be a fleet node of the tenant (404 otherwise); any other ``node_id`` is an
-    adapter stream, which an agent-bound credential may continue only if its
-    own agent last advanced it (409 otherwise). And ``cursor_to`` may run at
-    most ``INTERVIEW_MAX_CURSOR_ADVANCE`` past the stream's committed
-    watermark (422 otherwise).
+    adapter stream, which a credential may continue only as the agent that
+    last advanced it (409 otherwise). And ``cursor_to`` may run at most
+    ``INTERVIEW_MAX_CURSOR_ADVANCE`` past the stream's committed watermark
+    (422 otherwise).
 
-    An agent or install credential's window for a fleet node must also cite an
-    unused ``interview_request`` that was delivered to that node (403
-    otherwise). Each request admits one window, so a resubmit under a spent
-    request is refused; the scheduler issues a fresh one, as it does after any
-    failed submit.
+    A window for a fleet node must also cite an unused ``interview_request``
+    that was delivered to that node (403 otherwise), whatever the credential
+    apart from the admin key. Each request admits one window, so a resubmit
+    under a spent request is refused; the scheduler issues a fresh one, as it
+    does after any failed submit.
     """
     auth.enforce_read_only()
     auth.enforce_usage_limits()
@@ -253,13 +253,15 @@ async def submit_interview(
     #   it, so requiring one refused every window that adapter sends.
     #
     # An adapter stream belongs to the agent that last advanced it. Above, an
-    # agent credential's ``body.agent_id`` resolved to its own identity and an
-    # install credential's to an agent the install owns, so either may continue
-    # only streams of that agent and cannot jump another agent's cursor. Tenant
-    # credentials keep tenant-wide authority. 409 rather than 403: the
-    # credential is valid and only this stream is refused, which
-    # ``caura-interviewer`` handles by skipping the one transcript, where a 403
-    # aborts its whole run.
+    # agent credential's ``body.agent_id`` resolved to its own identity, an
+    # install credential's to an agent the install owns, and a tenant
+    # credential's to the agent it names; so each may continue only streams of
+    # that agent and cannot jump another agent's cursor. A tenant credential's
+    # authority to write as any agent is not authority over another agent's
+    # stream: the watermark only moves forward, so a jump is not undone. Only
+    # the admin key is not bound. 409 rather than 403: the credential is valid
+    # and only this stream is refused, which ``caura-interviewer`` handles by
+    # skipping the one transcript, where a 403 aborts its whole run.
     names_fleet_node = _is_uuid(body.node_id)
     # The node's own name rides into the memories the window yields (#678), so
     # a report reads as coming from its node rather than only from an agent id.
@@ -273,7 +275,7 @@ async def submit_interview(
     committed, stream_agent_id = await read_watermark_state(tenant_id, body.node_id)
     if (
         not names_fleet_node
-        and (auth.agent_id or auth.is_install_credential)
+        and not auth.is_admin
         and stream_agent_id is not None
         and canonical_service_agent_id(stream_agent_id) != body.agent_id
     ):
@@ -288,14 +290,16 @@ async def submit_interview(
                 f"past the node's committed watermark ({committed})"
             ),
         )
-    # M-86 — a fleet node's window from an agent or install credential must cite
-    # the ``interview_request`` the scheduler queued for that node and its
-    # heartbeat delivered, and each request admits one window. Naming the node
-    # used to be enough, so any such credential could advance any node's
-    # watermark and take its job doc. Storage checks and spends the request in
-    # one statement; the node's own result report still closes the command. It
-    # runs last, so a window refused for its shape does not spend the request.
-    if names_fleet_node and (auth.agent_id or auth.is_install_credential):
+    # M-86 — a fleet node's window must cite the ``interview_request`` the
+    # scheduler queued for that node and its heartbeat delivered, and each
+    # request admits one window. Naming the node used to be enough, so a
+    # credential could advance any node's watermark and take its job doc. That
+    # holds for a tenant credential too, whatever it may write: the plugin cites
+    # the request it was sent on every credential. Only the admin key, the
+    # operator's, is not asked. Storage checks and spends the request in one
+    # statement; the node's own result report still closes the command. It runs
+    # last, so a window refused for its shape does not spend the request.
+    if names_fleet_node and not auth.is_admin:
         command_id = body.command_id or ""
         if not (
             _is_uuid(command_id)

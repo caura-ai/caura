@@ -14,8 +14,8 @@ import os
 import re
 import shlex
 import shutil
-import subprocess
 import sys
+import tempfile
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -200,69 +200,75 @@ def render_config(url: str, insecure: bool, identity: dict, existing: Path) -> s
 
 def write_private(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(path.name + ".tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    os.chmod(temporary, 0o600)
-    temporary.replace(path)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".caura-bus-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 # --- 3. runtime wiring ----------------------------------------------------
 
 
-def claude_add_argv(claude: str, key: str, config: Path, mcp: Path) -> list[str]:
-    return [
-        claude,
-        "mcp",
-        "add",
-        "--scope",
-        "local",
-        SERVER_NAME,
-        "-e",
-        f"CAURA_API_KEY={key}",
-        "-e",
-        f"CAURA_BUS_AGENT_CONFIG={config}",
-        "--",
-        str(mcp),
-    ]
-
-
-def claude_manual_command(directory: Path, config: Path, mcp: Path) -> str:
-    """The exact command to run by hand; the key comes from the user's environment."""
-    argv = claude_add_argv("claude", "KEYPLACEHOLDER", config, mcp)
-    command = shlex.join(argv).replace(
-        "CAURA_API_KEY=KEYPLACEHOLDER", '"CAURA_API_KEY=${CAURA_API_KEY:?export your agent key first}"'
-    )
-    return f"cd {shlex.quote(str(directory))} && {command}"
-
-
-def wire_claude(directory: Path, key: str, config: Path, mcp: Path) -> str:
-    claude = shutil.which("claude")
-    if not claude:
+def wire_claude_entries(directory: Path, entries: dict[str, dict]) -> str:
+    """Update local-scope entries together, with one backup before a change."""
+    path = claude_config_file()
+    # Claude local scope uses the nearest repository root, or the launch directory
+    # outside a repository. A worktree's .git marker is a file rather than a directory.
+    project = next((p for p in (directory, *directory.parents) if (p / ".git").exists()), directory)
+    try:
+        exists = path.exists()
+        text = path.read_text(encoding="utf-8") if exists else ""
+        data = json.loads(text) if text else {}
+        if not isinstance(data, dict):
+            raise ValueError("expected a JSON object")
+        projects = data.setdefault("projects", {})
+        if not isinstance(projects, dict):
+            raise ValueError("projects must be an object")
+        settings = projects.setdefault(str(project), {})
+        if not isinstance(settings, dict):
+            raise ValueError("project settings must be an object")
+        servers = settings.setdefault("mcpServers", {})
+        if not isinstance(servers, dict):
+            raise ValueError("mcpServers must be an object")
+        servers.update(entries)
+        updated = json.dumps(data, indent=2) + "\n"
+        if updated == text:
+            os.chmod(path, 0o600)
+        else:
+            if exists:
+                write_private(path.with_name(path.name + ".caura-bus-setup.bak"), text)
+            write_private(path, updated)
+    except (OSError, ValueError) as exc:
+        # JSON decode errors can carry snippets of the original file; do not echo them.
         raise SetupError(
-            "`claude` is not on PATH. Run this yourself (with CAURA_API_KEY exported):\n  "
-            + claude_manual_command(directory, config, mcp)
-        )
-    # Replace a previous entry so re-running updates the key and paths in place.
-    subprocess.run(
-        [claude, "mcp", "remove", "--scope", "local", SERVER_NAME],
-        cwd=directory,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    result = subprocess.run(
-        claude_add_argv(claude, key, config, mcp),
-        cwd=directory,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        detail = scrub((result.stderr or result.stdout).strip(), key)
-        raise SetupError(f"`claude mcp add` failed ({result.returncode}): {detail}")
-    return f"claude mcp add --scope local {SERVER_NAME} (project {show(directory)})"
+            f"could not update private Claude config {show(path)} ({type(exc).__name__})"
+        ) from None
+    return f"{', '.join(entries)} in {show(path)} (project {show(project)}; mode 600)"
+
+
+def wire_claude(directory: Path, key: str, config: Path, mcp: Path, server_url: str | None = None) -> str:
+    entries = {
+        SERVER_NAME: {
+            "type": "stdio",
+            "command": str(mcp),
+            "args": [],
+            "env": {"CAURA_API_KEY": key, "CAURA_BUS_AGENT_CONFIG": str(config)},
+        },
+    }
+    if server_url is not None:
+        entries[MEMORY_SERVER_NAME] = {
+            "type": "http",
+            "url": memory_url(server_url),
+            "headers": {MEMORY_HEADER: key},
+        }
+    return wire_claude_entries(directory, entries)
 
 
 def codex_block(key: str, config: Path, mcp: Path) -> list[str]:
@@ -492,57 +498,6 @@ def codex_memory_warnings(text: str, url: str) -> list[str]:
     ]
 
 
-def claude_memory_argv(claude: str, url: str, key: str) -> list[str]:
-    # --header is variadic, so it goes after the name and URL.
-    return [
-        claude,
-        "mcp",
-        "add",
-        "--scope",
-        "local",
-        "--transport",
-        "http",
-        MEMORY_SERVER_NAME,
-        memory_url(url),
-        "--header",
-        f"{MEMORY_HEADER}: {key}",
-    ]
-
-
-def claude_memory_manual_command(directory: Path, url: str) -> str:
-    command = shlex.join(claude_memory_argv("claude", url, "KEYPLACEHOLDER")).replace(
-        f"'{MEMORY_HEADER}: KEYPLACEHOLDER'",
-        f'"{MEMORY_HEADER}: ${{CAURA_API_KEY:?export your agent key first}}"',
-    )
-    return f"cd {shlex.quote(str(directory))} && {command}"
-
-
-def wire_claude_memory(directory: Path, url: str, key: str) -> str:
-    claude = shutil.which("claude")
-    if not claude:
-        raise SetupError(
-            "`claude` is not on PATH. Run this yourself (with CAURA_API_KEY exported):\n  "
-            + claude_memory_manual_command(directory, url)
-        )
-    subprocess.run(
-        [claude, "mcp", "remove", "--scope", "local", MEMORY_SERVER_NAME],
-        cwd=directory,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    result = subprocess.run(
-        claude_memory_argv(claude, url, key), cwd=directory, capture_output=True, text=True, check=False
-    )
-    if result.returncode != 0:
-        detail = scrub((result.stderr or result.stdout).strip(), key)
-        raise SetupError(f"`claude mcp add` for the memory server failed ({result.returncode}): {detail}")
-    return (
-        f"claude mcp add --scope local --transport http {MEMORY_SERVER_NAME} {memory_url(url)} "
-        f"(project {show(directory)}; the key is stored in {show(claude_config_file())})"
-    )
-
-
 # --- 4. peer instructions -------------------------------------------------
 
 
@@ -717,15 +672,15 @@ def run_setup(options: Options, echo: Callable[[str], None], run_async) -> int:
         )
     if runtime == "claude":
         if options.dry_run:
-            echo(f"  {prefix}run in {directory}:")
-            echo("      " + shlex.join(claude_add_argv("claude", mask(key), config_path, mcp)))
+            echo(f"  {prefix}write local caura-bus entry in {show(claude_config_file())} (mode 600)")
             if options.memory:
-                echo("      " + shlex.join(claude_memory_argv("claude", url, mask(key))))
+                echo(f"  {prefix}write local caura {memory_url(url)} entry in the same private config")
         else:
             try:
-                echo("  [ok] MCP server " + wire_claude(directory, key, config_path, mcp))
-                if options.memory:
-                    echo("  [ok] memory MCP server " + wire_claude_memory(directory, url, key))
+                echo(
+                    "  [ok] MCP configuration "
+                    + wire_claude(directory, key, config_path, mcp, url if options.memory else None)
+                )
             except SetupError as exc:
                 echo(f"  [!!] {exc}")
                 return finish(options, runtime, directory, config_path, echo, run_async, key, failed=True)

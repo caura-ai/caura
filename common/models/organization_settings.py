@@ -55,7 +55,17 @@ class OrganizationSettingsAudit(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     org_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The person (a user id, or the one admin-api names in X-Changed-By), or a
+    # ``system:`` job. NULL for a change made with an API key, which names no
+    # person; the two columns below say which credential it was.
     changed_by: Mapped[str | None] = mapped_column(Text)
+    # The credential's kind as the audit trail labels it (``user_api_key``,
+    # ``person``, ``admin_key``, ``tenant_key``, ...). Migration 069; NULL on
+    # rows from before it and on system writes.
+    actor_kind: Mapped[str | None] = mapped_column(Text)
+    # The gateway's credential id (verified by the gateway secret), or
+    # ``config:<setting>`` for a key core-api matched itself. Never a secret.
+    actor_credential_id: Mapped[str | None] = mapped_column(Text)
     diff: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()")

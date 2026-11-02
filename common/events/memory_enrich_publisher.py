@@ -15,6 +15,7 @@ inside the worker.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from uuid import UUID
 
@@ -22,6 +23,8 @@ from common.events.base import Event
 from common.events.factory import get_event_bus
 from common.events.memory_enrich_request import MemoryEnrichRequest
 from common.events.topics import Topics
+
+logger = logging.getLogger(__name__)
 
 
 async def publish_memory_enrich_request(
@@ -61,30 +64,68 @@ async def publish_memory_enrich_request(
     ``track_task(tracked_task(...))`` so a transport error doesn't bubble
     out of the request handler.
     """
-    fallback_provider: str | None = None
-    fallback_model: str | None = None
-    if tenant_config is not None and hasattr(tenant_config, "resolve_fallback"):
-        # ``resolve_fallback()`` reads the resolver's own attribute
-        # tuples — only ``AttributeError`` / ``KeyError`` / ``TypeError``
-        # are plausible. Anything else is a real bug; let it surface
-        # to the caller's ``track_task`` wrapper instead of silently
-        # demoting to "no fallback".
-        try:
-            fallback_provider, fallback_model = tenant_config.resolve_fallback()
-        except (AttributeError, KeyError, TypeError):
-            fallback_provider, fallback_model = None, None
+    from common.settings_crypto import (
+        PROVIDER_KEY_FIELDS,
+        ProviderKeyDecryptionError,
+        cipher_from_environment,
+    )
+
+    credential_error = False
+    try:
+        fallback_provider: str | None = None
+        fallback_model: str | None = None
+        if tenant_config is not None and hasattr(tenant_config, "resolve_fallback"):
+            # ``resolve_fallback()`` reads the resolver's own attribute
+            # tuples — only ``AttributeError`` / ``KeyError`` / ``TypeError``
+            # are plausible. Anything else is a real bug; let it surface
+            # to the caller's ``track_task`` wrapper instead of silently
+            # demoting to "no fallback".
+            try:
+                fallback_provider, fallback_model = tenant_config.resolve_fallback()
+            except (AttributeError, KeyError, TypeError):
+                fallback_provider, fallback_model = None, None
+
+        encrypt_credentials = getattr(tenant_config, "encrypted_provider_keys", None)
+        if callable(encrypt_credentials):
+            encrypted_keys = encrypt_credentials()
+        else:
+            credentials = {
+                name: getattr(tenant_config, name, None) for name in PROVIDER_KEY_FIELDS
+            }
+            encrypted_keys = {
+                name: cipher_from_environment().encrypt(value)
+                for name, value in credentials.items()
+                if value
+            }
+        if any(
+            not isinstance(value, str) or not value.startswith("enc:")
+            for value in encrypted_keys.values()
+        ):
+            raise ValueError(
+                "Settings encryption is required before publishing provider credentials"
+            )
+
+        enrichment_provider = getattr(tenant_config, "enrichment_provider", None)
+        enrichment_model = getattr(tenant_config, "enrichment_model", None)
+    except ProviderKeyDecryptionError:
+        credential_error = True
+        encrypted_keys = {}
+        fallback_provider = fallback_model = None
+        enrichment_provider = enrichment_model = None
+        logger.error(
+            "Provider credential unavailable for tenant %s; publishing a failed enrichment request",
+            tenant_id,
+        )
 
     payload = MemoryEnrichRequest(
         memory_id=memory_id,
         tenant_id=tenant_id,
         content=content,
         reference_datetime=reference_datetime,
-        enrichment_provider=getattr(tenant_config, "enrichment_provider", None),
-        enrichment_model=getattr(tenant_config, "enrichment_model", None),
-        openai_api_key=getattr(tenant_config, "openai_api_key", None),
-        anthropic_api_key=getattr(tenant_config, "anthropic_api_key", None),
-        openrouter_api_key=getattr(tenant_config, "openrouter_api_key", None),
-        gemini_api_key=getattr(tenant_config, "gemini_api_key", None),
+        enrichment_provider=enrichment_provider,
+        enrichment_model=enrichment_model,
+        encrypted_api_keys=encrypted_keys,
+        credential_error=credential_error,
         fallback_provider=fallback_provider,
         fallback_model=fallback_model,
         agent_provided_fields=agent_provided_fields,
@@ -93,13 +134,8 @@ async def publish_memory_enrich_request(
     event = Event(
         event_type=Topics.Memory.ENRICH_REQUESTED,
         tenant_id=tenant_id,
-        # ``include_secrets=True`` opts out of the
-        # ``MemoryEnrichRequest._redact_secrets`` field-serializer so
-        # the wire payload carries the raw API keys (the worker needs
-        # them to resolve the tenant's LLM provider). Every other
-        # ``model_dump()`` call site — logging, audit, ad-hoc
-        # ``json.dumps`` — gets ``"***"`` for those fields.
-        payload=payload.model_dump(mode="json", context={"include_secrets": True}),
+        # Plaintext compatibility fields remain empty; only encrypted credentials travel.
+        payload=payload.model_dump(mode="json", context={"wire": True}),
     )
     bus = get_event_bus()
     await bus.publish(Topics.Memory.ENRICH_REQUESTED, event)

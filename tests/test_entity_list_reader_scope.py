@@ -12,6 +12,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import Request, Response
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -79,7 +80,14 @@ async def test_list_and_graph_forward_the_reader_scope(monkeypatch, agent_id):
     auth = AuthContext(tenant_id="t", agent_id=agent_id)
 
     await routes.list_entities(
-        tenant_id="t", fleet_id=None, entity_type=None, search=None, limit=10, auth=auth
+        request=Request({"type": "http"}),
+        response=Response(),
+        tenant_id="t",
+        fleet_id=None,
+        entity_type=None,
+        search=None,
+        limit=10,
+        auth=auth,
     )
     await routes.get_graph(tenant_id="t", fleet_id=None, auth=auth)
 

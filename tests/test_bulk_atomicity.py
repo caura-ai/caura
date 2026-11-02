@@ -1121,3 +1121,42 @@ async def test_storage_504_carries_attempt_id_retry_hint(client, monkeypatch):
     detail = resp.json()["detail"]
     assert "X-Bulk-Attempt-Id" in detail
     assert "recover" in detail.lower()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("metadata", {"x": "x" * 65529}),
+        ("source_uri", "x" * 2049),
+        ("run_id", "x" * 201),
+        ("predicate", "x" * 201),
+        ("object_value", "x" * 10001),
+    ],
+)
+async def test_oversized_item_fields_preserve_valid_sibling(client, field, value):
+    tenant_id, headers = get_test_auth()
+    response = await client.post(
+        "/api/v1/memories/bulk",
+        json={
+            "tenant_id": tenant_id,
+            "agent_id": f"field-size-{uid()}",
+            "items": [
+                {
+                    "content": f"Oversized field item with enough context {uid()}",
+                    field: value,
+                },
+                {"content": f"Valid sibling with enough context to persist {uid()}"},
+            ],
+        },
+        headers={**headers, "X-Bulk-Attempt-Id": _attempt_id("field-size")},
+    )
+    assert response.status_code == 207, response.text
+    result = response.json()
+    assert result["created"] == 1
+    assert result["errors"] == 1
+    assert [r["status"] for r in result["results"]] == ["error", "created"]
+    assert "must be <=" in result["results"][0]["error"]
+    persisted = await client.get(
+        f"/api/v1/memories/{result['results'][1]['id']}", headers=headers
+    )
+    assert persisted.status_code == 200

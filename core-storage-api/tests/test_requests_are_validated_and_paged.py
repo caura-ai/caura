@@ -100,10 +100,17 @@ async def test_l39_a_long_keystone_can_be_rewritten_short(client: AsyncClient) -
     override, so a rule of 2KB or more could never be cut down: it was a 500."""
     tenant = _tenant()
     rule = {"doc_id": "long-rule", "title": "long-rule", "scope": "tenant", "weight": "med"}
-    first = await client.post(
-        f"{PREFIX}/keystones", json={"tenant_id": tenant, **rule, "content": "x" * 4000}
+    # Seed a legacy rule directly: new writes are capped at 2,000 characters,
+    # but previously stored longer rules must still be editable downwards.
+    from core_storage_api.services.postgres_service import PostgresService
+
+    await PostgresService().document_upsert(
+        tenant_id=tenant,
+        collection="_keystones",
+        doc_id="long-rule",
+        data={"title": "long-rule", "scope": "tenant", "weight": 50, "content": "x" * 4000},
+        system=True,
     )
-    assert first.status_code == 200, first.text
 
     short = await client.post(
         f"{PREFIX}/keystones", json={"tenant_id": tenant, **rule, "content": "Do less."}

@@ -23,6 +23,7 @@ from fastapi import HTTPException
 from common.governance import mask, scan
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
+from core_api.services.auto_capture import capture_of
 from core_api.services.governance_gate import (
     ACTION_PII_DROP,
     ACTION_PII_FLAG,
@@ -31,6 +32,12 @@ from core_api.services.governance_gate import (
     mark_pii_flagged,
     pii_audit_detail,
 )
+from core_api.services.organization_settings import _GovPII
+
+# The policy a row the plugin captured on its own gets when the organization
+# has not turned the gate on: every category, masked. Nobody chose to store
+# that text, so a secret echoed in it is not kept (``auto_capture``).
+CAPTURED_ROW_POLICY = _GovPII(enabled=True, action="mask", enabled_categories=None)
 
 
 class GovernanceScanContent:
@@ -43,7 +50,9 @@ class GovernanceScanContent:
         cfg = ctx.tenant_config
         gov = cfg.governance_pii if cfg is not None else None
         if gov is None or not gov.enabled:
-            return StepResult(outcome=StepOutcome.SKIPPED)
+            if capture_of(getattr(data, "metadata", None)) is None:
+                return StepResult(outcome=StepOutcome.SKIPPED)
+            gov = CAPTURED_ROW_POLICY
         if not data.content:
             return None
 

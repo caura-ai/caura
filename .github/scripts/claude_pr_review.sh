@@ -3,13 +3,12 @@
 # Shared Claude PR review.
 #
 # Fetches a pull request's diff from the GitHub API, reviews it with Claude, and
-# posts the result as a PR comment. BOTH the on-open `claude-review` job and the
-# `@claude` `claude-retrigger` job call this same script, so the two paths are
-# guaranteed identical — historically they diverged, and the on-open path (the
-# claude-code-action agent) never actually received the diff: it tried to fetch
-# it via `gh`, hit the headless permission wall, and the workflow then stamped a
-# meaningless "No issues found". Feeding the diff on stdin to `claude --print`
-# is the mechanism that demonstrably works.
+# posts the result as a PR comment. The `claude-review` job runs it on a member's
+# `@claude` comment, from main's checkout. It replaced the claude-code-action
+# agent, which never actually received the diff: it tried to fetch it via `gh`,
+# hit the headless permission wall, and the workflow then stamped a meaningless
+# "No issues found". Feeding the diff on stdin to `claude --print` is the
+# mechanism that demonstrably works.
 #
 # Required env:
 #   REPO              owner/name

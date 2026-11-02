@@ -238,6 +238,13 @@ def _storage_permanent(response: httpx.Response) -> tuple[str, dict] | None:
     return (message if isinstance(message, str) and message else _PERMANENT_FALLBACK_DETAIL), fields
 
 
+def _path_segment(value: str | UUID) -> str:
+    value = str(value)
+    if value in {".", ".."}:
+        raise ValueError("identifier must not be a dot segment")
+    return quote(value, safe="")
+
+
 def _agent_path(agent_id: str) -> str:
     """``/agents/<agent_id>``, with the id escaped as one path segment (M-13).
 
@@ -246,7 +253,7 @@ def _agent_path(agent_id: str) -> str:
     escaped ``/`` does not survive routing, since the server decodes it first;
     ``get_or_create_agent`` refuses such an id before it gets here.
     """
-    return f"/agents/{quote(agent_id, safe='')}"
+    return f"/agents/{_path_segment(agent_id)}"
 
 
 def _reject_reserved_write_id(agent_id: str | None) -> None:
@@ -1259,12 +1266,14 @@ class CoreStorageClient:
 
     async def get_memory_conflict(self, conflict_id: str, tenant_id: str) -> dict | None:
         """One conflict row. ``None`` when absent or owned by another tenant."""
-        return await self._get(f"/memories/memory-conflicts/{conflict_id}", tenant_id=tenant_id, read=True)
+        return await self._get(
+            f"/memories/memory-conflicts/{_path_segment(conflict_id)}", tenant_id=tenant_id, read=True
+        )
 
     async def resolve_memory_conflict(self, conflict_id: str, data: dict) -> dict:
         """D11 — record a reviewer's decision. Raises on 409 (already reviewed),
         which the route above turns into the caller's 409."""
-        return await self._patch(f"/memories/memory-conflicts/{conflict_id}/resolve", data)
+        return await self._patch(f"/memories/memory-conflicts/{_path_segment(conflict_id)}/resolve", data)
 
     async def find_successors(self, data: dict) -> list[dict]:
         return await self._post("/memories/find-successors", data, read=True)  # type: ignore[return-value]
@@ -3230,7 +3239,7 @@ class CoreStorageClient:
         return result
 
     async def delete_fleet(self, tenant_id: str, fleet_id: str) -> bool:
-        return await self._delete(f"/fleet/{fleet_id}", tenant_id=tenant_id)
+        return await self._delete(f"/fleet/{_path_segment(fleet_id)}", tenant_id=tenant_id)
 
     async def fleet_in_flight_deploy(self, *, node_id: UUID, tenant_id: str, since: datetime) -> bool:
         result = await self._get(
@@ -3619,10 +3628,18 @@ class CoreStorageClient:
         return result.get("settings", {}), version if isinstance(version, str) else None
 
     async def update_org_settings(
-        self, org_id: str, settings: dict, *, changed_by: str | None = None
+        self,
+        org_id: str,
+        settings: dict,
+        *,
+        changed_by: str | None = None,
+        actor_kind: str | None = None,
+        actor_credential_id: str | None = None,
     ) -> dict:
         """Transactional upsert + audit, server-side. Returns
         ``{"settings": <merged overrides>, "changed": bool}``.
+
+        A storage build without the actor columns ignores the two actor keys.
 
         Non-idempotent ``_post`` (connection-phase retry only): a write whose
         response was lost is never replayed. Re-applying the same payload is a
@@ -3630,7 +3647,12 @@ class CoreStorageClient:
         """
         result = await self._post(
             f"/organization-settings/{org_id}",
-            {"settings": settings, "changed_by": changed_by},
+            {
+                "settings": settings,
+                "changed_by": changed_by,
+                "actor_kind": actor_kind,
+                "actor_credential_id": actor_credential_id,
+            },
         )
         # _post is typed dict | list; the endpoint always returns an object.
         # Guard so an unexpected shape (error envelope, schema drift) fails with
@@ -3711,6 +3733,13 @@ class CoreStorageClient:
         already pins the writer for its watermark read.
         """
         result = await self._get("/tenants/interviewer-enabled", read=read)
+        if result is None:
+            raise RuntimeError("core-storage-api /tenants/interviewer-enabled returned 404")
+        return result.get("org_ids", [])
+
+    async def list_interviewer_disabled_orgs(self) -> list[str]:
+        """Orgs with an ``interviewer`` settings block that is not enabled."""
+        result = await self._get("/tenants/interviewer-enabled", enabled="false")
         if result is None:
             raise RuntimeError("core-storage-api /tenants/interviewer-enabled returned 404")
         return result.get("org_ids", [])

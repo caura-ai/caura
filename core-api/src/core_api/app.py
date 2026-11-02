@@ -15,7 +15,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp as ASGIApplication
 from starlette.types import Receive, Scope, Send
 
-from common.structlog_config import configure_logging, reroute_third_party_loggers
+from common.structlog_config import configure_llmobs_privacy, configure_logging, reroute_third_party_loggers
 from core_api.config import settings as app_settings
 
 # Must run before any other module-level `logging.getLogger(...)` call emits
@@ -27,6 +27,8 @@ configure_logging(
     json_logs=app_settings.log_format_json,
     log_file=app_settings.log_file or None,
 )
+
+configure_llmobs_privacy()
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,7 @@ from core_api.clients.storage_client import (
 )
 from core_api.constants import STM_WRITE_ROUTE_NOTE, VERSION, is_mcp_path
 from core_api.consumer import register_consumers
+from core_api.docs import configure_swagger_ui
 from core_api.mcp_server import get_mcp_app, mcp_lifespan
 from core_api.middleware.ingest_body_size import IngestBodySizeMiddleware
 from core_api.middleware.per_tenant_concurrency import per_tenant_storage_slot
@@ -181,6 +184,23 @@ def _validate_startup_settings(app_settings) -> None:  # type: ignore[no-untyped
             "each write publishes would reach no subscriber. Set EVENT_BUS_BACKEND=pubsub with "
             "core-worker subscribed, or DEPLOYMENT_MODE=inline."
         )
+    from common.settings_crypto import SettingsCipher
+
+    key = app_settings.settings_encryption_key or ""
+    try:
+        SettingsCipher(key, _os.environ.get("SETTINGS_ENCRYPTION_PREVIOUS_KEYS", ""))
+    except ValueError:
+        if (
+            app_settings.environment == "production"
+            or _os.getenv("EVENT_BUS_BACKEND", "").lower() == "pubsub"
+            or _os.getenv("REQUIRE_SETTINGS_ENCRYPTION", "").lower() == "true"
+        ):
+            raise RuntimeError(
+                "SETTINGS_ENCRYPTION_KEY must be set to a valid Fernet key when encryption is required; configure legacy read keys before migration"
+            )
+        logger.warning(
+            "SETTINGS_ENCRYPTION_KEY is missing or invalid; provider key encryption is unavailable"
+        )
     if app_settings.environment == "development":
         return
     # Hosted from here: production, and ``sandbox``, which staging and every
@@ -228,10 +248,7 @@ def _validate_startup_settings(app_settings) -> None:  # type: ignore[no-untyped
             "fronted by the gateway."
         )
     if app_settings.environment != "production":
-        # ADMIN_API_KEY and SETTINGS_ENCRYPTION_KEY stay production-only, by
-        # decision: whether staging and the sandboxes set them lives in their
-        # Cloud Run state, outside this repo, and a guard that fails there takes
-        # the deployment down rather than warning.
+        # Non-production installs warn above; the admin guard remains production-only.
         return
     if _os.getenv("TESTING") == "1":
         # TESTING=1 registers the test-only ``/testing`` routes (time-warp
@@ -790,12 +807,13 @@ app = FastAPI(
     title="Caura",
     version=VERSION,
     description=_API_DESCRIPTION,
-    docs_url="/api/docs",
+    docs_url=None,
     redoc_url="/api/redoc",
     openapi_url="/api/openapi.json",
     openapi_tags=OPENAPI_TAGS,
     lifespan=lifespan,
 )
+configure_swagger_ui(app)
 
 
 # ── Error responses in the spec (C32 / API-05) ────────────────────────────
@@ -1090,6 +1108,9 @@ app.add_middleware(
     RequestTimeoutMiddleware,
     timeout_seconds=app_settings.request_timeout_seconds,
 )
+from core_api.http_security import StandaloneHTTPBoundary
+
+app.add_middleware(StandaloneHTTPBoundary)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -1224,10 +1245,9 @@ app.include_router(agents_router, prefix="/api/v1")
 app.include_router(fleet_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
-# Skill Factory Phase 2 — HITL Skills Inbox. Routes flag-gated at
-# request time via ``org_settings.skills_factory.enabled``; non-opted-in
-# tenants receive 403 SKILLS_FACTORY_DISABLED, ensuring zero behavior
-# change until they explicitly enable the feature.
+# Skill Factory Phase 2 — HITL Skills Inbox. Serves every tenant: every
+# skills write is staged until approved here, whatever
+# ``org_settings.skills_factory.enabled`` says.
 app.include_router(skills_inbox_router, prefix="/api/v1")
 app.include_router(keystones_router, prefix="/api/v1")
 app.include_router(keystone_versions_router, prefix="/api/v1")

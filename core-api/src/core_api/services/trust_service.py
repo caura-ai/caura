@@ -81,7 +81,12 @@ async def require_trust(
     """
     from core_api.services.agent_service import lookup_agent
 
-    agent = await lookup_agent(tenant_id, agent_id)
+    # The primary, not the read replica: a demotion lands on the primary, and
+    # every caller here gates on the answer (keystone writes, evolve, insights,
+    # conflict review, the trust-gated reads). From a replica that has not
+    # caught up, a just-demoted agent keeps its old level for as long as the
+    # replica lags. One indexed row, so the read split loses little.
+    agent = await lookup_agent(tenant_id, agent_id, read=False)
     if agent is None:
         # Soft-pass: a missing row is not a permission failure. Use the
         # platform default trust so the gate matches what the agent would
@@ -109,6 +114,18 @@ async def require_trust(
             f"{_MCP_ERROR_PREFIX}Agent '{agent_id}' (trust_level={trust}) < required {min_level}.",
         )
     return trust, False, None
+
+
+def run_scope_trust(scope: str) -> int:
+    """The trust level an insights or evolve run needs at ``scope``.
+
+    Both save what they find at the scope's visibility: ``agent`` as
+    ``scope_agent``, ``fleet`` as ``scope_team`` and ``all`` as ``scope_org``,
+    which every fleet of the tenant reads. So ``all`` needs level 3, as every
+    other ``scope_org`` write does. Shared by the REST routes and the MCP tools
+    so the two surfaces cannot drift; an unknown scope gets the highest level.
+    """
+    return {"agent": 1, "fleet": 2}.get(scope, 3)
 
 
 def parse_trust_error(terr: str) -> str:

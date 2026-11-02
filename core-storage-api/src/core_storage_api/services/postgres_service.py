@@ -64,7 +64,7 @@ from common.constants import (
     CONTRADICTION_CANDIDATE_MAX,
     CONTRADICTION_SIMILARITY_THRESHOLD,
     DEFAULT_RELATION_TYPE_WEIGHT,
-    ENCRYPTED_SETTING_PREFIX,
+    ENCRYPTED_SETTING_PREFIXES,
     ENTITY_RESOLUTION_CANDIDATE_LIMIT,
     GRAPH_MAX_ENTITIES,
     GRAPH_MAX_EXPANDED_ENTITIES,
@@ -131,6 +131,7 @@ from common.models.value_metering import AgentSession, MemoryOrigin, MemoryReuse
 from common.organization_settings_merge import diff_settings, merge_settings_update
 from common.settings_version import SETTINGS_VERSION_KEY, version_of
 from core_storage_api.observability import PhaseTimer, db_measure
+from core_storage_api.request_bounds import bound_metadata_merge
 from core_storage_api.schemas import MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.audit_chain import (
     GENESIS_PREV_HASH,
@@ -2067,10 +2068,13 @@ class PostgresService:
         # is exactly how we want to see it in Cloud Logging.
         from core_storage_api.config import settings as _role_settings
 
-        # The writer reads the primary: callers come to the writer for this GET
-        # when they need their own fresh write back (``read=False``), and the
-        # read pool lags behind it.
-        session_factory = get_session if _role_settings.core_storage_role == "writer" else get_read_session
+        # The primary, except on a reader. Callers come to the writer for this
+        # GET when they need their own fresh write back (``read=False``), or an
+        # authorisation decision on the row, and the read pool lags behind it.
+        # A hybrid service is the writer as well, on the same URL, so it cannot
+        # tell those callers from the rest and reads the primary for all of
+        # them. Only a reader, which serves no writer traffic, reads its pool.
+        session_factory = get_read_session if _role_settings.core_storage_role == "reader" else get_session
         with db_measure():
             async with session_factory() as session:
                 stmt = select(Memory).where(
@@ -2744,6 +2748,9 @@ class PostgresService:
                     derived_deleted.extend(deleted)
 
             metadata_patch = _withhold_caller_owned_keys(metadata_patch, row.metadata_)
+            if metadata_patch:
+                # The row lock makes the resulting size check atomic with the merge.
+                bound_metadata_merge(values.get("metadata_", row.metadata_), metadata_patch)
 
             # No-op patches on a live row are valid: existence check
             # already passed, so report success without burning UPDATEs.
@@ -5646,8 +5653,12 @@ class PostgresService:
         same as "live" — that's the standalone-OSS and pre-CAURA-694
         deployment shape. Hot path: one indexed PK lookup per
         authenticated request.
+
+        Read from the primary, where a suppression lands: a replica that has not
+        caught up would keep a just-suppressed tenant working for as long as it
+        lags. One indexed row, so the read split loses little.
         """
-        async with get_read_session() as session:
+        async with get_session() as session:
             result = await session.execute(
                 text(
                     "SELECT 1 FROM public.tenant_suppression "
@@ -7441,20 +7452,26 @@ class PostgresService:
             # Fetch the memory + its agent label in one query (the agent join is
             # free — 1:0..1 on the unique (tenant_id, agent_id)), consistent with
             # the other read paths; entity links are the second query below.
-            mem_row = (
-                await session.execute(
-                    select(Memory, Agent.display_name.label("agent_display_name"))
-                    .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
-                    .where(Memory.id == memory_id)
+            #
+            # Tenant, deletion and hold are in the statement, as in
+            # ``memory_get_by_id_for_tenant``, not compared in Python after the
+            # fetch: then another tenant's row crossed the database boundary
+            # first, and the protection was a comparison a later edit could drop.
+            stmt = (
+                select(Memory, Agent.display_name.label("agent_display_name"))
+                .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
+                .where(
+                    Memory.id == memory_id,
+                    Memory.tenant_id == tenant_id,
+                    Memory.deleted_at.is_(None),
                 )
-            ).one_or_none()
+            )
+            if not include_held:
+                stmt = stmt.where(Memory.status != QUARANTINED_MEMORY_STATUS)
+            mem_row = (await session.execute(stmt)).one_or_none()
             if mem_row is None:
                 return None
             [memory] = _attach_agent_display_names([mem_row])
-            if memory.tenant_id != tenant_id or memory.deleted_at is not None:
-                return None
-            if memory.status == QUARANTINED_MEMORY_STATUS and not include_held:
-                return None
 
             link_rows = (
                 await session.execute(
@@ -8153,7 +8170,16 @@ class PostgresService:
             ),
             func.sum(func.hashtextextended(shown, literal_column("0"))),
         ).where(*filters)
+        from core_storage_api.config import settings as _field_settings
+
         async with get_read_session() as session:
+            await session.execute(
+                select(
+                    func.set_config(
+                        "statement_timeout", f"{_field_settings.memory_field_signature_timeout_ms}ms", True
+                    )
+                )
+            )
             count, embedded, newest, revision = (await session.execute(stmt)).one()
         return {
             "count": int(count or 0),
@@ -15494,6 +15520,8 @@ class PostgresService:
         org_id: str,
         new_settings: dict,
         changed_by: str | None = None,
+        actor_kind: str | None = None,
+        actor_credential_id: str | None = None,
     ) -> dict:
         """Upsert org overrides + append an audit row, in ONE transaction.
 
@@ -15523,7 +15551,11 @@ class PostgresService:
             async def _write_audit(diff: dict) -> None:
                 await session.execute(
                     pg_insert(OrganizationSettingsAudit).values(
-                        org_id=org_id, changed_by=changed_by, diff=diff
+                        org_id=org_id,
+                        changed_by=changed_by,
+                        actor_kind=actor_kind,
+                        actor_credential_id=actor_credential_id,
+                        diff=diff,
                     )
                 )
 
@@ -15617,7 +15649,8 @@ class PostgresService:
             swap = {
                 name: encrypted[name]
                 for name, value in expected.items()
-                if encrypted.get(name, "").startswith(ENCRYPTED_SETTING_PREFIX) and stored.get(name) == value
+                if encrypted.get(name, "").startswith(ENCRYPTED_SETTING_PREFIXES)
+                and stored.get(name) == value
             }
             if not swap:
                 return []
@@ -15697,17 +15730,24 @@ class PostgresService:
             )
             return sorted(row[0] for row in result.all())
 
-    async def tenants_list_interviewer_enabled(self) -> list[str]:
+    async def tenants_list_interviewer_enabled(self, *, enabled: bool = True) -> list[str]:
         """``org_id`` values whose ``interviewer.enabled`` JSONB flag is True,
         sorted. The interviewer schedule tick uses this so a tenant that hasn't
         opted in pays zero cost. Orgs with no settings row are excluded
-        (default off)."""
+        (default off).
+
+        ``enabled=False`` lists the orgs that carry an ``interviewer`` block that
+        is not enabled instead: the sweep purges their finished jobs past
+        retention, so turning the interviewer off keeps none. A tenant that never
+        had the block has no jobs."""
+        flag = OrganizationSettings.settings["interviewer"]["enabled"].as_boolean()
+        where = (
+            [flag.is_(True)]
+            if enabled
+            else [OrganizationSettings.settings.has_key("interviewer"), flag.is_not(True)]
+        )
         async with get_read_session() as session:
-            result = await session.execute(
-                select(OrganizationSettings.org_id).where(
-                    OrganizationSettings.settings["interviewer"]["enabled"].as_boolean().is_(True)
-                )
-            )
+            result = await session.execute(select(OrganizationSettings.org_id).where(*where))
             return sorted(row[0] for row in result.all())
 
     # ══════════════════════════════════════════════════════════════════════

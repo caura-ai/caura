@@ -48,9 +48,13 @@ def as_auth():
         app.dependency_overrides[get_auth_context] = _dep
 
     field_cache.clear()
+    memory_field._signature_cache.clear()
+    memory_field._build_started.clear()
     yield _install
     app.dependency_overrides.pop(get_auth_context, None)
     field_cache.clear()
+    memory_field._signature_cache.clear()
+    memory_field._build_started.clear()
     # A build a failed test left running must not hold a slot in the next one.
     memory_field._builds.clear()
     memory_field._building_tenants.clear()
@@ -229,6 +233,7 @@ async def test_fleet_filter_and_limit(client, sc, as_auth):
     assert resp.status_code == 200, resp.text
     assert [p["id"] for p in resp.json()["points"]] == [ids["fleet"]]
 
+    memory_field._build_started.clear()  # independent visibility scope; cooldown is tested separately
     limited = await _field(client, ids["tenant"], limit=3)
     assert limited.status_code == 200, limited.text
     body = limited.json()
@@ -263,6 +268,8 @@ async def test_cached_until_the_corpus_changes(client, sc, as_auth):
     second = (await _field(client, tenant)).json()
     assert second["computed_at"] == first["computed_at"]
     await _write(sc, tenant, "one more", embedding=_vec(0, 0.5))
+    memory_field._signature_cache.clear()  # the five-second signature TTL has elapsed
+    memory_field._build_started.clear()
     third = (await _field(client, tenant)).json()
     assert third["computed_at"] != first["computed_at"]
     assert len(third["points"]) == len(first["points"]) + 1
@@ -283,6 +290,8 @@ async def test_an_edit_misses_the_cache(client, sc, as_auth):
         "WHERE id = CAST(:id AS uuid)",
         id=edited,
     )
+    memory_field._signature_cache.clear()  # the five-second signature TTL has elapsed
+    memory_field._build_started.clear()
     second = (await _field(client, tenant)).json()
     assert second["computed_at"] != first["computed_at"]
     point = next(p for p in second["points"] if p["id"] == edited)
@@ -346,21 +355,23 @@ async def test_requests_for_one_map_share_its_build(client, sc, as_auth, held_bu
     assert held_builds.builds == 1
 
 
-async def test_a_tenant_builds_one_map_at_a_time(client, sc, as_auth, held_builds):
+async def test_limits_share_one_map_build(client, sc, as_auth, held_builds):
     tenant = (await _seed(sc))["tenant"]
     as_auth(tenant)
     first = asyncio.create_task(_field(client, tenant))
     async with asyncio.timeout(5):
         await held_builds.until_builds(1)
-        other = await _field(client, tenant, limit=5)  # another map, same tenant
+        other = asyncio.create_task(_field(client, tenant, limit=5))
+        await asyncio.sleep(0)
     held_builds.release.set()
-    assert other.status_code == 429, other.text
-    assert other.headers["Retry-After"]
-    assert (await first).status_code == 200
+    one, two = await first, await other
+    assert one.status_code == two.status_code == 200
+    assert len(two.json()["points"]) == 5
+    assert one.json()["model_version"] == two.json()["model_version"]
+    assert held_builds.builds == 1
 
 
-async def test_builds_are_capped_per_process(client, sc, as_auth, held_builds):
-    """Two builds at a time per process by default; the third tenant waits."""
+async def test_build_slots_are_independent_per_tenant(client, sc, as_auth, held_builds):
     tenants = [(await _seed(sc))["tenant"] for _ in range(3)]
 
     async def _each_its_own_tenant(request: Request) -> AuthContext:
@@ -368,15 +379,12 @@ async def test_builds_are_capped_per_process(client, sc, as_auth, held_builds):
         set_current_tenant(tenant)
         return AuthContext(tenant_id=tenant, readable_tenant_ids=[tenant])
 
-    # ``as_auth`` removes this override and clears the cache on teardown.
     app.dependency_overrides[get_auth_context] = _each_its_own_tenant
-    running = [asyncio.create_task(_field(client, t)) for t in tenants[:2]]
+    running = [asyncio.create_task(_field(client, t)) for t in tenants]
     async with asyncio.timeout(5):
-        await held_builds.until_builds(2)
-        third = await _field(client, tenants[2])
+        await held_builds.until_builds(3)
     held_builds.release.set()
-    assert third.status_code == 429, third.text
-    assert [(await r).status_code for r in running] == [200, 200]
+    assert [(await r).status_code for r in running] == [200, 200, 200]
 
 
 async def test_concurrent_requests_share_one_signature_scan(

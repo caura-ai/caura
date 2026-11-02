@@ -42,7 +42,7 @@ async def get_organization_settings(org_id: str) -> dict:
 
 @router.post("/{org_id}")
 async def update_organization_settings(org_id: str, request: Request) -> dict:
-    """Transactional upsert + audit. Body: ``{settings, changed_by?}``.
+    """Transactional upsert + audit. Body: ``{settings, changed_by?, actor_kind?, actor_credential_id?}``.
 
     Returns ``{"settings": <merged overrides>, "changed": bool}``. ``changed``
     is ``False`` when the payload introduced no actual change (no row written).
@@ -58,15 +58,20 @@ async def update_organization_settings(org_id: str, request: Request) -> dict:
     new_settings = body.get("settings")
     if not isinstance(new_settings, dict):
         raise HTTPException(status_code=422, detail="'settings' must be an object")
-    changed_by = body.get("changed_by")
-    if changed_by is not None and not isinstance(changed_by, str):
-        # changed_by lands in OrganizationSettingsAudit.changed_by (Text); reject
-        # non-strings here rather than surfacing a confusing DB type error.
-        raise HTTPException(status_code=422, detail="'changed_by' must be a string or null")
+    actor: dict[str, str | None] = {}
+    for field in ("changed_by", "actor_kind", "actor_credential_id"):
+        value = body.get(field)
+        if value is not None and not isinstance(value, str):
+            # Each lands in a Text column of OrganizationSettingsAudit; reject
+            # non-strings here rather than surfacing a confusing DB type error.
+            raise HTTPException(status_code=422, detail=f"'{field}' must be a string or null")
+        actor[field] = value
     return await _svc.organization_settings_update(
         org_id=org_id,
         new_settings=new_settings,
-        changed_by=changed_by,
+        changed_by=actor["changed_by"],
+        actor_kind=actor["actor_kind"],
+        actor_credential_id=actor["actor_credential_id"],
     )
 
 

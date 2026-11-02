@@ -24,6 +24,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import Request, Response
 
 from core_api import auth as auth_mod
 from core_api.auth import AuthContext
@@ -130,6 +131,8 @@ async def _list(auth, agent_id=None, written_by=None):
     # Every parameter explicit: calling the endpoint function directly skips
     # FastAPI's dependency resolution (see test_scope_agent_home_tenant).
     await memories_routes.list_memories(
+        request=Request({"type": "http"}),
+        response=Response(),
         tenant_id=None,
         fleet_id=None,
         agent_id=agent_id,

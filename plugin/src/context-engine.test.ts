@@ -34,9 +34,13 @@ describe("automatic conversation-write opt-out", () => {
   // environment boundary without leaking state into the rest of this suite.
   // The context-engine fixture covers ingest, afterTurn and compact; the
   // memory-flush fixture covers the pre-compaction flush turn (M-106).
+  //
+  // Every spelling an operator uses to switch a flag off turns capture off, as
+  // the plugin's other switches read them; a blank value is off too.
+  const OFF = new Set(["false", "0", "no", "off", "False", "OFF", ""]);
   for (const fixture of ["context-engine-auto-write", "memory-flush-auto-write"]) {
-    for (const setting of [undefined, "true", "false"]) {
-      test(`${fixture} honors ${setting ?? "the default"}`, () => {
+    for (const setting of [undefined, "true", "1", ...OFF]) {
+      test(`${fixture} honors ${setting === undefined ? "the default" : JSON.stringify(setting)}`, () => {
         const env: NodeJS.ProcessEnv = Object.fromEntries(
           Object.entries(process.env).filter(([key]) => !hasPluginEnvPrefix(key)),
         );
@@ -45,7 +49,7 @@ describe("automatic conversation-write opt-out", () => {
         if (setting !== undefined) env.CAURA_AUTO_WRITE_TURNS = setting;
         execFileSync(process.execPath, [
           fileURLToPath(new URL(`./${fixture}.fixture.js`, import.meta.url)),
-          setting === "false" ? "disabled" : "enabled",
+          setting !== undefined && OFF.has(setting) ? "disabled" : "enabled",
         ], { env, timeout: 15_000, stdio: "pipe" });
       });
     }

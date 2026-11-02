@@ -390,7 +390,7 @@ in sync.
 |-------|--------------|
 | \`memory_type\` (auto on write; filter on read) | \`fact\`, \`episode\`, \`decision\`, \`preference\`, \`task\`, \`semantic\`, \`intention\`, \`plan\`, \`commitment\`, \`action\`, \`outcome\`, \`cancellation\`, \`rule\`, \`insight\` |
 | \`status\` (via \`caura_manage op=transition\`) | \`active\`, \`pending\`, \`confirmed\`, \`cancelled\`, \`outdated\`, \`conflicted\`, \`archived\`, \`deleted\` |
-| \`visibility\` (write-time) | \`scope_agent\` · \`scope_team\` *(default)* · \`scope_org\` |
+| \`visibility\` (write-time) | \`scope_agent\` · \`scope_team\` *(default)* · \`scope_org\` (trust 3) |
 | \`scope\` (read-time on \`_list\`, \`_insights\`) | \`agent\` *(default)* · \`fleet\` · \`all\` |
 | \`fleet_ids\` (optional recall filter) | array of fleet ID strings; narrows recall to those fleets (trust 2 for cross-fleet) |
 | \`write_mode\` | \`fast\` · \`auto\` *(default)* · \`strong\` |

@@ -454,12 +454,27 @@ def _build_tenant_config(request: MemoryEnrichRequest) -> SimpleNamespace | None
     :func:`enrich_memory` apply its ``or ProviderName.OPENAI``
     default.
     """
+    from common.settings_crypto import (
+        PROVIDER_KEY_FIELDS,
+        ProviderKeyDecryptionError,
+        cipher_from_environment,
+    )
+
+    if request.credential_error:
+        raise ProviderKeyDecryptionError("Configured provider key could not be decrypted")
+    credentials = {name: getattr(request, name) for name in PROVIDER_KEY_FIELDS}
+    if request.encrypted_api_keys:
+        cipher = cipher_from_environment()
+        for name, token in request.encrypted_api_keys.items():
+            if name not in PROVIDER_KEY_FIELDS or not token.startswith("enc:"):
+                raise ProviderKeyDecryptionError("Configured provider key could not be decrypted")
+            credentials[name] = cipher.decrypt(token)
     has_any_credentials = any(
         (
-            request.openai_api_key,
-            request.anthropic_api_key,
-            request.openrouter_api_key,
-            request.gemini_api_key,
+            credentials["openai_api_key"],
+            credentials["anthropic_api_key"],
+            credentials["openrouter_api_key"],
+            credentials["gemini_api_key"],
         )
     )
     if request.enrichment_provider is None and not has_any_credentials:
@@ -474,10 +489,10 @@ def _build_tenant_config(request: MemoryEnrichRequest) -> SimpleNamespace | None
     return SimpleNamespace(
         enrichment_provider=request.enrichment_provider,
         enrichment_model=request.enrichment_model,
-        openai_api_key=request.openai_api_key,
-        anthropic_api_key=request.anthropic_api_key,
-        openrouter_api_key=request.openrouter_api_key,
-        gemini_api_key=request.gemini_api_key,
+        openai_api_key=credentials["openai_api_key"],
+        anthropic_api_key=credentials["anthropic_api_key"],
+        openrouter_api_key=credentials["openrouter_api_key"],
+        gemini_api_key=credentials["gemini_api_key"],
         # Synthesised callable matches the
         # ``ResolvedConfig.resolve_fallback()`` shape ``call_with_fallback``
         # expects. The publisher already pre-resolved the tuple at
@@ -679,7 +694,7 @@ async def handle_enrich_request(event: Event) -> None:
         # payload that can never parse. No separate parse step to guard.
         request = MemoryEnrichRequest(**event.payload)
     except ValidationError:
-        logger.exception(
+        logger.error(
             "dropping malformed enrich-request payload",
             extra={
                 "event_type": event.event_type,

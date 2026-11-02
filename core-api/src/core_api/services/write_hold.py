@@ -24,6 +24,7 @@ from fastapi import HTTPException
 from common.constants import HOLD_KEY
 from common.settings_version import SETTINGS_VERSION_KEY
 from core_api.clients.storage_client import StorageSettingsChangedError, get_storage_client
+from core_api.services.auto_capture import CAPTURED_HOLD_BELOW_TRUST
 from core_api.services.system_metadata import SYSTEM_NAMESPACE
 
 if TYPE_CHECKING:
@@ -41,6 +42,7 @@ async def hold_for(
     config: ResolvedConfig,
     *,
     is_inferred: bool,
+    captured: bool = False,
 ) -> dict | None:
     """Why a write is held, or ``None`` when it goes live.
 
@@ -48,6 +50,9 @@ async def hold_for(
     platform's own, built from memories already live, so they are never held.
     Nothing is looked up while no level is set, so a tenant that holds nothing
     pays nothing for this.
+
+    A row the plugin captured on its own (``captured``) is held below trust
+    ``CAPTURED_HOLD_BELOW_TRUST`` even when no level is set (``auto_capture``).
 
     The agent is read from the primary: every write path creates its agent just
     before it writes, and a replica that hasn't caught up would answer that it
@@ -58,6 +63,8 @@ async def hold_for(
     if is_inferred:
         return None
     below_trust = config.quarantine_below_trust(fleet_id)
+    if captured:
+        below_trust = max(below_trust, CAPTURED_HOLD_BELOW_TRUST)
     if below_trust <= 0:
         return None
     agent = await get_storage_client().get_agent(agent_id, tenant_id, read=False)

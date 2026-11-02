@@ -70,7 +70,7 @@ def patch_lookup(monkeypatch):
     def _set(*, fleet_id=None, trust_level=0, exists=True):
         from core_api.services import agent_service
 
-        async def fake(tenant_id, agent_id):
+        async def fake(tenant_id, agent_id, *, read=True):
             return (
                 None
                 if not exists

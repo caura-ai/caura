@@ -275,12 +275,12 @@ def join(
     (`caura`) is installed, join prints the equivalent `caura agent connect`
     command and offers to run it instead.
     """
+    # Remove sign-in secrets before broker discovery or any other child process.
+    password = os.environ.pop("CAURA_PASSWORD", "")
+    totp_env = os.environ.pop("CAURA_TOTP_CODE", "").strip()
     if broker is not False:
         prefer_broker(url, name, runtime, directory, description, tenant, not no_hooks, broker, not no_memory)
     try:
-        # Take the secrets out of the environment so no child process (claude mcp add) inherits them.
-        password = os.environ.pop("CAURA_PASSWORD", "")
-        totp_env = os.environ.pop("CAURA_TOTP_CODE", "").strip()
         if not email:
             email = tty_prompt("Caura email")
         password = password or tty_prompt("Caura password", secret=True)

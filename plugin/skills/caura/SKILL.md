@@ -22,7 +22,7 @@ turns (§11), and writes a short **turn summary** afterward as a backstop
 (`CAURA_AUTO_WRITE_TURNS`, on by default). The same switch also controls
 automatic saves of user messages and compaction summaries, and the
 memory-flush turn that asks you to save a session summary before compaction;
-set it to `false` and restart the plugin to disable all four. Treat the
+set it to `false` (or `0`, `no`, `off`) and restart the plugin to disable all four. Treat the
 automatic layer as a floor, not a substitute. You still call the `caura_*` tools **directly** whenever you need
 to interact deliberately — above all to **write the high-value memories the
 auto-summary won't** (a decision and its *why*, an outcome, a rule), and to
@@ -201,8 +201,10 @@ You auto-register at **trust 1** on your first write.
 Operations that escalate the required level:
 - `caura_list` / `caura_stats` for another fleet, or either tool with
   `scope="all"` → trust 2; `scope="fleet"` for your own fleet stays at trust 1
-- `caura_insights` with `scope="fleet"` or `"all"` → trust 2
-- reporting outcomes (`caura_evolve`) at `scope="fleet"` / `"all"` → trust 2 (default `scope="agent"` needs only trust 1)
+- `caura_insights` with `scope="fleet"` → trust 2; with `scope="all"` → trust 3,
+  because its findings are saved as `scope_org`
+- reporting outcomes (`caura_evolve`) at `scope="fleet"` → trust 2; at `scope="all"`
+  → trust 3, as for `caura_insights` (default `scope="agent"` needs only trust 1)
 - `caura_manage op=delete` → trust 3
 
 **Knowing your own level.** You start at trust 1 and can't raise yourself —
@@ -221,15 +223,15 @@ is still your only source of truth; the trust-ladder errors do name both levels
 than silently retrying at a narrower scope.
 
 **Visibility (on write)** decides who can see a memory: `scope_agent` (private)
-· `scope_team` *(default — your fleet)* · `scope_org` (all fleets in tenant).
+· `scope_team` *(default — your fleet)* · `scope_org` (all fleets in tenant; needs trust 3).
 **Scope (on read):** `agent` · `fleet` · `all`. What an omitted `scope` means
 depends on the tool and the transport, so pass it when the trust boundary
 matters: `caura_insights` and `caura_evolve` default to `agent` on every
 surface, but `caura_list` / `caura_stats` default to `agent` only on MCP —
 over REST and the plugin, an omitted scope filters by `agent_id` with no trust
 gate. For `caura_list` / `caura_stats`, your own fleet needs trust 1; another
-fleet or `all` needs trust 2. `caura_insights` requires trust 2 for `fleet` or
-`all`.
+fleet or `all` needs trust 2. `caura_insights` and `caura_evolve` need trust 2
+for `fleet` and trust 3 for `all`.
 Prefer `scope_team` on write and `scope=agent` on read unless you need
 cross-agent context. *Naming caveat:* three different axes share the word
 `scope`, and the one place they collide is a single request. Writes take
@@ -316,12 +318,14 @@ Rolling skip counters (`recall_metrics`) ride the heartbeat for per-fleet
 visibility.
 
 The plugin also automatically saves **user messages**, short **assistant turn
-summaries** and **compaction summaries** as episode memories with the server's
-default `scope_team` visibility. User-message saves require at least 100
+summaries** and **compaction summaries** as episode memories private to you
+(`scope_agent`), scanned for secrets and marked as captured; automatic recall
+puts a captured memory back only into the conversation it came from. Anything
+the team should know, write deliberately. User-message saves require at least 100
 characters, are truncated to 500 characters plus an ellipsis, and are capped
 at 10 per session. Before OpenClaw compacts a long session, a **memory-flush
-turn** asks you to save a session summary with `caura_write`.
-`CAURA_AUTO_WRITE_TURNS=false` disables all four automatic writes, the flush
+turn** asks you to save a session summary with `caura_write`, private to you.
+`CAURA_AUTO_WRITE_TURNS=false` (or `0`, `no`, `off`) disables all four automatic writes, the flush
 turn included, after a plugin restart. Local buffering, recall, explicit memory tools
 and runtime compaction remain available; existing memories are not deleted.
 The separately enabled Interviewer (`CAURA_INTERVIEWER`) is unaffected.
@@ -340,12 +344,16 @@ vocabulary never grows with the library.
 caura_doc op=search collection=skills query="<intent>"
 caura_doc op=read   collection=skills doc_id=<slug>   # full body
 
-# Publish something reusable so the fleet inherits it:
+# Propose something reusable for the fleet (needs trust 2). It lands
+# "staged": no node installs it until an admin approves it in the inbox.
 caura_doc op=write collection=skills doc_id=<slug> \
-  data={ "name": "<slug>",
+  data={ "name": "<slug>", "slug": "<slug>",
+         "description": "<when to use it, at most 160 bytes>",
+         "domain": "<area, e.g. ops>", "kind": "create", "source": "agent",
          "summary": "<1-line, intent-focused — this is what gets embedded>",
          "content": "<full SKILL.md>" }
-# Re-uploading the same doc_id overwrites it (upsert; no version history).
+# Re-uploading your own staged draft replaces it; an approved skill is
+# changed by an admin.
 
 # Remove a wrong/superseded one:
 caura_doc op=delete collection=skills doc_id=<slug>

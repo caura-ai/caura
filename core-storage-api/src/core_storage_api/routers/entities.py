@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from common.constants import VECTOR_DIM
-from core_storage_api.routers._validation import _require, _require_number
+from core_storage_api.routers._validation import _bounded_int, _bounded_write, _require, _require_number
 from core_storage_api.schemas import (
     ENTITY_FIELDS,
     MEMORY_ENTITY_LINK_FIELDS,
@@ -55,6 +55,7 @@ def _validate_input_idxs(items: list[dict]) -> None:
 @router.post("")
 async def create_entity(request: Request) -> dict:
     body: dict = await request.json()
+    _bounded_write(body)
     try:
         entity = await _svc.entity_add(body)
     except ValueError as e:
@@ -80,8 +81,8 @@ async def list_entities(
     fleet_id: str | None = None,
     entity_type: str | None = None,
     search: str | None = None,
-    limit: int = 100,
-    offset: int = 0,
+    limit: int = Query(100, ge=1, le=5000),
+    offset: int = Query(0, ge=0, le=10000),
     caller_agent_id: str | None = None,
     caller_tenant_id: str | None = None,
     caller_fleet_ids: list[str] | None = Query(default=None),
@@ -195,7 +196,7 @@ async def resolve_entity_candidates(request: Request) -> list[dict]:
         entity_type=body["entity_type"],
         name_embedding=body["name_embedding"],
         fleet_id=body.get("fleet_id"),
-        limit=body.get("limit", 5),
+        limit=_bounded_int(body, "limit", 5, 5000, 1),
     )
     out = []
     for entity, sim in results:
@@ -231,6 +232,7 @@ async def bulk_upsert_entities(request: Request) -> list[dict]:
     Cap: 500 items per request.
     """
     body: dict = await request.json()
+    _bounded_write(body)
     items = body.get("items", [])
     if not isinstance(items, list):
         raise HTTPException(status_code=422, detail="'items' must be a list")
@@ -244,6 +246,7 @@ async def bulk_upsert_entities(request: Request) -> list[dict]:
     # the service. ``action`` is checked separately below.
     _REQUIRED_BASE = {"tenant_id", "entity_type", "canonical_name", "attributes"}
     for item in items:
+        _bounded_write(item)
         missing = _REQUIRED_BASE - item.keys()
         if missing:
             raise HTTPException(
@@ -326,6 +329,7 @@ async def bulk_resolve_entities(request: Request) -> list[dict | None]:
     OR-of-ANDs plan into a seq scan; chunk client-side if you need more.
     """
     body: dict = await request.json()
+    _bounded_write(body)
     items = body.get("items", [])
     if not isinstance(items, list):
         raise HTTPException(status_code=422, detail="'items' must be a list")
@@ -389,7 +393,7 @@ async def expand_graph(request: Request) -> dict:
         seed_entity_ids=[UUID(eid) for eid in body["seed_entity_ids"]],
         tenant_id=body["tenant_id"],
         fleet_id=body.get("fleet_id"),
-        max_hops=body.get("max_hops", 2),
+        max_hops=_bounded_int(body, "max_hops", 2, 3, 0),
         use_union=body.get("use_union", False),
     )
     return {str(eid): {"hop": hop, "weight": weight} for eid, (hop, weight) in result.items()}
@@ -737,6 +741,7 @@ async def get_entity(
 @router.patch("/{entity_id}")
 async def update_entity(entity_id: UUID, request: Request) -> dict:
     body: dict = await request.json()
+    _bounded_write(body)
     # Tenant guard, same shape as ``PATCH /memories/{memory_id}``: ``tenant_id``
     # is the row's home tenant, removed from the body so it scopes the fetch
     # rather than landing as a patched column (``Entity`` has a ``tenant_id``

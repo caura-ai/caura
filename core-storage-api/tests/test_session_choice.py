@@ -122,6 +122,12 @@ _MUST_STAY_ON_THE_WRITER = {
         "service sets read_database_url, the precondition below, so this read "
         "used to reach the replica anyway."
     ),
+    "is_tenant_suppressed": (
+        "core-api's auth refuses every request of a suppressed tenant through "
+        "it. A suppression lands on the primary, so under lag the replica kept "
+        "a just-suppressed tenant working for as long as it lagged. An "
+        "authorisation decision, not a plain read: one indexed row, on purpose."
+    ),
 }
 
 # Private helpers. They open a session but are called only from other methods
@@ -347,8 +353,10 @@ def test_the_writer_session_population_is_pinned() -> None:
     # ``value_record_reuse``); ``value_query`` reads on the replica.
     # 139 -> 140: ``value_record_outcome`` marks a session's reuse with its
     # reported Evolve outcome.
-    assert len(methods) == 140, f"{len(methods)} methods open a writer session"
-    assert len(pure) == 60, f"{len(pure)} of them show no write marker"
+    # 140 -> 141 (pure 60 -> 61): ``is_tenant_suppressed`` moved to the writer
+    # on purpose; see its ``_MUST_STAY_ON_THE_WRITER`` entry.
+    assert len(methods) == 141, f"{len(methods)} methods open a writer session"
+    assert len(pure) == 61, f"{len(pure)} of them show no write marker"
 
 
 @pytest.mark.parametrize(
@@ -390,7 +398,7 @@ def test_every_method_that_must_stay_on_the_writer_still_looks_like_a_pure_read(
 def test_the_convertible_population_is_pinned() -> None:
     """What is left after the caller analysis, so a conversion has a target.
 
-    60 methods show no write marker. Eight of them must stay on the writer
+    61 methods show no write marker. Nine of them must stay on the writer
     anyway because of what CALLS them, and one is a private helper that
     inherits its caller's session. The remaining 51 are the candidates — the number a
     conversion PR is allowed to move, and the only number in this file that

@@ -8,7 +8,16 @@
  */
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from "fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -205,5 +214,85 @@ describe("interview buffer — wet-test regressions (task #6)", () => {
       ["good", "next-1", "next-2"],
     );
     assert.deepEqual([a, b], [1, 2]);
+  });
+});
+
+/**
+ * The buffer holds raw transcripts and task prompts until the server takes
+ * them, so it is scrubbed before it is written and kept private to the user
+ * the gateway runs as.
+ */
+describe("interview buffer privacy", () => {
+  let tmp: string;
+  let bufPath: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "caura-interview-privacy-"));
+    bufPath = join(tmp, "state", "interview-buffer.jsonl");
+    __INTERVIEW_BUFFER_INTERNALS__.setPathForTests(bufPath);
+  });
+
+  afterEach(() => {
+    __INTERVIEW_BUFFER_INTERNALS__.setPathForTests(undefined);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  /** ``{c*N}`` in a vector is the character c repeated N times. */
+  function expand(template: string): string {
+    return template.replace(/\{(.)\*(\d+)\}/g, (_m, c: string, n: string) => c.repeat(Number(n)));
+  }
+
+  // The same vectors the Python interviewer's scrub is tested against, so the
+  // two clients redact the same shapes.
+  const shared = JSON.parse(
+    readFileSync(
+      new URL("../../clients/python/tests/scrub_vectors.json", import.meta.url),
+      "utf-8",
+    ),
+  ) as { vectors: Array<{ input: string; expected: string }> };
+
+  test("every shared vector is scrubbed as the Python interviewer scrubs it", async () => {
+    for (const v of shared.vectors) {
+      await appendInterviewEvent({ role: "user", kind: "message", content: expand(v.input) });
+    }
+    const events = await readInterviewEvents(0, 500);
+    assert.deepEqual(
+      events.map((e) => e.content),
+      shared.vectors.map((v) => expand(v.expected)),
+    );
+  });
+
+  test("a credential in the tool or outcome field is scrubbed too", async () => {
+    const token = "ghp_" + "e".repeat(36);
+    await appendInterviewEvent({
+      role: "tool",
+      kind: "tool_result",
+      content: "ran it",
+      tool: `curl -H 'Authorization: Bearer ${"g".repeat(32)}'`,
+      outcome: `failed with ${token}`,
+    });
+    const raw = readFileSync(bufPath, "utf-8");
+    assert.ok(!raw.includes(token), "token reached the buffer file");
+    assert.ok(!raw.includes("g".repeat(32)), "bearer token reached the buffer file");
+  });
+
+  test("the buffer and its meta file are readable by the owner only", async () => {
+    await appendInterviewEvent({ role: "user", kind: "message", content: "a" });
+    await appendInterviewEvent({ role: "user", kind: "message", content: "b" });
+    assert.equal(statSync(bufPath).mode & 0o777, 0o600);
+    // A prune rewrites the buffer through a temp file and writes the meta file.
+    await pruneInterviewBuffer(0);
+    assert.equal(statSync(bufPath).mode & 0o777, 0o600);
+    assert.equal(statSync(bufPath + ".meta.json").mode & 0o777, 0o600);
+    // A directory the buffer creates is the owner's alone.
+    assert.equal(statSync(join(tmp, "state")).mode & 0o777, 0o700);
+  });
+
+  test("a buffer left world-readable by an older plugin is tightened", async () => {
+    mkdirSync(join(tmp, "state"), { recursive: true });
+    writeFileSync(bufPath, "", { mode: 0o644 });
+    chmodSync(bufPath, 0o644);
+    await appendInterviewEvent({ role: "user", kind: "message", content: "a" });
+    assert.equal(statSync(bufPath).mode & 0o777, 0o600);
   });
 });

@@ -26,7 +26,7 @@ _DESCRIPTION = (
     "the supersession chain. "
     "update patches fields and re-embeds if content changes. "
     "transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). "
-    "delete and bulk_delete are soft (prefer transition to outdated/archived)."
+    "delete and bulk_delete are soft (prefer transition to outdated)."
 )
 
 _SPEC = ToolSpec(
@@ -41,9 +41,12 @@ _SPEC = ToolSpec(
     # ``trust_required`` is the ladder position each op's OWN branch asserts —
     # ``delete`` and ``bulk_delete`` call ``enforce_delete`` (>= 3) — and NOT
     # the effective threshold. Do not read the zeros as "ungated": ``update``
-    # reaches ``enforce_update`` via ``update_memory``, and
-    # ``authorize_memory_access`` consults ``trust_level`` (>= 2 read, >= 3
-    # write) on cross-fleet rows. Nothing corroborates per-op attribution —
+    # reaches ``enforce_update`` via ``update_memory``, or ``enforce_transition``
+    # when it sets a new status; ``transition`` calls
+    # ``enforce_transition``, which is ``enforce_update`` plus ``enforce_delete``
+    # for a status outside the live set (bar an agent retiring its own row), so
+    # its bar depends on the row and the status asked for; and ``authorize_memory_access`` consults ``trust_level`` (>= 2 read,
+    # >= 3 write) on cross-fleet rows. Nothing corroborates per-op attribution —
     # invariant 3 asks only whether a tool declaring a threshold reaches SOME
     # trust gate — so this claims no more than the two ``enforce_delete``
     # calls visible in the handler.
@@ -78,12 +81,15 @@ _SPEC = ToolSpec(
         "AGENT_NOT_REGISTERED",
         "AGENT_TRUST_TOO_LOW",
         "BAD_REQUEST",
+        "CREDENTIAL_KIND_FORBIDDEN",
         "DUPLICATE_MEMORY",
         "FLEET_SCOPE_FORBIDDEN",
         "FORBIDDEN",
         "INVALID_ARGUMENTS",
+        "KEPT_PRIVATE_BY_POLICY",
         "MISSING_AGENT_ID",
         "NOT_FOUND",
+        "ORG_ADMIN_REQUIRED",
         "PERMISSION_DENIED",
         "PLAN_LIMIT_READ_ONLY",
         "REQUEST_BUDGET_EXCEEDED",

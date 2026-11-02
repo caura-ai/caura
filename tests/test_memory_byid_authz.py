@@ -36,7 +36,7 @@ def patch_lookup(monkeypatch):
     """Install a fake ``lookup_agent`` returning a controlled agent dict."""
 
     def _set(*, fleet_id=None, trust_level=0, exists=True):
-        async def fake_lookup(tenant_id, agent_id):
+        async def fake_lookup(tenant_id, agent_id, *, read=True):
             if not exists:
                 return None
             return {
@@ -68,30 +68,32 @@ async def test_no_agent_identity_allows_everything():
 
 
 @pytest.mark.unit
-async def test_scope_agent_author_allowed():
+async def test_scope_agent_author_allowed(patch_lookup):
+    patch_lookup(fleet_id="fleet-alpha", trust_level=1)
     assert await _call("alice", "scope_agent", "alice", "fleet-alpha") is True
 
 
 @pytest.mark.unit
-async def test_scope_agent_non_author_denied():
+async def test_scope_agent_non_author_denied(patch_lookup):
+    patch_lookup(fleet_id="fleet-alpha", trust_level=1)
     assert await _call("bob", "scope_agent", "alice", "fleet-alpha") is False
 
 
 @pytest.mark.unit
 async def test_scope_org_is_tenant_global(patch_lookup):
-    patch_lookup(fleet_id="fleet-beta", trust_level=0)
+    patch_lookup(fleet_id="fleet-beta", trust_level=1)
     assert await _call("bob", "scope_org", "alice", "fleet-alpha") is True
 
 
 @pytest.mark.unit
 async def test_scope_team_same_fleet_allowed(patch_lookup):
-    patch_lookup(fleet_id="fleet-alpha", trust_level=0)
+    patch_lookup(fleet_id="fleet-alpha", trust_level=1)
     assert await _call("bob", "scope_team", "alice", "fleet-alpha") is True
 
 
 @pytest.mark.unit
 async def test_scope_team_fleetless_row_allowed(patch_lookup):
-    patch_lookup(fleet_id="fleet-beta", trust_level=0)
+    patch_lookup(fleet_id="fleet-beta", trust_level=1)
     assert await _call("bob", "scope_team", "alice", None) is True
 
 
@@ -177,7 +179,10 @@ async def test_mcp_read_cross_fleet_low_trust_denied(
 
 
 @pytest.mark.unit
-async def test_mcp_read_scope_agent_non_author_denied(mcp_env, monkeypatch):
+async def test_mcp_read_scope_agent_non_author_denied(
+    mcp_env, monkeypatch, patch_lookup
+):
+    patch_lookup(fleet_id="fleet-alpha", trust_level=1)
     row = _fake_read_row(
         visibility="scope_agent", agent_id="alice", fleet_id="fleet-alpha"
     )
@@ -1160,6 +1165,11 @@ async def test_rest_install_naming_no_agent_reads_no_private_rows(
     assert mid not in resp.text
     assert victim not in resp.text
 
+    if "/memories/field?" in path:
+        # These authorization checks use two scopes; cooldown is tested separately.
+        from core_api.services.memory_field import _build_started
+
+        _build_started.clear()
     resp = await _read("install-b", victim)
     assert resp.status_code == 200, resp.text
     assert victim in resp.text

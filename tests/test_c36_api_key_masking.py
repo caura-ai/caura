@@ -73,7 +73,14 @@ def _stub_update(monkeypatch):
     """Capture what update_settings forwards to storage; echo it back."""
     captured = {}
 
-    async def _update_org_settings(tenant_id, new_settings, *, changed_by=None):
+    async def _update_org_settings(
+        tenant_id,
+        new_settings,
+        *,
+        changed_by=None,
+        actor_kind=None,
+        actor_credential_id=None,
+    ):
         captured["payload"] = new_settings
         return {"settings": new_settings, "changed": True}
 

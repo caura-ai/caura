@@ -728,3 +728,27 @@ test("origin is sent as sdk-reported, with only what was given", async () => {
   );
   await client.write("x", { origin: { tokensIn: 1200, turns: 4 } });
 });
+
+test("client serialization and inspection keep credentials private", async () => {
+  const key = "mc_serialization_test_0123456789";
+  let sent = "";
+  const client = new Caura(key, {
+    tenantId: "t1",
+    baseUrl: "https://example.test",
+    fetch: (async (_url, init) => {
+      sent = new Headers(init?.headers).get("X-API-Key") ?? "";
+      return jsonResponse(200, { status: "ok" });
+    }) as typeof fetch,
+  });
+  const { inspect } = await import("node:util");
+  for (const rendered of [
+    JSON.stringify(client),
+    JSON.stringify({ ...client }),
+    inspect(client),
+    inspect(client, { showHidden: true }),
+  ]) {
+    assert.ok(!rendered.includes(key));
+  }
+  await client.health();
+  assert.equal(sent, key);
+});

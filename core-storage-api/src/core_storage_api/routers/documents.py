@@ -6,6 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from core_storage_api.routers._validation import _bounded_int, _bounded_write
 from core_storage_api.schemas import DOCUMENT_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import PostgresService
 
@@ -16,6 +17,7 @@ _svc = PostgresService()
 @router.post("")
 async def upsert_document(request: Request) -> dict:
     body: dict = await request.json()
+    _bounded_write(body)
     try:
         doc = await _svc.document_upsert(
             tenant_id=body["tenant_id"],
@@ -45,6 +47,7 @@ async def upsert_document_xmax(request: Request) -> dict:
     on a re-write clears a previously-indexed doc's vector (intentional).
     """
     body: dict = await request.json()
+    _bounded_write(body)
     try:
         row = await _svc.document_upsert_returning_xmax(
             tenant_id=body["tenant_id"],
@@ -78,7 +81,7 @@ async def search_documents(request: Request) -> list[dict]:
         tenant_id=body["tenant_id"],
         query_embedding=body["query_embedding"],
         collection=body.get("collection"),
-        top_k=body.get("top_k", 5),
+        top_k=_bounded_int(body, "top_k", 5, 5000, 1),
         fleet_id=body.get("fleet_id"),
         readable_tenant_ids=body.get("readable_tenant_ids"),
         status=body.get("status"),
@@ -150,8 +153,8 @@ async def query_documents(request: Request) -> list[dict]:
         where=body.get("where"),
         order_by=body.get("order_by"),
         order=body.get("order", "asc"),
-        limit=body.get("limit", 20),
-        offset=body.get("offset", 0),
+        limit=_bounded_int(body, "limit", 20, 5000, 1),
+        offset=_bounded_int(body, "offset", 0, 10000, 0),
         readable_tenant_ids=body.get("readable_tenant_ids"),
     )
     return [orm_to_dict(d, DOCUMENT_FIELDS) for d in docs]
@@ -258,8 +261,8 @@ async def list_documents(
     collection: str,
     tenant_id: str,
     fleet_id: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=5000),
+    offset: int = Query(0, ge=0, le=10000),
 ) -> list[dict]:
     docs = await _svc.document_list_by_collection(
         tenant_id=tenant_id,
@@ -322,8 +325,8 @@ async def list_documents_by_body(request: Request) -> list[dict]:
         tenant_id=body["tenant_id"],
         collection=body["collection"],
         fleet_id=body.get("fleet_id"),
-        limit=body.get("limit", 50),
-        offset=body.get("offset", 0),
+        limit=_bounded_int(body, "limit", 50, 5000, 1),
+        offset=_bounded_int(body, "offset", 0, 10000, 0),
     )
     return [orm_to_dict(d, DOCUMENT_FIELDS) for d in docs]
 

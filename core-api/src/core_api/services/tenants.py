@@ -67,3 +67,10 @@ async def list_tenants_with_interviewer_enabled(
     the sweep does, because this call decides which tenants are considered at
     all and a lagging replica silently drops one for a whole tick."""
     return await get_storage_client().list_interviewer_enabled_orgs(read=read)
+
+
+async def list_tenants_with_interviewer_disabled() -> list[str]:
+    """Return ``org_id`` values with an ``interviewer`` settings block that is
+    not enabled, sorted. The interviewer sweep purges their finished jobs, so a
+    tenant that turned the interviewer off keeps none past retention."""
+    return await get_storage_client().list_interviewer_disabled_orgs()

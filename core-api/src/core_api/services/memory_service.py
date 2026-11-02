@@ -79,6 +79,7 @@ from core_api.constants import (
     MEMORY_STATUSES,
     MEMORY_TYPES,
     MEMORY_VISIBILITIES,
+    MEMORY_VISIBILITY_SCOPE_AGENT,
     MIN_SEARCH_SIMILARITY,
     OPENAI_EMBEDDING_MODEL,
     RECALL_BOOST_CAP,
@@ -91,8 +92,10 @@ from core_api.constants import (
 )
 from core_api.errors import (
     AUTH_FLEET_SCOPE_FORBIDDEN,
+    AUTH_KEPT_PRIVATE_BY_POLICY,
     coded_detail,
 )
+from core_api.request_bounds import validate_write_fields
 from core_api.schemas import (
     BulkItemResult,
     BulkMemoryCreate,
@@ -111,15 +114,18 @@ from core_api.search_trim import (
     resolve_include_derived,
     trim_reserving_fts_matches,
 )
+from core_api.services.auto_capture import CAPTURE_KEY, capture_of, stamp_capture
 from core_api.services.contradiction_detector import _pick_older, revert_unheld_loser
 from core_api.services.entity_extraction_worker import process_entity_extraction
 from core_api.services.entity_tokens import extract_entity_tokens
 from core_api.services.governance_gate import (
+    ACTION_NB_KEEP_PRIVATE,
     ACTION_PII_DROP,
     ACTION_PII_FLAG,
     ACTION_PII_MASK,
     emit_governance_audit,
     mark_pii_flagged,
+    nonbusiness_audit_detail,
     pii_audit_detail,
 )
 from core_api.services.hooks import get_hooks
@@ -127,6 +133,7 @@ from core_api.services.organization_settings import ResolvedConfig, validate_sea
 from core_api.services.rules_receipt import RULES_RECEIPT_KEY, rules_receipt_from
 from core_api.services.system_metadata import (
     CALLER_OWNABLE_KEYS,
+    NONBUSINESS_KEPT_PRIVATE_KEY,
     SYSTEM_NAMESPACE,
     caller_owned_keys,
     extract_system_metadata,
@@ -903,6 +910,12 @@ async def create_memory(data: MemoryCreate, *, is_inferred: bool = False) -> Mem
     # needs its own call and its own route-level test.
     if data.metadata:
         data.metadata = sanitize_caller_metadata(data.metadata)
+        # A row the plugin captured on its own is made private and marked here,
+        # once its metadata is the caller's alone; the scan and the hold read
+        # the mark (``auto_capture``).
+        from core_api.session_context import current_session_id
+
+        stamp_capture(data, current_session_id())
     out = await _run_write_pipeline(data, is_inferred=is_inferred)
     # Value metering: where this memory came from (its session's work), once.
     from core_api.services.value_ledger import schedule_origin
@@ -1643,6 +1656,13 @@ async def create_memories_bulk(
     # -- Per-item validation. Short content used to raise a 422 for the
     # whole batch; now it's a per-item "error" result. Indices in this
     # dict are skipped through the embed / enrich / dedup / write path.
+    field_size_errors: dict[int, str] = {}
+    for i, item in enumerate(items):
+        try:
+            validate_write_fields(item.model_dump())
+        except ValueError as exc:
+            field_size_errors[i] = str(exc)
+
     short_content_errors: dict[int, str] = {
         i: f"content too short (minimum {CRYSTALLIZER_SHORT_CONTENT_CHARS} characters)"
         for i, item in enumerate(items)
@@ -1727,6 +1747,7 @@ async def create_memories_bulk(
         and i not in status_errors
         and i not in memory_type_errors
         and i not in unknown_field_errors
+        and i not in field_size_errors
     ]
 
     # -- Deterministic governance gate (eToro). Runs BEFORE embeddings +
@@ -2015,6 +2036,7 @@ async def create_memories_bulk(
                 weight_errors,
                 status_errors,
                 unknown_field_errors,
+                field_size_errors,
             )
             if i in errs
         ]
@@ -3839,6 +3861,21 @@ async def _record_enrich_stranded(
     )
 
 
+def _kept_private(metadata: dict | None) -> bool:
+    """Whether the non-business policy narrowed this row to its writer.
+
+    ``GovernanceDecision`` and the fast-mode remediation both mark it, in the
+    legacy top-level key and in ``_system``. The key is platform-only, so no
+    caller can set or clear it.
+    """
+    if not metadata:
+        return False
+    nested = metadata.get(SYSTEM_NAMESPACE)
+    return metadata.get(NONBUSINESS_KEPT_PRIVATE_KEY) is True or (
+        isinstance(nested, dict) and nested.get(NONBUSINESS_KEPT_PRIVATE_KEY) is True
+    )
+
+
 def _merged_metadata(stored: dict, metadata_patch: dict) -> dict:
     """``metadata_patch`` over ``stored``, merged the way storage merges it.
 
@@ -4457,9 +4494,21 @@ async def update_memory(
 
     # Trust enforcement -- always runs (access control, not a platform feature)
     if agent_id:
-        from core_api.services.agent_service import authorize_memory_access, enforce_update
+        from core_api.services.agent_service import (
+            authorize_memory_access,
+            enforce_transition,
+            enforce_update,
+            enforce_visibility_write,
+        )
 
-        await enforce_update(tenant_id, agent_id, mem.get("agent_id"))
+        # An edit that sets a new status changes it as ``PATCH /memories/{id}/status``
+        # does, so it meets that route's gate. Naming the status the row already
+        # has changes nothing, which keeps a client that sends the whole record
+        # back at the edit bar. A ``null`` status is refused as a bad request below.
+        if data.status is not None and data.status != mem.get("status"):
+            await enforce_transition(tenant_id, agent_id, mem.get("agent_id"), data.status)
+        else:
+            await enforce_update(tenant_id, agent_id, mem.get("agent_id"))
         # Cross-fleet / scope_agent row authorization (write threshold) — the
         # same fleet/scope contract the list/search paths enforce, so a by-id
         # PATCH can't mutate a peer fleet's row.
@@ -4479,6 +4528,11 @@ async def update_memory(
                     f"Agent '{agent_id}' cannot modify memory in fleet '{mem.get('fleet_id')}'.",
                 ),
             )
+        # Every fleet reads a scope_org row, so an edit that leaves the row
+        # there needs what creating one needs (trust 3): setting scope_org, or
+        # editing a row that already is. Narrowing it away needs nothing more.
+        visibility_after = data.visibility if "visibility" in data.model_fields_set else mem.get("visibility")
+        await enforce_visibility_write(tenant_id, agent_id, visibility_after)
     elif is_install_credential:
         from core_api.services.agent_service import authorize_memory_access
 
@@ -4531,6 +4585,36 @@ async def update_memory(
             status_code=400,
             detail=f"{', '.join(nulled)} cannot be null; omit the field to leave it unchanged",
         )
+
+    # The non-business policy kept this row to its writer. Widening it changes
+    # no content, so nothing would run the policy again: while the tenant's
+    # policy still keeps such content private, the widening is refused, for any
+    # credential. An admin who wants the row shared changes the policy.
+    if (
+        "visibility" in fields_set
+        and data.visibility != MEMORY_VISIBILITY_SCOPE_AGENT
+        and _kept_private(mem.get("metadata_") or mem.get("metadata"))
+    ):
+        nb_cfg = (await resolve_config(tenant_id)).governance_non_business
+        if nb_cfg.enabled and nb_cfg.disposition == "keep_private":
+            await emit_governance_audit(
+                tenant_id=tenant_id,
+                agent_id=agent_id or mem.get("agent_id"),
+                action=ACTION_NB_KEEP_PRIVATE,
+                detail={
+                    **nonbusiness_audit_detail(ACTION_NB_KEEP_PRIVATE, mem.get("content") or "", None),
+                    "refused_visibility": data.visibility,
+                },
+                resource_id=str(memory_id),
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    AUTH_KEPT_PRIVATE_BY_POLICY,
+                    "This memory was kept private by the tenant's non-business content policy "
+                    "and cannot be shared while that policy stands.",
+                ),
+            )
 
     # Snapshot old values for audit diff
     changes: dict = {}
@@ -4799,6 +4883,15 @@ async def update_memory(
             # platform — omit it from a replace and the next enrichment fills it.
             if patch["metadata_"] is not None:
                 mark_caller_owned(patch["metadata_"], claimed)
+            # Except where the row came from: a captured row stays marked as
+            # captured, whatever its metadata is replaced with (``auto_capture``).
+            captured = capture_of(old_meta)
+            if captured is not None:
+                replaced = patch["metadata_"] or {}
+                patch["metadata_"] = {
+                    **replaced,
+                    SYSTEM_NAMESPACE: {**(replaced.get(SYSTEM_NAMESPACE) or {}), CAPTURE_KEY: captured},
+                }
         elif data.metadata is None:
             # Surface the breaking change explicitly: pre-PR
             # ``{"metadata": null}`` cleared the column. The

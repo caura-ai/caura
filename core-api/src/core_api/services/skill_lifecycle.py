@@ -110,6 +110,22 @@ UNATTRIBUTED_AGENT_ID = "unknown"
 
 REQUIRED_TOP_LEVEL_KEYS: tuple[str, ...] = ("name", "slug", "description", "domain", "kind", "source")
 
+# The trust an agent needs to write a skill, on REST and MCP alike. An
+# approved skill is instructions in every agent's palette on every node its
+# fleet reaches, so proposing one is the cross-agent tier keystones need,
+# not the trust 1 every approved agent has.
+SKILL_WRITE_MIN_TRUST = 2
+
+
+def skill_trust_message(agent_id: str | None) -> str:
+    """The refusal both write surfaces give an agent below
+    :data:`SKILL_WRITE_MIN_TRUST`."""
+    return (
+        f"Agent '{agent_id}' cannot write skills: that needs trust_level >= "
+        f"{SKILL_WRITE_MIN_TRUST}. Ask a tenant admin to raise it, or to add the skill."
+    )
+
+
 # ``slug`` regex mirrors the existing ``_SKILL_SLUG_RE`` in
 # ``routes/documents.py``. Duplicated here intentionally — the route
 # uses the regex on ``doc_id``; this module uses it on

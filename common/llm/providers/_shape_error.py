@@ -10,9 +10,8 @@ three subclasses at once.
 
 from __future__ import annotations
 
-# Captured-content cap. 1 KiB is enough to identify the schema-miss
-# class while keeping log lines bounded — a megabyte-scale aberrant
-# response would otherwise blow up log ingestion.
+# Bound the content retained for monitoring and pickle payloads. Formatted
+# exceptions omit this text; the retained slice must also stay small.
 _CONTENT_TRUNCATION_LIMIT = 1024
 
 
@@ -35,7 +34,7 @@ class ProviderResponseShapeError(ValueError):
     The ``content`` carried in ``self.args`` is the post-truncation
     slice (capped at ``_CONTENT_TRUNCATION_LIMIT``); the full
     pre-truncation string is intentionally NOT retained so a
-    megabyte-scale aberrant response can't bloat log lines or pickle
+    megabyte-scale aberrant response can't bloat monitoring or pickle
     payloads.
     """
 
@@ -61,5 +60,10 @@ class ProviderResponseShapeError(ValueError):
         )
         return (
             f"{self.provider} returned a JSON {self.parsed_type} where a dict was expected. "
-            f"{label}: {self.content!r}"
+            f"{label}: {len(self.content)} characters retained; text omitted"
         )
+
+    def __repr__(self) -> str:
+        # ValueError's default repr renders args, which retain the monitoring
+        # content and are also used for pickle compatibility.
+        return f"{type(self).__name__}({str(self)!r})"

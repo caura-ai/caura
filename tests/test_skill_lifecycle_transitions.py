@@ -654,11 +654,11 @@ class TestAutoPromoteClean:
         assert result.attempts[0].target_status == "active"
 
     @pytest.mark.asyncio
-    async def test_flag_on_but_warn_scan_still_auto_activates(self):
-        # A scan with warn>0 but state='clean' + critical=0 is still a
-        # clean PASS for auto-approve — warns surface on the card but
-        # don't block (matching the inbox approve semantics). The
-        # decisive fields are ``state`` + ``critical``.
+    async def test_flag_on_but_warn_scan_is_held_for_review(self):
+        # A scan with warn>0 but state='clean' + critical=0 passes the inbox
+        # approve, where a person reads the warnings on the card. Nobody reads
+        # them on the automatic path, so there a finding of any severity
+        # sends the candidate to the inbox instead of straight to active.
         doc = _candidate_doc(
             scan={"state": "clean", "critical": 0, "warn": 2, "findings": []}
         )
@@ -679,8 +679,35 @@ class TestAutoPromoteClean:
                 freshness_window_days=14,
                 auto_promote_clean=True,
             )
-        assert updates == [("t1", "skills", "forge/warned", "active")]
-        assert result.auto_approved == 1
+        assert updates == [("t1", "skills", "forge/warned", "staged")]
+        assert result.auto_approved == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("warn", ["several", [1]])
+    async def test_flag_on_unreadable_warn_count_is_held_for_review(self, warn):
+        # A warning count that is not a number is read as a warning.
+        doc = _candidate_doc(
+            scan={"state": "clean", "critical": 0, "warn": warn, "findings": []}
+        )
+        updates: list[tuple] = []
+
+        async def updater(t, c, d, s):
+            updates.append((t, c, d, s))
+
+        with _patch_candidates([_doc_row("forge/warned", doc)]):
+            result = await promote_pending_candidates(
+                tenant_id="t1",
+                fleet_id=None,
+                poison_checker=_fake_poison_never,
+                live_data_fetcher=await _fake_live_data_returns(None),
+                status_updater=updater,
+                min_cluster_size=3,
+                min_distinct_agents=3,
+                freshness_window_days=14,
+                auto_promote_clean=True,
+            )
+        assert updates == [("t1", "skills", "forge/warned", "staged")]
+        assert result.auto_approved == 0
 
     @pytest.mark.asyncio
     async def test_flag_on_missing_scan_block_falls_back_to_staged(self):

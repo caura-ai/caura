@@ -1,7 +1,7 @@
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 
 from core_api import openapi_responses as _oar
@@ -9,6 +9,8 @@ from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_ENTITY_LIMIT, MAX_LIST_LIMIT
 from core_api.errors import AUTH_AGENT_TRUST_TOO_LOW, coded_detail
+from core_api.middleware.per_tenant_concurrency import per_tenant_slot
+from core_api.middleware.rate_limit import search_limit
 from core_api.schemas import (
     EntityOut,
     EntityUpsert,
@@ -61,11 +63,14 @@ async def _graph_write_scope(body: EntityUpsert | RelationUpsert, auth: AuthCont
 
 
 @router.get("/entities", responses={200: {"model": list[_oar.EntityListItem]}})
+@search_limit
 async def list_entities(
+    request: Request,
+    response: Response,
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),
     entity_type: str | None = Query(default=None),
-    search: str | None = Query(default=None),
+    search: str | None = Query(default=None, max_length=200),
     limit: int = Query(default=DEFAULT_ENTITY_LIMIT, ge=1, le=MAX_LIST_LIMIT),
     offset: int = Query(default=0, ge=0),
     auth: AuthContext = Depends(get_auth_context),
@@ -99,15 +104,16 @@ async def list_entities(
     # admin credentials keep the full list, less entities mined only from
     # soft-deleted memories, which storage hides from every reader (M-92).
     reader = await entity_reader_scope(tenant_id, auth.agent_id, auth.tenant_id)
-    entities = await sc.list_entities(
-        tenant_id,
-        fleet_id=fleet_id,
-        entity_type=entity_type,
-        search=search,
-        limit=limit,
-        offset=offset,
-        reader=reader,
-    )
+    async with per_tenant_slot("search", tenant_id):
+        entities = await sc.list_entities(
+            tenant_id,
+            fleet_id=fleet_id,
+            entity_type=entity_type,
+            search=search,
+            limit=limit,
+            offset=offset,
+            reader=reader,
+        )
 
     # Count linked memories per entity
     eids = [e.get("id", "") for e in entities]

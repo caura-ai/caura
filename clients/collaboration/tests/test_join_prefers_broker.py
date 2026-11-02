@@ -217,3 +217,31 @@ def test_plan_passes_no_memory_only_to_a_broker_that_knows_it(tmp_path):
     assert "--no-memory" not in broker_mod.connect_plan(new, memory=True, **common).argv
     assert broker_mod.connect_plan(new, memory=True, **common).notes == []
     assert broker_mod.connect_plan(new, memory=False, **common).argv[-1] == "--no-memory"
+
+
+@pytest.mark.parametrize("broker_args", [("--broker",), ()])
+def test_join_removes_signin_environment_before_any_broker_child(env, monkeypatch, broker_args):  # noqa: F811
+    import os
+    import subprocess
+
+    install_broker(env)
+    real_run = subprocess.run
+    observed = []
+
+    def capture(argv, **kwargs):
+        if argv[1:3] == ["agent", "connect"]:
+            child_env = kwargs.get("env", os.environ)
+            observed.append(
+                {k: child_env[k] for k in ("CAURA_PASSWORD", "CAURA_TOTP_CODE") if k in child_env}
+            )
+        return real_run(argv, **kwargs)
+
+    find_broker = broker_mod.find_broker
+    monkeypatch.setattr(broker_mod, "find_broker", lambda: find_broker(run=capture))
+    monkeypatch.setattr(subprocess, "run", capture)
+    monkeypatch.setenv("CAURA_TOTP_CODE", "123456")
+    result = invoke("--dir", str(env.project), *broker_args)
+    assert result.exit_code == 0, result.output
+    assert observed and all(not entry for entry in observed)
+    if not broker_args:
+        assert env.dashboard.minted()

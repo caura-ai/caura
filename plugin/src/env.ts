@@ -120,18 +120,48 @@ export function applyPluginConfig(config: unknown): void {
     const value = block[key];
     if (typeof value === "string" && value.trim()) {
       CAURA_AGENT_ID = value.trim();
+      break;
+    }
+  }
+  // The capture switch is declared there too, so it is honoured there; a
+  // boolean is what OpenClaw hands over for a JSON ``false``.
+  for (const key of ["CAURA_AUTO_WRITE_TURNS", "MEMCLAW_AUTO_WRITE_TURNS"]) {  // legacy-name-ok: rule 3 dual-read alias
+    const value = block[key];
+    if (typeof value === "boolean") {
+      CAURA_AUTO_WRITE_TURNS = value;
+      return;
+    }
+    if (typeof value === "string") {
+      CAURA_AUTO_WRITE_TURNS = parseBoolSetting(value, true);
       return;
     }
   }
 }
 
+/**
+ * Whether a switch's value means on. Unset means ``defaultValue``. The usual
+ * ways to say off are off, in any case: ``false``, ``0``, ``no``, ``off``,
+ * ``disabled``, and a blank value (``KEY=`` is how an ``.env`` blanks one out).
+ * Anything else is on, so an operator can opt in with their shell's idiom.
+ */
+export function parseBoolSetting(value: string | undefined, defaultValue: boolean): boolean {
+  if (value === undefined) return defaultValue;
+  return !["false", "0", "", "no", "off", "disabled"].includes(value.trim().toLowerCase());
+}
+
 // Default to true for all automatic conversation-memory writes: user messages
 // from ingest, turn summaries, compaction summaries and the pre-compaction
-// memory-flush turn (index.ts). Setting false disables these four paths;
-// explicit writes and runtime compaction remain available. The independently
-// enabled Interviewer has its own controls.
-export const CAURA_AUTO_WRITE_TURNS =
-  readEnv(["CAURA_AUTO_WRITE_TURNS", "MEMCLAW_AUTO_WRITE_TURNS"]) !== "false";  // legacy-name-ok: rule 3 dual-read alias
+// memory-flush turn (index.ts). Off disables these four paths; explicit writes
+// and runtime compaction remain available. The independently enabled
+// Interviewer has its own controls. What these writes become on the server
+// (private to the agent, scanned, marked as captured) is in context-engine.ts.
+//
+// ``let`` because the plugin config can set it after import (applyPluginConfig);
+// importers read the live binding.
+export let CAURA_AUTO_WRITE_TURNS = parseBoolSetting(
+  readEnv(["CAURA_AUTO_WRITE_TURNS", "MEMCLAW_AUTO_WRITE_TURNS"]),  // legacy-name-ok: rule 3 dual-read alias
+  true,
+);
 
 // HMAC signature enforcement on incoming fleet commands. Default is
 // **opt-in** because the OSS server doesn't sign commands at all (the
@@ -440,26 +470,7 @@ export const INTERVIEW_TASK_SIDECAR_RETENTION_MS = 8 * 24 * 60 * 60_000;
 //   the current session so a freshly authored rule takes effect on the
 //   next turn.
 function _readBoolEnv(names: readonly string[], defaultValue: boolean): boolean {
-  const v = readEnv(names);
-  if (v === undefined) return defaultValue;
-  // Treat the standard set of "off" idioms as off: ``"false"``, ``"0"``,
-  // the empty string, ``"no"``, ``"off"``, and ``"disabled"``. The last
-  // three cover the common shell-script operator idioms that show up in
-  // ``.env`` files in the wild (``FLAG=no``, ``FLAG=off``,
-  // ``FLAG=disabled``). Anything else (including ``"true"``, ``"1"``,
-  // ``"yes"``, or unrecognised values) is treated as on so operators can
-  // opt-in with whatever convention their shell uses. The empty-string
-  // case matters because ``KEY=`` in an ``.env`` file is the natural way
-  // to "blank out" a previously-set value.
-  const lower = v.toLowerCase();
-  return (
-    lower !== "false" &&
-    lower !== "0" &&
-    lower !== "" &&
-    lower !== "no" &&
-    lower !== "off" &&
-    lower !== "disabled"
-  );
+  return parseBoolSetting(readEnv(names), defaultValue);
 }
 function _readIntEnv(names: readonly string[], defaultValue: number, min: number): number {
   const raw = readEnv(names);

@@ -15,12 +15,23 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import Request, Response
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
-async def test_by_id_gate_refuses_a_sibling_tenants_private_row():
+async def test_by_id_gate_refuses_a_sibling_tenants_private_row(monkeypatch):
+    from core_api.services import agent_service
     from core_api.services.agent_service import authorize_memory_access
+
+    # The gate reads the caller's row (an agent at trust 0 reads nothing).
+    monkeypatch.setattr(
+        agent_service,
+        "lookup_agent",
+        AsyncMock(
+            return_value={"agent_id": "rollup-bot", "fleet_id": None, "trust_level": 1}
+        ),
+    )
 
     kwargs = {
         "visibility": "scope_agent",
@@ -100,6 +111,8 @@ async def test_rest_list_pinned_to_a_sibling_sends_the_home_tenant(monkeypatch):
     # Every parameter explicit: calling the endpoint function directly skips
     # FastAPI's dependency resolution (see test_cross_tenant_audit_surfaces).
     await memories_routes.list_memories(
+        request=Request({"type": "http"}),
+        response=Response(),
         tenant_id="sibling",
         fleet_id=None,
         agent_id=None,

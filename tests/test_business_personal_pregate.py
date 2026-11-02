@@ -33,7 +33,7 @@ from core_api.services.organization_settings import (
     _validate_governance_enums,
 )
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.unit]
 
 
 @pytest.fixture(autouse=True)
@@ -233,6 +233,7 @@ async def test_pregate_uses_own_provider_independent_of_enrichment(monkeypatch):
         },
         enrichment_provider="none",
     )
+    cfg._ts["api_keys"] = {"openai_api_key": "synthetic-tenant-key"}
     await BusinessPersonalPregate().execute(_ctx(_data(), cfg=cfg))
     assert captured["provider"] == "openai"  # NOT "none"
     assert captured["model"] == "gpt-5.4-nano"
@@ -362,6 +363,7 @@ async def test_pregate_default_off():
 async def test_pregate_settings_resolve():
     pg = ResolvedConfig(
         {
+            "api_keys": {"openai_api_key": "synthetic-tenant-key"},
             "governance": {
                 "non_business": {
                     "pregate": {
@@ -372,7 +374,7 @@ async def test_pregate_settings_resolve():
                         "fail_closed": True,
                     }
                 }
-            }
+            },
         }
     ).governance_non_business_pregate
     assert (

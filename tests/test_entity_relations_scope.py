@@ -378,7 +378,7 @@ async def test_graph_keeps_scope_org_evidence(graph_storage, patch_lookup):
             }
         ]
     )
-    patch_lookup(fleet_id="fleet-alpha", trust_level=0)
+    patch_lookup(fleet_id="fleet-alpha", trust_level=1)
 
     out = await _filter([_rel(org_id)], "agent-b")
     assert len(out) == 1

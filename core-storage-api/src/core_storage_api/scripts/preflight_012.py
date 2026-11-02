@@ -39,6 +39,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -109,9 +110,14 @@ def _tls_connect_args(dsn: str) -> dict[str, object]:
 
         return db_connect_args(dsn)
     except Exception:
-        from core_storage_api.db_tls import tls_connect_args, tls_required_from_env
+        from core_storage_api.db_tls import tls_connect_args, tls_mode_from_env, tls_required_from_env
 
-        return tls_connect_args(dsn, require=tls_required_from_env())
+        return tls_connect_args(
+            dsn,
+            require=tls_required_from_env(),
+            mode=tls_mode_from_env(),
+            root_cert=os.environ.get("POSTGRES_SSL_ROOT_CERT", ""),
+        )
 
 
 def _is_past_012(head: str | None) -> bool:

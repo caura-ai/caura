@@ -94,10 +94,14 @@ def _validate_payload(body: dict) -> tuple[str, dict, str | None]:
     title = body.get("title")
     if not title or not isinstance(title, str):
         errors.append("title is required and must be a string")
+    elif len(title) > 200:
+        errors.append("title must be <= 200 characters")
 
     content = body.get("content")
     if not content or not isinstance(content, str):
         errors.append("content is required and must be a string")
+    elif len(content) > 2000:
+        errors.append("content must be <= 2000 characters")
 
     weight_label = body.get("weight")
     if not weight_label:

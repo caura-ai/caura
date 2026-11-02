@@ -75,14 +75,16 @@ def test_defaults_preserve_the_previous_window_for_unpaged_callers():
 
     for fn in (CoreStorageClient.list_reports, reports.list_reports):
         params = inspect.signature(fn).parameters
-        assert params["limit"].default == 10, fn
-        assert params["offset"].default == 0, fn
+        assert (
+            getattr(params["limit"].default, "default", params["limit"].default) == 10
+        ), fn
+        assert (
+            getattr(params["offset"].default, "default", params["offset"].default) == 0
+        ), fn
 
 
 def test_the_core_api_edge_still_bounds_the_window():
-    """Bounds live at the public edge, and must stay there: the storage route is
-    internal and deliberately unbounded, so removing these would let a caller
-    ask for an unbounded scan."""
+    """Bounds remain at the public edge as well as on internal storage reads."""
     from core_api.routes import crystallizer
 
     src = inspect.getsource(crystallizer.list_reports)

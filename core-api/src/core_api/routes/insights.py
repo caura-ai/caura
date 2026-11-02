@@ -77,8 +77,8 @@ async def generate_insights_endpoint(
     correspond to an existing agent in the tenant that meets the scope's
     trust requirement.
 
-    Trust gating: scope='agent' requires trust ≥ 1, scope='fleet'/'all'
-    requires trust ≥ 2. Admin keys bypass.
+    Trust gating: scope='agent' requires trust ≥ 1, scope='fleet' trust ≥ 2
+    and scope='all' trust ≥ 3 (it saves ``scope_org`` rows). Admin keys bypass.
     """
     auth.enforce_tenant(body.tenant_id)
     auth.enforce_read_only()

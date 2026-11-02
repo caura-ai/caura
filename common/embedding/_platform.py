@@ -59,7 +59,12 @@ def init_platform_embedding() -> None:
         return
 
     if provider == ProviderName.OPENAI:
-        api_key = os.environ.get("PLATFORM_EMBEDDING_API_KEY", "")
+        base_url = os.environ.get("PLATFORM_EMBEDDING_BASE_URL") or None
+        api_key = (
+            os.environ.get("PLATFORM_EMBEDDING_ENDPOINT_TOKEN") or "tei-no-auth"
+            if base_url
+            else os.environ.get("PLATFORM_EMBEDDING_API_KEY", "")
+        )
         if not api_key:
             _reject_openai_config(
                 "PLATFORM_EMBEDDING_PROVIDER=openai but no PLATFORM_EMBEDDING_API_KEY"

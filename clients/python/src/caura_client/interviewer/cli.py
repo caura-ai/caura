@@ -19,9 +19,11 @@ import getpass
 import json
 import os
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 
 from ..client import Caura, _check_key_transport
@@ -100,28 +102,45 @@ def _build_parser() -> argparse.ArgumentParser:
     def common(p: argparse.ArgumentParser) -> None:
         p.add_argument(
             "--base-url",
-            default=_read_env("CAURA_BASE_URL", "MEMCLAW_BASE_URL", default=DEFAULT_BASE_URL),  # legacy-name-ok: rule 3 dual-read alias
+            default=_read_env(
+                "CAURA_BASE_URL",
+                "MEMCLAW_BASE_URL",  # legacy-name-ok: dual-read alias
+                default=DEFAULT_BASE_URL,
+            ),
         )
-        p.add_argument("--api-key", default=_read_env("CAURA_API_KEY", "MEMCLAW_API_KEY"))  # legacy-name-ok: rule 3 dual-read alias
-        p.add_argument("--tenant-id", default=_read_env("CAURA_TENANT_ID", "MEMCLAW_TENANT_ID"))  # legacy-name-ok: rule 3 dual-read alias
+        p.add_argument(
+            "--api-key",
+            default=_read_env("CAURA_API_KEY", "MEMCLAW_API_KEY"),  # legacy-name-ok: dual-read alias
+        )
+        p.add_argument(
+            "--tenant-id",
+            default=_read_env("CAURA_TENANT_ID", "MEMCLAW_TENANT_ID"),  # legacy-name-ok: dual-read alias
+        )
         p.add_argument(
             "--agent-id",
-            default=_read_env("CAURA_AGENT_ID", "MEMCLAW_AGENT_ID") or _default_agent_id(),  # legacy-name-ok: rule 3 dual-read alias
+            default=_read_env("CAURA_AGENT_ID", "MEMCLAW_AGENT_ID")  # legacy-name-ok: dual-read alias
+            or _default_agent_id(),
         )
-        p.add_argument("--fleet-id", default=_read_env("CAURA_FLEET_ID", "MEMCLAW_FLEET_ID") or None)  # legacy-name-ok: rule 3 dual-read alias
+        p.add_argument(
+            "--fleet-id",
+            default=_read_env("CAURA_FLEET_ID", "MEMCLAW_FLEET_ID")  # legacy-name-ok: dual-read alias
+            or None,
+        )
         p.add_argument(
             "--projects",
             nargs="+",
             default=None,
             help="project-dir globs to allow (default: CAURA_INTERVIEWER_PROJECTS env; DEFAULT-DENY without either)",
         )
-        p.add_argument("--all-projects", action="store_true", help="explicit opt-in: harvest every project dir")
+        p.add_argument(
+            "--all-projects", action="store_true", help="explicit opt-in: harvest every project dir"
+        )
         p.add_argument(
             "--harness",
             choices=(HARNESS_CLAUDE_CODE, HARNESS_CURSOR),
             default=_read_env(
                 "CAURA_INTERVIEWER_HARNESS",
-                "MEMCLAW_INTERVIEWER_HARNESS",  # legacy-name-ok: rule 3 dual-read alias
+                "MEMCLAW_INTERVIEWER_HARNESS",  # legacy-name-ok: dual-read alias
                 default=HARNESS_CLAUDE_CODE,
             ),
             help="which agent's transcripts to harvest (default: claude-code; env CAURA_INTERVIEWER_HARNESS)",
@@ -136,10 +155,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     run_p = sub.add_parser("run", help="scan transcripts and submit due interview windows")
     common(run_p)
-    run_p.add_argument("--transcript", type=Path, default=None, help="drain ONE transcript file (bypasses discovery)")
+    run_p.add_argument(
+        "--transcript", type=Path, default=None, help="drain ONE transcript file (bypasses discovery)"
+    )
     run_p.add_argument("--dry-run", action="store_true", help="parse + window, submit nothing")
     run_p.add_argument("--max-windows", type=int, default=8)
-    run_p.add_argument("--since-hours", type=float, default=168.0, help="only files modified in this window (0 = all)")
+    run_p.add_argument(
+        "--since-hours", type=float, default=168.0, help="only files modified in this window (0 = all)"
+    )
     run_p.add_argument("--min-events", type=int, default=10, help="dribble gate for the final window")
     run_p.add_argument("--max-event-chars", type=_event_chars, default=4_000)
     run_p.add_argument("--flush", action="store_true", help="submit even below the dribble gate")
@@ -148,16 +171,22 @@ def _build_parser() -> argparse.ArgumentParser:
     common(status_p)
     status_p.add_argument("--since-hours", type=float, default=168.0)
 
-    hook_p = sub.add_parser("hook", help="Claude Code SessionEnd hook: drain the session transcript (stdin JSON)")
+    hook_p = sub.add_parser(
+        "hook", help="Claude Code SessionEnd hook: drain the session transcript (stdin JSON)"
+    )
     common(hook_p)
     hook_p.add_argument("--max-windows", type=int, default=2)
     hook_p.add_argument("--max-event-chars", type=_event_chars, default=4_000)
 
-    install_p = sub.add_parser("install", help="schedule a periodic `run` via cron (writes a 0600 env file it sources)")
+    install_p = sub.add_parser(
+        "install", help="schedule a periodic `run` via cron (writes a 0600 env file it sources)"
+    )
     common(install_p)
     install_p.add_argument("--interval", default="30m", help="cron cadence, e.g. '30m' or '2h' (default 30m)")
 
-    uninstall_p = sub.add_parser("uninstall", help="remove the cron entry (and env file) written by `install`")
+    uninstall_p = sub.add_parser(
+        "uninstall", help="remove the cron entry (and env file) written by `install`"
+    )
     uninstall_p.add_argument("--keep-env", action="store_true", help="leave the 0600 env file in place")
     return parser
 
@@ -173,7 +202,10 @@ def _projects_root(args: argparse.Namespace) -> Path:
 def _resolve_allowlist(args: argparse.Namespace) -> list[str]:
     if args.projects is not None:
         return list(args.projects)
-    env = _read_env("CAURA_INTERVIEWER_PROJECTS", "MEMCLAW_INTERVIEWER_PROJECTS")  # legacy-name-ok: rule 3 dual-read alias
+    env = _read_env(
+        "CAURA_INTERVIEWER_PROJECTS",
+        "MEMCLAW_INTERVIEWER_PROJECTS",  # legacy-name-ok: dual-read alias
+    )
     return [g.strip() for g in env.split(",") if g.strip()]
 
 
@@ -211,40 +243,67 @@ def _deny_guidance(args: argparse.Namespace) -> str:
     return "\n".join(lines)
 
 
-def _acquire_lock() -> object | None:
-    """Best-effort cross-invocation guard (cron + hook overlap).
+def _open_owned_lock(path: Path):
+    """Open without truncation; only this user's regular file with one link can contend."""
+    import fcntl
 
-    The REAL safety is the server's deterministic attempt-id dedup; this
-    just avoids burning duplicate LLM windows. Never blocks. On platforms
-    without ``fcntl`` (Windows) the guard degrades to a no-op — dedup
-    still protects correctness.
+    fd = os.open(path, os.O_CREAT | os.O_NOFOLLOW | os.O_RDWR, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            raise OSError(errno.EACCES, "lock file is not a private regular file owned by this user")
+        os.fchmod(fd, 0o600)
+        handle = os.fdopen(fd, "r+")
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BaseException:
+        handle.close()
+        raise
+    return handle
+
+
+def _acquire_lock() -> object | None:
+    """Best-effort guard for cron/hook overlap, including older installed clients.
+
+    The server's attempt-id dedup protects correctness when locking is unavailable.
     """
     try:
-        import fcntl
+        import fcntl  # noqa: F401 - capability check; Windows proceeds lockless.
     except ImportError:
-        # No fcntl (Windows): PROCEED without a lock rather than treating
-        # it as "already locked" — returning None here would make every
-        # Windows run exit immediately. Dedup still protects correctness.
         return object()
-    # Per-user filename: a shared /tmp lock owned by another user would
-    # fail our open() with EACCES forever, reading as "always locked".
-    lock_path = Path(tempfile.gettempdir()) / f"memclaw-interviewer-{getpass.getuser()}.lock"  # legacy-name-deferred: current writer needs a canonical lock migration before removal (docs/plans/rebrand-alias-migration-notes.md)
-    handle = None
+    locks = ExitStack()
     try:
-        handle = open(lock_path, "w")  # noqa: SIM115 - caller owns the lock lifetime.
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return handle
+        directory = installer.config_dir()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = directory.stat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise OSError(errno.EACCES, "lock directory is not owned by this user")
+        directory.chmod(0o700)
+        locks.enter_context(_open_owned_lock(directory / "run.lock"))
     except OSError as exc:
-        if handle is not None:
-            handle.close()
+        locks.close()
         if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
-            return None  # genuine contention: another run holds the lock
-        # Unrecoverable environment error (EACCES on the lock file,
-        # read-only tmpdir, ...): warn and PROCEED lockless, like the
-        # no-fcntl path — treating it as contention would silently
-        # disable the CLI on that machine forever.
+            return None
         print(f"[interviewer] lock unavailable ({exc}); proceeding without it", file=sys.stderr)
         return object()
+
+    # Keep coordinating with older installed clients during the migration.
+    # Unsafe/unavailable shared files never override the private guard above.
+    # The compatibility sentinel pins this spelling until older installs migrate.
+    # fmt: off
+    lock_path = Path(tempfile.gettempdir()) / f"memclaw-interviewer-{getpass.getuser()}.lock"  # legacy-name-deferred: current writer needs a canonical lock migration before removal (docs/plans/rebrand-alias-migration-notes.md)
+    # fmt: on
+    try:
+        locks.enter_context(_open_owned_lock(lock_path))
+    except OSError as exc:
+        if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+            locks.close()
+            return None
+        print(f"[interviewer] compatibility lock unavailable ({exc}); using private lock", file=sys.stderr)
+    return locks
 
 
 def _make_client(args: argparse.Namespace) -> Caura:
@@ -386,7 +445,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
                 )
                 continue
             pending = max(0, lines - (last_seq + 1))
-            print(f"{transcript.project}/{transcript.path.name}: lines={lines} cursor={last_seq} pending={pending}")
+            print(
+                f"{transcript.project}/{transcript.path.name}: lines={lines} cursor={last_seq} pending={pending}"
+            )
     return 0
 
 
@@ -544,7 +605,11 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
         except OSError as exc:
             print(f"[interviewer] warning: could not remove env file {env_file}: {exc}", file=sys.stderr)
     env_file_present = env_file.exists() or env_deleted
-    suffix = "; env file deleted" if env_deleted else ("; env file kept" if (args.keep_env and env_file_present) else "")
+    suffix = (
+        "; env file deleted"
+        if env_deleted
+        else ("; env file kept" if (args.keep_env and env_file_present) else "")
+    )
     print(f"[interviewer] {'removed cron entry' if removed else 'no cron entry found'}{suffix}")
     return 0
 

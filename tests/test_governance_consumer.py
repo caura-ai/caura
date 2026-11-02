@@ -129,8 +129,17 @@ async def test_keep_private_updates_visibility_and_still_runs_detection(
 
     await consumer.handle_memory_enriched(_event(mid))
 
+    # Narrowed, and marked kept private so an edit cannot widen it back.
     sc.update_memory.assert_awaited_once_with(
-        str(mid), "tenant-gov", {"visibility": "scope_agent"}
+        str(mid),
+        "tenant-gov",
+        {
+            "visibility": "scope_agent",
+            "metadata_patch": {
+                "nonbusiness_kept_private": True,
+                "_system": {"nonbusiness_kept_private": True},
+            },
+        },
     )
     detect.assert_awaited_once()  # not dropped → detection proceeds on the kept row
 

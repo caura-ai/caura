@@ -231,10 +231,12 @@ def test_claude_join_signs_in_mints_and_runs_setup(env):
         "tenant_id": TENANT,
     }
     assert config.with_suffix(".key").read_text(encoding="utf-8").strip() == raw  # hooks on by default
-    add = [c for c in claude_calls(env.capture) if c["argv"][:2] == ["mcp", "add"]]
-    assert add and f"CAURA_API_KEY={raw}" in add[0]["argv"]
-    # The same server's memory MCP is registered too, with the same key.
-    assert add[1]["argv"][-4:] == ["caura", f"{URL}/mcp/", "--header", f"X-API-Key: {raw}"]
+    servers = json.loads((env.home / ".claude.json").read_text())["projects"][str(env.project.resolve())][
+        "mcpServers"
+    ]
+    assert servers["caura-bus"]["env"]["CAURA_API_KEY"] == raw
+    assert servers["caura"]["headers"]["X-API-Key"] == raw
+    assert not claude_calls(env.capture)
     assert "caura-bus and the caura memory server" in result.output
     assert (env.project / "CLAUDE.md").exists()
     assert (env.project / ".claude" / "settings.local.json").exists()
@@ -261,8 +263,10 @@ def test_codex_join_writes_codex_config_and_prints_waker(env):
 def test_join_no_memory_wires_only_the_bus(env):
     result = invoke("--dir", str(env.project), "--no-memory")
     assert result.exit_code == 0, result.output
-    adds = [c for c in claude_calls(env.capture) if c["argv"][:2] == ["mcp", "add"]]
-    assert [c["argv"][4] for c in adds] == ["caura-bus"]
+    servers = json.loads((env.home / ".claude.json").read_text())["projects"][str(env.project.resolve())][
+        "mcpServers"
+    ]
+    assert set(servers) == {"caura-bus"}
 
 
 def test_no_hooks_skips_key_file(env):
@@ -367,7 +371,12 @@ def test_rejoin_without_name_reuses_this_dirs_agent(env):
 
 
 def test_setup_failure_revokes_the_new_key(env, monkeypatch):
-    monkeypatch.setenv("FAKE_CLAUDE_EXIT", "1")
+    from caura_bus_cli import setup as setup_mod
+
+    def denied(*args):
+        raise setup_mod.SetupError("private config write failed")
+
+    monkeypatch.setattr(setup_mod, "wire_claude", denied)
     result = invoke("--dir", str(env.project))
     assert result.exit_code == 1
     assert "the new key was revoked" in result.output

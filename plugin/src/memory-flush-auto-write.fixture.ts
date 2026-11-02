@@ -32,6 +32,8 @@ const plan = resolveFlushPlan({ nowMs: Date.UTC(2026, 9, 5, 12) });
 if (enabled) {
   assert.ok(plan, "the flush turn runs while automatic writes are on");
   assert.match(String(plan.prompt), /caura_write/);
+  // The session summary is an automatic write too, so it is kept private.
+  assert.match(String(plan.prompt), /visibility 'scope_agent'/);
 } else {
   // OpenClaw runs no memory-flush turn when the resolver returns null.
   assert.equal(plan, null, "no flush turn once automatic writes are off");

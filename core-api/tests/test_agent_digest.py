@@ -364,3 +364,19 @@ async def test_build_prompt_tags_subagent_rows():
 async def test_run_agent_digest_rejects_bad_period(wire):
     with pytest.raises(ValueError):
         await agent_digest.run_agent_digest("month")
+
+
+async def test_server_credentials_keep_operator_provider_and_model(monkeypatch, wire):
+    from unittest.mock import AsyncMock
+
+    wire(FakeStorage([{"agent_id": "a"}], {"a": [_mem()] * 4}))
+    call = AsyncMock(return_value={"narrative": "summary", "shipped": []})
+    monkeypatch.setattr(agent_digest, "call_with_fallback", call)
+    monkeypatch.setenv("AGENT_DIGEST_PROVIDER", "openai")
+    monkeypatch.setenv("AGENT_DIGEST_MODEL", "gpt-5.4-mini")
+    await agent_digest.generate_for_org(
+        "org1", "day", {**CONFIG, "provider": "anthropic", "model": "claude-haiku-4-5-20251001"}, now=NOW
+    )
+    assert call.await_args.args[0] == "openai"
+    assert call.await_args.kwargs["model_override"] == "gpt-5.4-mini"
+    assert call.await_args.kwargs["tenant_config"] is None

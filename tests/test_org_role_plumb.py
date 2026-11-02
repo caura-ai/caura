@@ -114,13 +114,9 @@ def inbox_app(monkeypatch):
     monkeypatch.setattr(auth_mod, "_block_if_suppressed", _noop)
     monkeypatch.setattr(auth_mod, "_block_if_any_readable_suppressed", _noop)
 
-    async def raw_settings(tenant_id):
-        return {"skills_factory": {"enabled": True}}
-
     async def display_settings(tenant_id):
         return {"skills_factory": {"enabled": True}}
 
-    monkeypatch.setattr(si, "get_raw_settings", raw_settings)
     monkeypatch.setattr(si, "get_settings_for_display", display_settings)
     monkeypatch.setattr(si, "log_action", _noop)
 

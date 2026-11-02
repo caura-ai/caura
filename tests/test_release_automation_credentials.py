@@ -61,7 +61,8 @@ def test_the_release_token_reaches_only_this_repository() -> None:
     mint = next(step for step in steps if step.get("id") == "app-token")
     assert steps.index(mint) == 1
     assert mint["with"] == {
-        "app-id": "${{ secrets.RELEASE_APP_ID }}",
+        # The caura-release App's Client ID is public; only its key is secret.
+        "client-id": "Iv23liJAMLLlQtdvIRd0",
         "private-key": "${{ secrets.RELEASE_APP_PRIVATE_KEY }}",
         "owner": "caura-ai",
         "repositories": "caura",

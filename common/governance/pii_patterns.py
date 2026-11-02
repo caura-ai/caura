@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import re
+from bisect import bisect_right
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum
@@ -203,7 +204,15 @@ def _c(pattern: str, flags: int = 0) -> re.Pattern[str]:
     return re.compile(pattern, flags)
 
 
+# The literal delimiter avoids rescanning scheme-like prefixes in long text.
+_URL_PASSWORD = _c(r"://[^/\s:@]*:([^@\s/]+)@")
+
 _RULES: tuple[_Rule, ...] = (
+    _Rule(
+        PIICategory.API_KEY,
+        Severity.HIGH,
+        _c(r"\b(?:hf_|GOCSPX-)[0-9A-Za-z_\-]{16,}"),
+    ),
     # ── Email (LOW) ──
     _Rule(
         PIICategory.EMAIL,
@@ -581,6 +590,24 @@ def scan(
             start, end = m.span(rule.group)
             if end > start:
                 findings.append(Finding(rule.category, start, end, rule.severity))
+    # URL passwords take precedence over incidental email/token matches that
+    # extend into the hostname. Otherwise overlap resolution can mask only a
+    # password's tail or replace the address instead of the credential.
+    if allowed is None or PIICategory.SECRET in allowed:
+        passwords = [
+            Finding(PIICategory.SECRET, *match.span(1), Severity.HIGH)
+            for match in _URL_PASSWORD.finditer(text)
+        ]
+        if passwords:
+            ends = [password.end for password in passwords]
+
+            def separate(finding: Finding) -> bool:
+                index = bisect_right(ends, finding.start)
+                return index == len(passwords) or passwords[index].start >= finding.end
+
+            findings = [
+                finding for finding in findings if separate(finding)
+            ] + passwords
     return _resolve_overlaps(findings)
 
 

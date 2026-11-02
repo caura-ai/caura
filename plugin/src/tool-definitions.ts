@@ -386,7 +386,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       scope: {
         type: "string",
         enum: ["agent", "fleet", "all"],
-        description: "agent (default, trust ≥ 1, caller-owned memories) | fleet (trust ≥ 2) | all (trust ≥ 2)",
+        description: "agent (default, trust ≥ 1, caller-owned memories) | fleet (trust ≥ 2) | all (trust ≥ 3)",
       },
       agent_id: { type: "string", description: "Caller agent" },
       fleet_id: { type: "string", description: "Required when scope='fleet'" },

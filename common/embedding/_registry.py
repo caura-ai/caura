@@ -205,7 +205,13 @@ def get_embedding_provider(
         return FakeEmbeddingProvider()
 
     if name == ProviderName.OPENAI:
-        api_key = _resolve_openai_api_key(tenant_config)
+        base_url = os.environ.get("OPENAI_EMBEDDING_BASE_URL") or None
+        if base_url:
+            # Endpoint-specific credentials are independent of hosted OpenAI credentials.
+            api_key = os.environ.get("OPENAI_EMBEDDING_ENDPOINT_TOKEN") or "tei-no-auth"
+            tenant_config = None
+        else:
+            api_key = _resolve_openai_api_key(tenant_config)
         if not api_key:
             # Lazy import — avoids a circular at module-load time and
             # keeps platform setup off the cold-start critical path
@@ -235,10 +241,14 @@ def get_embedding_provider(
                 )
             return UnconfiguredEmbeddingProvider()
         embed_model = (
-            getattr(tenant_config, "embedding_model", None)
-            if tenant_config is not None
-            else None
-        ) or OPENAI_EMBEDDING_MODEL
+            (
+                getattr(tenant_config, "embedding_model", None)
+                if tenant_config is not None
+                else None
+            )
+            or (os.environ.get("OPENAI_EMBEDDING_MODEL") if base_url else None)
+            or OPENAI_EMBEDDING_MODEL
+        )
         base_url = os.environ.get("OPENAI_EMBEDDING_BASE_URL") or None
         # Strict bool parsing: only ``"true"`` / ``"false"`` (case-insensitive)
         # accepted. The previous ``!= "false"`` check silently treated typos

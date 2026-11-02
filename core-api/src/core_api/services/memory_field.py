@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import logging
 import math
 import re
 import time
@@ -37,11 +38,18 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
 import numpy as np
+from fastapi import HTTPException
+from slowapi.wrappers import LimitGroup
 
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
+from core_api.middleware.per_tenant_concurrency import per_tenant_slot
+from core_api.middleware.rate_limit import limiter
 from core_api.services.kmeans import numpy_kmeans
+
+logger = logging.getLogger(__name__)
 
 FIELD_KIND = "pca2"
 FIELD_DEFAULT_LIMIT = 20000
@@ -589,6 +597,10 @@ class _FieldCache:
 
 
 field_cache = _FieldCache()
+_signature_cache = _FieldCache(ttl=5.0)
+FIELD_BUILD_TIMEOUT_SECONDS = 40.0
+FIELD_BUILD_COOLDOWN_SECONDS = 5.0
+_build_started: OrderedDict[str, float] = OrderedDict()
 
 
 class FieldBusyError(Exception):
@@ -598,10 +610,10 @@ class FieldBusyError(Exception):
 # Builds in flight, by cache key, and the tenants running them. Touched only
 # on this process's event loop, so they need no lock.
 _builds: dict[tuple, asyncio.Task[dict]] = {}
+_layouts: dict[str, asyncio.Task[dict]] = {}
 _building_tenants: set[str] = set()
-# Signature reads in flight, by visibility scope. A read visits every row the
-# caller can see, cache hit or not, so concurrent requests for one scope share
-# it; none is kept once its own flight ends, so a later request reads afresh.
+# Signature reads share in-flight work and cache successful results for five
+# seconds per visibility scope, avoiding a full scan on every payload hit.
 _signatures: dict[tuple, asyncio.Task[dict]] = {}
 
 
@@ -617,6 +629,9 @@ def _scope_key(scope: dict) -> tuple:
 
 async def _signature(scope: dict) -> dict:
     key = _scope_key(scope)
+    cached = _signature_cache.get(key)
+    if cached is not None:
+        return cached
     read = _signatures.get(key)
     if read is None:
         read = asyncio.create_task(get_storage_client().memory_field_signature(scope))
@@ -625,54 +640,122 @@ async def _signature(scope: dict) -> dict:
         def _forget(done: asyncio.Task[dict]) -> None:
             if _signatures.get(key) is done:
                 del _signatures[key]
-            if not done.cancelled():
-                done.exception()  # retrieved, so a read every caller left does not log it
+            if not done.cancelled() and done.exception() is None:
+                _signature_cache.put(key, done.result())
 
         read.add_done_callback(_forget)
-    return await asyncio.shield(read)
+    try:
+        return await asyncio.shield(read)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 503:
+            raise FieldBusyError from exc
+        raise
 
 
 async def get_memory_field(scope: dict, *, limit: int) -> dict:
-    """Fetch (paged, newest first) and lay out the caller's memories.
+    """Rate-limit map requests per tenant and share one bounded full layout.
 
-    ``scope`` is the visibility body the storage field reads take
-    (``tenant_id``, ``caller_agent_id``, ``caller_tenant_id``, ``fleet_id``,
-    ``include_scope_agent``) — the same values ``GET /memories`` sends to
-    ``/memories/list``.
-
-    Concurrent requests for one scope share the signature read, and requests
-    for a map already being built wait for that build. Any other build needs a
-    slot (M-125): at most ``memory_field_max_concurrent_builds`` in this
-    process and one per tenant, else :class:`FieldBusyError`. Reads and builds
-    are shielded, so a caller that leaves does not cancel them for the others,
-    and a finished build is cached either way.
+    Signatures refresh within five seconds. Builds have one slot per tenant,
+    a forty-second wait budget and a tenant-wide cooldown between uncached
+    builds, across visibility scopes. Cooldown responses report the time left.
+    Caller limits slice the shared layout rather than selecting a new build.
     """
-    sig = await _signature(scope)
-    # ``revision`` hashes the visible rows' shown columns, so an edit misses
-    # the cache too (L-236); a storage without it leaves the first three.
-    signature = f"{sig.get('count')}:{sig.get('embedded')}:{sig.get('newest')}:{sig.get('revision')}"
-    key = (*_scope_key(scope), limit, signature)
-    cached = field_cache.get(key)
-    if cached is not None:
-        return cached
+    tenant = scope["tenant_id"]
+    if limiter.enabled:
+        rates = LimitGroup(
+            settings.rate_limit_search,
+            key_function=lambda: tenant,
+            scope="memory-field",
+            per_method=False,
+            methods=None,
+            error_message=None,
+            exempt_when=None,
+            cost=1,
+            override_defaults=True,
+        )
+        for rate in rates:
+            try:
+                allowed = limiter.limiter.hit(rate.limit, rate.scope, rate.key_func())
+            except Exception:
+                # Direct backend calls do not inherit slowapi's swallow_errors.
+                logger.warning("Memory map rate limiter backend unavailable; allowing request", exc_info=True)
+                continue
+            if not allowed:
+                raise HTTPException(
+                    status_code=429, detail="Memory map request rate exceeded", headers={"Retry-After": "1"}
+                )
+    return await _get_memory_field(scope, limit=limit)
+
+
+def _slice_field(payload: dict, limit: int) -> dict:
+    if len(payload["points"]) <= limit:
+        return payload
+    points = payload["points"][:limit]
+    counts = Counter(p["cluster"] for p in points)
+    linked = {eid for p in points for eid in p["entity_ids"]}
+    return {
+        **payload,
+        "points": points,
+        "clusters": [{**c, "size": counts[c["id"]]} for c in payload["clusters"] if counts[c["id"]]],
+        "entities": [e for e in payload["entities"] if e["id"] in linked],
+    }
+
+
+async def _get_memory_field(scope: dict, *, limit: int) -> dict:
+    # Only the signature read occupies a search slot. Waiting for the shared
+    # layout has its own tenant build slot and must leave ordinary searches free.
+    async with per_tenant_slot("search", scope["tenant_id"]):
+        sig = await _signature(scope)
+        # ``revision`` includes edits to the visible rows' displayed columns.
+        signature = f"{sig.get('count')}:{sig.get('embedded')}:{sig.get('newest')}:{sig.get('revision')}"
+        key = (*_scope_key(scope), signature)
+        cached = field_cache.get(key)
+        if cached is not None:
+            return _slice_field(cached, limit)
 
     build = _builds.get(key)
     if build is None:
         tenant = scope["tenant_id"]
-        if tenant in _building_tenants or len(_builds) >= settings.memory_field_max_concurrent_builds:
+        if tenant in _building_tenants:
             raise FieldBusyError
-        build = asyncio.create_task(_build(scope, key, limit=limit, sig=sig, signature=signature))
+        now = time.monotonic()
+        remaining = FIELD_BUILD_COOLDOWN_SECONDS - (
+            now - _build_started.get(tenant, -FIELD_BUILD_COOLDOWN_SECONDS)
+        )
+        if remaining > 0:
+            # This tenant-wide budget prevents changing visibility scopes from
+            # bypassing the limit on sequential uncached builds.
+            raise HTTPException(
+                status_code=429,
+                detail="The tenant's memory map build cooldown is active; retry shortly.",
+                headers={"Retry-After": str(math.ceil(remaining))},
+            )
+        _build_started[tenant] = now
+        _build_started.move_to_end(tenant)
+        while len(_build_started) > 1024:
+            _build_started.popitem(last=False)
+
+        async def bounded_build():
+            async with asyncio.timeout(FIELD_BUILD_TIMEOUT_SECONDS):
+                return await _build(scope, key, limit=FIELD_MAX_LIMIT, sig=sig, signature=signature)
+
+        build = asyncio.create_task(bounded_build())
         _builds[key] = build
         _building_tenants.add(tenant)
 
         def _release(done: asyncio.Task[dict]) -> None:
             _builds.pop(key, None)
-            _building_tenants.discard(tenant)
+            layout = _layouts.get(tenant)
+            if layout is None or layout.done():
+                _building_tenants.discard(tenant)
             if not done.cancelled():
                 done.exception()  # retrieved, so a build every caller left does not log it
 
         build.add_done_callback(_release)
-    return await asyncio.shield(build)
+    try:
+        return _slice_field(await asyncio.shield(build), limit)
+    except TimeoutError:
+        raise FieldBusyError from None
 
 
 async def _build(scope: dict, key: tuple, *, limit: int, sig: dict, signature: str) -> dict:
@@ -720,14 +803,33 @@ async def _build(scope: dict, key: tuple, *, limit: int, sig: dict, signature: s
     vectors = np.concatenate(chunks) if chunks else np.zeros((0, width), dtype=np.float16)
     has_vec = np.array(flags, dtype=bool)
 
-    payload = await asyncio.to_thread(
-        build_field,
-        rows,
-        vectors,
-        has_vec,
-        entities,
-        total=int(sig.get("count") or len(rows)),
-        signature=signature,
+    tenant = scope["tenant_id"]
+    layout = asyncio.create_task(
+        asyncio.to_thread(
+            build_field,
+            rows,
+            vectors,
+            has_vec,
+            entities,
+            total=int(sig.get("count") or len(rows)),
+            signature=signature,
+        )
     )
+    _layouts[tenant] = layout
+
+    def release_layout(done: asyncio.Task[dict]) -> None:
+        if not done.cancelled() and done.exception() is None:
+            # The request may have timed out while its shielded layout kept
+            # running. Save that work before releasing the tenant's build slot.
+            field_cache.put(key, done.result())
+        if _layouts.get(tenant) is done:
+            del _layouts[tenant]
+        if key not in _builds:
+            _building_tenants.discard(tenant)
+
+    layout.add_done_callback(release_layout)
+    # Cancelling an await cannot stop the worker thread. Keep its slot until
+    # release_layout observes completion, even after the build's deadline.
+    payload = await asyncio.shield(layout)
     field_cache.put(key, payload)
     return payload

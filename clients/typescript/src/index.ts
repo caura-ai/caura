@@ -247,7 +247,7 @@ export class Caura {
   readonly agentId?: string;
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
-  private readonly headers: Record<string, string>;
+  readonly #headers: Record<string, string>;
   private readonly fetchImpl: typeof globalThis.fetch;
 
   constructor(apiKey: string, options: CauraOptions) {
@@ -258,7 +258,7 @@ export class Caura {
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
     assertKeyTransportAllowed(this.baseUrl, options.allowInsecureHttp);
     this.timeoutMs = options.timeoutMs ?? 30000;
-    this.headers = {
+    this.#headers = {
       "X-API-Key": apiKey,
       "Content-Type": "application/json",
       "User-Agent": USER_AGENT,
@@ -271,8 +271,8 @@ export class Caura {
 
   /** Put later calls in an agent session (`X-Caura-Session-Id`), or in none. */
   setSession(sessionId: string | undefined | null): void {
-    if (sessionId) this.headers["X-Caura-Session-Id"] = sessionId;
-    else delete this.headers["X-Caura-Session-Id"];
+    if (sessionId) this.#headers["X-Caura-Session-Id"] = sessionId;
+    else delete this.#headers["X-Caura-Session-Id"];
   }
 
   /** Persist a memory. POST /api/v1/memories */
@@ -423,7 +423,7 @@ export class Caura {
       try {
         res = await this.fetchImpl(this.baseUrl + path, {
           method,
-          headers: this.headers,
+          headers: this.#headers,
           body: serializedBody,
           signal: controller.signal,
           // fetch re-sends X-API-Key to a redirect target, even cross-origin
