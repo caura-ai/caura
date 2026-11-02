@@ -139,6 +139,33 @@ async def test_pregate_skips_when_disposition_not_drop():
     assert res.outcome == StepOutcome.SKIPPED
 
 
+async def test_pregate_skips_an_extract_only_preview(monkeypatch, emitted):
+    # ``persist=False`` stores nothing and hands the caller back its own text,
+    # so a "personal" verdict has nothing to refuse there.
+    _patch_classifier(monkeypatch)
+    cfg = _cfg(
+        nb={"enabled": True, "disposition": "drop", "pregate": {"enabled": True}}
+    )
+    data = _data()
+    data.persist = False
+    res = await BusinessPersonalPregate().execute(_ctx(data, cfg=cfg))
+    assert res.outcome == StepOutcome.SKIPPED
+    assert emitted == []
+
+
+async def test_pregate_runs_on_the_auto_chunk_branch_before_the_hash():
+    # A long document that auto-chunks runs ``build_enrichment_pipeline``, not
+    # the fast or strong composition, so the gate has to be in it too: after
+    # the deterministic scan, before the hash and the enrichment it would save.
+    from core_api.pipeline.compositions.write import build_enrichment_pipeline
+
+    names = [s.name for s in build_enrichment_pipeline()._steps]
+    assert "business_personal_pregate" in names
+    gate = names.index("business_personal_pregate")
+    assert names.index("governance_scan_content") < gate
+    assert gate < names.index("compute_content_hash")
+
+
 # ── decision logic ───────────────────────────────────────────────────
 
 
@@ -436,11 +463,10 @@ async def test_pregate_wired_into_strong_and_fast_before_enrich():
         ), build.__name__
 
 
-async def test_pregate_not_in_stm_or_enrichment_only():
-    from core_api.pipeline.compositions.write import (
-        build_enrichment_pipeline,
-        build_stm_write_pipeline,
-    )
+async def test_pregate_not_in_stm():
+    # ``build_enrichment_pipeline`` has it now, for the auto-chunk branch, and
+    # skips it on an extract-only preview: see
+    # ``test_pregate_runs_on_the_auto_chunk_branch_before_the_hash``.
+    from core_api.pipeline.compositions.write import build_stm_write_pipeline
 
     assert "business_personal_pregate" not in _names(build_stm_write_pipeline())
-    assert "business_personal_pregate" not in _names(build_enrichment_pipeline())

@@ -1799,6 +1799,43 @@ async def create_memories_bulk(
         if governance_errors:
             valid_indices = [i for i in valid_indices if i not in governance_errors]
 
+    # -- The business/personal pre-gate, per item, as a single create runs it
+    # (``BusinessPersonalPregate``). After the deterministic gate, so it judges
+    # the text that would be stored; before the hash and the providers, so a
+    # refused item costs no embedding or enrichment. A personal item is a
+    # per-item error; under ``fail_closed`` an unavailable classifier refuses
+    # the batch with 503, as it refuses a single write. Imported here because
+    # the pipeline steps import this module.
+    from core_api.pipeline.steps.write.business_personal_pregate import (
+        enforce_business_personal_pregate,
+        pregate_applies,
+    )
+
+    if valid_indices and pregate_applies(tenant_config):
+        pregate_slots = asyncio.Semaphore(BULK_ENRICHMENT_CONCURRENCY)
+
+        async def _pregate(idx: int) -> int | None:
+            async with pregate_slots:
+                try:
+                    await enforce_business_personal_pregate(
+                        tenant_config,
+                        content=items[idx].content,
+                        tenant_id=data.tenant_id,
+                        agent_id=data.agent_id,
+                        write_mode="bulk",
+                    )
+                except HTTPException as exc:
+                    if exc.status_code != 422:
+                        raise
+                    return idx
+            return None
+
+        verdicts = await asyncio.gather(*(_pregate(i) for i in valid_indices))
+        refused = {idx for idx in verdicts if idx is not None}
+        for idx in refused:
+            governance_errors[idx] = "rejected by content policy: non-business content"
+        valid_indices = [i for i in valid_indices if i not in refused]
+
     # -- Batch hash dedup, BEFORE embed and enrich (OSS 08/14 M-38).
     #
     # This lookup used to sit below both provider blocks, so a retried batch —
@@ -4637,6 +4674,19 @@ async def update_memory(
             agent_id=agent_id or mem.get("agent_id"),
             content=data.content,
             gov=getattr(tenant_config, "governance_pii", None),
+        )
+        # And the business/personal pre-gate, as on create: 422 for personal
+        # text, 503 under ``fail_closed`` when the classifier cannot judge it.
+        from core_api.pipeline.steps.write.business_personal_pregate import (
+            enforce_business_personal_pregate,
+        )
+
+        await enforce_business_personal_pregate(
+            tenant_config,
+            content=data.content,
+            tenant_id=tenant_id,
+            agent_id=agent_id or mem.get("agent_id"),
+            write_mode="update",
         )
         # Synchronous update: the caller awaits the re-embed.
         new_embedding = await get_embedding(data.content, tenant_config, background=False)

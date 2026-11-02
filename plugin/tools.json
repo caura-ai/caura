@@ -613,7 +613,8 @@
       "PERMISSION_DENIED",
       "PLAN_LIMIT_READ_ONLY",
       "REQUEST_BUDGET_EXCEEDED",
-      "UNAUTHORIZED"
+      "UNAUTHORIZED",
+      "UNAVAILABLE"
     ],
     "impl_status": "live",
     "name": "caura_manage",
