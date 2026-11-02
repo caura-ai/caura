@@ -94,6 +94,7 @@ _SPEC = ToolSpec(
         "PLAN_LIMIT_READ_ONLY",
         "REQUEST_BUDGET_EXCEEDED",
         "UNAUTHORIZED",
+        "UNAVAILABLE",
     ),
 )
 register(_SPEC)

@@ -534,3 +534,124 @@ async def test_pii_flag_marks_an_edited_memory():
         )
     assert details, "the update audit record was dropped"
     assert all("4111" not in d for d in details)
+
+
+# ---------------------------------------------------------------------------
+# The business/personal pre-gate on every write shape
+# ---------------------------------------------------------------------------
+#
+# A tenant whose non-business disposition is ``drop`` and whose pre-gate is on
+# wants personal text refused before it is stored; with ``fail_closed`` it wants
+# a write refused when the classifier cannot answer. A single create had both.
+# The same text sent as a bulk item, an ingest or interview commit, or an edit
+# was stored, and only remediation after enrichment could catch it later.
+
+_PERSONAL = f"My weekend plans: hiking with my sister.{_PADDING}"
+_BUSINESS = f"Quarterly planning notes for the team.{_PADDING}"
+
+
+async def _seed_pregate(tenant_id: str, *, fail_closed: bool = False) -> None:
+    await _seed_governance(
+        tenant_id,
+        non_business={
+            "enabled": True,
+            "disposition": "drop",
+            "pregate": {"enabled": True, "fail_closed": fail_closed},
+        },
+    )
+
+
+def _classify(monkeypatch, *, available: bool = True) -> None:
+    """The pre-gate's classifier: personal when the text mentions a weekend.
+
+    ``available=False`` is the classifier failing open (no provider answered).
+    """
+    from core_api.pipeline.steps.write import business_personal_pregate
+    from core_api.services.business_classifier import BusinessClassification
+
+    async def _fake(content, tenant_config=None, *, provider, model):
+        if not available:
+            return BusinessClassification(
+                business_relevance="business",
+                confidence=0.0,
+                llm_ms=0,
+                provider=None,
+                model=None,
+            )
+        return BusinessClassification(
+            business_relevance="personal" if "weekend" in content else "business",
+            confidence=0.95,
+            llm_ms=3,
+            provider="openai",
+            model="gpt-5.4-nano",
+        )
+
+    monkeypatch.setattr(business_personal_pregate, "classify_business_personal", _fake)
+
+
+async def _memory_count(tenant_id: str) -> int:
+    async with get_session() as s:
+        return (
+            await s.execute(
+                text("SELECT count(*) FROM memories WHERE tenant_id=:t"),
+                {"t": tenant_id},
+            )
+        ).scalar_one()
+
+
+async def test_pregate_refuses_only_the_personal_bulk_item(monkeypatch):
+    tenant = _tenant()
+    await _seed_pregate(tenant)
+    _classify(monkeypatch)
+    resp = await create_memories_bulk(
+        _bulk(tenant, [_BUSINESS, _PERSONAL]), bulk_attempt_id=uuid.uuid4().hex
+    )
+    assert resp.results[0].status == "created"
+    assert resp.results[1].status == "error"
+    assert "content policy" in (resp.results[1].error or "")
+    rows = await _governance_audit_rows(tenant)
+    drop = next((r for r in rows if r["action"] == "nonbusiness_pregate_drop"), None)
+    assert drop is not None and drop["detail"]["write_mode"] == "bulk", rows
+
+
+async def test_pregate_fail_closed_refuses_a_bulk_write(monkeypatch):
+    tenant = _tenant()
+    await _seed_pregate(tenant, fail_closed=True)
+    _classify(monkeypatch, available=False)
+    with pytest.raises(HTTPException) as exc:
+        await create_memories_bulk(
+            _bulk(tenant, [_BUSINESS]), bulk_attempt_id=uuid.uuid4().hex
+        )
+    assert exc.value.status_code == 503
+    assert await _memory_count(tenant) == 0
+
+
+async def test_pregate_refuses_an_edit_to_personal_text(monkeypatch):
+    from core_api.schemas import MemoryUpdate
+    from core_api.services.memory_service import update_memory
+
+    tenant = _tenant()
+    created = await create_memory(_make_input(tenant, _BUSINESS))
+    await _seed_pregate(tenant)
+    _classify(monkeypatch)
+    with pytest.raises(HTTPException) as exc:
+        await update_memory(created.id, tenant, MemoryUpdate(content=_PERSONAL))
+    assert exc.value.status_code == 422
+    row = await get_storage_client().get_memory(str(created.id), tenant, read=False)
+    assert row["content"] == _BUSINESS
+
+
+async def test_pregate_fail_closed_refuses_an_edit(monkeypatch):
+    from core_api.schemas import MemoryUpdate
+    from core_api.services.memory_service import update_memory
+
+    tenant = _tenant()
+    created = await create_memory(_make_input(tenant, _BUSINESS))
+    await _seed_pregate(tenant, fail_closed=True)
+    _classify(monkeypatch, available=False)
+    revised = f"Revised quarterly planning notes.{_PADDING}"
+    with pytest.raises(HTTPException) as exc:
+        await update_memory(created.id, tenant, MemoryUpdate(content=revised))
+    assert exc.value.status_code == 503
+    row = await get_storage_client().get_memory(str(created.id), tenant, read=False)
+    assert row["content"] == _BUSINESS
