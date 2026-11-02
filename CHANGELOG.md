@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.37.9](https://github.com/caura-ai/caura/compare/backend-v3.37.8...backend-v3.37.9) (2026-11-02)
+
+
+### Bug Fixes
+
+* **forge:** distil only the rows a tenant shares ([#2281](https://github.com/caura-ai/caura/issues/2281)) ([b61662e](https://github.com/caura-ai/caura/commit/b61662efaa4b5c177b54f0bf936fd3e535975257))
+* **governance:** a policy drop clears the row's text ([#2282](https://github.com/caura-ai/caura/issues/2282)) ([0974013](https://github.com/caura-ai/caura/commit/097401318ea4339e3a3be6874f5d786b8c0ce0bc))
+
 ## [3.37.8](https://github.com/caura-ai/caura/compare/backend-v3.37.7...backend-v3.37.8) (2026-11-02)
 
 
