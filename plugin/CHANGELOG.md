@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.25.9](https://github.com/caura-ai/caura/compare/plugin-v2.25.8...plugin-v2.25.9) (2026-11-03)
+
+
+### Bug Fixes
+
+* **recall:** show readers each memory's author trust level ([#2294](https://github.com/caura-ai/caura/issues/2294)) ([6ff5089](https://github.com/caura-ai/caura/commit/6ff50894a6f135a0340f2744a5c3febeadf38086))
+
 ## [2.25.8](https://github.com/caura-ai/caura/compare/plugin-v2.25.7...plugin-v2.25.8) (2026-11-02)
 
 
