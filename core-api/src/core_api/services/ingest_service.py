@@ -40,6 +40,7 @@ from core_api.services.ingest_chunking import (
 )
 from core_api.services.memory_service import _content_hash, create_memories_bulk
 from core_api.services.organization_settings import resolve_config
+from core_api.services.pii_update_gate import apply_pii_policy_to_fields
 
 # Document extraction (PDF / Office / EPUB / …) is an optional ``ingest`` extra:
 # kreuzberg is ~64MB and is excluded from the default image to cut cold-start
@@ -1081,6 +1082,18 @@ async def ingest_preview(request: IngestRequest) -> dict:
         content = request.content
     else:
         raise HTTPException(status_code=400, detail="Either url or content is required")
+
+    # The tenant's PII policy applies before the text is hashed or any of it
+    # is sent to the extraction model, as it does before a memory write's hash
+    # and enrichment: ``drop`` refuses the ingest, ``mask`` sends the redacted
+    # text. URL and file ingest arrive here as text, so this covers all three.
+    content = await apply_pii_policy_to_fields(
+        tenant_id=request.tenant_id,
+        agent_id=request.agent_id,
+        data=content,
+        write_mode="ingest",
+        subject="Content",
+    )
 
     # ---- A2: doc-hash idempotency ----
     # Hash the full content (post-PR#7 there's no more truncate-to-50k cap
