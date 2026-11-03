@@ -10,6 +10,15 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.37.14](https://github.com/caura-ai/caura/compare/backend-v3.37.13...backend-v3.37.14) (2026-11-03)
+
+
+### Bug Fixes
+
+* **prompts:** frame stored content as data in model prompts ([#2293](https://github.com/caura-ai/caura/issues/2293)) ([d813251](https://github.com/caura-ai/caura/commit/d813251649214ec5c31e35c070fe037e64d41c10))
+* **recall:** show readers each memory's author trust level ([#2294](https://github.com/caura-ai/caura/issues/2294)) ([6ff5089](https://github.com/caura-ai/caura/commit/6ff50894a6f135a0340f2744a5c3febeadf38086))
+* **search:** an open validity window far ahead does not pin freshness ([#2296](https://github.com/caura-ai/caura/issues/2296)) ([fa583e9](https://github.com/caura-ai/caura/commit/fa583e91d975e65895372e8edcb9700bbaf5eebb))
+
 ## [3.37.13](https://github.com/caura-ai/caura/compare/backend-v3.37.12...backend-v3.37.13) (2026-11-03)
 
 
