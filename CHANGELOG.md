@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.37.12](https://github.com/caura-ai/caura/compare/backend-v3.37.11...backend-v3.37.12) (2026-11-03)
+
+
+### Bug Fixes
+
+* **ingest:** apply the PII policy before extraction ([#2289](https://github.com/caura-ai/caura/issues/2289)) ([0ecad59](https://github.com/caura-ai/caura/commit/0ecad59f9769840c714bcd732e821dbd7d2a7403))
+* **recall:** memory text is evidence, not instruction ([#1706](https://github.com/caura-ai/caura/issues/1706)) ([0d48c96](https://github.com/caura-ai/caura/commit/0d48c9629656d38e9b7c9fa75f1c5267c21a20dc))
+
 ## [3.37.11](https://github.com/caura-ai/caura/compare/backend-v3.37.10...backend-v3.37.11) (2026-11-03)
 
 
