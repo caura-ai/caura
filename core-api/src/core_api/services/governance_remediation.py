@@ -11,6 +11,14 @@ The DETERMINISTIC pattern gate already ran synchronously pre-write
 (``GovernanceScanContent``), so regex/Luhn/entropy-detectable PII/PCI/secrets
 were never persisted in either mode; only the LLM's free-form judgement is
 eventually-consistent here (≈ enrichment-deferral latency).
+
+A run can also end with no judgement at all: every provider failed and
+enrichment fell back to the keyword heuristic, whose defaults read like a clean
+verdict. Each caller says whether a model judged the text (``llm_verdict``).
+Under an active LLM policy, a row no model judged is marked
+``governance_llm_uncertain`` (as strong mode marks it), audited, and logged for
+``services.enrichment_rerun``, which enriches it again; a later verdict clears
+the mark.
 """
 
 from __future__ import annotations
@@ -18,9 +26,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
+from common.provider_names import ProviderName
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.governance_gate import (
+    ACTION_LLM_UNCERTAIN,
     ACTION_NB_DROP,
     ACTION_NB_KEEP_PRIVATE,
     ACTION_PII_DROP,
@@ -28,9 +39,11 @@ from core_api.services.governance_gate import (
     ACTION_PII_MASK,
     emit_governance_audit,
     llm_pii_audit_detail,
+    llm_uncertain_audit_detail,
     nonbusiness_audit_detail,
 )
 from core_api.services.system_metadata import NONBUSINESS_KEPT_PRIVATE_KEY, SYSTEM_NAMESPACE
+from core_api.services.task_tracker import record_task_failure
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +63,75 @@ def _keep_private_patch() -> dict:
             SYSTEM_NAMESPACE: {NONBUSINESS_KEPT_PRIVATE_KEY: True},
         },
     }
+
+
+# The mark on a row no model judged, which is also its audit action and its
+# ``background_task_log`` task.
+LLM_UNCERTAIN = ACTION_LLM_UNCERTAIN
+
+
+def _uncertain_patch(value: bool | None) -> dict:
+    """Set (``True``) or clear (``None``) the mark, in both metadata homes.
+
+    A storage merge cannot delete a key, so clearing writes ``None``, as an edit
+    clears the other verdicts on a row's text.
+    """
+    return {"metadata_patch": {LLM_UNCERTAIN: value, SYSTEM_NAMESPACE: {LLM_UNCERTAIN: value}}}
+
+
+def marked_uncertain(metadata: dict) -> bool:
+    """Whether the row carries the mark, in either metadata home."""
+    nested = metadata.get(SYSTEM_NAMESPACE)
+    return metadata.get(LLM_UNCERTAIN) is True or (
+        isinstance(nested, dict) and nested.get(LLM_UNCERTAIN) is True
+    )
+
+
+def can_judge_again(cfg: Any) -> bool:
+    """Whether enriching again could give a verdict: enrichment is on and its
+    provider is a model. ``fake`` and ``none`` never give one, so a row of such
+    a tenant is marked and audited but not retried."""
+    return bool(cfg.enrichment_enabled) and cfg.enrichment_provider not in (
+        ProviderName.FAKE,
+        ProviderName.NONE,
+    )
+
+
+async def _record_unjudged(memory: dict, memory_id: str, cfg: Any) -> None:
+    """Mark, audit and log a row an active LLM policy could not judge.
+
+    Changes nothing else: with no verdict there is nothing to apply, and the
+    heuristic's defaults (``business``, no PII) are not one. The mark goes first
+    so a row deleted meanwhile (the PATCH answers ``None``) gets no audit row.
+    """
+    tenant_id = memory.get("tenant_id")
+    if await get_storage_client().update_memory(memory_id, tenant_id, _uncertain_patch(True)) is None:
+        return
+    policies = [
+        name
+        for name, on in (
+            ("pii", cfg.governance_pii.enabled),
+            ("non_business", cfg.governance_non_business.enabled),
+        )
+        if on
+    ]
+    await emit_governance_audit(
+        tenant_id=tenant_id,
+        agent_id=memory.get("agent_id"),
+        action=ACTION_LLM_UNCERTAIN,
+        detail=llm_uncertain_audit_detail(memory.get("content") or "", policies),
+        resource_id=memory_id,
+    )
+    if can_judge_again(cfg):
+        await record_task_failure(
+            LLM_UNCERTAIN,
+            UUID(memory_id),
+            tenant_id,
+            RuntimeError(
+                f"no model judged this memory, so its LLM policies ({', '.join(policies)}) did not apply"
+            ),
+            tb="no traceback: every enrichment provider failed and the keyword heuristic answered",
+        )
 
 
 @dataclass(frozen=True)
@@ -457,8 +539,16 @@ async def _purge_entity_artifacts(sc: Any, memory_id: str, tenant_id: str, actio
         )
 
 
-async def remediate_after_enrichment(memory: dict, cfg: Any) -> RemediationOutcome:
+async def remediate_after_enrichment(
+    memory: dict, cfg: Any, *, llm_verdict: bool | None = None
+) -> RemediationOutcome:
     """Apply LLM-signal governance to a fast-mode row after enrichment landed.
+
+    ``llm_verdict`` says whether a model judged the text. ``False``: the run
+    fell back to the heuristic, so there is no verdict to apply; the row is
+    marked, audited and logged for a re-run instead. ``True`` clears a mark an
+    earlier run left. ``None`` (a caller that cannot tell) applies whatever the
+    row holds, as before.
 
     Returns what was done. A caller that only needs "should I stop?" reads
     ``.dropped``; one that creates derived rows must also honour
@@ -488,7 +578,12 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> RemediationOutco
         logger.warning("governance: remediate_after_enrichment called with memory missing 'id'; skipping")
         return RemediationOutcome()
     memory_id = str(raw_id)
+    if llm_verdict is False:
+        await _record_unjudged(memory, memory_id, cfg)
+        return RemediationOutcome()
     sc = get_storage_client()
+    if llm_verdict and marked_uncertain(md):
+        await sc.update_memory(memory_id, tenant_id, _uncertain_patch(None))
 
     # ── PII (LLM free-form signal) ──
     if pii_cfg.enabled and md.get("contains_pii"):

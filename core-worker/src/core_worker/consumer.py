@@ -795,6 +795,9 @@ async def handle_enrich_request(event: Event) -> None:
             tenant_id=request.tenant_id,
             content=request.content,
             retrieval_hint=result.retrieval_hint or "",
+            # ``llm_ms`` is 0 exactly when the heuristic answered (the same
+            # proxy ``_build_patch`` uses to keep its defaults off the row).
+            llm_verdict=result.llm_ms > 0,
         )
     except Exception:
         logger.exception(

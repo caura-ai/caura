@@ -35,7 +35,7 @@ import asyncio
 import logging
 import weakref
 from collections import defaultdict
-from collections.abc import MutableMapping
+from collections.abc import Awaitable, Callable, MutableMapping
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -76,7 +76,7 @@ SKIPPED = "skipped"
 _RERUN_SLOTS: MutableMapping[asyncio.AbstractEventLoop, asyncio.Semaphore] = weakref.WeakKeyDictionary()
 
 
-def _rerun_slots() -> asyncio.Semaphore:
+def rerun_slots() -> asyncio.Semaphore:
     loop = asyncio.get_running_loop()
     slots = _RERUN_SLOTS.get(loop)
     if slots is None:
@@ -112,7 +112,7 @@ async def _rerun(memory_id: str, tenant_id: str) -> None:
     reset is one storage call: an edit would have to land and finish its own
     extraction inside it.
     """
-    async with _rerun_slots():
+    async with rerun_slots():
         memory = await live_memory(memory_id, tenant_id)
         if memory is None:
             logger.info(
@@ -157,14 +157,39 @@ async def schedule_rerun(memory: dict, tenant_id: str) -> int:
     return marked
 
 
+async def _extraction_wanted(memory: dict, tenant_id: str) -> bool:
+    return await _extraction_enabled(tenant_id)
+
+
 async def rerun_lost_extractions() -> dict:
     """The hourly sweep: re-run the oldest lost extractions, across tenants.
 
+    Counts as :func:`sweep_open_tasks` returns them; ``skipped`` is a memory
+    that is gone, held, or whose organization has extraction off.
+    """
+    return await sweep_open_tasks(
+        LOST_EXTRACTION_TASKS, wanted=_extraction_wanted, schedule=_schedule, label="entity extraction re-run"
+    )
+
+
+async def sweep_open_tasks(
+    task_names: tuple[str, ...],
+    *,
+    wanted: Callable[[dict, str], Awaitable[bool]],
+    schedule: Callable[[str, str], None],
+    label: str,
+) -> dict:
+    """Re-run the memories with the oldest open rows of ``task_names``, across tenants.
+
+    Shared by the hourly sweeps over ``background_task_log``: this one and
+    ``services.enrichment_rerun``. ``wanted(memory, tenant_id)`` says whether a
+    live memory still needs its re-run, and ``schedule(memory_id, tenant_id)``
+    starts it in the background.
+
     Returns counts: ``tenants`` read, ``unreadable_tenants`` whose rows could not
     be read, ``memories`` picked, how many were ``scheduled`` for a re-run, how
-    many ``skipped`` because the memory is gone, held, or its organization has
-    extraction off, and ``failed_memories``, picked memories a storage or
-    settings error stopped.
+    many ``skipped`` because the memory is gone, held or no longer wanted, and
+    ``failed_memories``, picked memories a storage or settings error stopped.
     """
     sc = get_storage_client()
     since = datetime.now(UTC) - RERUN_LOOKBACK
@@ -175,7 +200,7 @@ async def rerun_lost_extractions() -> dict:
         async with reads:
             return await sc.list_open_task_failures(
                 tenant_id,
-                LOST_EXTRACTION_TASKS,
+                task_names,
                 since=since,
                 limit=RERUN_ROWS_PER_TENANT,
                 max_reruns_per_memory=RERUN_MAX_PER_MEMORY,
@@ -188,9 +213,7 @@ async def rerun_lost_extractions() -> dict:
     for tenant_id, result in zip(tenants, results, strict=True):
         if isinstance(result, BaseException):
             unreadable += 1
-            logger.warning(
-                "entity extraction re-run: could not read tenant %s's rows", tenant_id, exc_info=result
-            )
+            logger.warning("%s: could not read tenant %s's rows", label, tenant_id, exc_info=result)
             continue
         for row in result:
             lost[(tenant_id, row["memory_id"])].append(row)
@@ -201,14 +224,14 @@ async def rerun_lost_extractions() -> dict:
         ids = [r["id"] for r in rows]
         try:
             memory = await live_memory(memory_id, tenant_id)
-            if memory is None or not await _extraction_enabled(tenant_id):
+            if memory is None or not await wanted(memory, tenant_id):
                 await sc.mark_task_failures_handled(tenant_id, ids, SKIPPED)
                 skipped += 1
                 continue
             # Marked before it runs, so the next sweep does not pick it while it
             # is still in flight; its own outcome is a fresh row if it fails.
             if await sc.mark_task_failures_handled(tenant_id, ids, RERUN):
-                _schedule(memory_id, tenant_id)
+                schedule(memory_id, tenant_id)
                 scheduled += 1
         except Exception:
             # One memory's error must not stop the rest of the sweep, or lose
@@ -216,7 +239,8 @@ async def rerun_lost_extractions() -> dict:
             # open, so a later sweep tries the memory again.
             failed += 1
             logger.warning(
-                "entity extraction re-run: could not handle memory %s of tenant %s",
+                "%s: could not handle memory %s of tenant %s",
+                label,
                 memory_id,
                 tenant_id,
                 exc_info=True,

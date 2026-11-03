@@ -2587,6 +2587,7 @@ async def create_memories_bulk(
                                 "metadata_": mem_data["metadata_"],
                             },
                             tenant_config,
+                            llm_verdict=bool(enrichments[orig_idx].llm_ms),
                         ),
                         "governance_remediation",
                         mem_id,
@@ -4240,7 +4241,9 @@ async def _enrich_memory_background(
     if run_governance_remediation and governed_row is not None:
         from core_api.services.governance_remediation import remediate_after_enrichment
 
-        outcome = await remediate_after_enrichment(governed_row, governance_config)
+        outcome = await remediate_after_enrichment(
+            governed_row, governance_config, llm_verdict=bool(enrichment.llm_ms)
+        )
         if outcome.dropped:
             # ``None``: the row no longer exists, and the return value's whole
             # meaning is "here is the live governed row".
