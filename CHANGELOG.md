@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.37.11](https://github.com/caura-ai/caura/compare/backend-v3.37.10...backend-v3.37.11) (2026-11-03)
+
+
+### Bug Fixes
+
+* **governance:** apply the PII policy to documents and keystones ([#2287](https://github.com/caura-ai/caura/issues/2287)) ([e03ee04](https://github.com/caura-ai/caura/commit/e03ee04ea07f3ef83144345ec8f16e402373d355))
+
 ## [3.37.10](https://github.com/caura-ai/caura/compare/backend-v3.37.9...backend-v3.37.10) (2026-11-02)
 
 
