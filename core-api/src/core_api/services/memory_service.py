@@ -879,7 +879,9 @@ def _memory_to_out(
     agent=lambda a: a["data"].agent_id,
     fleet=lambda a: a["data"].fleet_id,
 )
-async def create_memory(data: MemoryCreate, *, is_inferred: bool = False) -> MemoryOut:
+async def create_memory(
+    data: MemoryCreate, *, is_inferred: bool = False, system_values: dict | None = None
+) -> MemoryOut:
     """Create one memory.
 
     ``is_inferred`` is INTERNAL and keyword-only — deliberately not a field on
@@ -889,6 +891,10 @@ async def create_memory(data: MemoryCreate, *, is_inferred: bool = False) -> Mem
     caller pick which side of that invariant it sits on, which is the opposite of
     a guard. Platform writers (the crystallizer, insights) pass True; every other
     caller gets the default.
+
+    ``system_values`` is INTERNAL too: platform-written metadata from an internal
+    writer (``source_trust``, from the crystallizer and evolve). It is set after
+    the caller's metadata is sanitised, which would otherwise strip it.
     """
     if not data.agent_id:
         raise ValueError("agent_id must be resolved before calling create_memory")
@@ -918,6 +924,10 @@ async def create_memory(data: MemoryCreate, *, is_inferred: bool = False) -> Mem
         from core_api.session_context import current_session_id
 
         stamp_capture(data, current_session_id())
+    if system_values:
+        data.metadata = data.metadata or {}
+        for key, value in system_values.items():
+            set_system_value(data.metadata, key, value)
     out = await _run_write_pipeline(data, is_inferred=is_inferred)
     # Value metering: where this memory came from (its session's work), once.
     from core_api.services.value_ledger import schedule_origin
@@ -1572,8 +1582,13 @@ async def create_memories_bulk(
     memory_type_is_agent_set: bool | None = None,
     is_inferred: bool = False,
     from_broker: bool = False,
+    system_values: list[dict] | None = None,
 ) -> BulkMemoryResponse:
     """Create multiple memories with per-attempt idempotency (CAURA-602).
+
+    ``system_values``, INTERNAL like ``is_inferred``, holds one dict of
+    platform-written metadata per item, aligned with ``data.items`` (insights
+    passes ``source_trust``). Each is set after the item's metadata is sanitised.
 
     ``from_broker`` takes the batch at the broker's word: the rules receipt each
     item's metadata carries (``rules_receipt``, g2.8) is kept, and an item may
@@ -1654,6 +1669,11 @@ async def create_memories_bulk(
     for item in items:
         if item.metadata:
             item.metadata = sanitize_caller_metadata(item.metadata)
+    for item, values in zip(items, system_values or [], strict=False):
+        if values:
+            item.metadata = item.metadata or {}
+            for key, value in values.items():
+                set_system_value(item.metadata, key, value)
 
     # -- Per-item validation. Short content used to raise a 422 for the
     # whole batch; now it's a per-item "error" result. Indices in this

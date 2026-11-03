@@ -42,12 +42,12 @@ def _memory_row(mid: UUID) -> dict:
 
 async def _stub_resolve_config(_tenant_id):
     """Bypass DB lookup — return an object with the attributes
-    ``_run_crystallization`` reads from ``config``. Only
-    ``_crystallize_cluster`` actually touches it; that call is mocked
-    out by these tests, so a placeholder is enough."""
+    ``_run_crystallization`` reads from ``config``: the hold level (none
+    here) and whatever ``_crystallize_cluster`` reads, which these tests
+    mock out."""
     from types import SimpleNamespace
 
-    return SimpleNamespace()
+    return SimpleNamespace(quarantine_below_trust=lambda _fleet_id: 0)
 
 
 def _build_storage_mock(memories: list[dict]) -> AsyncMock:

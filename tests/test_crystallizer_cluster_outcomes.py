@@ -64,7 +64,9 @@ def _env(sc, *, extracted, create_memory=None, clusters=None):
         stack.enter_context(
             patch(
                 "core_api.services.organization_settings.resolve_config",
-                AsyncMock(return_value=SimpleNamespace()),
+                AsyncMock(
+                    return_value=SimpleNamespace(quarantine_below_trust=lambda _f: 0)
+                ),
             )
         )
         stack.enter_context(

@@ -78,7 +78,8 @@ async def generate_insights_endpoint(
     trust requirement.
 
     Trust gating: scope='agent' requires trust ≥ 1, scope='fleet' trust ≥ 2
-    and scope='all' trust ≥ 3 (it saves ``scope_org`` rows). Admin keys bypass.
+    and scope='all' trust ≥ 3 (a run's findings are saved in the narrowest home
+    the rows it read allow). Admin keys bypass.
     """
     auth.enforce_tenant(body.tenant_id)
     auth.enforce_read_only()

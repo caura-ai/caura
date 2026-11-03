@@ -13261,6 +13261,16 @@ class PostgresService:
                 "weight": r.weight,
                 "agent_id": r.agent_id,
                 "fleet_id": r.fleet_id,
+                # Where the row is seen and, for a row the platform derived, the
+                # source trust it recorded: core-api gives a run's insights the
+                # narrowest home and the lowest trust among the rows it read.
+                "visibility": r.visibility,
+                "is_inferred": bool(r.is_inferred),
+                "source_trust": (
+                    ((r.metadata_ or {}).get(_SYSTEM_NAMESPACE) or {}).get("source_trust")
+                    if r.is_inferred
+                    else None
+                ),
                 "created_at": r.created_at.isoformat() if r.created_at else "",
                 "status": r.status,
                 "recall_count": r.recall_count or 0,
@@ -13741,7 +13751,11 @@ class PostgresService:
                       AND metadata->>'insight_focus' = :focus
                       AND metadata->>'insight_scope' = :scope
                       AND (
-                          (CAST(:fleet_id AS text) IS NULL AND fleet_id IS NULL)
+                          -- A scope='all' run saves its findings in the
+                          -- narrowest fleet the rows it read allow, so its
+                          -- priors are the agent's in any fleet.
+                          CAST(:scope AS text) = 'all'
+                          OR (CAST(:fleet_id AS text) IS NULL AND fleet_id IS NULL)
                           OR fleet_id = :fleet_id
                       )
                     RETURNING id::text AS id
