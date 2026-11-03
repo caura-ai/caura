@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from fastapi import HTTPException
 
+from common.llm.untrusted import UNTRUSTED_DATA_RULE, data_block
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
     INSIGHTS_DISCOVER_CLUSTERS,
@@ -84,7 +85,8 @@ Respond with JSON:
 
 # World modes (discover / patterns): the subject must be the WORK, never the
 # records or the analysis machinery.
-_RULES_WORLD = """\
+_RULES_WORLD = (
+    """\
 RULES — your reader is a busy operator who never sees these records:
 - Report on the WORK the records describe (systems, incidents, deals, \
 decisions) — never on the records themselves, their grouping, this sample, \
@@ -97,6 +99,9 @@ systems or process. Suggestions to write, tag, merge, store or restructure \
 records are FORBIDDEN.
 - Fewer, sharper findings beat coverage. An empty findings list is a valid \
 answer.
+- """
+    + UNTRUSTED_DATA_RULE
+    + """
 
 BAD finding (never produce): headline "Cluster 5 has high weight variance \
 (std=0.22)", action "Re-cluster with a finer label set".
@@ -105,11 +110,13 @@ what_happened "Heartbeat checks and cleanup escalation fire independently \
 across 6 agents; a disk-full event on Jul 28 alerted twice with no shared \
 cooldown.", action "Unify triggers and cooldowns in the monitoring workflow \
 config."""
+)
 
 # Hygiene modes (contradictions / failures / stale / divergence): the records
 # ARE the legitimate subject, but findings must name the disputed fact in
 # real-world terms and resolve it concretely.
-_RULES_HYGIENE = """\
+_RULES_HYGIENE = (
+    """\
 RULES — your reader is a busy operator deciding what to trust:
 - Name the disputed, weak or stale FACT in real-world terms ("gateway \
 endpoint: old.example vs new.example"), with the real names, dates and \
@@ -120,7 +127,10 @@ a specific record, use its (id:...) value in related_memory_ids.
 trust and why, what to re-verify, or what to stop relying on — not generic \
 bookkeeping.
 - Fewer, sharper findings beat coverage. An empty findings list is a valid \
-answer."""
+answer.
+- """
+    + UNTRUSTED_DATA_RULE
+)
 
 _PROMPT_CONTRADICTIONS = (
     """\
@@ -1152,8 +1162,9 @@ async def synthesize_insights(
     # ``str.format`` inserts the substituted ``memories`` value literally (it
     # never re-scans it for fields), so it must NOT be brace-escaped — escaping
     # would corrupt the Python dict reprs (cluster mode) and any user-controlled
-    # {...} strings. A substituted value never raises KeyError.
-    prompt = prompt_template.format(memories=memories_text, count=count)
+    # {...} strings. A substituted value never raises KeyError. The records go
+    # in a data block: they are fleet members' text, never instructions.
+    prompt = prompt_template.format(memories=data_block(memories_text), count=count)
 
     analysis = await _run_llm_analysis(prompt, config)
     llm_unavailable = analysis.get("llm_unavailable") is _LLM_UNAVAILABLE
