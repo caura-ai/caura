@@ -4448,7 +4448,17 @@ class PostgresService:
                 ),
                 _freshness_floor,
             ),
-            (ing.c.ts_valid_end.is_not(None), 1.0),
+            # An open window keeps the row current only while it closes within
+            # the row's decay horizon, as a near deadline does. Any caller can
+            # set a window years out, so one that closes later counts for
+            # nothing: the row ages like a row with no window.
+            (
+                and_(
+                    ing.c.ts_valid_end.is_not(None),
+                    func.extract("epoch", ing.c.ts_valid_end - ref_ts) / 86400.0 <= type_decay,
+                ),
+                1.0,
+            ),
             (
                 age_days < type_decay,
                 # Clamp age to >= 0 so a FUTURE anchor (e.g. an enrichment-set
