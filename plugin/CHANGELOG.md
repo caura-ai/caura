@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.25.8](https://github.com/caura-ai/caura/compare/plugin-v2.25.7...plugin-v2.25.8) (2026-11-02)
+
+
+### Bug Fixes
+
+* **governance:** run the business/personal pre-gate on every write ([#2283](https://github.com/caura-ai/caura/issues/2283)) ([9c00308](https://github.com/caura-ai/caura/commit/9c00308c921bd9e36cbc4b082309b110db9a5691))
+
 ## [2.25.7](https://github.com/caura-ai/caura/compare/plugin-v2.25.6...plugin-v2.25.7) (2026-11-02)
 
 
