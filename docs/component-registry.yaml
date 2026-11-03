@@ -67,6 +67,9 @@ cron_ticks:
   - name: entity-extraction-rerun
     cadence: hourly at :45 — re-runs extraction for memories whose run failed, was cancelled or degraded
     module: core_operations.app
+  - name: enrichment-rerun
+    cadence: hourly at :15 — enriches again the memories an LLM governance policy could not judge
+    module: core_operations.app
 
 # The str-enum families in common/events/topics.py. Topic strings follow
 # ``<brand>.<domain>.<verb>`` — the brand segment flips per family; see FLIPPED_FAMILIES.

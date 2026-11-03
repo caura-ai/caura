@@ -228,7 +228,7 @@ async def handle_memory_enriched(event: Event) -> None:
     # tolerates a None session (cache-first; cold-miss opens its own).
     gov_cfg = await resolve_config(payload.tenant_id)
     try:
-        outcome = await remediate_after_enrichment(memory, gov_cfg)
+        outcome = await remediate_after_enrichment(memory, gov_cfg, llm_verdict=payload.llm_verdict)
     except GovernanceCascadeError as exc:
         # The parent WAS remediated; only rows derived from it could not be.
         # Caught HERE and nowhere deeper, because the two callers of

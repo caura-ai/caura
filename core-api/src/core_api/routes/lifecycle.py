@@ -612,6 +612,26 @@ async def rerun_lost_entity_extractions(
     return counts
 
 
+@router.post("/admin/enrichment/rerun-unjudged")
+async def rerun_unjudged_enrichments(
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict:
+    """Enrich again the memories an LLM governance policy could not judge
+    (``services.enrichment_rerun``).
+
+    core-operations' hourly ``enrichment-rerun`` job calls this. Like the
+    extraction re-run above, it marks the open rows, schedules the re-runs in
+    the background and returns counts without waiting for them.
+    """
+    auth.enforce_admin()
+    from core_api.services.enrichment_rerun import rerun_unjudged_enrichments as sweep
+
+    counts = await sweep()
+    if counts["memories"] or counts["unreadable_tenants"]:
+        logger.info("enrichment re-run sweep", extra=counts)
+    return counts
+
+
 @router.post("/admin/memories/{memory_id}/re-extract", status_code=202)
 async def re_extract_memory(
     memory_id: UUID,

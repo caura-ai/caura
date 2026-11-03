@@ -190,25 +190,50 @@ async def run_entity_extraction_rerun_tick() -> None:
     re-runs in the background and answers with counts at once, so this tick
     never waits on an extraction.
     """
-    url = f"{settings.core_api_url.rstrip('/')}/api/v1/admin/entity-extraction/rerun-lost"
+    await _run_rerun_sweep(
+        "/api/v1/admin/entity-extraction/rerun-lost",
+        "entity extraction re-run",
+        swept="lost extractions",
+        idle="nothing lost",
+    )
+
+
+async def run_enrichment_rerun_tick() -> None:
+    """POST ``/admin/enrichment/rerun-unjudged``.
+
+    Enriches again the memories an LLM governance policy could not judge,
+    because every provider failed and enrichment fell back to the keyword
+    heuristic (core-api ``services.enrichment_rerun``). Answered at once, as
+    the extraction re-run is.
+    """
+    await _run_rerun_sweep(
+        "/api/v1/admin/enrichment/rerun-unjudged",
+        "enrichment re-run",
+        swept="unjudged rows",
+        idle="nothing unjudged",
+    )
+
+
+async def _run_rerun_sweep(path: str, label: str, *, swept: str, idle: str) -> None:
+    """POST one of core-api's re-run sweeps and log the counts it answers with."""
+    url = f"{settings.core_api_url.rstrip('/')}{path}"
     headers: dict[str, str] = {}
     if settings.core_api_admin_api_key:
         headers["X-API-Key"] = settings.core_api_admin_api_key
     else:
-        logger.warning(
-            "core-operations: CORE_API_ADMIN_API_KEY unset; the entity extraction re-run will be unauthorised",
-        )
+        logger.warning("core-operations: CORE_API_ADMIN_API_KEY unset; the %s will be unauthorised", label)
 
     timeout = httpx.Timeout(settings.core_api_http_timeout_s)
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             resp = await client.post(url, headers=headers)
         except httpx.HTTPError:
-            logger.exception("entity extraction re-run POST failed", extra={"url": url})
+            logger.exception("%s POST failed", label, extra={"url": url})
             return
     if resp.status_code >= 400:
         logger.error(
-            "entity extraction re-run returned non-2xx; will retry next tick",
+            "%s returned non-2xx; will retry next tick",
+            label,
             extra={"status_code": resp.status_code, "body": resp.text[:500]},
         )
         return
@@ -219,20 +244,23 @@ async def run_entity_extraction_rerun_tick() -> None:
     if not isinstance(body, dict):
         # A 2xx: core-api already ran the sweep, as for the reconcile tick.
         logger.error(
-            "entity extraction re-run returned an unreadable 2xx; the sweep ran, its counts are lost",
+            "%s returned an unreadable 2xx; the sweep ran, its counts are lost",
+            label,
             extra={"status_code": resp.status_code, "body": resp.text[:500]},
         )
         return
     if not body.get("memories") and not body.get("unreadable_tenants"):
-        logger.debug("entity extraction re-run: nothing lost")
+        logger.debug("%s: %s", label, idle)
         return
-    # Each picked memory had lost its extraction, so this is worth a WARNING;
-    # a tenant whose rows could not be read, or a memory an error stopped, is
-    # an ERROR, because those memories stay lost until a later sweep gets them.
+    # Each picked memory needed its re-run, so this is worth a WARNING; a
+    # tenant whose rows could not be read, or a memory an error stopped, is an
+    # ERROR, because those memories wait until a later sweep gets them.
     failed = body.get("unreadable_tenants") or body.get("failed_memories")
     level = logger.error if failed else logger.warning
     level(
-        "entity extraction re-run swept lost extractions",
+        "%s swept %s",
+        label,
+        swept,
         extra={
             "tenants": body.get("tenants"),
             "unreadable_tenants": body.get("unreadable_tenants"),

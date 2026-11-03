@@ -747,6 +747,31 @@ async def test_extraction_rerun_tick_posts_to_the_sweep(monkeypatch):
     ]
 
 
+async def test_enrichment_rerun_tick_posts_to_its_sweep(monkeypatch, caplog):
+    """The same tick for the rows an LLM governance policy could not judge."""
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    caplog.set_level("DEBUG", logger=tasks.logger.name)
+    body = {
+        "tenants": 3,
+        "unreadable_tenants": 0,
+        "memories": 2,
+        "scheduled": 2,
+        "skipped": 0,
+        "failed_memories": 0,
+    }
+    async with _patch_client(monkeypatch, response=_StubResponse(200, body)) as stub:
+        await tasks.run_enrichment_rerun_tick()
+
+    assert stub.calls == [
+        ("http://core-api/api/v1/admin/enrichment/rerun-unjudged", {"X-API-Key": "admin-key-xyz"})
+    ]
+    [record] = _records(caplog, "enrichment re-run swept unjudged rows")
+    assert record.levelname == "WARNING"
+    assert record.scheduled == 2
+
+
 @pytest.mark.parametrize(
     ("body", "level"),
     [
