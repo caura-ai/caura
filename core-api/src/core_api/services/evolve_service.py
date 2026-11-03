@@ -13,6 +13,7 @@ from uuid import UUID
 from fastapi import HTTPException
 
 from common import duplicate_memory
+from common.llm.untrusted import UNTRUSTED_DATA_RULE, data_block
 from common.usage import scoped
 from core_api.constants import (
     EVOLVE_FAILURE_DELTA,
@@ -119,10 +120,16 @@ _SCOPE_TO_VISIBILITY = {
 
 # -- Rule generation prompt ---------------------------------------------------
 
-_RULE_GENERATION_PROMPT = """\
+_RULE_GENERATION_PROMPT = (
+    """\
 You are analyzing a {outcome_type} outcome to generate a preventive rule.
 
-OUTCOME: {outcome}
+"""
+    + UNTRUSTED_DATA_RULE
+    + """
+
+OUTCOME:
+{outcome}
 
 RELATED MEMORIES ({count} memories the agent used before this outcome):
 {memories}
@@ -141,6 +148,7 @@ Respond with JSON:
   "reasoning": "brief explanation of why this rule would help"
 }}
 """
+)
 
 
 # -- Weight adjustment --------------------------------------------------------
@@ -504,12 +512,13 @@ async def _generate_rule(
     # for fields), so outcome/memories must NOT be brace-escaped — escaping would
     # corrupt literal {word} / JSON / code in agent input or DB content. A
     # substituted value never raises KeyError. Still cap the outcome to bound
-    # prompt tokens.
+    # prompt tokens. Both go in data blocks: the outcome is the caller's text and
+    # the memories are any fleet member's, so neither may steer the rule.
     safe_outcome = _sanitize_content(outcome, max_len=2000)
     prompt = _RULE_GENERATION_PROMPT.format(
-        outcome=safe_outcome,
+        outcome=data_block(safe_outcome),
         outcome_type=outcome_type,
-        memories=memories_text,
+        memories=data_block(memories_text),
         count=len(memories_text_lines),
     )
 
