@@ -10,13 +10,14 @@ store a caller's text in their own tables.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from collections.abc import Iterator
 from typing import Any
 
 from fastapi import HTTPException
 
-from common.governance import Finding, mask, scan
+from common.governance import Finding, PIICategory, mask, scan
 from core_api.services import organization_settings
 from core_api.services.governance_gate import (
     ACTION_PII_DROP,
@@ -79,12 +80,12 @@ async def apply_pii_policy_to_fields(
 ) -> Any:
     """Return ``data`` as the tenant's PII policy lets it be stored.
 
-    ``data`` is any JSON value: a document's ``data``, or a keystone's title and
-    text. Every string in it is scanned; keys are field names, not content, and
-    are not. ``drop`` raises 422 (``subject`` names what was refused); ``mask``
-    returns a copy with each string masked where it sits; ``flag`` returns
-    ``data`` as sent, since these stores have no metadata to carry the flag, and
-    the audit row records it. One audit row per write, whose spans index the
+    ``data`` is any JSON value: a document's ``data``, a keystone's title and
+    text, or the text of a document being ingested. Every string in it is
+    scanned; keys are field names, not content, and are not. ``drop`` raises
+    422 (``subject`` names what was refused); ``mask`` returns a copy with each
+    string masked where it sits; ``flag`` returns ``data`` as sent, since these
+    stores have no metadata to carry the flag, and the audit row records it. One audit row per write, whose spans index the
     strings joined by newlines. A tenant config that cannot be read fails the
     write, as it fails a memory write.
     """
@@ -93,7 +94,9 @@ async def apply_pii_policy_to_fields(
     if gov is None or not gov.enabled:
         return data
     texts = list(_strings(data))
-    found = [scan(t, enabled_categories=gov.enabled_categories) for t in texts]
+    # In a worker thread: ingest passes a whole document, up to 3 MB, and every
+    # pattern runs over all of it.
+    found = await asyncio.to_thread(_scan_all, texts, gov.enabled_categories)
     if not any(found):
         return data
     joined = "\n".join(texts)
@@ -110,8 +113,16 @@ async def apply_pii_policy_to_fields(
             status_code=422, detail=f"{subject} rejected by content policy: sensitive data detected"
         )
     if action == ACTION_PII_MASK:
-        return _with_strings(data, iter([mask(t, f) if f else t for t, f in zip(texts, found, strict=True)]))
+        return _with_strings(data, iter(await asyncio.to_thread(_mask_all, texts, found)))
     return data
+
+
+def _scan_all(texts: list[str], categories: frozenset[PIICategory] | None) -> list[list[Finding]]:
+    return [scan(t, enabled_categories=categories) for t in texts]
+
+
+def _mask_all(texts: list[str], found: list[list[Finding]]) -> list[str]:
+    return [mask(t, f) if f else t for t, f in zip(texts, found, strict=True)]
 
 
 def _strings(value: Any) -> Iterator[str]:
