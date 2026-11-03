@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.37.13](https://github.com/caura-ai/caura/compare/backend-v3.37.12...backend-v3.37.13) (2026-11-03)
+
+
+### Bug Fixes
+
+* **governance:** mark and retry fast-mode rows no model judged ([#2291](https://github.com/caura-ai/caura/issues/2291)) ([4c56d0a](https://github.com/caura-ai/caura/commit/4c56d0abc90a676a221ca9bae55f45e5cd54133a))
+
 ## [3.37.12](https://github.com/caura-ai/caura/compare/backend-v3.37.11...backend-v3.37.12) (2026-11-03)
 
 
