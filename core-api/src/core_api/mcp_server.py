@@ -131,6 +131,7 @@ from core_api.services.organization_settings import (
     validate_knob_resets,
     validate_search_profile,
 )
+from core_api.services.pii_update_gate import apply_pii_policy_to_fields
 from core_api.services.recall_service import summarize_memories
 from core_api.services.skill_lifecycle import SKILL_WRITE_MIN_TRUST, skill_trust_message
 
@@ -3073,6 +3074,16 @@ async def caura_doc(
                         ),
                         t0,
                     )
+                # The tenant's PII policy, as REST applies it: before the
+                # skills validator hashes the body, and before anything is
+                # embedded or stored. A refusal is a 422, mapped below.
+                data = await apply_pii_policy_to_fields(
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    data=data,
+                    write_mode="document",
+                    subject="Document",
+                )
                 # ── Skill Factory SF-002 lifecycle validator ─────────
                 # The agent-facing MCP write path runs the SAME validator
                 # the REST route does (routes/documents.py §SF-002), so an
@@ -4755,6 +4766,17 @@ async def caura_keystones_set(
                         ),
                         t0,
                     )
+                # The tenant's PII policy over the title and the text every
+                # agent in scope receives, as REST applies it. Before the
+                # recheck below, so it adds nothing to the recheck → write window.
+                fields = await apply_pii_policy_to_fields(
+                    tenant_id=tenant_id,
+                    agent_id=caller_agent_id,
+                    data={"title": title, "content": content},
+                    write_mode="keystone",
+                    subject="Keystone",
+                )
+                title, content = fields["title"], fields["content"]
                 # TOCTOU narrowing: re-fetch the stored row immediately
                 # before the upsert and abort if the shape changed. A
                 # legitimate concurrent upsert could otherwise promote
