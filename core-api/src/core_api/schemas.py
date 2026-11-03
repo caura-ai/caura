@@ -539,6 +539,10 @@ class MemoryOut(BaseModel):
     # to agent_id. Populated via a LEFT JOIN in the storage query methods, not
     # stored on the memory row.
     agent_display_name: str | None = None
+    # The author's current trust level (agents.trust_level), from the same
+    # join, so a reader can weigh a row by who wrote it. Null when the author
+    # has no agents row (platform writers, broker:<install> ids).
+    agent_trust_level: int | None = None
     memory_type: str
     title: str | None = None
     content: str
@@ -666,6 +670,7 @@ class MemoryDetailResponse(BaseModel):
     fleet_id: str | None = None
     agent_id: str
     agent_display_name: str | None = None
+    agent_trust_level: int | None = None
     memory_type: str
     title: str | None = None
     content: str

@@ -705,6 +705,17 @@
             "title": "Agent Id",
             "type": "string"
           },
+          "agent_trust_level": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Trust Level"
+          },
           "content": {
             "title": "Content",
             "type": "string"
@@ -998,6 +1009,17 @@
           "agent_id": {
             "title": "Agent Id",
             "type": "string"
+          },
+          "agent_trust_level": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Trust Level"
           },
           "confidence": {
             "anyOf": [

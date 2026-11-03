@@ -1721,23 +1721,29 @@ def _verify_audit_chain_rows(
     }
 
 
-# ── agents.display_name join (shared by the memory read paths) ──
-# Surfaces the agent's human label NULL-safe on memory responses. The join is
-# 1:0..1 (agents has UNIQUE(tenant_id, agent_id)), so it never multiplies rows;
-# a memory whose agent has no row / no display_name simply yields NULL.
+# ── agents join (shared by the memory read paths) ──
+# Surfaces the author's human label and current trust level NULL-safe on memory
+# responses, so a reader can weigh a row by who wrote it. The join is 1:0..1
+# (agents has UNIQUE(tenant_id, agent_id)), so it never multiplies rows; a
+# memory whose agent has no row simply yields NULL for both.
 _AGENT_DISPLAY_JOIN = and_(
     Agent.tenant_id == Memory.tenant_id,
     Agent.agent_id == Memory.agent_id,
 )
+_AUTHOR_COLUMNS = (
+    Agent.display_name.label("agent_display_name"),
+    Agent.trust_level.label("agent_trust_level"),
+)
 
 
-def _attach_agent_display_names(rows: Any) -> list[Memory]:
-    """Attach each joined ``agent_display_name`` onto its ``Memory`` — a
-    non-mapped instance attribute that ``orm_to_dict`` serialises via getattr.
-    ``rows`` are ``(Memory, display_name)`` tuples from the joined select."""
+def _attach_author(rows: Any) -> list[Memory]:
+    """Attach the joined ``_AUTHOR_COLUMNS`` onto each ``Memory`` — non-mapped
+    instance attributes that ``orm_to_dict`` serialises via getattr. ``rows``
+    are ``(Memory, display_name, trust_level)`` tuples from the joined select."""
     out: list[Memory] = []
-    for mem, agent_display_name in rows:
+    for mem, agent_display_name, agent_trust_level in rows:
         mem.agent_display_name = agent_display_name
+        mem.agent_trust_level = agent_trust_level
         out.append(mem)
     return out
 
@@ -4747,7 +4753,7 @@ class PostgresService:
                 scored_cte.c.recall_boost,
                 scored_cte.c.temporal_boost,
                 pool_arms_col,
-                Agent.display_name.label("agent_display_name"),
+                *_AUTHOR_COLUMNS,
             )
             .join(scored_cte, Memory.id == scored_cte.c.mem_id)
             .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
@@ -4823,6 +4829,7 @@ class PostgresService:
             mid = row.Memory.id
             if mid not in grouped:
                 row.Memory.agent_display_name = row.agent_display_name
+                row.Memory.agent_trust_level = row.agent_trust_level
                 grouped[mid] = SimpleNamespace(
                     Memory=row.Memory,
                     score=row.score,
@@ -4902,7 +4909,7 @@ class PostgresService:
             return []
         async with get_read_session() as session:
             stmt = (
-                select(Memory, Agent.display_name.label("agent_display_name"))
+                select(Memory, *_AUTHOR_COLUMNS)
                 .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
                 .options(*_without_vectors())
                 .where(
@@ -4939,7 +4946,7 @@ class PostgresService:
                 # memories pass). End side is intentionally NOT a hard filter —
                 # see scored_search currency_factor.
                 stmt = stmt.where(_started_by(valid_at))
-            return _attach_agent_display_names((await session.execute(stmt)).all())
+            return _attach_author((await session.execute(stmt)).all())
 
     # ------------------------------------------------------------------
     # D-0) Supersedes chain: find successor memories
@@ -5049,28 +5056,27 @@ class PostgresService:
             scope.append(Memory.memory_type == memory_type_filter)
         if valid_at:
             scope.append(_started_by(valid_at))
-        display = Agent.display_name.label("agent_display_name")
         async with get_read_session() as session:
             edges = await session.execute(
-                select(Memory, display)
+                select(Memory, *_AUTHOR_COLUMNS)
                 .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
                 .options(*_without_vectors())
                 .where(Memory.supersedes_id.in_(supersedes_ids), *scope)
             )
             found: list[tuple[Memory, UUID]] = [
-                (m, m.supersedes_id) for m in _attach_agent_display_names(edges.all()) if m.supersedes_id
+                (m, m.supersedes_id) for m in _attach_author(edges.all()) if m.supersedes_id
             ]
             winners = _recorded_winners(
                 supersedes_ids, tenant_id, *scope, readable_tenant_ids=readable_tenant_ids
             )
             for stmt in winners:
                 named = (
-                    stmt.add_columns(display)
+                    stmt.add_columns(*_AUTHOR_COLUMNS)
                     .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
                     .options(*_without_vectors())
                 )
                 rows = (await session.execute(named)).all()
-                memories = _attach_agent_display_names((row[0], row[2]) for row in rows)
+                memories = _attach_author((row[0], *row[2:]) for row in rows)
                 found.extend(zip(memories, (row[1] for row in rows), strict=True))
         return found
 
@@ -7499,7 +7505,7 @@ class PostgresService:
             # fetch: then another tenant's row crossed the database boundary
             # first, and the protection was a comparison a later edit could drop.
             stmt = (
-                select(Memory, Agent.display_name.label("agent_display_name"))
+                select(Memory, *_AUTHOR_COLUMNS)
                 .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
                 .where(
                     Memory.id == memory_id,
@@ -7512,7 +7518,7 @@ class PostgresService:
             mem_row = (await session.execute(stmt)).one_or_none()
             if mem_row is None:
                 return None
-            [memory] = _attach_agent_display_names([mem_row])
+            [memory] = _attach_author([mem_row])
 
             link_rows = (
                 await session.execute(
@@ -8071,7 +8077,7 @@ class PostgresService:
         # The route serialises ``MEMORY_LIST_FIELDS``, so the vectors are not
         # loaded: a 500-row page parsed ~6 MB of vector text it then dropped (L-194).
         base = (
-            select(Memory, Agent.display_name.label("agent_display_name"))
+            select(Memory, *_AUTHOR_COLUMNS)
             .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
             .options(*_without_vectors())
         )
@@ -8172,7 +8178,7 @@ class PostgresService:
         stmt = stmt.limit(limit + 1)
 
         async with get_read_session() as session:
-            return _attach_agent_display_names((await session.execute(stmt)).all())
+            return _attach_author((await session.execute(stmt)).all())
 
     # ------------------------------------------------------------------
     #  Memory field (2D map layout input)
