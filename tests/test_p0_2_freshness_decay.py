@@ -31,8 +31,11 @@ def compute_freshness(
     if ts_valid_end is not None and ts_valid_end < now:
         return FRESHNESS_FLOOR
 
-    # Still within validity window → full freshness
-    if ts_valid_end is not None:
+    # A window closing within the decay horizon → full freshness. One that
+    # closes later is neutral: the row decays as if it had none.
+    if ts_valid_end is not None and (
+        (ts_valid_end - now).total_seconds() / 86400.0 <= FRESHNESS_DECAY_DAYS
+    ):
         return 1.0
 
     # No validity window: standard decay from anchor
@@ -111,6 +114,14 @@ class TestFreshnessDecay:
         valid_end = now + timedelta(days=30)  # still valid
         f = compute_freshness(created_at=created, ts_valid_end=valid_end, now=now)
         assert f == 1.0
+
+    def test_far_future_window_is_neutral(self):
+        """A window closing past the decay horizon → decays like no window."""
+        now = self._now()
+        created = now - timedelta(days=200)
+        valid_end = now + timedelta(days=FRESHNESS_DECAY_DAYS + 1)
+        f = compute_freshness(created_at=created, ts_valid_end=valid_end, now=now)
+        assert f == compute_freshness(created_at=created, now=now) == FRESHNESS_FLOOR
 
     def test_valid_end_today_still_valid(self):
         """ts_valid_end = now (still in the future by a tiny margin)."""
