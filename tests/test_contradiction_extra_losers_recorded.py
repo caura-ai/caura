@@ -5,14 +5,14 @@ rows in one run, each detection loop demotes them all but wires the edge to the
 first, so the rest end up ``outdated``/``conflicted`` with nothing pointing at
 them: ``find_successors`` cannot say what replaced them and retraction cannot
 reach them. The same happens to a loser whose winner already supersedes another
-row. The ``memory_conflicts`` record was the only thing naming the winner, and
-it sat behind ``contradiction_write_conflict_record``, off by default.
+row. The ``memory_conflicts`` record was the only thing naming the winner. It
+is now enabled by default so every confirmed demotion remains reviewable.
 
-Such a loser is now recorded whatever the flag. A loser the edge points at is
-not, and with the flag on every pair is still recorded once. An edge counts
-only if it landed: storage's ``expect_supersedes_null`` CAS can lose to a
-concurrent writer, and then the winner keeps its old pointer and the loser has
-no edge at all.
+With recording explicitly disabled, an unlinked loser is still recorded; a
+loser with a landed edge is omitted under that opt-out. With the default-on flag,
+every confirmed pair is recorded once. An edge counts only if it landed:
+storage's ``expect_supersedes_null`` CAS can lose to a concurrent writer, and
+then the winner keeps its old pointer and the loser has no edge at all.
 """
 
 from __future__ import annotations
@@ -73,6 +73,10 @@ def _row(path: str, hour: int, value: str, *, supersedes_id=None) -> dict:
     }
     if path in ("rdf", "path_c_rdf"):
         row.update(subject_entity_id=SUBJ, predicate="lives_in", object_value=value)
+    elif path == "path_c":
+        # Path C still needs evidence that these are competing claims about
+        # the same subject; leave the RDF triple empty so the semantic path runs.
+        row.update(subject_entity_id=SUBJ)
     return row
 
 

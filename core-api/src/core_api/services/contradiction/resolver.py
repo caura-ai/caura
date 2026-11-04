@@ -98,14 +98,33 @@ async def record_conflict_from_verdict(
     tenant_id: str,
     fleet_id: str | None,
     confidence: float | None = None,
+    tenant_config=None,
 ) -> dict | None:
-    """Record a conflict the detector already CONFIRMED (semantic / Path C)
-    WITHOUT a second LLM call. The detector's effect is a supersede, so the
-    record is aligned to it: exact_value / temporal_change / supersede. Richer
-    L1/L2 classification of confirmed conflicts is a follow-up."""
-    conf = confidence if confidence is not None else 0.5
-    result = ClassifyResult("exact_value", conf, "temporal_change", conf)
-    return await record_conflict(new_memory, candidate, tenant_id=tenant_id, fleet_id=fleet_id, result=result)
+    """Record a detector-confirmed semantic / Path-C pair with its actual L1/L2 labels.
+
+    The detector verdict is still the authority for the existing memory-row
+    effect, but the audit record must not pretend every pair is an exact-value
+    temporal change. Classify the pair for the record; if classification fails,
+    retain a conservative unresolved label rather than fabricating certainty.
+    """
+    try:
+        result = await classify(new_memory, candidate, tenant_config=tenant_config)
+    except Exception:
+        logger.warning(
+            "conflict classification failed for new=%s old=%s; recording unresolved",
+            new_memory.get("id"),
+            candidate.get("id"),
+            exc_info=True,
+        )
+        result = ClassifyResult("probabilistic", 0.0, "unresolved", 0.0)
+    return await record_conflict(
+        new_memory,
+        candidate,
+        tenant_id=tenant_id,
+        fleet_id=fleet_id,
+        tenant_config=tenant_config,
+        result=result,
+    )
 
 
 async def record_detected_conflicts(
@@ -117,8 +136,9 @@ async def record_detected_conflicts(
     tenant_config=None,
 ) -> None:
     """Write a memory_conflicts record for each ``(candidate, kind, confidence)``
-    the detector confirmed. ``rdf`` pairs classify deterministically (no LLM);
-    ``semantic`` / Path-C pairs reuse the detector's verdict (no second LLM)."""
+    the detector confirmed. ``rdf`` pairs classify deterministically when a
+    structured triple is available; semantic / Path-C pairs receive an L1/L2
+    audit classification so the stored labels describe the actual pair."""
     for candidate, kind, confidence in pairs:
         if kind == "rdf":
             await record_conflict(
@@ -135,4 +155,5 @@ async def record_detected_conflicts(
                 tenant_id=tenant_id,
                 fleet_id=fleet_id,
                 confidence=confidence,
+                tenant_config=tenant_config,
             )

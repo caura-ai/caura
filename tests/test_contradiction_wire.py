@@ -1,7 +1,7 @@
-"""Detector -> conflict-record wiring (A55 1d), flag-gated.
+"""Detector -> conflict-record wiring (A55 1d), default-on with explicit opt-out.
 
 Proves: with contradiction_write_conflict_record ON, a confirmed conflict in
-``_detect`` schedules a memory_conflicts record; with it OFF (default) it does
+``_detect`` schedules a memory_conflicts record; with it explicitly OFF it does
 not. Either way the status/supersedes effect is unchanged (no degradation).
 """
 
@@ -77,6 +77,12 @@ async def _run(flag: bool):
     return new, cand, sc, rec
 
 
+def test_conflict_recording_is_enabled_by_default():
+    from core_api.config import Settings
+
+    assert Settings.model_fields["contradiction_write_conflict_record"].default is True
+
+
 @pytest.mark.asyncio
 async def test_flag_on_records_conflict_and_preserves_effect():
     new, cand, sc, rec = await _run(True)
@@ -102,7 +108,7 @@ async def test_flag_on_records_conflict_and_preserves_effect():
 async def test_flag_off_does_not_record_but_still_applies_effect():
     _, cand, sc, rec = await _run(False)
 
-    rec.assert_not_awaited()  # no record write when flag is off (default)
+    rec.assert_not_awaited()  # no record write when explicitly opted out
     # Effect still applied — identical to today.
     calls = [c.args for c in sc.update_memory_status.call_args_list]
     assert (cand["id"], "outdated") in calls
