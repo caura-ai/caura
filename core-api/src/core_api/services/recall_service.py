@@ -6,6 +6,7 @@ import re
 import time
 from datetime import UTC, datetime
 
+from common.llm._platform import get_platform_llm, get_platform_recall_llm
 from core_api.constants import (
     DEFAULT_SEARCH_TOP_K,
     MEMORY_RECALL_SUMMARY_MAX_TOKENS,
@@ -223,6 +224,24 @@ def _row_keys(rows: list[dict], *, items_alias: bool) -> dict:
     return {"memories": rows, "items": rows} if items_alias else {"memories": rows}
 
 
+def _recall_provider_factory(recall_llm):
+    """``get_llm_provider``, with ``recall_llm`` in place of the platform LLM.
+
+    For a tenant the deployment lists (``get_platform_recall_llm``), the recall
+    model answers wherever the registry would have used the platform LLM: when
+    the configured provider has no key, and for a fallback provider without
+    one. A tenant answering on its own key keeps it, because the substitution
+    covers only what the platform serves.
+    """
+    from common.llm.registry import get_llm_provider
+
+    def factory(name, tenant_config, **kwargs):
+        llm = get_llm_provider(name, tenant_config, **kwargs)
+        return recall_llm if llm is get_platform_llm() else llm
+
+    return factory
+
+
 async def summarize_memories(
     memories: list,
     query: str,
@@ -234,6 +253,7 @@ async def summarize_memories(
     top_k: int = DEFAULT_SEARCH_TOP_K,
     t0: float | None = None,
     items_alias: bool = True,
+    tenant_id: str | None = None,
 ) -> dict:
     """LLM-only summarization step. No DB access.
 
@@ -252,6 +272,10 @@ async def summarize_memories(
     ``items_alias`` controls the C4 ``items`` key; see ``_row_keys``. It
     defaults to True so the REST response shape is unchanged, and the rows
     themselves always carry one metadata location (see ``_dump_rows``).
+
+    ``tenant_id`` selects the deployment's recall model for a tenant listed in
+    ``PLATFORM_RECALL_LLM_TENANTS`` (``get_platform_recall_llm``). Omitted, or
+    for any other tenant, recall uses whatever the registry resolves.
     """
     if t0 is None:
         t0 = time.perf_counter()
@@ -398,6 +422,7 @@ async def summarize_memories(
         return completion
 
     recall_model = getattr(config, "recall_model", None)
+    recall_llm = get_platform_recall_llm(tenant_id)
     completion = await call_with_fallback(
         primary_provider_name=provider,
         call_fn=_do_recall,
@@ -405,6 +430,7 @@ async def summarize_memories(
         tenant_config=config,
         service_label="recall",
         model_override=recall_model,
+        provider_factory=_recall_provider_factory(recall_llm) if recall_llm else None,
         # Recall is a latency-sensitive read path. Cap the per-attempt LLM timeout AND
         # don't retry the same provider: with the default 2 attempts across primary +
         # fallback, a slow provider stacks past the 45s request-timeout budget and

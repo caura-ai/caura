@@ -277,6 +277,8 @@ directly. A complete `ALLOYDB_HOST`, `ALLOYDB_USER`, `ALLOYDB_PASSWORD`, and
 | `PLATFORM_LLM_API_KEY` | — | OpenAI API key for the platform LLM singleton |
 | `PLATFORM_LLM_GCP_PROJECT_ID` | — | GCP project for platform Vertex LLM |
 | `PLATFORM_LLM_GCP_LOCATION` | `us-central1` | GCP region for platform Vertex LLM |
+| `PLATFORM_RECALL_LLM_MODEL` | *(empty)* | A second Vertex model that writes recall briefs for the tenants in `PLATFORM_RECALL_LLM_TENANTS`, wherever the platform LLM would have. Needs `PLATFORM_LLM_PROVIDER=vertex`; uses the same project and location |
+| `PLATFORM_RECALL_LLM_TENANTS` | *(empty)* | Comma-separated tenant ids that use `PLATFORM_RECALL_LLM_MODEL`. Set both or neither; one without the other is reported on `/health` and ignored |
 | `PLATFORM_EMBEDDING_PROVIDER` | *(empty)* | Platform-default embeddings: `openai` or empty to disable |
 | `PLATFORM_EMBEDDING_MODEL` | *(empty)* | Embedding model override (e.g. `text-embedding-3-small`) |
 | `PLATFORM_EMBEDDING_API_KEY` | — | OpenAI API key for platform embeddings |
