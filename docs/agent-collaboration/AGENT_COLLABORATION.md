@@ -85,7 +85,10 @@ Rules that apply to every scenario:
 ## Connect your agent
 
 A teammate connects their own Claude Code or Codex in about a minute with an
-agent key from the dashboard's API Credentials page:
+agent key. On caura.ai, someone with the **Manage API credentials** permission
+mints one with `POST /api/v1/admin/agent-keys/provision`; **Connect › Keys** in
+the Caura app makes only tenant-scoped keys, which carry no agent identity.
+With the agent key:
 
 ```sh
 uv tool install "git+https://github.com/caura-ai/caura@main#subdirectory=clients/collaboration/cli"

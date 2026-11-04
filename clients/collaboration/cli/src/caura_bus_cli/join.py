@@ -390,7 +390,7 @@ def run_join(options: JoinOptions, echo: Callable[[str], None], run_async) -> in
         if code != 0:
             revoked = session.revoke(str(credential["id"]))
             raise JoinError(
-                f"{failure}; the new key was {'revoked' if revoked else 'NOT revoked (revoke it in API Credentials)'}"
+                f"{failure}; the new key was {'revoked' if revoked else 'NOT revoked (revoke it in Connect > Keys)'}"
                 ". Fix the problem above and run join again."
             )
 
@@ -398,7 +398,7 @@ def run_join(options: JoinOptions, echo: Callable[[str], None], run_async) -> in
             done = session.revoke(str(row["id"]))
             echo(
                 f"  [{'ok' if done else '!!'}] previous join key {row.get('key_prefix', '')}… for this directory "
-                + ("revoked" if done else "could NOT be revoked; revoke it in API Credentials")
+                + ("revoked" if done else "could NOT be revoked; revoke it in Connect > Keys")
             )
         if others:
             echo(
