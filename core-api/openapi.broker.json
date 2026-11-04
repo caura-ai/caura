@@ -1790,6 +1790,141 @@
         "title": "PaginatedMemoryResponse",
         "type": "object"
       },
+      "RecallEvidence": {
+        "description": "Where a recalled memory came from, whether anyone checked it, and why it was picked.",
+        "properties": {
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "'tool:<tool_call_id>' when the writer named the tool call, else the memory's source_uri; absent when neither (ingest's 'text-input' placeholder is not a source).",
+            "title": "Source"
+          },
+          "source_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Uri"
+          },
+          "strategy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The retrieval strategy that served the query.",
+            "title": "Strategy"
+          },
+          "tool_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Call Id"
+          },
+          "trace": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The trace_id of the session or request that wrote it.",
+            "title": "Trace"
+          },
+          "verification": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "verification_status: unverified, tool_observed, corroborated, human_verified or disputed.",
+            "title": "Verification"
+          },
+          "verified_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified At"
+          },
+          "verified_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified By"
+          },
+          "why": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Short reason the row was returned, from its ranking factors (no LLM).",
+            "title": "Why"
+          }
+        },
+        "title": "RecallEvidence",
+        "type": "object"
+      },
       "ScoreParts": {
         "description": "D12 — per-factor breakdown of the ranking composite ``MemoryOut.score``.\n\nEvery factor mirrors a column the scored-search SQL already computes and\nreturns per row; this model only surfaces them. All fields are nullable:\nFTS-only rows have no ``vec_sim``, entity-lookup short-circuit rows have no\nFTS rank, and successor-injected rows were never scored at all.\n\n``rerank`` is the second-stage reranker's score, set only on rows it\nreordered. ``MemoryOut.score`` stays the first-stage composite.",
         "properties": {
@@ -1978,6 +2113,362 @@
         "title": "SearchDiagnostic",
         "type": "object"
       },
+      "SearchHitOut": {
+        "description": "A memory as search and recall return it: MemoryOut plus its evidence.",
+        "properties": {
+          "agent_display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Display Name"
+          },
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "agent_trust_level": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Trust Level"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "entity_links": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/EntityLinkOut"
+            },
+            "title": "Entity Links",
+            "type": "array"
+          },
+          "evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecallEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "fleet_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fleet Id"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "injected": {
+            "default": false,
+            "title": "Injected",
+            "type": "boolean"
+          },
+          "is_inferred": {
+            "default": false,
+            "title": "Is Inferred",
+            "type": "boolean"
+          },
+          "last_recalled_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Recalled At"
+          },
+          "memory_type": {
+            "title": "Memory Type",
+            "type": "string"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          },
+          "object_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Value"
+          },
+          "predicate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Predicate"
+          },
+          "recall_count": {
+            "default": 0,
+            "title": "Recall Count",
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "score_parts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoreParts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "similarity": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Similarity"
+          },
+          "source_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Uri"
+          },
+          "status": {
+            "default": "active",
+            "title": "Status",
+            "type": "string"
+          },
+          "subject_entity_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Entity Id"
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ContradictionInfo"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded By"
+          },
+          "supersedes_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Id"
+          },
+          "system_metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Metadata"
+          },
+          "tenant_id": {
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "ts_valid_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ts Valid End"
+          },
+          "ts_valid_start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ts Valid Start"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "visibility": {
+            "default": "scope_team",
+            "title": "Visibility",
+            "type": "string"
+          },
+          "weight": {
+            "title": "Weight",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "tenant_id",
+          "agent_id",
+          "memory_type",
+          "content",
+          "weight",
+          "source_uri",
+          "run_id",
+          "metadata",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "SearchHitOut",
+        "type": "object"
+      },
       "SearchRequest": {
         "additionalProperties": true,
         "properties": {
@@ -2129,6 +2620,12 @@
             ],
             "description": "As-of time for the question (ISO 8601). Rows whose ts_valid_start is after this date are excluded and rows whose ts_valid_end is before it are down-weighted; relative dates in the query ('last month') are resolved against it. When the tenant's search.default_profile sets freshness_reference=1, freshness and the temporal window are ALSO measured from this time against each row's event time (ts_valid_start, else created_at) instead of from now() — the setting for backfilled corpora where ingest time carries no signal. Naive values are read as UTC.",
             "title": "Valid At"
+          },
+          "verified_only": {
+            "default": false,
+            "description": "Return only memories someone or something checked: verification_status tool_observed, corroborated or human_verified. A filter only; ranking is unchanged.",
+            "title": "Verified Only",
+            "type": "boolean"
           }
         },
         "required": [
@@ -2163,7 +2660,7 @@
           },
           "items": {
             "items": {
-              "$ref": "#/components/schemas/MemoryOut"
+              "$ref": "#/components/schemas/SearchHitOut"
             },
             "title": "Items",
             "type": "array"

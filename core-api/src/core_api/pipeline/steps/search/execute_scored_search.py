@@ -150,6 +150,8 @@ def build_scored_search_payload(data: dict, sp: dict, top_k: int) -> dict:
         search_data["memory_type_filter"] = data["memory_type_filter"]
     if data.get("status_filter"):
         search_data["status_filter"] = data["status_filter"]
+    if data.get("verified_only"):
+        search_data["verified_only"] = True
     if data.get("valid_at"):
         search_data["valid_at"] = str(data["valid_at"])
 

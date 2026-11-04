@@ -846,6 +846,13 @@
         "name": "diagnostic",
         "required": false,
         "type": "bool"
+      },
+      {
+        "default": false,
+        "description": "Only tool-observed or human-verified rows.",
+        "name": "verified_only",
+        "required": false,
+        "type": "bool"
       }
     ],
     "plugin_exposed": true,

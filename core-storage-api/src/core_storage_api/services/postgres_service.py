@@ -125,6 +125,7 @@ from common.models.memory import (
     PENDING_FANOUT_SQL,
     PENDING_WORK_SQL,
     STRANDED_EMBEDDING_SQL,
+    VERIFIED_STATUSES,
 )
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.models.recall_log import RecallCandidate, RecallEvent
@@ -536,6 +537,7 @@ def _scored_search_row_filters(
     status_filter: str | None,
     history_query: bool,
     valid_at: datetime | None,
+    verified_only: bool = False,
 ) -> list[tuple[str, ColumnElement[bool]]]:
     """The scored search's row-level filters, each named for what it removes.
 
@@ -612,6 +614,8 @@ def _scored_search_row_filters(
         row_filters.append(("agent_filter", Memory.agent_id == filter_agent_id))
     if memory_type_filter:
         row_filters.append(("memory_type_filter", Memory.memory_type == memory_type_filter))
+    if verified_only:
+        row_filters.append(("verified_only", _verified_clause()))
     if status_filter:
         row_filters.append(("status_filter", Memory.status == status_filter))
     elif history_query:
@@ -718,6 +722,16 @@ def _started_by(valid_at: datetime | str) -> ColumnElement[bool]:
     so could not find a correction written later that day (L-43).
     """
     return or_(Memory.ts_valid_start.is_(None), _utc_day(Memory.ts_valid_start) <= _utc_day_of(valid_at))
+
+
+def _verified_clause() -> ColumnElement[bool]:
+    """``verified_only`` recall: rows someone or something checked.
+
+    One predicate for the scored search, the by-id load and the successor
+    lookup, so the three agree on what a verified row is. Served by
+    ``ix_memories_verification`` (partial on ``<> 'unverified'``).
+    """
+    return Memory.verification_status.in_(VERIFIED_STATUSES)
 
 
 def _document_fleet_clause(collection: str | None, fleet_id: str) -> ColumnElement[bool]:
@@ -4103,6 +4117,7 @@ class PostgresService:
         readable_tenant_ids: list[str] | None = None,
         history_query: bool = False,
         strict_fleet_scoping: bool = False,
+        verified_only: bool = False,
     ) -> list[SimpleNamespace]:
         """Execute the full CTE-based scored search, then load the hits' entity links.
 
@@ -4279,6 +4294,7 @@ class PostgresService:
                 status_filter=status_filter,
                 history_query=history_query,
                 valid_at=valid_at,
+                verified_only=verified_only,
             )
         ]
 
@@ -4966,6 +4982,7 @@ class PostgresService:
         readable_tenant_ids: list[str] | None = None,
         history_query: bool = False,
         strict_fleet_scoping: bool = False,
+        verified_only: bool = False,
     ) -> dict[str, Any]:
         """Evaluate every scored-search row filter against ONE memory.
 
@@ -5001,6 +5018,7 @@ class PostgresService:
             status_filter=status_filter,
             history_query=history_query,
             valid_at=valid_at,
+            verified_only=verified_only,
         )
         check_cols = [func.coalesce(pred, false()).label(f"chk_{i}") for i, (_, pred) in enumerate(named)]
         stmt = select(
@@ -5010,6 +5028,7 @@ class PostgresService:
             Memory.visibility,
             Memory.status,
             Memory.memory_type,
+            Memory.verification_status,
             Memory.deleted_at,
             Memory.ts_valid_start,
             Memory.embedding.is_not(None).label("has_embedding"),
@@ -5030,6 +5049,7 @@ class PostgresService:
                 "visibility": m["visibility"],
                 "status": m["status"],
                 "memory_type": m["memory_type"],
+                "verification_status": m["verification_status"],
                 "deleted": m["deleted_at"] is not None,
                 "ts_valid_start": m["ts_valid_start"].isoformat() if m["ts_valid_start"] else None,
                 "has_embedding": bool(m["has_embedding"]),
@@ -5054,6 +5074,7 @@ class PostgresService:
         valid_at: datetime | None = None,
         readable_tenant_ids: list[str] | None = None,
         strict_fleet_scoping: bool = False,
+        verified_only: bool = False,
     ) -> list[Memory]:
         """Load memories by ID with visibility/fleet/agent filters applied.
 
@@ -5102,6 +5123,8 @@ class PostgresService:
                 stmt = stmt.where(Memory.agent_id == filter_agent_id)
             if memory_type_filter:
                 stmt = stmt.where(Memory.memory_type == memory_type_filter)
+            if verified_only:
+                stmt = stmt.where(_verified_clause())
             if status_filter:
                 stmt = stmt.where(Memory.status == status_filter)
             else:
@@ -5196,6 +5219,7 @@ class PostgresService:
         valid_at: datetime | None = None,
         strict_fleet_scoping: bool = False,
         readable_tenant_ids: list[str] | None = None,
+        verified_only: bool = False,
     ) -> list[tuple[Memory, UUID]]:
         """Find the active/confirmed memories that replaced the given ones, each
         with the id of the one it replaced.
@@ -5228,6 +5252,8 @@ class PostgresService:
             scope.append(Memory.agent_id == filter_agent_id)
         if memory_type_filter:
             scope.append(Memory.memory_type == memory_type_filter)
+        if verified_only:
+            scope.append(_verified_clause())
         if valid_at:
             scope.append(_started_by(valid_at))
         async with get_read_session() as session:

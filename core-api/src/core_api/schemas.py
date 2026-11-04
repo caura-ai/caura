@@ -2,7 +2,15 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, create_model, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    create_model,
+    model_serializer,
+    model_validator,
+)
 
 from common.constants import AGENT_TUNABLE_KEYS, SEARCH_KNOBS
 from core_api.constants import (
@@ -695,6 +703,66 @@ class MemoryOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class RecallEvidence(BaseModel):
+    """Where a recalled memory came from, whether anyone checked it, and why it was picked."""
+
+    # Evidence contract v1 (EC-10). The first four keys are the compact default
+    # every search hit carries; the rest appear only on a ``diagnostic=true``
+    # call. A key with no value is left off the wire rather than sent as null:
+    # this object rides on every row of every recall, so a null costs tokens and
+    # says nothing the absence does not. ``test_recall_evidence.py`` pins the
+    # compact size per row.
+    source: str | None = Field(
+        default=None,
+        description=(
+            "'tool:<tool_call_id>' when the writer named the tool call, else the "
+            "memory's source_uri; absent when neither (ingest's 'text-input' "
+            "placeholder is not a source)."
+        ),
+    )
+    trace: str | None = Field(
+        default=None, description="The trace_id of the session or request that wrote it."
+    )
+    verification: str | None = Field(
+        default=None,
+        description="verification_status: unverified, tool_observed, corroborated, human_verified or disputed.",
+    )
+    why: str | None = Field(
+        default=None,
+        description="Short reason the row was returned, from its ranking factors (no LLM).",
+    )
+    # Detail — diagnostic=true only.
+    observed_at: datetime | None = None
+    run_id: str | None = None
+    tool_call_id: str | None = None
+    source_uri: str | None = None
+    verified_by: str | None = None
+    verified_at: datetime | None = None
+    strategy: str | None = Field(default=None, description="The retrieval strategy that served the query.")
+
+    @model_serializer(mode="wrap")
+    def _drop_empty(self, handler):  # type: ignore[no-untyped-def]
+        return {k: v for k, v in handler(self).items() if v is not None}
+
+
+class SearchHitOut(MemoryOut):
+    """A memory as search and recall return it: MemoryOut plus its evidence."""
+
+    # The six evidence-contract columns are not repeated at the top level of a
+    # hit: ``evidence`` carries them (compact by default, all of them on
+    # ``diagnostic=true``), and a row sent to an agent on every recall should
+    # not pay for the same facts twice. Still readable as attributes in-process
+    # (the brief, recall logging); only serialization drops them. List, get and
+    # write responses keep them at the top level.
+    observed_at: datetime | None = Field(default=None, exclude=True)
+    trace_id: str | None = Field(default=None, exclude=True)
+    tool_call_id: str | None = Field(default=None, exclude=True)
+    verification_status: str = Field(default="unverified", exclude=True)
+    verified_by: str | None = Field(default=None, exclude=True)
+    verified_at: datetime | None = Field(default=None, exclude=True)
+    evidence: RecallEvidence | None = None
+
+
 # Kept to ONE line, because a model docstring becomes the schema's public
 # ``description`` in ``openapi.broker.json`` — maintainer rationale belongs here, in a
 # comment, not in the frozen contract. Three things about this model are load-bearing:
@@ -1006,7 +1074,7 @@ class EmptyRecallHint(BaseModel):
 class SearchResponse(BaseModel):
     """Envelope for search results — matches PaginatedMemoryResponse shape."""
 
-    items: list[MemoryOut]
+    items: list[SearchHitOut]
     # Whether this search dispatched a ``recall_count`` bump for the rows it
     # returned. False means the returned memories were NOT reinforced, and the
     # three reasons are all invisible from the request alone: the caller
@@ -1199,7 +1267,20 @@ class SearchRequest(TenantScopedBody):
     # D12 — when true, the response carries a ``diagnostic`` retrieval trace
     # (full candidate set, score factors, exclusion reasons, applied knobs).
     # Results are unchanged and no recall_count is bumped on a diagnostic call.
+    # EC-10 — it also widens each hit's ``evidence`` to the full detail.
     diagnostic: bool = False
+    # Evidence contract v1 (EC-11). A storage filter applied with the others
+    # (fleet, type, status), so the scored search, the entity short-circuit and
+    # successor injection all honour it and the empty-result explanations see
+    # the same predicate. Deliberately not a ranking input in v1.
+    verified_only: bool = Field(
+        default=False,
+        description=(
+            "Return only memories someone or something checked: "
+            "verification_status tool_observed, corroborated or human_verified. "
+            "A filter only; ranking is unchanged."
+        ),
+    )
     # pm-0918-c-03. Inherited by ``RecallRequest`` below, deliberately: /recall
     # summarises these rows into a brief, so a short fragment restating its
     # parent costs brief tokens on exactly the surface where they are scarcest.

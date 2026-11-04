@@ -80,6 +80,9 @@ VERIFICATION_STATUSES = (
     "disputed",
 )
 DEFAULT_VERIFICATION_STATUS = "unverified"
+#: The statuses ``verified_only`` recall keeps: someone or something checked the
+#: row. ``unverified`` and ``disputed`` are the two it drops.
+VERIFIED_STATUSES = ("tool_observed", "corroborated", "human_verified")
 
 
 class Memory(Base):

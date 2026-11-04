@@ -108,6 +108,7 @@ from core_api.schemas import (
     MemoryOut,
     MemoryUpdate,
     ScoreParts,
+    SearchHitOut,
     server_owned_refusal,
 )
 from core_api.search_trim import (
@@ -120,7 +121,7 @@ from core_api.services.auto_capture import CAPTURE_KEY, capture_of, stamp_captur
 from core_api.services.contradiction_detector import _pick_older, revert_unheld_loser
 from core_api.services.entity_extraction_worker import process_entity_extraction
 from core_api.services.entity_tokens import extract_entity_tokens
-from core_api.services.evidence import evidence_payload
+from core_api.services.evidence import evidence_payload, to_search_hit
 from core_api.services.governance_gate import (
     ACTION_NB_KEEP_PRIVATE,
     ACTION_PII_DROP,
@@ -6093,7 +6094,11 @@ async def search_memories(
     # EC-05 — filled with ``{"hint": {...}}`` when the search returned nothing
     # but a readable candidate scored below the cut-off. Pipeline path only.
     empty_hint_ctx: dict | None = None,
-) -> list[MemoryOut]:
+    # Evidence contract v1 — keep only rows someone or something checked
+    # (``VERIFIED_STATUSES``). A storage filter beside the others, never a
+    # ranking input.
+    verified_only: bool = False,
+) -> list[SearchHitOut]:
     # ``allow_recall_bump`` defaults True so every existing caller — MCP
     # ``caura_recall``, the internal search paths — keeps bumping exactly as
     # before. Only ``POST /search`` passes False, and only for an identity the
@@ -6129,6 +6134,7 @@ async def search_memories(
             top_k_explicit=top_k_explicit,
             retrieval_ctx=retrieval_ctx,
             empty_hint_ctx=empty_hint_ctx,
+            verified_only=verified_only,
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
     # The legacy path bumps recall_count unconditionally (no caller-agent gate,
@@ -6158,6 +6164,7 @@ async def search_memories(
         allow_recall_bump=allow_recall_bump,
         include_derived=include_derived,
         top_k_explicit=top_k_explicit,
+        verified_only=verified_only,
     )
     if recall_ctx is not None:
         recall_ctx["recall_tracked"] = bool(legacy_results) and allow_recall_bump
@@ -6212,7 +6219,11 @@ async def _search_memories_pipeline(
     # handed back under ``explain_ctx["data"]``. Same context, same steps up to
     # the result set, so the explanation is of the search that would run.
     explain_ctx: dict | None = None,
-) -> list[MemoryOut]:
+    # Evidence contract v1 — keep only rows someone or something checked
+    # (``VERIFIED_STATUSES``). A storage filter beside the others, never a
+    # ranking input.
+    verified_only: bool = False,
+) -> list[SearchHitOut]:
     """Pipeline-based search_memories -- same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.search import (
         build_search_explain_pipeline,
@@ -6259,6 +6270,7 @@ async def _search_memories_pipeline(
             # the request layer would silently fall back to the tenant default,
             # and the request flag is the layer a caller can actually see.
             "include_derived": resolve_include_derived(include_derived, tenant_config),
+            "verified_only": verified_only,
         },
         tenant_config=tenant_config,
     )
@@ -6371,7 +6383,8 @@ async def _search_memories_legacy(
     allow_recall_bump: bool = True,
     include_derived: bool | None = None,
     top_k_explicit: bool = False,
-) -> list[MemoryOut]:
+    verified_only: bool = False,
+) -> list[SearchHitOut]:
     """Legacy search -- uses scored_search storage API endpoint."""
     sc = get_storage_client()
 
@@ -6462,6 +6475,7 @@ async def _search_memories_legacy(
         "caller_tenant_id": caller_tenant_id,
         "memory_type_filter": memory_type_filter,
         "status_filter": status_filter,
+        "verified_only": verified_only,
         "valid_at": valid_at.isoformat() if valid_at else None,
         "top_k": _overfetch_top_k,
         # Core-api-local, NOT a scoring knob: the route never reads it, and the
@@ -6537,21 +6551,25 @@ async def _search_memories_legacy(
             EntityLinkOut(entity_id=el.get("entity_id"), role=el.get("role"))
             for el in links_data.get(mid_str, [])
         ]
+        # EC-10 — the same ``evidence`` the pipeline attaches; this path keeps
+        # no score factors, so ``why`` falls back to the generic phrase.
         results.append(
-            _dict_to_memory_out(
-                row,
-                entity_links=entity_links,
-                # Raw vector cosine (``vec_sim``), NOT ``score`` (the ranking
-                # composite, which exceeds 1.0 and is useless for threshold
-                # gating). Mirrors LoadAndSerialize in the pipeline path so both
-                # surfaces agree (test_search_pipeline_equivalence) — see F-14.
-                # None for a row with no embedding, whose 0.0 is storage's
-                # sentinel, not a cosine (L-113).
-                similarity=(
-                    round(float(row["vec_sim"]), 4)
-                    if row.get("vec_sim") is not None and row.get("has_embedding", True) is not False
-                    else None
-                ),
+            to_search_hit(
+                _dict_to_memory_out(
+                    row,
+                    entity_links=entity_links,
+                    # Raw vector cosine (``vec_sim``), NOT ``score`` (the ranking
+                    # composite, which exceeds 1.0 and is useless for threshold
+                    # gating). Mirrors LoadAndSerialize in the pipeline path so both
+                    # surfaces agree (test_search_pipeline_equivalence) — see F-14.
+                    # None for a row with no embedding, whose 0.0 is storage's
+                    # sentinel, not a cosine (L-113).
+                    similarity=(
+                        round(float(row["vec_sim"]), 4)
+                        if row.get("vec_sim") is not None and row.get("has_embedding", True) is not False
+                        else None
+                    ),
+                )
             )
         )
 

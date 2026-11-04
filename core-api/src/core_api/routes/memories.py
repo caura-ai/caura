@@ -3021,6 +3021,7 @@ async def _search_inner(
             top_k_explicit="top_k" in body.model_fields_set,
             retrieval_ctx=retrieval_ctx,
             empty_hint_ctx=empty_hint_ctx,
+            verified_only=body.verified_only,
         )
     except HTTPException:
         # Auth / tenant errors raised downstream are expected outcomes,
@@ -3479,6 +3480,7 @@ async def recall_endpoint(
         # SIDE-57 — same body as /search, same rule: a named top_k is honoured.
         top_k_explicit="top_k" in body.model_fields_set,
         empty_hint_ctx=empty_hint_ctx,
+        verified_only=body.verified_only,
     )
 
     # CAURA-723 — same shape as /search, and before the LLM brief so a

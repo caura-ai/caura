@@ -1496,6 +1496,10 @@ async def caura_recall(
         bool,
         Field(description="Return retrieval trace; results unchanged, never bumps recall_count."),
     ] = False,
+    verified_only: Annotated[
+        bool,
+        Field(description="Only tool-observed or human-verified rows."),
+    ] = False,
 ) -> ToolReply:
     """Hybrid semantic+keyword recall, with optional LLM brief."""
     t0 = time.perf_counter()
@@ -1683,6 +1687,7 @@ async def caura_recall(
             recall_ctx=recall_ctx,
             retrieval_ctx=retrieval_ctx,
             empty_hint_ctx=empty_hint_ctx,
+            verified_only=verified_only,
         )
         # Cross-tenant read audit (F2): emit one event per source tenant when
         # the credential widened beyond home. Async queue — non-blocking.

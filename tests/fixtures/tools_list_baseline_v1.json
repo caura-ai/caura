@@ -914,6 +914,12 @@
           "description": "Return retrieval trace; results unchanged, never bumps recall_count.",
           "title": "Diagnostic",
           "type": "boolean"
+        },
+        "verified_only": {
+          "default": false,
+          "description": "Only tool-observed or human-verified rows.",
+          "title": "Verified Only",
+          "type": "boolean"
         }
       },
       "required": [

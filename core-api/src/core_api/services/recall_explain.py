@@ -48,6 +48,9 @@ FILTER_REASONS: dict[str, str] = {
     "visibility_scope": "The memory is private (scope_agent) to another agent than the one searching.",
     "agent_filter": "The search only returns memories written by one agent (filter_agent_id), and another agent wrote this one.",
     "memory_type_filter": "The search filters to another memory type.",
+    "verified_only": (
+        "The search returns only verified memories (verified_only), and this one is unverified or disputed."
+    ),
     "status_filter": "The search filters to another status.",
     "status_superseded": (
         "The memory is superseded (status outdated or conflicted); search excludes superseded "
@@ -232,6 +235,8 @@ def _filter_details(name: str, data: dict[str, Any], memory: dict[str, Any]) -> 
             "memory_type": memory.get("memory_type"),
             "memory_type_filter": data.get("memory_type_filter"),
         }
+    if name == "verified_only":
+        return {"verification_status": memory.get("verification_status")}
     if name in ("status_filter", "status_superseded", "held"):
         return {"memory_status": memory.get("status"), "status_filter": data.get("status_filter")}
     if name == "temporal_valid_at":
