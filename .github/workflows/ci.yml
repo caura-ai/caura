@@ -975,12 +975,21 @@ jobs:
       # no workflow. Its tests run in the CI job's shared venv, where another
       # service's dependency can stand in for one core-worker never declared,
       # so import the app its CMD serves from what the image itself installed.
+      # The stock stack now runs the service (#720), and ``--no-build`` below
+      # needs the image too, under the name Compose resolves for it — same
+      # pattern as the core-operations step further down.
       - name: Build core-worker image and import its app
         run: |
           docker build --platform linux/amd64 --target runtime \
             -t core-worker-imagetest \
             -f core-worker/Dockerfile .
           docker run --rm core-worker-imagetest python -c "import uvicorn, core_worker.app"
+          compose_image="$(
+            docker compose --env-file /dev/null --file docker-compose.yml \
+              --project-name "$README_COMPOSE_PROJECT" config --format json |
+              python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["core-worker"]["image"])'
+          )"
+          docker tag core-worker-imagetest "$compose_image"
 
       - name: Build core-storage-api image for README quickstart
         run: |
