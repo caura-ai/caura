@@ -4026,7 +4026,8 @@ async def caura_insights(
     or unexpected clusters; persist findings as ``insight`` memories.
     Consolidates onto the Karpathy Loop reflection step.
     scope='agent' (default) requires trust ≥ 1, scope='fleet' trust ≥ 2 and
-    scope='all' trust ≥ 3: its findings are saved as ``scope_org`` rows.
+    scope='all' trust ≥ 3: a run's findings are saved in the narrowest home the
+    rows it read allow, org-wide only when they all are.
     """
     t0 = time.perf_counter()
     if err := _check_auth():
@@ -4083,6 +4084,7 @@ async def caura_insights(
         _build_method,
         _DiscoverResult,
         _persist_findings,
+        _source_rows,
         skipped_reason_of,
         synthesize_insights,
     )
@@ -4172,6 +4174,7 @@ async def caura_insights(
                 scope,
                 findings,
                 method=_build_method(focus, scope, is_clustered, synth),
+                sources=_source_rows(memories_or_clusters, is_clustered),
             )
 
         result = {

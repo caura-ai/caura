@@ -28,6 +28,7 @@ from core_api.constants import (
     INSIGHTS_TEMPERATURE,
 )
 from core_api.services.kmeans import numpy_kmeans
+from core_api.services.source_trust import SOURCE_TRUST_KEY, author_trust, row_trust
 from core_api.utils.sanitize import sanitize_content as _sanitize_content
 
 logger = logging.getLogger(__name__)
@@ -840,6 +841,36 @@ findings without a matching "repairs" value are discarded)."""
 # -- Persist -------------------------------------------------------------------
 
 
+def _source_rows(memories_or_clusters: list, is_clustered: bool) -> dict[str, dict]:
+    """The rows a run showed the model, by id: what any of its findings may draw on."""
+    rows = (
+        [row for cluster in memories_or_clusters for row in cluster.get("representatives", [])]
+        if is_clustered
+        else memories_or_clusters
+    )
+    return {str(row["id"]): row for row in rows if row.get("id")}
+
+
+def _home_for_all_scope(rows: list[dict]) -> tuple[str | None, str]:
+    """The ``(fleet_id, visibility)`` a scope='all' run's findings are saved under.
+
+    The narrowest home the rows it read allow. Drawn only from org-wide rows, it
+    stays org-wide. Drawn from one fleet's team rows (with any org-wide ones), it
+    is saved in that fleet. Anything else, rows of several fleets, a private row,
+    or no row it can place, stays with the requesting agent: no single fleet may
+    read all of it.
+    """
+    if rows and all(row.get("visibility") == "scope_org" for row in rows):
+        return None, "scope_org"
+    team = [row for row in rows if row.get("visibility") != "scope_org"]
+    fleets = {row.get("fleet_id") for row in team}
+    if team and all(row.get("visibility") == "scope_team" for row in team) and len(fleets) == 1:
+        (home,) = fleets
+        if home is not None:
+            return home, "scope_team"
+    return None, "scope_agent"
+
+
 async def _persist_findings(
     tenant_id: str,
     agent_id: str,
@@ -848,11 +879,21 @@ async def _persist_findings(
     scope: str,
     findings: list[dict],
     method: dict | None = None,
+    sources: dict[str, dict] | None = None,
 ) -> list[str | None]:
     """Create insight-type memories for each finding.
 
     Supersedes previous active insights with the same focus+agent by
     transitioning them to 'outdated', preventing duplicate pile-up on re-runs.
+
+    ``sources`` are the rows the run showed the model, by id
+    (``_source_rows``). Each finding records ``source_trust``, the lowest trust
+    among the requester and those rows. A scope='all' run saves its findings in
+    the narrowest home those rows allow (``_home_for_all_scope``) rather than
+    org-wide, so findings from one fleet's rows stay in that fleet. Every row
+    counts, not only the ones a finding cites: a finding may draw on any row
+    the model was shown, and the ids it cites are the model's own choice, which
+    the stored text can steer.
 
     Fix 2 Ph5b storage-routing note (narrow widening)
     -------------------------------------------------
@@ -877,6 +918,13 @@ async def _persist_findings(
     from core_api.services.memory_service import create_memories_bulk
 
     sc = get_storage_client()
+    sources = sources or {}
+    # Read before anything changes, so a failed lookup leaves the priors live.
+    by_author = (
+        await author_trust(tenant_id, [agent_id, *(row.get("agent_id") for row in sources.values())])
+        if findings
+        else {}
+    )
 
     # Transition prior insights for this focus/scope/fleet to "outdated" BEFORE
     # creating new ones. This prevents semantic-dedup in create_memory from
@@ -966,6 +1014,12 @@ async def _persist_findings(
     # insight whose content happens to look semantically similar to an
     # unrelated fact. Net: cheaper persist AND fewer false-positive
     # rejections.
+    trust = min([by_author.get(agent_id, 0), *(row_trust(row, by_author) for row in sources.values())])
+    home_fleet_id, visibility = (
+        _home_for_all_scope(list(sources.values()))
+        if scope == "all"
+        else (fleet_id, _SCOPE_TO_VISIBILITY.get(scope, "scope_team"))
+    )
     titles: list[str] = []
     items: list[BulkMemoryItem] = []
     for finding in findings:
@@ -1031,10 +1085,10 @@ async def _persist_findings(
 
     bulk_data = BulkMemoryCreate(
         tenant_id=tenant_id,
-        fleet_id=fleet_id,
+        fleet_id=home_fleet_id,
         agent_id=agent_id,
         items=items,
-        visibility=_SCOPE_TO_VISIBILITY.get(scope, "scope_team"),
+        visibility=visibility,
     )
     # Per-attempt id is required by the bulk contract for idempotent
     # retries; insights persist is called from one place per
@@ -1052,6 +1106,7 @@ async def _persist_findings(
             # memories; nobody stated it. Marking the batch keeps it from
             # destructively overturning a fact a user did state.
             is_inferred=True,
+            system_values=[{SOURCE_TRUST_KEY: trust}] * len(items),
         )
     except Exception:
         logger.exception("Bulk persist of insight findings failed entirely")
@@ -1454,7 +1509,14 @@ async def generate_insights(
     # storage-routed paths).
     method = _build_method(focus, scope, is_clustered, synth)
     insight_ids = await _persist_findings(
-        tenant_id, agent_id, fleet_id, focus, scope, findings, method=method
+        tenant_id,
+        agent_id,
+        fleet_id,
+        focus,
+        scope,
+        findings,
+        method=method,
+        sources=_source_rows(memories_or_clusters, is_clustered),
     )
 
     return {

@@ -52,7 +52,7 @@ def _memory_row(mid) -> dict:
 
 
 async def _stub_resolve_config(_tenant_id):
-    return SimpleNamespace()
+    return SimpleNamespace(quarantine_below_trust=lambda _fleet_id: 0)
 
 
 def _hygiene_with_one_cluster() -> tuple[dict, list[dict]]:
