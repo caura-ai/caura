@@ -6090,6 +6090,9 @@ async def search_memories(
     # SIDE-59 — always-on (non-diagnostic) channel for the resolved retrieval
     # strategy and any strategy-applied top_k cap. Pipeline path only.
     retrieval_ctx: dict | None = None,
+    # EC-05 — filled with ``{"hint": {...}}`` when the search returned nothing
+    # but a readable candidate scored below the cut-off. Pipeline path only.
+    empty_hint_ctx: dict | None = None,
 ) -> list[MemoryOut]:
     # ``allow_recall_bump`` defaults True so every existing caller — MCP
     # ``caura_recall``, the internal search paths — keeps bumping exactly as
@@ -6125,6 +6128,7 @@ async def search_memories(
             include_derived=include_derived,
             top_k_explicit=top_k_explicit,
             retrieval_ctx=retrieval_ctx,
+            empty_hint_ctx=empty_hint_ctx,
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
     # The legacy path bumps recall_count unconditionally (no caller-agent gate,
@@ -6200,6 +6204,9 @@ async def _search_memories_pipeline(
     # SIDE-59 — always-on (non-diagnostic) channel for the resolved retrieval
     # strategy and any strategy-applied top_k cap. Pipeline path only.
     retrieval_ctx: dict | None = None,
+    # EC-05 — filled with ``{"hint": {...}}`` when the search returned nothing
+    # but a readable candidate scored below the cut-off. Pipeline path only.
+    empty_hint_ctx: dict | None = None,
 ) -> list[MemoryOut]:
     """Pipeline-based search_memories -- same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.search import build_search_pipeline
@@ -6306,6 +6313,17 @@ async def _search_memories_pipeline(
     # result set is missing successors it would normally carry.
     if warnings_ctx is not None:
         warnings_ctx.extend(ctx.data.get("warnings", []) or [])
+
+    if empty_hint_ctx is not None and not ctx.data["results"]:
+        from core_api.empty_hint import build_empty_hint
+
+        hint = build_empty_hint(
+            ctx.data.get("raw_rows"),
+            min_similarity=(ctx.data.get("search_params") or {}).get("min_similarity"),
+            include_derived=ctx.data.get("include_derived", True),
+        )
+        if hint is not None:
+            empty_hint_ctx["hint"] = hint
 
     return ctx.data["results"]
 

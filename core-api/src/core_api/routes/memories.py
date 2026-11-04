@@ -70,6 +70,7 @@ from core_api.schemas import (
     BulkMemoryCreate,
     BulkMemoryItem,
     BulkMemoryResponse,
+    EmptyRecallHint,
     HeldMemoryPage,
     IngestCommitRequest,
     IngestRequest,
@@ -2961,6 +2962,8 @@ async def _search_inner(
     # does not read — the same silent-drop that hid ``limit`` on /recall is live
     # on /search, which shares this body.
     search_warnings: list = _unknown_param_warnings(body, route="memory-search")
+    # EC-05 — the closest below-cut-off memory, filled only on an empty result.
+    empty_hint_ctx: dict = {}
     try:
         config = await resolve_config(body.tenant_id)
         # Widen the read predicate when the caller authenticated with
@@ -3017,6 +3020,7 @@ async def _search_inner(
             # the FIELD name in ``model_fields_set`` for either spelling.
             top_k_explicit="top_k" in body.model_fields_set,
             retrieval_ctx=retrieval_ctx,
+            empty_hint_ctx=empty_hint_ctx,
         )
     except HTTPException:
         # Auth / tenant errors raised downstream are expected outcomes,
@@ -3080,13 +3084,17 @@ async def _search_inner(
     _set_retrieval_headers(response, retrieval_ctx)
     # A28 — null when empty (matches ``diagnostic``); purely additive.
     warn_out = [SearchWarning(**w) for w in search_warnings] or None
+    hint_out = EmptyRecallHint(**empty_hint_ctx["hint"]) if "hint" in empty_hint_ctx else None
     if not body.diagnostic:
-        return SearchResponse(items=results, recall_tracked=recall_tracked, warnings=warn_out)
+        return SearchResponse(
+            items=results, recall_tracked=recall_tracked, warnings=warn_out, empty_hint=hint_out
+        )
     counts = diagnostic_ctx.get("counts", {}) or {}
     return SearchResponse(
         items=results,
         recall_tracked=recall_tracked,
         warnings=warn_out,
+        empty_hint=hint_out,
         diagnostic=SearchDiagnostic(
             retrieval_strategy=diagnostic_ctx.get("retrieval_strategy"),
             top_k_requested=diagnostic_ctx.get("diagnostic_original_top_k"),
@@ -3412,6 +3420,8 @@ async def recall_endpoint(
     diagnostic_ctx: dict = {}
     # A28 / CAURA-723 — same collect-then-serialize shape /search uses.
     recall_warnings: list = []
+    # EC-05 — same channel /search uses; filled only on an empty recall.
+    empty_hint_ctx: dict = {}
 
     # ── Phase 1: DB-bound — config + search ──────────────────────
     config = await resolve_config(body.tenant_id)
@@ -3468,6 +3478,7 @@ async def recall_endpoint(
         include_derived=body.include_derived,
         # SIDE-57 — same body as /search, same rule: a named top_k is honoured.
         top_k_explicit="top_k" in body.model_fields_set,
+        empty_hint_ctx=empty_hint_ctx,
     )
 
     # CAURA-723 — same shape as /search, and before the LLM brief so a
@@ -3521,6 +3532,9 @@ async def recall_endpoint(
     recall_warnings.extend(_unknown_param_warnings(body, route="memory-recall"))
     if recall_warnings:
         brief["warnings"] = recall_warnings
+    # EC-05 — added only when present, for the same plain-dict reason as above.
+    if "hint" in empty_hint_ctx:
+        brief["empty_hint"] = empty_hint_ctx["hint"]
     return brief
 
 

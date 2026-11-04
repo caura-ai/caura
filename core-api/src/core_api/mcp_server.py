@@ -1656,6 +1656,8 @@ async def caura_recall(
         recall_ctx: dict = {}
         # The top_k the search resolved, and any strategy cut of it.
         retrieval_ctx: dict = {}
+        # EC-05 — the closest below-cut-off memory, filled only on an empty result.
+        empty_hint_ctx: dict = {}
         results = await search_memories(
             tenant_id=tenant_id,
             query=query,
@@ -1680,6 +1682,7 @@ async def caura_recall(
             min_similarity=min_similarity,
             recall_ctx=recall_ctx,
             retrieval_ctx=retrieval_ctx,
+            empty_hint_ctx=empty_hint_ctx,
         )
         # Cross-tenant read audit (F2): emit one event per source tenant when
         # the credential widened beyond home. Async queue — non-blocking.
@@ -1729,6 +1732,10 @@ async def caura_recall(
             or capped_top_k,
             "recall_tracked": bool(recall_ctx.get("recall_tracked")),
         }
+        # EC-05 — only on an empty result; absent otherwise, so no new bytes on
+        # the ordinary recall.
+        if "hint" in empty_hint_ctx:
+            payload["empty_hint"] = empty_hint_ctx["hint"]
         if diagnostic:
             counts = diagnostic_ctx.get("counts", {}) or {}
             payload["diagnostic"] = {

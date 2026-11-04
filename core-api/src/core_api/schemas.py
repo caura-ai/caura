@@ -987,6 +987,22 @@ class SearchWarning(BaseModel):
     details: dict = Field(default_factory=dict, description="Machine-readable context.")
 
 
+class EmptyRecallHint(BaseModel):
+    """EC-05 — the closest result of an EMPTY search, and the cut-off it missed.
+
+    Present only when a search returned no items but a memory the caller can
+    read scored below the similarity cut-off. That memory passed every other
+    filter (tenant, fleet, visibility, agent, type, status, dates) — the cut-off
+    is the only reason it was not returned.
+    """
+
+    memory_id: str = Field(description="Id of the closest candidate; read it by id to judge it.")
+    title: str = Field(description="Its title (or a content preview), one line, at most 80 characters.")
+    similarity: float = Field(description="Its cosine similarity to the query.")
+    min_similarity: float = Field(description="The similarity cut-off this search applied.")
+    message: str = Field(description="One-line human-readable summary of the above.")
+
+
 class SearchResponse(BaseModel):
     """Envelope for search results — matches PaginatedMemoryResponse shape."""
 
@@ -1019,6 +1035,15 @@ class SearchResponse(BaseModel):
     # change ``diagnostic``'s existing serialization. Additive for integrators —
     # a new nullable key alongside one they already tolerate.
     warnings: list[SearchWarning] | None = None
+    # EC-05 — ``null`` unless ``items`` is empty AND a readable memory scored
+    # below the cut-off. Same nullable-additive shape as ``warnings``.
+    empty_hint: EmptyRecallHint | None = Field(
+        default=None,
+        description=(
+            "Only when items is empty: the closest memory that scored below the "
+            "similarity cut-off, so an empty result is not mistaken for 'nothing saved'."
+        ),
+    )
 
 
 class SearchRequest(TenantScopedBody):
