@@ -68,7 +68,8 @@ unverified ─┤                                ├──► disputed
 - `unverified`: every new row. The default; nothing about it was checked.
 - `tool_observed`: the content records a tool's result the server can point
   at: a `tool_call_id`, or a real `source_uri` (not ingest's `text-input`
-  placeholder, not a benchmark scheme such as `longmemeval:`;
+  placeholder, not a benchmark scheme: `longmemeval:`, `locomo:`, `stale:`,
+  `clbench:`, `test:`, `lme:`, `bench:`, `seed:`, `benchmark:`;
   `common.models.memory.is_real_source_uri`, the `NON_EVIDENCE_SOURCE_URIS`
   rule the coverage report counts with). Set on write by EC-13, not by
   the writer.
