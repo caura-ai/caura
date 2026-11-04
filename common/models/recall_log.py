@@ -6,7 +6,9 @@ cosine + final score), including a few near-misses below the similarity floor.
 Used to answer "why aren't good memories recalled?" — see migration 027.
 
 Candidates store only ``memory_id`` (a pointer); content is JOINed from
-``memories`` on demand, never duplicated here.
+``memories`` on demand, never duplicated here. The query is stored with PII
+masked, and the daily purge (``memory_purge_soft_deleted``) deletes events
+older than the org's retention window, their candidates with them.
 """
 
 import uuid

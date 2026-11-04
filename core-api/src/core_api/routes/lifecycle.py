@@ -204,8 +204,9 @@ async def _list_tenants_for_action(action: str) -> list[str]:
     silently drop the orgs we most need to run against (e.g. an org
     that 100%-soft-deleted its memories), so purge gets its own
     helper bounded to soft-deleted rows older than the shortest window an
-    org can set (``MEMORY_RETENTION_MIN_DAYS``). Suppressed tenants are in
-    the purge list only.
+    org can set (``MEMORY_RETENTION_MIN_DAYS``), or with a recall log or spent
+    replays for the purge to sweep. Suppressed tenants are in the purge list
+    only.
 
     Each helper now reads through core-storage-api (Fix 2 Phase 1), so no
     core-api DB session is involved.

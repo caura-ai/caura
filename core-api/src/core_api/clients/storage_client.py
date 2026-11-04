@@ -3733,7 +3733,7 @@ class CoreStorageClient:
         return result.get("tenant_ids", [])
 
     async def list_purgeable_tenants(self) -> list[str]:
-        """Orgs with soft-deleted memories older than the shortest retention window."""
+        """Orgs with anything for the purge: see storage ``tenants_list_purgeable``."""
         result = await self._get("/tenants/purgeable")
         if result is None:
             raise RuntimeError("core-storage-api /tenants/purgeable returned 404")

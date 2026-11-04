@@ -39,8 +39,9 @@ async def list_active_tenants() -> TenantIdsResponse:
 
 @router.get("/purgeable")
 async def list_purgeable_tenants() -> TenantIdsResponse:
-    """Orgs with soft-deleted memories older than the shortest retention window
-    (CAURA-656 purge fanout target)."""
+    """Orgs with soft-deleted memories or recall events older than the shortest
+    retention window, or expired idempotency responses (CAURA-656 purge fanout
+    target)."""
     return TenantIdsResponse(tenant_ids=await _svc.tenants_list_purgeable())
 
 

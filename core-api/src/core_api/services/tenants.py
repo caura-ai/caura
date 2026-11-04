@@ -31,8 +31,9 @@ async def list_tenants_with_purgeable_memories(db: AsyncSession | None = None) -
 
     The cutoff is the shortest window an org can set
     (``MEMORY_RETENTION_MIN_DAYS``); the purge applies each org's own window.
-    Suppressed tenants stay listed. ``db`` is ignored (reads via
-    core-storage-api).
+    A tenant with a recall event older than that cutoff, or an expired
+    idempotency response, is listed too: the purge sweeps both. Suppressed
+    tenants stay listed. ``db`` is ignored (reads via core-storage-api).
     """
     return await get_storage_client().list_purgeable_tenants()
 
