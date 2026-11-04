@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -5,11 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.config import settings
 from core_api.constants import AGENT_NEXT_OFFSET_HEADER, MAX_AGENT_LIST_LIMIT
 from core_api.schemas import AgentFleetUpdate, AgentOut, AgentTrustUpdate, SearchProfileUpdate
+from core_api.services import stm_service
 from core_api.services.agent_service import enforce_broker_agent_ownership, lookup_agent, update_trust_level
 from core_api.services.audit_service import log_action
 from core_api.services.organization_settings import validate_knob_resets, validate_search_profile
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Admin"])
 
@@ -321,6 +326,15 @@ async def delete_agent(
     # or matched nothing left an entry saying the agent was gone (L-21).
     if not await sc.delete_agent(agent["agent_id"], tenant_id):
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    # Its short-term notes go too, or the next agent registered under this id
+    # would read them. Best effort: the agent is already deleted, so a clear that
+    # fails is logged and must not fail the request or skip its audit row. The
+    # notes then expire on their TTL.
+    if settings.use_stm:
+        try:
+            await stm_service.clear_notes(tenant_id, agent["agent_id"])
+        except Exception:
+            logger.warning("STM notes of deleted agent %s not cleared", agent["agent_id"], exc_info=True)
     await log_action(
         tenant_id=tenant_id,
         action="delete",

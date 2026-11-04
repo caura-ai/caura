@@ -32,6 +32,8 @@ from fastapi.responses import JSONResponse
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.config import settings
+from core_api.services import stm_service
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +148,14 @@ async def purge_org_data(
             continue
 
         purged[tenant_id] = counts
+        # Short-term memory lives outside the database and goes with the tenant
+        # too. Best effort, like ``_finalize``: the purge has happened, so a clear
+        # that fails is logged and the keys expire on their TTL.
+        if settings.use_stm:
+            try:
+                await stm_service.clear_tenant(tenant_id)
+            except Exception:
+                logger.warning("STM keys of purged tenant %s not cleared", tenant_id, exc_info=True)
         await _finalize(
             audit_id,
             org_id=tenant_id,
