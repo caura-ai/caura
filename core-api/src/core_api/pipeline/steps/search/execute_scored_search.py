@@ -87,6 +87,90 @@ async def _run_ann_pool_shadow(
     )
 
 
+def build_scored_search_payload(data: dict, sp: dict, top_k: int) -> dict:
+    """The ``/memories/scored-search`` body for this request's context.
+
+    A function, not inline in the step, because two consumers must send the
+    SAME filters: the search itself, and the EC-06 explain step, which asks
+    storage which of these filters removed one memory. Built twice from one
+    function, the explanation cannot drift from the search it explains.
+    """
+    embedding = data["embedding"]
+    temporal_window = data["temporal_window"]
+    boosted_memory_ids = data["boosted_memory_ids"]
+    memory_boost_factor = data["memory_boost_factor"]
+    recall_boost_enabled = data.get("recall_boost_enabled", True)
+
+    search_data: dict = {
+        "tenant_id": data["tenant_id"],
+        "query": data["query"],
+        "embedding": embedding,
+        "search_params": {k: sp[k] for k in SQL_SCORING_PARAM_KEYS if k in sp},
+        "top_k": top_k,
+        "recall_boost_enabled": recall_boost_enabled,
+    }
+
+    # Cross-tenant read widening: when the caller's AuthContext is
+    # authorised to read beyond its home tenant, pass the full set
+    # through to the storage-api so it widens the WHERE predicate.
+    # The explicit comparison (rather than ``len > 1``) matches the
+    # entity-lookup short-circuit in ``classify_query``: a
+    # single-element list naming a tenant other than ``tenant_id``
+    # must still be forwarded — ``len > 1`` silently narrowed that
+    # caller to home-tenant reads on this path only, so the same
+    # request returned different visibility depending on whether the
+    # query matched an entity token (audit S6).
+    readable = data.get("readable_tenant_ids")
+    if readable and readable != [data["tenant_id"]]:
+        search_data["readable_tenant_ids"] = readable
+
+    if temporal_window is not None:
+        search_data["temporal_window_seconds"] = int(temporal_window.total_seconds())
+
+    if boosted_memory_ids:
+        search_data["boosted_memory_ids"] = [str(mid) for mid in boosted_memory_ids]
+        search_data["memory_boost_factor"] = {str(mid): factor for mid, factor in memory_boost_factor.items()}
+
+    fleet_ids = data.get("fleet_ids")
+    if fleet_ids:
+        search_data["fleet_ids"] = fleet_ids
+        # C27 — only meaningful alongside fleet_ids; the storage predicate
+        # is built only when a fleet scope was requested.
+        if data.get("strict_fleet_scoping"):
+            search_data["strict_fleet_scoping"] = True
+    if data.get("filter_agent_id"):
+        search_data["filter_agent_id"] = data["filter_agent_id"]
+    if data.get("caller_agent_id"):
+        search_data["caller_agent_id"] = data["caller_agent_id"]
+        # The caller's HOME tenant: its own ``scope_agent`` rows live there
+        # and nowhere else (agent ids are unique per tenant only).
+        if data.get("caller_tenant_id"):
+            search_data["caller_tenant_id"] = data["caller_tenant_id"]
+    if data.get("memory_type_filter"):
+        search_data["memory_type_filter"] = data["memory_type_filter"]
+    if data.get("status_filter"):
+        search_data["status_filter"] = data["status_filter"]
+    if data.get("valid_at"):
+        search_data["valid_at"] = str(data["valid_at"])
+
+    # A63 — a history question must see superseded values: tell the
+    # storage side to skip the outdated/conflicted status demotion.
+    if data.get("history_hint"):
+        search_data["history_query"] = True
+        logger.info("execute_scored_search: history query — status demotion lifted")
+
+    date_range = data.get("date_range_filter")
+    if date_range:
+        search_data["date_range_start"] = date_range["start_date"]
+        search_data["date_range_end"] = date_range["end_date"]
+        logger.info(
+            "execute_scored_search: applying date_range %s → %s",
+            date_range["start_date"],
+            date_range["end_date"],
+        )
+    return search_data
+
+
 class ExecuteScoredSearch:
     @property
     def name(self) -> str:
@@ -106,12 +190,6 @@ class ExecuteScoredSearch:
             if unknown:
                 raise ValueError(f"Unexpected search_param_overrides keys: {unknown}")
             sp = {**sp, **plan.search_param_overrides}
-
-        embedding = data["embedding"]
-        temporal_window = data["temporal_window"]
-        boosted_memory_ids = data["boosted_memory_ids"]
-        memory_boost_factor = data["memory_boost_factor"]
-        recall_boost_enabled = data.get("recall_boost_enabled", True)
 
         # Diagnostic mode: widen the search to capture all candidates.
         diagnostic = data.get("diagnostic", False)
@@ -172,75 +250,9 @@ class ExecuteScoredSearch:
         # ``diagnostic_results``/``diagnostic_counts``, the branch above sets
         # ``final_top_k`` so results stay identical, and TrackRecalls skips
         # diagnostic calls.
-        search_data: dict = {
-            "tenant_id": data["tenant_id"],
-            "query": data["query"],
-            "embedding": embedding,
-            "search_params": {k: sp[k] for k in SQL_SCORING_PARAM_KEYS if k in sp},
-            "top_k": top_k,
-            "recall_boost_enabled": recall_boost_enabled,
-        }
-
-        # Cross-tenant read widening: when the caller's AuthContext is
-        # authorised to read beyond its home tenant, pass the full set
-        # through to the storage-api so it widens the WHERE predicate.
-        # The explicit comparison (rather than ``len > 1``) matches the
-        # entity-lookup short-circuit in ``classify_query``: a
-        # single-element list naming a tenant other than ``tenant_id``
-        # must still be forwarded — ``len > 1`` silently narrowed that
-        # caller to home-tenant reads on this path only, so the same
-        # request returned different visibility depending on whether the
-        # query matched an entity token (audit S6).
-        readable = data.get("readable_tenant_ids")
-        if readable and readable != [data["tenant_id"]]:
-            search_data["readable_tenant_ids"] = readable
-
-        if temporal_window is not None:
-            search_data["temporal_window_seconds"] = int(temporal_window.total_seconds())
-
-        if boosted_memory_ids:
-            search_data["boosted_memory_ids"] = [str(mid) for mid in boosted_memory_ids]
-            search_data["memory_boost_factor"] = {
-                str(mid): factor for mid, factor in memory_boost_factor.items()
-            }
-
-        fleet_ids = data.get("fleet_ids")
-        if fleet_ids:
-            search_data["fleet_ids"] = fleet_ids
-            # C27 — only meaningful alongside fleet_ids; the storage predicate
-            # is built only when a fleet scope was requested.
-            if data.get("strict_fleet_scoping"):
-                search_data["strict_fleet_scoping"] = True
-        if data.get("filter_agent_id"):
-            search_data["filter_agent_id"] = data["filter_agent_id"]
-        if data.get("caller_agent_id"):
-            search_data["caller_agent_id"] = data["caller_agent_id"]
-            # The caller's HOME tenant: its own ``scope_agent`` rows live there
-            # and nowhere else (agent ids are unique per tenant only).
-            if data.get("caller_tenant_id"):
-                search_data["caller_tenant_id"] = data["caller_tenant_id"]
-        if data.get("memory_type_filter"):
-            search_data["memory_type_filter"] = data["memory_type_filter"]
-        if data.get("status_filter"):
-            search_data["status_filter"] = data["status_filter"]
-        if data.get("valid_at"):
-            search_data["valid_at"] = str(data["valid_at"])
-
-        # A63 — a history question must see superseded values: tell the
-        # storage side to skip the outdated/conflicted status demotion.
-        if data.get("history_hint"):
-            search_data["history_query"] = True
-            logger.info("execute_scored_search: history query — status demotion lifted")
-
-        date_range = data.get("date_range_filter")
-        if date_range:
-            search_data["date_range_start"] = date_range["start_date"]
-            search_data["date_range_end"] = date_range["end_date"]
-            logger.info(
-                "execute_scored_search: applying date_range %s → %s",
-                date_range["start_date"],
-                date_range["end_date"],
-            )
+        search_data = build_scored_search_payload(data, sp, top_k)
+        # EC-06 — the explain step re-asks storage about this exact payload.
+        data["scored_search_payload"] = search_data
 
         # Per-tenant storage bulkhead (CAURA-602 follow-up). The pipeline
         # search path is the active path (``_USE_PIPELINE_SEARCH=True``);

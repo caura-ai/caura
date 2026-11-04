@@ -1331,6 +1331,14 @@ class CoreStorageClient:
     async def scored_search(self, data: dict) -> list[dict]:
         return await self._post("/memories/scored-search", data, read=True)  # type: ignore[return-value]
 
+    async def explain_scored_search_filters(self, data: dict) -> dict:
+        """EC-06: which ``/scored-search`` filter removes ``data["memory_id"]``.
+
+        ``data`` is a scored-search body plus ``memory_id``; storage evaluates
+        the search's own row filters against that one row.
+        """
+        return await self._post("/memories/scored-search/explain", data, read=True)  # type: ignore[return-value]
+
     async def load_memories_by_ids(self, data: dict) -> list[dict]:
         """ENTITY_LOOKUP short-circuit endpoint (CAURA-687).
 

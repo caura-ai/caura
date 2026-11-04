@@ -22,9 +22,7 @@ class PostFilterResults:
         if plan and plan.strategy == RetrievalStrategy.ENTITY_LOOKUP:
             return StepResult(outcome=StepOutcome.SKIPPED)
 
-        min_similarity = ctx.data["search_params"]["min_similarity"]
-        fts_enabled = float(ctx.data["search_params"].get("fts_weight", 0.0)) > 0.0
-        allow_fts_bypass = fts_enabled and bool(ctx.data.get("allow_fts_global_floor_bypass", False))
+        min_similarity, fts_enabled, allow_fts_bypass = relevance_floor_args(ctx.data)
         filtered = [
             row
             for row in ctx.data["raw_rows"]
@@ -133,6 +131,18 @@ class PostFilterResults:
                 ),
             }
         return None
+
+
+def relevance_floor_args(data: dict) -> tuple[float, bool, bool]:
+    """``(min_similarity, fts_enabled, allow_fts_bypass)`` as this step applies them.
+
+    Shared with EC-06's explain, which must judge a row against the floor this
+    step used, not a copy of how it was derived.
+    """
+    min_similarity = data["search_params"]["min_similarity"]
+    fts_enabled = float(data["search_params"].get("fts_weight", 0.0)) > 0.0
+    allow_fts_bypass = fts_enabled and bool(data.get("allow_fts_global_floor_bypass", False))
+    return min_similarity, fts_enabled, allow_fts_bypass
 
 
 def _f(v) -> float | None:

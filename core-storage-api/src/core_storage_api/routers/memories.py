@@ -340,6 +340,39 @@ async def scored_search(request: Request) -> list[dict]:
     return out
 
 
+@router.post("/scored-search/explain")
+async def scored_search_explain(request: Request) -> dict:
+    """Which scored-search filter removes ``memory_id`` for this request (EC-06).
+
+    Takes the ``/scored-search`` body (core-api sends the very payload it built
+    for the search) plus ``memory_id``, and answers per filter with
+    ``PostgresService.memory_explain_filters``. Only the filter arguments are
+    read: scoring knobs cannot remove a row, so ``search_params`` and the
+    embedding are not required here.
+    """
+    body: dict = await request.json()
+    memory_id = _require_uuid(body, "memory_id")
+    tenant_id = _require(body, "tenant_id")
+    valid_at = body.get("valid_at")
+    if isinstance(valid_at, str):
+        valid_at = datetime.fromisoformat(valid_at)
+    return await _svc.memory_explain_filters(
+        memory_id,
+        tenant_id,
+        body.get("query") or "",
+        fleet_ids=body.get("fleet_ids"),
+        caller_agent_id=body.get("caller_agent_id"),
+        caller_tenant_id=body.get("caller_tenant_id"),
+        filter_agent_id=body.get("filter_agent_id"),
+        memory_type_filter=body.get("memory_type_filter"),
+        status_filter=body.get("status_filter"),
+        valid_at=valid_at,
+        readable_tenant_ids=body.get("readable_tenant_ids") or None,
+        history_query=bool(body.get("history_query", False)),
+        strict_fleet_scoping=body.get("strict_fleet_scoping", False),
+    )
+
+
 @router.post("/load-by-ids")
 async def load_by_ids(request: Request) -> list[dict]:
     """Load memories by ID with visibility/fleet/agent filters applied.
