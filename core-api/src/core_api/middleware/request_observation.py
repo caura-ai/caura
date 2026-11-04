@@ -160,6 +160,8 @@ _REST_CAPABILITY: dict[tuple[str, str], tuple[str, str | None]] = {
     ("DELETE", "/memories/{memory_id}"): ("manage", "delete"),
     ("PATCH", "/memories/{memory_id}/status"): ("manage", "transition"),
     ("PATCH", "/memories/{memory_id}"): ("manage", "update"),
+    ("POST", "/memories/{memory_id}/verify"): ("manage", "verify"),
+    ("POST", "/memories/{memory_id}/unverify"): ("manage", "unverify"),
     ("POST", "/search"): ("search", None),
     ("POST", "/recall"): ("recall", None),
     # documents

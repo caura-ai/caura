@@ -651,11 +651,11 @@
   {
     "name": "caura_manage",
     "title": null,
-    "description": "Per-memory lifecycle. bulk_delete and lineage are not in the plugin; lineage returns the supersession chain. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete and bulk_delete are soft (prefer transition to outdated).",
+    "description": "Per-memory lifecycle. bulk_delete, lineage, verify and unverify are not in the plugin; lineage returns the supersession chain. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete and bulk_delete are soft (prefer transition to outdated). verify sets human_verified (trust 3), unverify clears it.",
     "inputSchema": {
       "properties": {
         "op": {
-          "description": "read|update|transition|delete|bulk_delete|lineage.",
+          "description": "read|update|transition|delete|bulk_delete|lineage|verify|unverify.",
           "title": "Op",
           "type": "string"
         },

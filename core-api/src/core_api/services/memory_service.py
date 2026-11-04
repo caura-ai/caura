@@ -3778,7 +3778,8 @@ async def fan_out_atomic_facts(
                     ),
                     "run_id": parent_run_id,
                     "source_uri": parent_source_uri,
-                    **evidence_payload(parent_evidence or {}),
+                    # The source the child carries decides its verification state.
+                    **evidence_payload({**(parent_evidence or {}), "source_uri": parent_source_uri}),
                 }
             )
         except DuplicateMemoryError:

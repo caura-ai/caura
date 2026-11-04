@@ -20,8 +20,11 @@ from collections.abc import Iterable
 # ``agent_service`` function: ``enforce_update`` (its own row, a peer's at
 # trust 3, never trust 0), ``enforce_delete`` (trust 3), and
 # ``enforce_transition`` (a status change: the first, plus the second when the
-# new status takes the row out of the live set).
-ROW_GATES = frozenset({"enforce_update", "enforce_delete", "enforce_transition"})
+# new status takes the row out of the live set), and ``enforce_verify`` (trust
+# 3 to mark a row human_verified or withdraw that; EC-14).
+ROW_GATES = frozenset(
+    {"enforce_update", "enforce_delete", "enforce_transition", "enforce_verify"}
+)
 
 # Imported service functions that apply a row gate themselves, so a handler
 # calling one is gated one layer down. The inventories do not follow imported

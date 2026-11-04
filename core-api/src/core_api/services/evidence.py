@@ -3,13 +3,17 @@
 See ``docs/plans/evidence-contract-v1.md``. ``observed_at``, ``trace_id`` and
 ``tool_call_id`` describe where a memory came from. They are the writer's, except
 ``trace_id``, which the server stamps when the writer sent none
-(``session_context.server_trace_id``). The verification columns are not here:
-they are server-owned, no write sets them, and a new row takes the column
-default (``unverified``).
+(``session_context.server_trace_id``). ``verification_status`` is server-owned
+(no write body may name it); the server derives it here from the row's own
+evidence (EC-13): ``tool_observed`` when it carries a ``tool_call_id`` or a real
+``source_uri`` (``common.models.memory.is_real_source_uri``), else
+``unverified``.
 
 One helper for every payload that inserts a memory row, so a row derived from
 another (an auto-chunk child, an atomic fact) carries its parent's provenance
-the way it already carries ``source_uri`` and ``run_id``.
+the way it already carries ``source_uri`` and ``run_id``. A derived row is
+given the source and tool call its parent was written with, so it starts in
+the state its parent started in.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from common.models.memory import DEFAULT_VERIFICATION_STATUS
+from common.models.memory import DEFAULT_VERIFICATION_STATUS, automatic_verification_status
 from core_api.schemas import MemoryOut, RecallEvidence, SearchHitOut
 
 EVIDENCE_WRITE_FIELDS = ("observed_at", "trace_id", "tool_call_id")
@@ -27,16 +31,21 @@ def evidence_payload(source: Any) -> dict[str, Any]:
     """The evidence columns of ``source`` as a storage insert payload.
 
     ``source`` is a write body (``MemoryCreate``, ``BulkMemoryItem``) or a stored
-    row as storage returns it. A ``datetime`` goes out as ISO text, as the other
-    timestamp fields of these payloads do, since the payload is sent as JSON.
+    row as storage returns it. Its ``source_uri`` is read too, for
+    ``verification_status``: the parent's, on a derived row. A ``datetime`` goes
+    out as ISO text, as the other timestamp fields of these payloads do, since
+    the payload is sent as JSON.
     """
     if isinstance(source, dict):
         values = {f: source.get(f) for f in EVIDENCE_WRITE_FIELDS}
+        source_uri = source.get("source_uri")
     else:
         values = {f: getattr(source, f, None) for f in EVIDENCE_WRITE_FIELDS}
+        source_uri = getattr(source, "source_uri", None)
     observed_at = values["observed_at"]
     if isinstance(observed_at, datetime):
         values["observed_at"] = observed_at.isoformat()
+    values["verification_status"] = automatic_verification_status(source_uri, values["tool_call_id"])
     return values
 
 

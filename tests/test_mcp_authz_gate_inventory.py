@@ -150,6 +150,8 @@ MUTATING_OPS = frozenset(
         "delete",
         "bulk_delete",
         "redistribute",
+        "verify",
+        "unverify",
     }
 )
 READING_OPS = frozenset({"read", "query", "search", "list_collections", "lineage"})
@@ -1119,6 +1121,8 @@ def test_the_op_scan_reads_both_spellings() -> None:
             "delete",
             "bulk_delete",
             "lineage",
+            "verify",
+            "unverify",
         },
         "caura_doc": {"write", "read", "query", "delete", "list_collections", "search"},
         "caura_keystones_set": {"set", "delete"},

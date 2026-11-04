@@ -126,6 +126,7 @@ from common.models.memory import (
     PENDING_WORK_SQL,
     STRANDED_EMBEDDING_SQL,
     VERIFIED_STATUSES,
+    is_real_source_uri,
 )
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.models.recall_log import RecallCandidate, RecallEvent
@@ -1119,6 +1120,139 @@ _MEMORY_IMMUTABLE_FIELDS = frozenset({"id", "tenant_id", "fleet_id", "search_vec
 # production write. Entity's is four columns and two callers, so it can be
 # enumerated exactly. Both arrive at the same guarantee.
 _MEMORY_UPDATABLE_FIELDS = _MEMORY_VALID_FIELDS - _MEMORY_IMMUTABLE_FIELDS
+
+# Evidence contract v1 (EC-13): how a row's own changes move
+# ``verification_status`` (``docs/plans/evidence-contract-v1.md``). The rules, in
+# one place for every writer that changes a status, content or source:
+#
+# * ``conflicted`` makes the row ``disputed``: the contradiction pipeline (or a
+#   transition) says another memory disagrees with it. ``verified_by`` and
+#   ``verified_at`` stay, recording who had verified it.
+# * Back to a live status (``_VERIFICATION_RESTORING_STATUSES``), a ``disputed``
+#   row gets its undisputed state back, recomputed rather than stored:
+#   ``human_verified`` when ``verified_by`` is set (only the verify operation
+#   sets it), else what its own evidence says (``tool_observed`` or
+#   ``unverified``). A row that is not ``disputed`` keeps its state.
+# * ``outdated``, ``archived`` and every other status keep the state: the status
+#   already says the row is old, and why it was believed stays true.
+# * A content change drops a person's verification (they checked other text):
+#   ``verified_by``/``verified_at`` clear and the state is recomputed from the
+#   row's evidence, ``disputed`` excepted. A ``source_uri`` or ``tool_call_id``
+#   change recomputes the same way and keeps a person's verification.
+# * A write that names ``verification_status`` is the verify operation, which
+#   knows what it wants; nothing here runs. Its undo (``verified_by`` set to
+#   NULL, no state named) gets the row's evidence state, ``disputed`` excepted,
+#   decided here in the same UPDATE so a dispute landing meanwhile is kept.
+_VERIFICATION_RESTORING_STATUSES = frozenset({"active", "pending", "confirmed"})
+_DISPUTING_STATUS = "conflicted"
+_VERIFICATION_COLUMNS = ("verification_status", "verified_by", "verified_at")
+# Sentinel: read the value from the row rather than from the write.
+_FROM_ROW: Any = object()
+
+
+def _verification_literal(value: str) -> ColumnElement[str]:
+    return literal(value, String)
+
+
+def _non_evidence_source_uri_sql(uri: Any) -> ColumnElement[bool]:
+    """``uri`` (a lowercased, trimmed ``source_uri``) is in ``NON_EVIDENCE_SOURCE_URIS``."""
+    return or_(
+        uri.in_([v for v in NON_EVIDENCE_SOURCE_URIS if not v.endswith(":")]),
+        *(uri.startswith(v) for v in NON_EVIDENCE_SOURCE_URIS if v.endswith(":")),
+    )
+
+
+def _real_source_uri_sql(source_uri: Any) -> ColumnElement[bool]:
+    """``common.models.memory.is_real_source_uri`` over a column, in SQL."""
+    uri = func.lower(func.btrim(func.coalesce(source_uri, "")))
+    return and_(uri != "", ~_non_evidence_source_uri_sql(uri))
+
+
+def automatic_verification_sql(
+    *, source_uri: Any = _FROM_ROW, tool_call_id: Any = _FROM_ROW
+) -> ColumnElement[str]:
+    """``automatic_verification_status`` for the row, in SQL.
+
+    A value passed for ``source_uri`` or ``tool_call_id`` is the one the same
+    UPDATE writes, so the state follows the new evidence, not the old.
+    """
+    has_tool = (
+        func.nullif(func.btrim(Memory.tool_call_id), "").is_not(None)
+        if tool_call_id is _FROM_ROW
+        else (true() if tool_call_id and str(tool_call_id).strip() else false())
+    )
+    has_source = (
+        _real_source_uri_sql(Memory.source_uri)
+        if source_uri is _FROM_ROW
+        else (true() if is_real_source_uri(source_uri) else false())
+    )
+    return case(
+        (or_(has_tool, has_source), _verification_literal("tool_observed")),
+        else_=_verification_literal(DEFAULT_VERIFICATION_STATUS),
+    )
+
+
+def _undisputed_verification_sql(**evidence: Any) -> ColumnElement[str]:
+    """The state a row holds when nothing disputes it: a person's, else its evidence's."""
+    return case(
+        (Memory.verified_by.is_not(None), _verification_literal("human_verified")),
+        else_=automatic_verification_sql(**evidence),
+    )
+
+
+def verification_on_status_change(status: str) -> ColumnElement[str] | None:
+    """The ``verification_status`` a move to ``status`` writes, or None to keep it."""
+    if status == _DISPUTING_STATUS:
+        return _verification_literal("disputed")
+    if status in _VERIFICATION_RESTORING_STATUSES:
+        return case(
+            (Memory.verification_status == "disputed", _undisputed_verification_sql()),
+            else_=Memory.verification_status,
+        )
+    return None
+
+
+def _verification_writes(values: Mapping[str, Any]) -> dict[str, Any]:
+    """The verification columns a by-id patch of ``values`` implies (see above)."""
+    if "verification_status" in values:
+        return {}
+    if "verified_by" in values and values["verified_by"] is None:
+        return {
+            "verification_status": case(
+                (Memory.verification_status == "disputed", _verification_literal("disputed")),
+                else_=automatic_verification_sql(),
+            )
+        }
+    if any(column in values for column in _VERIFICATION_COLUMNS):
+        return {}
+    status = values.get("status")
+    content_changed = "content" in values
+    evidence_changed = "source_uri" in values or "tool_call_id" in values
+    if not content_changed and not evidence_changed:
+        expr = verification_on_status_change(status) if status is not None else None
+        return {} if expr is None else {"verification_status": expr}
+    evidence = {
+        "source_uri": values.get("source_uri", _FROM_ROW),
+        "tool_call_id": values.get("tool_call_id", _FROM_ROW),
+    }
+    writes: dict[str, Any] = {}
+    if content_changed:
+        writes["verified_by"] = None
+        writes["verified_at"] = None
+        undisputed = automatic_verification_sql(**evidence)
+    else:
+        undisputed = _undisputed_verification_sql(**evidence)
+    if status == _DISPUTING_STATUS:
+        writes["verification_status"] = _verification_literal("disputed")
+    elif status in _VERIFICATION_RESTORING_STATUSES:
+        writes["verification_status"] = undisputed
+    else:
+        writes["verification_status"] = case(
+            (Memory.verification_status == "disputed", _verification_literal("disputed")),
+            else_=undisputed,
+        )
+    return writes
+
 
 # oss-0814-l-08 — the C25 caller/platform metadata boundary, enforced where the
 # ROW is. Mirrors ``core_api.services.system_metadata``; duplicated because this
@@ -2909,6 +3043,8 @@ class PostgresService:
         # replaying a known transition can supply the real time.
         if "status" in values and "status_changed_at" not in values:
             values["status_changed_at"] = datetime.now(UTC)
+        # EC-13: a status, content or source change moves the verification state.
+        values.update(_verification_writes(values))
         async with get_session() as session:
             # Existence check FIRST — runs even on empty / all-unknown-
             # keys patches so a PATCH on an absent or soft-deleted row
@@ -3212,6 +3348,9 @@ class PostgresService:
             "status": status,
             "status_changed_at": datetime.now(UTC),
         }
+        # EC-13: ``conflicted`` disputes the row; a live status undoes that.
+        if (verification := verification_on_status_change(status)) is not None:
+            values["verification_status"] = verification
         rejected = release_hold and status == QUARANTINE_REJECTED
         if rejected:
             values["deleted_at"] = values["status_changed_at"]
@@ -7404,10 +7543,7 @@ class PostgresService:
         trace = func.coalesce(func.btrim(Memory.trace_id), "") != ""
         tool_call = func.coalesce(func.btrim(Memory.tool_call_id), "") != ""
         uri = func.lower(func.btrim(func.coalesce(Memory.source_uri, "")))
-        placeholder_uri = or_(
-            uri.in_([v for v in NON_EVIDENCE_SOURCE_URIS if not v.endswith(":")]),
-            *(uri.startswith(v) for v in NON_EVIDENCE_SOURCE_URIS if v.endswith(":")),
-        )
+        placeholder_uri = _non_evidence_source_uri_sql(uri)
         real_uri = (uri != "") & ~placeholder_uri
         counts = [
             func.count(Memory.id).label("rows"),

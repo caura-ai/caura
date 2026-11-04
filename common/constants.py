@@ -914,4 +914,8 @@ NON_EVIDENCE_SOURCE_URIS = (
     "stale:",
     "clbench:",
     "test:",
+    "lme:",
+    "bench:",
+    "seed:",
+    "benchmark:",
 )

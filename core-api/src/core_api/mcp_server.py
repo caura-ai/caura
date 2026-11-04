@@ -90,6 +90,7 @@ from core_api.services.agent_service import (
     enforce_fleet_read_many,
     enforce_fleet_write,
     enforce_transition,
+    enforce_verify,
     enforce_visibility_write,
     lookup_agent,
     memory_reader,
@@ -150,6 +151,7 @@ from core_api.services.usage_service import (
     recall_operation,
 )
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
+from core_api.services.verification import change_verification, verifier_id
 from core_api.trust_utils import (
     effective_keystone_min_trust,
     keystone_min_trust,
@@ -771,7 +773,7 @@ async def _refuse_unowned_agent(agent_id: str) -> str | None:
     return None
 
 
-def _refuse_tenant_admin_op(action: str) -> str | None:
+def _refuse_tenant_admin_op(action: str, *, allow_member: bool = False) -> str | None:
     """Refuse a caller that is not its tenant's admin, for an op on the admin plane.
 
     The MCP twin of the REST gates on ``POST /memories/bulk-delete`` and
@@ -780,7 +782,8 @@ def _refuse_tenant_admin_op(action: str) -> str | None:
     and the enterprise gateway refuses a person stamped ``member`` by matching
     the path. Every tool call arrives as ``/mcp``, so this surface checks for
     itself. Every other caller passes. Returns an error envelope, or ``None`` to
-    proceed.
+    proceed. ``allow_member`` lets an org member through, for an op a member may
+    take on REST too (``verify``).
     """
     if _is_install_credential():
         kind = "install_credential"
@@ -796,7 +799,7 @@ def _refuse_tenant_admin_op(action: str) -> str | None:
             credential_kind=kind,
             remediation="Use a credential of this tenant alone: a tenant API key, or an admin's session.",
         )
-    if _org_role_var.get(None) == "member":
+    if _org_role_var.get(None) == "member" and not allow_member:
         return _error_response(
             AUTH_ORG_ADMIN_REQUIRED, f"Org members cannot {action}; ask an org admin.", action=action
         )
@@ -2191,8 +2194,76 @@ async def caura_write(
             )
 
 
+async def _manage_verification(
+    sc: Any,
+    tenant_id: str,
+    uid: UUID,
+    caller_agent_id: AgentIdentity | None,
+    is_install: bool,
+    install_uuid: str | None,
+    t0: float,
+    *,
+    verify: bool,
+) -> ToolReply:
+    """``caura_manage`` op=verify / op=unverify (EC-14).
+
+    The REST ``POST /memories/{id}/verify`` rule: WRITE → home tenant; an agent
+    credential needs trust >= 3 and may not verify a disputed row
+    (``enforce_verify``), then the cross-fleet write check. A credential with no
+    agent identity (tenant key, admin key, a person) is the tenant's own and
+    carries no trust level. Install and cross-tenant credentials were refused
+    by the handler before this runs. ``HTTPException`` from the gate is the
+    handler's to map, as for its other ops.
+    """
+    memory = await sc.get_memory(str(uid), tenant_id)
+    if not memory:
+        return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
+    if caller_agent_id:
+        await enforce_verify(
+            tenant_id,
+            caller_agent_id,
+            disputed=memory.get("verification_status") == "disputed",
+            verify=verify,
+        )
+    if not await authorize_memory_access(
+        tenant_id,
+        caller_agent_id,
+        visibility=memory.get("visibility"),
+        owner_agent_id=memory.get("agent_id"),
+        fleet_id=memory.get("fleet_id"),
+        write=True,
+        is_install_credential=is_install,
+        install_uuid=install_uuid,
+    ):
+        return _with_latency(
+            _error_response(
+                "PERMISSION_DENIED",
+                f"Agent cannot modify memory in fleet '{memory.get('fleet_id')}'.",
+            ),
+            t0,
+        )
+    principal = audit_principal.get() or {}
+    result = await change_verification(
+        tenant_id=tenant_id,
+        memory=memory,
+        verify=verify,
+        verified_by=verifier_id(
+            agent_id=caller_agent_id,
+            user_id=_user_id_var.get(None),
+            credential_kind=principal.get("credential_kind") or "tenant_key",
+        ),
+        audit_agent_id=caller_agent_id,
+        audit_detail={"via": "mcp", **_audit_actor()},
+    )
+    if result is None:
+        return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
+    return _with_latency(_dumps(result), t0)
+
+
 async def caura_manage(
-    op: Annotated[str, Field(description="read|update|transition|delete|bulk_delete|lineage.")],
+    op: Annotated[
+        str, Field(description="read|update|transition|delete|bulk_delete|lineage|verify|unverify.")
+    ],
     memory_id: Annotated[str, Field(description="UUID. Required except for op=bulk_delete.")] = "",
     memory_ids: Annotated[
         list[str] | None,
@@ -2207,17 +2278,21 @@ async def caura_manage(
     source_uri: Annotated[str | None, Field(description="op=update.")] = None,
     agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
 ) -> ToolReply:
-    """Per-memory lifecycle: read | update | transition | delete | bulk_delete | lineage.
+    """Per-memory lifecycle: read | update | transition | delete | bulk_delete | lineage | verify | unverify.
 
     op=lineage walks the supersession chain for `memory_id` and returns
     {this, superseded_by, supersessors} — the older row this memory
     replaced (if any) and any newer rows that supersede this one.
     Mirrors the focused agent-facing view of REST `/memories/{id}/contradictions`.
+
+    op=verify marks the memory human_verified and op=unverify withdraws that
+    (evidence contract v1, EC-14; REST `/memories/{id}/verify` and `/unverify`).
+    An agent needs trust_level >= 3, and may not verify a disputed memory.
     """
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
-    _valid_ops = {"read", "update", "transition", "delete", "bulk_delete", "lineage"}
+    _valid_ops = {"read", "update", "transition", "delete", "bulk_delete", "lineage", "verify", "unverify"}
     if op not in _valid_ops:
         return _with_latency(
             _dumps(
@@ -2233,9 +2308,15 @@ async def caura_manage(
         )
     # Mutating ops gated by the credential scope set; read/lineage stay open
     # to read-only keys.
-    if op in {"update", "transition", "delete", "bulk_delete"} and (err := _check_write_scope()):
+    if op in {"update", "transition", "delete", "bulk_delete", "verify", "unverify"} and (
+        err := _check_write_scope()
+    ):
         return err
     if op == "bulk_delete" and (refuse := _refuse_tenant_admin_op("bulk-delete memories")):
+        return _with_latency(refuse, t0)
+    if op in {"verify", "unverify"} and (
+        refuse := _refuse_tenant_admin_op(f"{op} memories", allow_member=True)
+    ):
         return _with_latency(refuse, t0)
     # bulk_delete uses memory_ids (list); all other ops use memory_id (single UUID).
     # Validate accordingly so a missing memory_id on bulk_delete doesn't fail with
@@ -2255,7 +2336,7 @@ async def caura_manage(
     # no agent context (OSS/standalone) ⇒ tenant-scoped, no agent isolation.
     caller_agent_id = _get_agent_id()
     agent_id = canonical_service_agent_id(caller_agent_id or agent_id)
-    if op in {"update", "transition", "delete", "bulk_delete"} and (
+    if op in {"update", "transition", "delete", "bulk_delete", "verify", "unverify"} and (
         refuse := _refuse_default_agent_on_gateway(agent_id) or await _refuse_unowned_agent(agent_id)
     ):
         return _with_latency(refuse, t0)
@@ -2530,6 +2611,14 @@ async def caura_manage(
                         }
                     ),
                     t0,
+                )
+            if op == "verify":
+                return await _manage_verification(
+                    sc, tenant_id, uid, caller_agent_id, is_install, install_uuid, t0, verify=True
+                )
+            if op == "unverify":
+                return await _manage_verification(
+                    sc, tenant_id, uid, caller_agent_id, is_install, install_uuid, t0, verify=False
                 )
             if op == "update":
                 # C3/C8: reject agent-supplied server-reserved types on update,

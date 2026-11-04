@@ -150,8 +150,11 @@ describe("createToolFromSpec factory", () => {
   // this plugin does not dispatch. It reaches core-api over REST and has no
   // endpoint for these, so its PARAM_SCHEMAS enum deliberately omits them.
   // Listing them keeps the divergence a recorded decision instead of a drift.
+  // ``verify``/``unverify`` (evidence contract v1, EC-14) do have REST
+  // endpoints; the plugin does not offer them yet, which caura_manage's
+  // description says.
   const MCP_ONLY_OPS: Record<string, readonly string[]> = {
-    caura_manage: ["bulk_delete", "lineage"],
+    caura_manage: ["bulk_delete", "lineage", "verify", "unverify"],
   };
 
   test("every declared op is offered, or recorded as MCP-only", () => {
