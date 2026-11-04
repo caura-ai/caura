@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.38.2](https://github.com/caura-ai/caura/compare/backend-v3.38.1...backend-v3.38.2) (2026-11-04)
+
+
+### Bug Fixes
+
+* **llm:** a text completion cut at max_tokens raises instead of returning ([#2319](https://github.com/caura-ai/caura/issues/2319)) ([936778f](https://github.com/caura-ai/caura/commit/936778f86db701d7ba3e9158b332d6abcde5176d))
+
 ## [3.38.1](https://github.com/caura-ai/caura/compare/backend-v3.38.0...backend-v3.38.1) (2026-11-04)
 
 
