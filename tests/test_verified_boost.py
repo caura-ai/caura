@@ -264,11 +264,15 @@ async def test_off_ranks_exactly_as_without_the_knob(seeded, formula):
 @pytest.mark.parametrize("formula", [0, 1], ids=["legacy", "unified"])
 async def test_on_orders_by_verification_and_scales_by_the_factor(seeded, formula):
     tenant, ids = seeded
-    off = dict(_shape(await _search(tenant, score_formula=formula)))
-    assert len({round(s, 9) for s in off.values()}) == 1, "base scores must tie"
+    # Clock pinned (see the test above): under ``now()`` the legacy formula's
+    # freshness separates rows inserted milliseconds apart, so they only tie
+    # when the inserts happen to land close together.
+    pinned = {"score_formula": formula, "freshness_reference": 1, "valid_at": _AS_OF}
+    off = dict(_shape(await _search(tenant, **pinned)))
+    assert len(set(off.values())) == 1, "base scores must tie"
     base = next(iter(off.values()))
 
-    rows = await _search(tenant, score_formula=formula, verified_boost=1)
+    rows = await _search(tenant, **pinned, verified_boost=1)
     by_id = {str(r.Memory.id): r for r in rows}
     assert [str(r.Memory.id) for r in rows] == [
         ids["human_verified"],
@@ -292,7 +296,12 @@ async def test_on_orders_by_verification_and_scales_by_the_factor(seeded, formul
 async def test_on_reads_the_tenant_factors(seeded):
     tenant, ids = seeded
     rows = await _search(
-        tenant, verified_boost=1, verified_boost_tool=1.4, verified_boost_human=1.0
+        tenant,
+        freshness_reference=1,
+        valid_at=_AS_OF,
+        verified_boost=1,
+        verified_boost_tool=1.4,
+        verified_boost_human=1.0,
     )
     assert str(rows[0].Memory.id) == ids["tool_observed"]
     assert float(rows[0].verification_boost) == pytest.approx(1.4)
