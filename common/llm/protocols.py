@@ -71,5 +71,10 @@ class LLMProvider(Protocol):
         Parameters that are not supported by a provider (e.g.,
         ``temperature``, ``max_tokens``) may be silently ignored by the
         implementation.
+
+        Raises ``ValueError`` when the backend reports the output was cut at
+        ``max_tokens`` (``raise_if_truncated``): a cut-off text is not an
+        answer, and a thinking model can spend the whole budget before it
+        writes one. Raising lets ``call_with_fallback`` try the next tier.
         """
         ...

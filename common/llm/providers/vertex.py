@@ -227,11 +227,19 @@ class VertexLLMProvider:
         logger.info("Vertex complete_text (%s) took %dms", self._model, llm_ms)
         record_genai_call(response, provider=self.provider_name, model=self._model)
         try:
-            return response.text or ""
+            text = response.text or ""
         except ValueError as exc:
             raise ValueError(
                 f"Vertex model {self._model} returned no usable content (possible safety block): {exc}"
             ) from exc
+        raise_if_truncated(
+            response,
+            provider="Vertex",
+            model=self._model,
+            max_tokens=max_tokens,
+            kind="text",
+        )
+        return text
 
     async def complete_json(
         self,
