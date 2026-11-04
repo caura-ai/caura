@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.39.2](https://github.com/caura-ai/caura/compare/backend-v3.39.1...backend-v3.39.2) (2026-11-04)
+
+
+### Bug Fixes
+
+* **lifecycle:** recall logs and spent replays age out with the purge ([#2320](https://github.com/caura-ai/caura/issues/2320)) ([cd050c0](https://github.com/caura-ai/caura/commit/cd050c04da0cc0695fe386184ac04ff11a400db5))
+
 ## [3.39.1](https://github.com/caura-ai/caura/compare/backend-v3.39.0...backend-v3.39.1) (2026-11-04)
 
 
