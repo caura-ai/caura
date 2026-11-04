@@ -2,9 +2,9 @@
 
 Status: in progress. Done: EC-04 (this spec), EC-07 (schema, migration 071),
 EC-08 (write path, server-stamped `trace_id`), EC-09 (server-owned
-verification fields). Open: the compact `evidence` object on recall (EC-10),
-`tool_observed` on write (EC-13), the verify operation, the `verified_only`
-filter.
+verification fields), EC-10/EC-12 (the `evidence` object on recall, with its
+`why`), EC-11 (the `verified_only` filter). Open: `tool_observed` on write
+(EC-13), the verify operation.
 
 ## Goal
 
@@ -52,9 +52,9 @@ from another (an auto-chunk child, an atomic fact) copies its parent's
 - MCP `caura_write`: single writes take `observed_at`, `trace_id` and
   `tool_call_id` as parameters ("single only", like `source_uri` and
   `run_id`); a batch item carries its own inside `items`.
-- Read: `MemoryOut` (write responses, list, search hits) and
-  `GET /memories/{id}` return all six. The compact recall payload is unchanged
-  until EC-10.
+- Read: `MemoryOut` (write responses, list) and `GET /memories/{id}` return
+  all six at the top level. Search and recall hits carry them inside
+  `evidence` instead (below), so a hit does not pay for them twice.
 
 ## Verification state machine
 
@@ -87,27 +87,46 @@ The refusal is the C6 one `supersedes_id` already gets (`SERVER_OWNED_MEMORY_FIE
 in `core-api/src/core_api/schemas.py`): a 422 on single write and PATCH, a
 per-item `error` on bulk.
 
-## The `evidence` object on recall (planned, EC-10)
+## The `evidence` object on recall (EC-10, EC-12)
 
-Recall returns a compact object per memory by default, about four keys, with
-full detail only on request:
+Every hit of `POST /search`, `POST /recall` and MCP `caura_recall` carries a
+compact object, four keys at most:
 
 ```json
 "evidence": {
   "source": "tool:call_abc123",
   "trace": "mcp-5f2e…",
   "verification": "tool_observed",
-  "why": "semantic 0.82, entity match"
+  "why": "vector + keyword match"
 }
 ```
 
-- `source`: `tool_call_id` or `source_uri`, prefixed by kind; null when neither.
+- `source`: `tool:<tool_call_id>` when the writer named the tool call, else
+  `source_uri` as written (a URL, `upload:<name>`); absent when neither.
+  Ingest's `text-input` placeholder is not a source.
 - `trace`: `trace_id`.
-- `verification`: `verification_status`.
-- `why`: a short reason the row was picked, from the ranking factors already
-  computed. No new LLM call.
+- `verification`: `verification_status`, always present (`unverified` is the
+  answer most rows give, and the one an agent most needs to see).
+- `why` (EC-12): at most 40 characters, built from the score factors and the
+  retrieval strategy: the signals that matched (`vector`, `keyword`, `entity`)
+  plus at most one qualifier (`reranked`, `in time range`, `recent`,
+  `often recalled`). `entity match` for the entity short-circuit,
+  `newest version of a recalled fact` for an injected successor. No LLM.
 
-The payload must not grow noticeably: keys with no value are dropped.
+Keys with no value are left off. `diagnostic=true` (the existing D12 flag)
+widens the object with `observed_at`, `run_id`, `tool_call_id`, `source_uri`,
+`verified_by`, `verified_at` and the retrieval `strategy`; `score_parts` stays
+where it already is, on the hit. The six evidence columns are not repeated at
+the top level of a hit. `tests/test_recall_evidence.py` pins the compact size.
+
+## `verified_only` (EC-11)
+
+`verified_only: true` on `/search`, `/recall` and `caura_recall` keeps rows
+whose `verification_status` is `tool_observed`, `corroborated` or
+`human_verified`. It is a storage filter beside fleet, type and status, applied
+by the scored search, the entity short-circuit and the successor lookup, so an
+unverified correction is not injected into a verified-only result. Ranking is
+unchanged; the survivors keep their order.
 
 ## Done when
 

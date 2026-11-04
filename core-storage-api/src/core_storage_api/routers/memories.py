@@ -258,6 +258,8 @@ async def scored_search(request: Request) -> list[dict]:
                 # A63 — history questions lift the status demotion so
                 # superseded values stay reachable.
                 history_query=bool(body.get("history_query", False)),
+                # Evidence contract v1 — a filter, not a ranking input.
+                verified_only=bool(body.get("verified_only", False)),
             )
         for r in results:
             # MEMORY_LIST_FIELDS, not MEMORY_FIELDS (audit oss-0814-m-39): this
@@ -370,6 +372,7 @@ async def scored_search_explain(request: Request) -> dict:
         readable_tenant_ids=body.get("readable_tenant_ids") or None,
         history_query=bool(body.get("history_query", False)),
         strict_fleet_scoping=body.get("strict_fleet_scoping", False),
+        verified_only=bool(body.get("verified_only", False)),
     )
 
 
@@ -430,6 +433,7 @@ async def load_by_ids(request: Request) -> list[dict]:
                 valid_at=valid_at,
                 readable_tenant_ids=body.get("readable_tenant_ids") or None,
                 strict_fleet_scoping=body.get("strict_fleet_scoping", False),
+                verified_only=bool(body.get("verified_only", False)),
             )
         # No vectors (L-188): ClassifyQuery builds result rows from these, and
         # a result carries no vector.
@@ -609,6 +613,7 @@ async def find_successors(request: Request) -> list[dict]:
         # Where the search read, so its stale rows' corrections are found
         # there too (L-43); absent reads the home tenant, as before.
         readable_tenant_ids=body.get("readable_tenant_ids") or None,
+        verified_only=bool(body.get("verified_only", False)),
     )
     # ``successor_of`` names the row each one replaced: its ``supersedes_id``,
     # or for a contradiction's further loser the one its record names (M-34).

@@ -26,7 +26,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from core_api.schemas import EmptyRecallHint, MemoryOut, SearchWarning
+from core_api.schemas import EmptyRecallHint, SearchHitOut, SearchWarning
 
 # --------------------------------------------------------------------------
 # memories / recall / health / version
@@ -236,7 +236,7 @@ class RecallResponse(BaseModel):
     query: str
     summary: str
     memory_count: int
-    memories: list[MemoryOut] = Field(
+    memories: list[SearchHitOut] = Field(
         description="The matched rows in rank order, as /search returns them; the summary reads them by date."
     )
     # ax-0917-h-03 — DEPRECATED, and deliberately still emitted by default here.
@@ -254,7 +254,7 @@ class RecallResponse(BaseModel):
     # ``memories`` first and only fall back (clients/python .../models.py,
     # clients/typescript/src/index.ts), and the plugin's items reader is only
     # ever fed /search.
-    items: list[MemoryOut] | None = Field(
+    items: list[SearchHitOut] | None = Field(
         default=None,
         deprecated=True,
         description=(

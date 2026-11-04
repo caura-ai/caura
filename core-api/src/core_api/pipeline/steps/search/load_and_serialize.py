@@ -16,6 +16,7 @@ from core_api.constants import CONTRADICTED_STATUSES
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
 from core_api.schemas import ScoreParts
+from core_api.services.evidence import to_search_hit
 from core_api.services.memory_service import _memory_to_out
 
 logger = logging.getLogger(__name__)
@@ -192,6 +193,10 @@ class LoadAndSerialize:
                         "caller_tenant_id": data.get("caller_tenant_id"),
                         "filter_agent_id": data.get("filter_agent_id"),
                         "memory_type_filter": data.get("memory_type_filter"),
+                        # EC-11 — the same filter the search applied: an
+                        # unverified correction is not injected into a
+                        # verified-only result set, as a wrong-type one is not.
+                        "verified_only": bool(data.get("verified_only")),
                         "valid_at": str(data["valid_at"]) if data.get("valid_at") else None,
                     }
                 )
@@ -302,30 +307,39 @@ class LoadAndSerialize:
                 _place(row)
             rows = reordered
 
+        # EC-10/EC-12 — every hit carries its ``evidence``; ``diagnostic=true``
+        # widens it to the full detail.
+        plan = ctx.data.get("retrieval_plan")
+        strategy = plan.strategy.value if plan else None
+        detail = bool(ctx.data.get("diagnostic"))
         ctx.data["results"] = [
-            _memory_to_out(
-                row.Memory,
-                entity_links=row.entity_links,
-                # Expose the raw vector cosine (``vec_sim``), NOT ``row.score`` —
-                # ``score`` is the multiplicative ranking composite (similarity *
-                # freshness * entity/recall/temporal boosts) which routinely
-                # exceeds 1.0, so it's useless for client-side threshold gating.
-                # ``vec_sim`` is the raw cosine compared by ``min_similarity`` in
-                # PostFilterResults. An actual lexical hit may relax only the
-                # untuned global fallback; configured floors stay strict. Rank
-                # order is unchanged (rows are already ordered by ``score``
-                # upstream). None for FTS-only hits, which have no vector
-                # similarity, and for rows with no embedding at all.
-                similarity=(round(float(sim), 4) if (sim := _vec_sim(row)) is not None else None),
-                # D12 — the composite that ordered this row, and its factors.
-                # The storage SQL has always computed these per row; this is the
-                # first place they survive serialization. None end-to-end for
-                # successor-injected rows, which were never scored.
-                score=(round(float(row.score), 4) if row.score is not None else None),
-                score_parts=_score_parts(row),
-                # D16 — set only by the injection block above; a successor
-                # recalled organically stays unlabelled because it IS a result.
-                injected=bool(getattr(row, "injected", False)),
+            to_search_hit(
+                _memory_to_out(
+                    row.Memory,
+                    entity_links=row.entity_links,
+                    # Expose the raw vector cosine (``vec_sim``), NOT ``row.score`` —
+                    # ``score`` is the multiplicative ranking composite (similarity *
+                    # freshness * entity/recall/temporal boosts) which routinely
+                    # exceeds 1.0, so it's useless for client-side threshold gating.
+                    # ``vec_sim`` is the raw cosine compared by ``min_similarity`` in
+                    # PostFilterResults. An actual lexical hit may relax only the
+                    # untuned global fallback; configured floors stay strict. Rank
+                    # order is unchanged (rows are already ordered by ``score``
+                    # upstream). None for FTS-only hits, which have no vector
+                    # similarity, and for rows with no embedding at all.
+                    similarity=(round(float(sim), 4) if (sim := _vec_sim(row)) is not None else None),
+                    # D12 — the composite that ordered this row, and its factors.
+                    # The storage SQL has always computed these per row; this is the
+                    # first place they survive serialization. None end-to-end for
+                    # successor-injected rows, which were never scored.
+                    score=(round(float(row.score), 4) if row.score is not None else None),
+                    score_parts=_score_parts(row),
+                    # D16 — set only by the injection block above; a successor
+                    # recalled organically stays unlabelled because it IS a result.
+                    injected=bool(getattr(row, "injected", False)),
+                ),
+                strategy=strategy,
+                detail=detail,
             )
             for row in rows
         ]

@@ -7,8 +7,9 @@ is storage's scored set before ``PostFilterResults`` applies the floor — and
 until now only ``LogRecallEvent`` looked at it, on a sampled, opt-in log.
 
 Scoping is inherited, not re-implemented: storage applies tenant, fleet,
-visibility, agent, type, status and date filters in the scored query itself,
-so every row in ``raw_rows`` is one the caller could read. The only cuts made
+visibility, agent, type, status, verification (``verified_only``) and date
+filters in the scored query itself, so every row in ``raw_rows`` is one the
+caller could read. The only cuts made
 after that are the cut-off, the derived-row exclusion and the top_k trim. When
 nothing survived, the trim cut nothing, so a candidate here failed the cut-off
 — and the derived exclusion is re-applied below, so a row the caller opted out
