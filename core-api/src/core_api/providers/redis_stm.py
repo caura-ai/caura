@@ -28,6 +28,17 @@ from core_api.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _tenant_keys(tenant_id: str) -> str:
+    """The set of a tenant's STM keys, which every write adds its key to.
+
+    A key joins tenant and scope ids with ``:`` and neither id is restricted, so
+    a ``SCAN`` pattern on ``stm:notes:{tenant_id}:*`` would also match a tenant
+    whose id starts with this one and a colon. ``clear_tenant`` deletes the keys
+    this set names instead.
+    """
+    return f"stm:keys:{tenant_id}"
+
+
 def _unexpired(raw_items: list, ttl: int) -> list[dict[str, Any]]:
     """The entries posted within ``ttl`` seconds, newest first (L-118).
 
@@ -67,6 +78,8 @@ class RedisSTM:
         self._bulletin_max = bulletin_max_entries
         self._notes_ttl = notes_ttl if notes_ttl is not None else settings.stm_notes_ttl
         self._bulletin_ttl = bulletin_ttl if bulletin_ttl is not None else settings.stm_bulletin_ttl
+        # Every write renews it, so it outlives each key it names.
+        self._tenant_keys_ttl = max(self._notes_ttl, self._bulletin_ttl)
 
     @staticmethod
     async def _redis():
@@ -102,6 +115,8 @@ class RedisSTM:
             pipe.lpush(key, json.dumps(entry, default=str))
             pipe.ltrim(key, 0, self._notes_max - 1)
             pipe.expire(key, self._notes_ttl)
+            pipe.sadd(_tenant_keys(tenant_id), key)
+            pipe.expire(_tenant_keys(tenant_id), self._tenant_keys_ttl)
             await pipe.execute()
             return True
         except Exception:
@@ -148,6 +163,8 @@ class RedisSTM:
             pipe.lpush(key, json.dumps(entry, default=str))
             pipe.ltrim(key, 0, self._bulletin_max - 1)
             pipe.expire(key, self._bulletin_ttl)
+            pipe.sadd(_tenant_keys(tenant_id), key)
+            pipe.expire(_tenant_keys(tenant_id), self._tenant_keys_ttl)
             await pipe.execute()
             return True
         except Exception:
@@ -164,4 +181,19 @@ class RedisSTM:
             return True
         except Exception:
             logger.warning("RedisSTM.clear_bulletin failed; nothing cleared", exc_info=True)
+            return False
+
+    # -- tenant ----------------------------------------------------------------
+
+    async def clear_tenant(self, tenant_id: str) -> bool:
+        r = await self._redis()
+        if r is None:
+            logger.warning("RedisSTM.clear_tenant: no Redis connection; nothing cleared")
+            return False
+        try:
+            keys = await r.smembers(_tenant_keys(tenant_id))
+            await r.delete(_tenant_keys(tenant_id), *keys)
+            return True
+        except Exception:
+            logger.warning("RedisSTM.clear_tenant failed; nothing cleared", exc_info=True)
             return False
