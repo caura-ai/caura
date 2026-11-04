@@ -74,6 +74,7 @@ from common.constants import (
     GRAPH_MAX_HOPS,
     GRAPH_MAX_RELATIONS,
     HOLD_KEY,
+    INGEST_DOCUMENTS_COLLECTION,
     LIVE_MEMORY_STATUSES,
     NODE_PRINCIPAL_TENANT,
     NON_EVIDENCE_SOURCE_URIS,
@@ -754,6 +755,34 @@ def _tenant_suppressed(tenant_id: Any) -> ColumnElement[bool]:
     return exists().where(
         _TENANT_SUPPRESSION.c.tenant_id == tenant_id,
         _TENANT_SUPPRESSION.c.suppressed_at.is_not(None),
+    )
+
+
+async def _clear_ingest_summaries(
+    session: AsyncSession, tenant_id: str, run_ids: Iterable[str | None]
+) -> None:
+    """Drop the summary from the parent records of the ingest batches named.
+
+    A batch's parent document (``INGEST_DOCUMENTS_COLLECTION``, ``doc_id`` =
+    the batch's ``run_id``) keeps a summary built from the batch's first facts,
+    and an embedding of it, and any tenant credential can read it. Once one of
+    the batch's facts is deleted the summary may quote deleted text, so it and
+    its embedding go. The rest of the record (counts, source, timestamps)
+    stays. Rows written outside an ingest carry no such record, or no
+    ``run_id``, and match nothing.
+    """
+    doc_ids = sorted({run_id for run_id in run_ids if run_id})
+    if not doc_ids:
+        return
+    # ``data`` is ``json`` (see ``Document.data``), and ``-`` exists only on ``jsonb``.
+    await session.execute(
+        text(
+            "UPDATE documents SET data = (data::jsonb - 'summary')::json, embedding = NULL, "
+            "updated_at = now() "
+            "WHERE tenant_id = :tenant_id AND collection = :collection "
+            "AND doc_id = ANY(:doc_ids) AND (data ->> 'summary') IS NOT NULL"
+        ),
+        {"tenant_id": tenant_id, "collection": INGEST_DOCUMENTS_COLLECTION, "doc_ids": doc_ids},
     )
 
 
@@ -8128,6 +8157,9 @@ class PostgresService:
         (``soft_delete_memory``, governance remediation) delete and audit each
         child themselves, governance auditing before it deletes.
 
+        The ingest batches the deleted rows came from lose their summaries in
+        the same transaction (``_clear_ingest_summaries``).
+
         A held row (``QUARANTINED_MEMORY_STATUS``) is never selected: it leaves
         quarantine only by a person's decision on it, so no delete, the
         writer's own included, takes it out of the review queue. A bulk
@@ -8147,7 +8179,7 @@ class PostgresService:
             return clauses
 
         now = datetime.now(UTC)
-        deleted = 0
+        run_ids: list[str | None] = []
         async with get_session() as session:
             if with_derived:
                 parent = aliased(Memory)
@@ -8159,14 +8191,18 @@ class PostgresService:
                     sql_update(Memory)
                     .where(*children)
                     .values(deleted_at=now, status="deleted", status_changed_at=now)
+                    .returning(Memory.run_id)
                 )
-                deleted += result.rowcount or 0  # type: ignore[attr-defined]
+                run_ids.extend(result.scalars().all())
             result = await session.execute(
                 sql_update(Memory)
                 .where(*selected(Memory))
                 .values(deleted_at=now, status="deleted", status_changed_at=now)
+                .returning(Memory.run_id)
             )
-            return deleted + (result.rowcount or 0)  # type: ignore[attr-defined]
+            run_ids.extend(result.scalars().all())
+            await _clear_ingest_summaries(session, tenant_id, run_ids)
+            return len(run_ids)
 
     async def memory_soft_delete_by_filter(
         self,
@@ -8279,7 +8315,7 @@ class PostgresService:
         async with get_session() as session:
             row = (
                 await session.execute(
-                    select(Memory.metadata_)
+                    select(Memory.metadata_, Memory.run_id)
                     .where(
                         Memory.tenant_id == tenant_id,
                         Memory.id == memory_id,
@@ -8308,6 +8344,7 @@ class PostgresService:
                     status_changed_at=now,
                 )
             )
+            await _clear_ingest_summaries(session, tenant_id, [row.run_id])
             return True
 
     async def memory_redistribute(

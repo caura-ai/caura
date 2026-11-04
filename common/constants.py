@@ -644,6 +644,14 @@ def predicate_cluster(predicate: str) -> frozenset[str]:
     return _PREDICATE_CLUSTER_BY_MEMBER.get(normalized, frozenset({normalized}))
 
 
+# ── Ingest ──
+# The ``documents`` collection that holds each ingest batch's parent record.
+# Its ``doc_id`` is the batch's ``run_id``, which the batch's memories carry too.
+# core-api writes the record; storage clears its summary when one of the
+# batch's facts is deleted.
+INGEST_DOCUMENTS_COLLECTION = "ingest-sources"
+
+
 # ── Lifecycle automation (CAURA-655) ──
 # Weight threshold for archive-stale: memories below this with zero
 # recalls are eligible for archival. Lives in common/ so the threshold
