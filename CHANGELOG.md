@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.39.3](https://github.com/caura-ai/caura/compare/backend-v3.39.2...backend-v3.39.3) (2026-11-04)
+
+
+### Bug Fixes
+
+* **stm:** short-term memory goes with its agent and its tenant ([#2325](https://github.com/caura-ai/caura/issues/2325)) ([7da7eba](https://github.com/caura-ai/caura/commit/7da7eba7afe0395fbaec0c79e5eab863ca9d61ea))
+
 ## [3.39.2](https://github.com/caura-ai/caura/compare/backend-v3.39.1...backend-v3.39.2) (2026-11-04)
 
 
