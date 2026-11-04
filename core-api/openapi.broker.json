@@ -466,6 +466,45 @@
         "title": "ContradictionInfo",
         "type": "object"
       },
+      "EmptyRecallHint": {
+        "description": "EC-05 — the closest result of an EMPTY search, and the cut-off it missed.\n\nPresent only when a search returned no items but a memory the caller can\nread scored below the similarity cut-off. That memory passed every other\nfilter (tenant, fleet, visibility, agent, type, status, dates) — the cut-off\nis the only reason it was not returned.",
+        "properties": {
+          "memory_id": {
+            "description": "Id of the closest candidate; read it by id to judge it.",
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "message": {
+            "description": "One-line human-readable summary of the above.",
+            "title": "Message",
+            "type": "string"
+          },
+          "min_similarity": {
+            "description": "The similarity cut-off this search applied.",
+            "title": "Min Similarity",
+            "type": "number"
+          },
+          "similarity": {
+            "description": "Its cosine similarity to the query.",
+            "title": "Similarity",
+            "type": "number"
+          },
+          "title": {
+            "description": "Its title (or a content preview), one line, at most 80 characters.",
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "memory_id",
+          "title",
+          "similarity",
+          "min_similarity",
+          "message"
+        ],
+        "title": "EmptyRecallHint",
+        "type": "object"
+      },
       "EntityLinkIn": {
         "additionalProperties": false,
         "properties": {
@@ -2110,6 +2149,17 @@
                 "type": "null"
               }
             ]
+          },
+          "empty_hint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EmptyRecallHint"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only when items is empty: the closest memory that scored below the similarity cut-off, so an empty result is not mistaken for 'nothing saved'."
           },
           "items": {
             "items": {

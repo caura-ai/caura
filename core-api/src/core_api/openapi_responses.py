@@ -26,7 +26,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from core_api.schemas import MemoryOut, SearchWarning
+from core_api.schemas import EmptyRecallHint, MemoryOut, SearchWarning
 
 # --------------------------------------------------------------------------
 # memories / recall / health / version
@@ -284,6 +284,14 @@ class RecallResponse(BaseModel):
             "parameters the endpoint does not read and therefore ignored, or "
             "'filter_agent_unknown' when the agent filter names an id this "
             "tenant has never seen."
+        ),
+    )
+    # EC-05 — absent unless the recall found nothing; same object /search sends.
+    empty_hint: EmptyRecallHint | None = Field(
+        default=None,
+        description=(
+            "Only when no memory was recalled: the closest memory that scored below "
+            "the similarity cut-off, so an empty recall is not mistaken for 'nothing saved'."
         ),
     )
 
