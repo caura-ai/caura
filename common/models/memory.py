@@ -18,7 +18,7 @@ from sqlalchemy.dialects.postgresql import JSON, JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from common.constants import VECTOR_DIM
+from common.constants import NON_EVIDENCE_SOURCE_URIS, VECTOR_DIM
 from common.models.base import Base
 
 #: Row-state predicate for "this live memory still has background work coming".
@@ -83,6 +83,36 @@ DEFAULT_VERIFICATION_STATUS = "unverified"
 #: The statuses ``verified_only`` recall keeps: someone or something checked the
 #: row. ``unverified`` and ``disputed`` are the two it drops.
 VERIFIED_STATUSES = ("tool_observed", "corroborated", "human_verified")
+
+
+def is_real_source_uri(source_uri: str | None) -> bool:
+    """Whether ``source_uri`` names a source a reader could follow.
+
+    Not one of ``NON_EVIDENCE_SOURCE_URIS`` (ingest's ``text-input``
+    placeholder, benchmark schemes), compared trimmed and lowercased: the rule
+    the evidence coverage report counts external evidence with.
+    """
+    uri = (source_uri or "").strip().lower()
+    if not uri:
+        return False
+    return not any(
+        uri.startswith(v) if v.endswith(":") else uri == v
+        for v in NON_EVIDENCE_SOURCE_URIS
+    )
+
+
+def automatic_verification_status(
+    source_uri: str | None, tool_call_id: str | None
+) -> str:
+    """The verification state the server derives from a row's own evidence (EC-13).
+
+    ``tool_observed`` when the row points at a tool call or a real source,
+    else ``unverified``. Never ``human_verified`` or ``disputed``: those come
+    from a person or the contradiction pipeline, not from the row.
+    """
+    if (tool_call_id and tool_call_id.strip()) or is_real_source_uri(source_uri):
+        return "tool_observed"
+    return DEFAULT_VERIFICATION_STATUS
 
 
 class Memory(Base):
@@ -389,7 +419,9 @@ Index(
     "ix_memories_session",
     Memory.tenant_id,
     Memory.metadata_["session_id"].astext,
-    postgresql_where=text("deleted_at IS NULL AND (metadata ->> 'session_id') IS NOT NULL"),
+    postgresql_where=text(
+        "deleted_at IS NULL AND (metadata ->> 'session_id') IS NOT NULL"
+    ),
 )
 
 

@@ -595,8 +595,9 @@
     "trust_required": 1
   },
   {
-    "description": "Per-memory lifecycle. bulk_delete and lineage are not in the plugin; lineage returns the supersession chain. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete and bulk_delete are soft (prefer transition to outdated).",
+    "description": "Per-memory lifecycle. bulk_delete, lineage, verify and unverify are not in the plugin; lineage returns the supersession chain. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete and bulk_delete are soft (prefer transition to outdated). verify sets human_verified (trust 3), unverify clears it.",
     "error_codes": [
+      "AGENT_CREDENTIAL_FORBIDDEN",
       "AGENT_IDENTITY_MISMATCH",
       "AGENT_NOT_REGISTERED",
       "AGENT_TRUST_TOO_LOW",
@@ -667,11 +668,27 @@
           "memory_id"
         ],
         "trust_required": 0
+      },
+      {
+        "description": "Mark a memory human_verified.",
+        "name": "verify",
+        "required_params": [
+          "memory_id"
+        ],
+        "trust_required": 3
+      },
+      {
+        "description": "Withdraw a memory's verification.",
+        "name": "unverify",
+        "required_params": [
+          "memory_id"
+        ],
+        "trust_required": 3
       }
     ],
     "params": [
       {
-        "description": "read|update|transition|delete|bulk_delete|lineage.",
+        "description": "read|update|transition|delete|bulk_delete|lineage|verify|unverify.",
         "name": "op",
         "required": true,
         "type": "str"

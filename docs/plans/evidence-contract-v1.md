@@ -3,8 +3,8 @@
 Status: in progress. Done: EC-04 (this spec), EC-07 (schema, migration 071),
 EC-08 (write path, server-stamped `trace_id`), EC-09 (server-owned
 verification fields), EC-10/EC-12 (the `evidence` object on recall, with its
-`why`), EC-11 (the `verified_only` filter). Open: `tool_observed` on write
-(EC-13), the verify operation.
+`why`), EC-11 (the `verified_only` filter), EC-13 (automatic states), EC-14
+(the verify operation).
 
 ## Goal
 
@@ -67,13 +67,60 @@ unverified ─┤                                ├──► disputed
 
 - `unverified`: every new row. The default; nothing about it was checked.
 - `tool_observed`: the content records a tool's result the server can point
-  at (`tool_call_id` or `source_uri` present). Set on write by EC-13, not by
+  at: a `tool_call_id`, or a real `source_uri` (not ingest's `text-input`
+  placeholder, not a benchmark scheme such as `longmemeval:`;
+  `common.models.memory.is_real_source_uri`, the `NON_EVIDENCE_SOURCE_URIS`
+  rule the coverage report counts with). Set on write by EC-13, not by
   the writer.
 - `human_verified`: a person, or an agent at `trust_level >= 3`, confirmed it
   through the verify operation. Audited.
-- `disputed`: someone with the same rights marked it wrong, or a later
-  contradiction did.
+- `disputed`: a later contradiction did (the row became `conflicted`). v1 has
+  no "mark it wrong" operation; a transition to `conflicted` disputes too.
 - `corroborated`: reserved for "independent sources agree". No v1 path sets it.
+
+### How the state moves (EC-13)
+
+Server-side only, and no LLM call. Storage applies the rules in the same
+UPDATE that changes the row (`postgres_service._verification_writes`,
+`verification_on_status_change`), on every status write: the single and batch
+status routes, the retraction path and a by-id PATCH.
+
+| Event | `verification_status` | `verified_by` / `verified_at` |
+|---|---|---|
+| Write (REST, bulk item, MCP, auto-chunk child, atomic fact) | `tool_observed` if the row carries a `tool_call_id` or a real `source_uri`, else `unverified`. A derived row is computed from the source and tool call it copies from its parent, so it starts where its parent started. | NULL |
+| Status becomes `conflicted` | `disputed` | kept (who had verified it) |
+| A `disputed` row becomes `active`, `pending` or `confirmed` (a retraction, a person's transition) | restored, not stored: `human_verified` if `verified_by` is set, else the row's evidence state | kept |
+| Any other status (`outdated`, `archived`, `cancelled`, ...) | kept: the status already says the row is old | kept |
+| Content edited | the evidence state (`disputed` stays `disputed`): a person checked other text | cleared |
+| `source_uri` or `tool_call_id` edited | recomputed from the new evidence, a person's verification kept (`disputed` stays) | kept |
+
+Rows written before migration 071 are not backfilled; a status change alone
+does not recompute them, except a dispute's resolution, which restores from the
+row's own fields.
+
+### The verify operation (EC-14)
+
+- REST: `POST /memories/{id}/verify` and `POST /memories/{id}/unverify`
+  (`?tenant_id=`). MCP: `caura_manage` op `verify` / `unverify` (ops on the
+  existing tool, not a new one). The plugin does not offer them yet.
+- `verify` sets `human_verified`, `verified_by` (a person's user id,
+  `agent:<id>`, or the credential kind such as `tenant_key`) and
+  `verified_at = now`. `unverify` clears `verified_by`/`verified_at` and
+  returns the row to its evidence state; a `disputed` row stays `disputed`.
+- Who: a signed-in person (admin or member), the admin key, a tenant key (the
+  OSS contract: tenant key = tenant admin), or an agent with
+  `trust_level >= 3` that may write the row (the cross-fleet / `scope_agent`
+  check transitions use). A lower-trust or unregistered agent gets 403
+  `AGENT_TRUST_TOO_LOW` / `AGENT_NOT_REGISTERED` naming the bar; an install or
+  cross-tenant credential gets 403 `CREDENTIAL_KIND_FORBIDDEN`; a read-only
+  credential is refused as on every write.
+- A `disputed` memory: only a person or an admin/tenant credential may verify
+  it. Settling a contradiction the pipeline found is a person's call, so an
+  agent gets 403 `AGENT_CREDENTIAL_FORBIDDEN` whatever its trust. `unverify`
+  stays open to a trusted agent on any row: it only lowers what readers
+  believe.
+- Every call writes an audit entry (`memory_verify` / `memory_unverify`,
+  resource the memory, detail: old and new state, actor, owner, surface).
 
 ## Who may set what
 
@@ -81,7 +128,7 @@ unverified ─┤                                ├──► disputed
 |---|---|---|
 | `observed_at`, `tool_call_id` | yes, on create | copies to derived rows |
 | `trace_id` | yes, on create | stamps when absent |
-| `verification_status`, `verified_by`, `verified_at` | never: a create, a bulk item or a PATCH naming one is refused with a message saying the server sets it | the verify operation (dashboard users, agents with `trust_level >= 3`, audited) and EC-13's `tool_observed` |
+| `verification_status`, `verified_by`, `verified_at` | never: a create, a bulk item or a PATCH naming one is refused with a message saying the server sets it | the verify operation (dashboard users, agents with `trust_level >= 3`, audited) and EC-13's automatic states |
 
 The refusal is the C6 one `supersedes_id` already gets (`SERVER_OWNED_MEMORY_FIELDS`
 in `core-api/src/core_api/schemas.py`): a 422 on single write and PATCH, a

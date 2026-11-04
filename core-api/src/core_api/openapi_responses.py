@@ -197,6 +197,16 @@ class MemoryStatusPatchResponse(BaseModel):
     new_status: str
 
 
+class MemoryVerificationResponse(BaseModel):
+    """``POST /memories/{id}/verify`` and ``/unverify`` (evidence contract v1, EC-14)."""
+
+    memory_id: str
+    old_verification_status: str
+    verification_status: str | None
+    verified_by: str | None
+    verified_at: str | None
+
+
 class RecallDiagnostic(BaseModel):
     recall_prompt: str | None
     # WT-1 — ``summary`` carries only the extracted final answer; the raw

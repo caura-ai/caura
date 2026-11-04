@@ -93,6 +93,8 @@ def test_the_writer_evidence_fields_are_accepted_and_bounded() -> None:
         "observed_at": _OBSERVED,
         "trace_id": "trace-1",
         "tool_call_id": "toolu_01",
+        # EC-13: a tool call the row points at makes it tool_observed.
+        "verification_status": "tool_observed",
     }
     with pytest.raises(ValidationError):
         MemoryCreate(tenant_id="t1", agent_id="a1", content="x", trace_id="x" * 201)
@@ -152,7 +154,8 @@ async def test_rest_write_persists_the_evidence_and_both_reads_return_it(
     assert out["trace_id"] == "client-trace-7"
     assert out["tool_call_id"] == "toolu_abc"
     assert out["observed_at"].startswith("2026-11-01T09:30:00")
-    assert out["verification_status"] == "unverified"
+    # EC-13: the server derives it from the tool call and source the row carries.
+    assert out["verification_status"] == "tool_observed"
     assert out["verified_by"] is None and out["verified_at"] is None
 
     r = await client.get(
@@ -168,7 +171,7 @@ async def test_rest_write_persists_the_evidence_and_both_reads_return_it(
     ) == (
         "client-trace-7",
         "toolu_abc",
-        "unverified",
+        "tool_observed",
     )
 
 
@@ -363,7 +366,7 @@ async def test_mcp_write_without_a_trace_id_is_stamped_with_the_mcp_session(
     assert "error" not in out, out
     assert out["trace_id"] == "mcp-ec08session"
     assert out["tool_call_id"] == "toolu_mcp"
-    assert out["verification_status"] == "unverified"
+    assert out["verification_status"] == "tool_observed"
 
     row = (
         await db.execute(
@@ -376,7 +379,7 @@ async def test_mcp_write_without_a_trace_id_is_stamped_with_the_mcp_session(
     assert (row.trace_id, row.tool_call_id, row.verification_status) == (
         "mcp-ec08session",
         "toolu_mcp",
-        "unverified",
+        "tool_observed",
     )
     assert row.observed_at.isoformat() == _OBSERVED
 

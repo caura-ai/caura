@@ -12,6 +12,7 @@ from core_api.agent_ids import AgentIdentity, canonical_service_agent_id
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_TRUST_LEVEL, MEMORY_VISIBILITY_SCOPE_ORG
 from core_api.errors import (
+    AUTH_AGENT_CREDENTIAL_FORBIDDEN,
     AUTH_AGENT_IDENTITY_MISMATCH,
     AUTH_AGENT_NOT_REGISTERED,
     AUTH_AGENT_TRUST_TOO_LOW,
@@ -918,6 +919,62 @@ async def enforce_delete(
             detail=coded_detail(
                 AUTH_AGENT_TRUST_TOO_LOW,
                 f"access policy: principals of fleet '{agent.get('fleet_id') or 'none'}' are not permitted to delete memories.",
+            ),
+        )
+
+
+#: Evidence contract v1: the trust level an agent needs to verify a memory.
+VERIFY_MIN_TRUST = 3
+
+
+async def enforce_verify(
+    tenant_id: str,
+    agent_id: AgentIdentity,
+    *,
+    disputed: bool,
+    verify: bool,
+) -> None:
+    """Gate an AGENT credential's verify or unverify of a memory (EC-14).
+
+    Verifying tells every later reader "someone checked this", so it takes the
+    bar deletes take: a registered agent at ``trust_level >= 3``. A ``disputed``
+    memory is one the contradiction pipeline found another memory disagreeing
+    with; settling that is a person's call, so no agent may verify one, whatever
+    its trust. Withdrawing a verification (``verify=False``) only lowers what a
+    reader believes and stays open to a trusted agent on any row.
+
+    Same contract as ``enforce_delete``: invoke only for a credential that
+    carries an authenticated agent identity. A tenant key, the admin key and a
+    signed-in person carry no trust level and are not gated here.
+    """
+    action = "verify" if verify else "unverify"
+    agent = await lookup_agent(tenant_id, agent_id, read=False)
+    if not agent:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_AGENT_NOT_REGISTERED,
+                f"Agent '{agent_id}' is not registered and cannot {action} memories.",
+            ),
+        )
+    trust = agent.get("trust_level", 0)
+    if trust < VERIFY_MIN_TRUST:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW,
+                f"Agent '{agent_id}' has trust level {trust}; marking a memory "
+                f"{'verified' if verify else 'unverified'} needs trust level {VERIFY_MIN_TRUST}. "
+                "Ask a tenant admin to raise it, or verify from the dashboard.",
+            ),
+        )
+    if verify and disputed:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_AGENT_CREDENTIAL_FORBIDDEN,
+                "This memory is disputed (another memory contradicts it). Only a person or an "
+                "admin credential can verify a disputed memory; an agent cannot.",
             ),
         )
 

@@ -2432,12 +2432,13 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
         from sqlalchemy import update as sql_update
 
         from common.models import Memory
-        from core_storage_api.services.postgres_service import get_session
+        from core_storage_api.services.postgres_service import get_session, verification_on_status_change
 
         try:
             expected_uuid = UUID(str(expected_supersedes_id))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="expected_supersedes_id must be a UUID") from exc
+        verification = verification_on_status_change(status)
         async with get_session() as session:
             result = await session.execute(
                 sql_update(Memory)
@@ -2465,6 +2466,10 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                     status_changed_at=case(
                         (Memory.status.is_distinct_from(status), datetime.now(UTC)),
                         else_=Memory.status_changed_at,
+                    ),
+                    # EC-13, as on every status write (``memory_update_status``).
+                    verification_status=(
+                        Memory.verification_status if verification is None else verification
                     ),
                 )
             )

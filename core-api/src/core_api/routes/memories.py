@@ -101,6 +101,7 @@ from core_api.services.agent_service import (
     enforce_fleet_read_many,
     enforce_fleet_write,
     enforce_transition,
+    enforce_verify,
     enforce_visibility_write,
     get_or_create_agent,
     lookup_agent,
@@ -149,6 +150,7 @@ from core_api.services.usage_service import (
     recall_operation,
     set_usage_headers,
 )
+from core_api.services.verification import change_verification, verifier_id
 from core_api.tasks import track_task
 
 logger = logging.getLogger(__name__)
@@ -2458,6 +2460,99 @@ async def update_memory_status(
             tracked_task(replay_released_write(str(memory_id), tenant_id), REPLAY_TASK, memory_id, tenant_id)
         )
     return {"memory_id": str(memory_id), "old_status": old_status, "new_status": status}
+
+
+async def _change_verification(memory_id: UUID, tenant_id: str, auth: AuthContext, *, verify: bool) -> dict:
+    """Shared body of ``POST /memories/{id}/verify`` and ``/unverify`` (EC-14).
+
+    Who may: a signed-in person, the admin key, a tenant key (the OSS contract:
+    tenant key = tenant admin), and an agent at ``trust_level >= 3`` that may
+    write the row (``enforce_verify``, then the cross-fleet check transitions
+    use). An install or cross-tenant credential may not: those are machine
+    credentials of a fleet, not the tenant's own. A ``disputed`` memory is
+    verified by a person or an admin credential only.
+    """
+    auth.enforce_read_only()
+    auth.enforce_tenant(tenant_id)
+    auth.enforce_tenant_admin_credential("verify memories" if verify else "unverify memories")
+    sc = get_storage_client()
+    memory = await sc.get_memory(str(memory_id), tenant_id)
+    if not memory:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    if auth.agent_id:
+        await enforce_verify(
+            tenant_id,
+            auth.agent_id,
+            disputed=memory.get("verification_status") == "disputed",
+            verify=verify,
+        )
+        allowed = await authorize_memory_access(
+            tenant_id,
+            auth.agent_id,
+            visibility=memory.get("visibility"),
+            owner_agent_id=memory.get("agent_id"),
+            fleet_id=memory.get("fleet_id"),
+            write=True,
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    AUTH_FLEET_SCOPE_FORBIDDEN,
+                    f"Agent '{auth.agent_id}' cannot modify memory in fleet '{memory.get('fleet_id')}'.",
+                ),
+            )
+    result = await change_verification(
+        tenant_id=tenant_id,
+        memory=memory,
+        verify=verify,
+        verified_by=verifier_id(
+            agent_id=auth.agent_id, user_id=auth.user_id, credential_kind=auth.actor_kind
+        ),
+        audit_agent_id=auth.agent_id,
+        audit_detail={"via": "rest", **auth.audit_actor()},
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return result
+
+
+@router.post(
+    "/memories/{memory_id}/verify",
+    responses={200: {"model": _oar.MemoryVerificationResponse}},
+)
+async def verify_memory(
+    memory_id: UUID,
+    tenant_id: str = Query(...),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Mark a memory ``human_verified`` (evidence contract v1, EC-14).
+
+    Sets ``verified_by`` to the caller (a person's user id, ``agent:<id>``, or
+    the credential kind) and ``verified_at`` to now, and writes an audit entry.
+    Open to a signed-in person, an admin or tenant key, and an agent at
+    ``trust_level >= 3``; anyone else gets 403. Only a person or an admin
+    credential may verify a ``disputed`` memory.
+    """
+    return await _change_verification(memory_id, tenant_id, auth, verify=True)
+
+
+@router.post(
+    "/memories/{memory_id}/unverify",
+    responses={200: {"model": _oar.MemoryVerificationResponse}},
+)
+async def unverify_memory(
+    memory_id: UUID,
+    tenant_id: str = Query(...),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Withdraw a memory's verification (EC-14).
+
+    Clears ``verified_by``/``verified_at``. The state returns to what the row's
+    own evidence says (``tool_observed`` or ``unverified``); a ``disputed``
+    memory stays ``disputed``. Same callers as ``/verify``, audited the same way.
+    """
+    return await _change_verification(memory_id, tenant_id, auth, verify=False)
 
 
 @router.patch("/memories/{memory_id}", response_model=MemoryOut)
