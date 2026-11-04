@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.39.0](https://github.com/caura-ai/caura/compare/backend-v3.38.2...backend-v3.39.0) (2026-11-04)
+
+
+### Features
+
+* **search:** optional ranking boost for verified memories, off by default ([#2313](https://github.com/caura-ai/caura/issues/2313)) ([2fb266f](https://github.com/caura-ai/caura/commit/2fb266f06f5c4d8fd2fca360a2c4fba83b23df4c))
+
+
+### Bug Fixes
+
+* **memory:** a deleted memory's text leaves no copies beside it ([#2318](https://github.com/caura-ai/caura/issues/2318)) ([1ad7efe](https://github.com/caura-ai/caura/commit/1ad7efe86ad2687feaa66fb14f3c1ccda3abe181))
+
 ## [3.38.2](https://github.com/caura-ai/caura/compare/backend-v3.38.1...backend-v3.38.2) (2026-11-04)
 
 
