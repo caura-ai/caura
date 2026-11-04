@@ -10,6 +10,28 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.38.0](https://github.com/caura-ai/caura/compare/backend-v3.37.15...backend-v3.38.0) (2026-11-04)
+
+
+### Features
+
+* **evidence:** clients send real evidence on writes (EC-15) ([#2311](https://github.com/caura-ai/caura/issues/2311)) ([3786c21](https://github.com/caura-ai/caura/commit/3786c21bea5ebc51373be0aa35d6cc29d0375b29))
+* **memory:** automatic verification states and the verify operation ([#2312](https://github.com/caura-ai/caura/issues/2312)) ([1aff27d](https://github.com/caura-ai/caura/commit/1aff27d3f2bb95d4de116702ada643e7f9c19fc1))
+* **memory:** evidence fields and server-stamped trace_id ([#2307](https://github.com/caura-ai/caura/issues/2307)) ([cc263af](https://github.com/caura-ai/caura/commit/cc263affb2993c30df3abe1ea61f1c3d3818db27))
+* **recall:** a deployment can give listed tenants their own recall model ([#2303](https://github.com/caura-ai/caura/issues/2303)) ([7592573](https://github.com/caura-ai/caura/commit/7592573d9d2a3aabbbb4a0c9c199c50e414c090a))
+* **recall:** evidence object, verified_only filter and why phrase on every hit ([#2310](https://github.com/caura-ai/caura/issues/2310)) ([c272e36](https://github.com/caura-ai/caura/commit/c272e368478362d9e06a580a3903e09f5883332d))
+* **recall:** explain an empty recall with the closest result ([#2305](https://github.com/caura-ai/caura/issues/2305)) ([2aee60a](https://github.com/caura-ai/caura/commit/2aee60a1782e1f5b1036b52c81361d51d099f982))
+* **reports:** evidence coverage report per tenant ([#2309](https://github.com/caura-ai/caura/issues/2309)) ([25dbaaf](https://github.com/caura-ai/caura/commit/25dbaafc58c5402c45c08474a900c6cce4c04ec2))
+* **search:** explain why a memory was not found ([#2308](https://github.com/caura-ai/caura/issues/2308)) ([fc6d9f0](https://github.com/caura-ai/caura/commit/fc6d9f06ae156cf8397e158ddc36c83fde8e03ab))
+
+
+### Bug Fixes
+
+* **contradictions:** a less-trusted writer cannot overturn a row ([#2304](https://github.com/caura-ai/caura/issues/2304)) ([1720a5e](https://github.com/caura-ai/caura/commit/1720a5ed30b70b0b0e2fe64f10abb6d3d0fab955))
+* **prompts:** frame stored text as data in the contradiction judges ([#2306](https://github.com/caura-ai/caura/issues/2306)) ([584c9f7](https://github.com/caura-ai/caura/commit/584c9f7f1c4fdaa10bf6151dd7500043672de758))
+* **recall:** restate the memory hierarchy rule after the memories ([#2301](https://github.com/caura-ai/caura/issues/2301)) ([68a5046](https://github.com/caura-ai/caura/commit/68a5046d1a060bd057310a51b3e8ade18f6f7f6e))
+* **recall:** the diagnostic names the model that wrote the brief ([#2300](https://github.com/caura-ai/caura/issues/2300)) ([c25096b](https://github.com/caura-ai/caura/commit/c25096b681685c24d2f622e1897ba41cbdae6a60))
+
 ## [3.37.15](https://github.com/caura-ai/caura/compare/backend-v3.37.14...backend-v3.37.15) (2026-11-04)
 
 
