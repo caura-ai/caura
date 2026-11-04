@@ -194,6 +194,17 @@ export interface WriteOptions {
   metadata?: Record<string, unknown>;
   /** Read it from the provider's responses; leave it out rather than estimate. */
   origin?: Origin;
+  /** Evidence: the URL, file or record the memory was read from. */
+  sourceUri?: string;
+  /** Evidence: the id of the tool call whose result the memory records (e.g. the `tool_use` id). */
+  toolCallId?: string;
+  /** Evidence: when the fact was observed, if earlier than this write. */
+  observedAt?: Date | string;
+  /**
+   * The session or trace the memory belongs to. Leave it out and the server
+   * uses the client's session (`sessionId`), else an id for the request.
+   */
+  traceId?: string;
   [extra: string]: unknown;
 }
 
@@ -277,7 +288,18 @@ export class Caura {
 
   /** Persist a memory. POST /api/v1/memories */
   async write(content: string, options: WriteOptions = {}): Promise<Memory> {
-    const { agentId, memoryType, fleetId, metadata, origin, ...extra } = options;
+    const {
+      agentId,
+      memoryType,
+      fleetId,
+      metadata,
+      origin,
+      sourceUri,
+      toolCallId,
+      observedAt,
+      traceId,
+      ...extra
+    } = options;
     const body: Record<string, unknown> = { tenant_id: this.tenantId, content };
     const resolvedAgent = agentId ?? this.agentId;
     if (resolvedAgent) body.agent_id = resolvedAgent;
@@ -291,6 +313,12 @@ export class Caura {
       if (origin.turns !== undefined) o.turns = origin.turns;
       body.origin = o;
     }
+    // Each sent only when given: tool_call_id, observed_at and trace_id need a
+    // server with the evidence fields (caura#2307), and an older one 422s on them.
+    if (sourceUri) body.source_uri = sourceUri;
+    if (toolCallId) body.tool_call_id = toolCallId;
+    if (observedAt) body.observed_at = observedAt instanceof Date ? observedAt.toISOString() : observedAt;
+    if (traceId) body.trace_id = traceId;
     Object.assign(body, extra);
     const data = await this.request("POST", "/api/v1/memories", body);
     if (!isRecord(data)) {

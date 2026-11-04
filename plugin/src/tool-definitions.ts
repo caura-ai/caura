@@ -28,6 +28,7 @@ import {
   getToolDescription,
 } from "./env.js";
 import { assertSafePathSegment } from "./validation.js";
+import { sessionHeader } from "./origin-usage.js";
 import { resolveAgentIdQuiet } from "./resolve-agent.js";
 import { getSpec } from "./tool-specs.js";
 import { fetchKeystonesPayload } from "./keystones.js";
@@ -230,6 +231,9 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
             weight: { type: "number" },
             source_uri: { type: "string" },
             run_id: { type: "string" },
+            tool_call_id: { type: "string" },
+            observed_at: { type: "string" },
+            trace_id: { type: "string" },
             metadata: { type: "object" },
             status: STATUS_SCHEMA,
           },
@@ -241,6 +245,10 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       weight: { type: "number", description: "Importance 0-1 (single-write only)" },
       source_uri: { type: "string", description: "Provenance URI (single-write only)" },
       run_id: { type: "string", description: "Run/session identifier (single-write only)" },
+      // Evidence contract v1. Omitted ``trace_id`` is the OpenClaw session.
+      tool_call_id: { type: "string", description: "Id of the tool call whose result this records (single-write only)" },
+      observed_at: { type: "string", description: "ISO time the fact was observed, if earlier (single-write only)" },
+      trace_id: { type: "string", description: "Session/trace id; default: this session (single-write only)" },
       metadata: { type: "object", description: "Additional metadata (single-write only)" },
       status: STATUS_SCHEMA,
       write_mode: { type: "string", enum: ["fast", "strong", "auto"], description: "Single-write only" },
@@ -420,9 +428,20 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
 
 // --- HTTP dispatch ---
 
+/**
+ * What OpenClaw tells a tool about the run it is called in (the
+ * ``OpenClawPluginToolContext`` a tool factory receives). Only the session is
+ * read: it is the trace a memory written by the tool belongs to.
+ */
+export interface ToolRunContext {
+  sessionKey?: string;
+  sessionId?: string;
+}
+
 type ExecuteFn = (
   params: Record<string, unknown>,
   signal?: AbortSignal,
+  run?: ToolRunContext,
 ) => Promise<unknown>;
 
 // Translate friendly MCP-tool param names to existing REST query/body fields.
@@ -480,6 +499,9 @@ const SINGLE_WRITE_ONLY_FIELDS = [
   "weight",
   "source_uri",
   "run_id",
+  "tool_call_id",
+  "observed_at",
+  "trace_id",
   "metadata",
   "status",
   "write_mode",
@@ -530,7 +552,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     return envelope;
   },
 
-  caura_write: async (params, signal) => {
+  caura_write: async (params, signal, run) => {
     const isBatch = Array.isArray(params.items);
     // Never send an empty agent_id: on the gateway path it collapses onto the
     // reserved "main" default. ``resolveIdentity`` supplies the install-scoped
@@ -548,6 +570,11 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     // visibility — the per-item spellings belong inside each item object).
     // Single: ``items``, which reaches here only when it is present but not an
     // array (``isBatch`` is false), i.e. already malformed.
+    // Evidence contract v1: the session the agent wrote from, as the header the
+    // server stamps a memory's ``trace_id`` from (the same label the
+    // auto-capture writes carry). A header, not a body field, so a server that
+    // predates the evidence fields ignores it instead of 422-ing the write.
+    const session = sessionHeader(run?.sessionKey ?? run?.sessionId);
     if (isBatch) {
       for (const k of SINGLE_WRITE_ONLY_FIELDS) delete body[k];
       // POST /memories/bulk requires a per-attempt idempotency token via
@@ -561,10 +588,11 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
       // MCP path which auto-generates `mcp:{uuid4()}`.
       return apiCall("POST", "/memories/bulk", body, undefined, signal, undefined, {
         "X-Bulk-Attempt-Id": randomUUID(),
+        ...session,
       });
     }
     delete body.items;
-    return apiCall("POST", "/memories", body, undefined, signal);
+    return apiCall("POST", "/memories", body, undefined, signal, undefined, session);
   },
 
   caura_manage: async (params, signal) => {
@@ -785,8 +813,11 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
  * Throws at construction if the tool is missing a parameters schema or
  * dispatch entry — a sanity check to catch local drift between
  * `PARAM_SCHEMAS`, `ENDPOINT_DISPATCH`, and `tools.json`.
+ *
+ * ``run`` is the OpenClaw run the tool is built for (index.ts registers a
+ * factory, so each run gets its own); without it a write carries no session.
  */
-export function createToolFromSpec(name: string): AgentTool {
+export function createToolFromSpec(name: string, run?: ToolRunContext): AgentTool {
   const spec = getSpec(name);
   const parameters = PARAM_SCHEMAS[name];
   const execute = ENDPOINT_DISPATCH[name];
@@ -805,8 +836,11 @@ export function createToolFromSpec(name: string): AgentTool {
       return getToolDescription(spec.name, fallbackDescription);
     },
     parameters,
+    // ``_toolCallId`` is THIS call's id, not the tool call a memory's content
+    // came from, so it is never sent as ``tool_call_id``: that field is the
+    // evidence a fact was observed, and the agent names it when it has one.
     async execute(_toolCallId, params, signal) {
-      const result = await execute(params, signal);
+      const result = await execute(params, signal, run);
       return textResult(JSON.stringify(result, null, 2));
     },
   };
