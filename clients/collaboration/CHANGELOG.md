@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.4.0...collaboration-clients-v0.4.1) (2026-11-04)
+
+
+### Documentation
+
+* name Connect › Keys, and say who mints agent keys (Prism v2 R9) ([#2316](https://github.com/caura-ai/caura/issues/2316)) ([70f026a](https://github.com/caura-ai/caura/commit/70f026a49e6536c30feda317abf6ec2528547b97))
+
 ## [0.4.0](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.3.5...collaboration-clients-v0.4.0) (2026-11-04)
 
 

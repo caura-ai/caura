@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.38.1](https://github.com/caura-ai/caura/compare/backend-v3.38.0...backend-v3.38.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **lifecycle:** skip suppressed tenants, purge on each org's window ([#2315](https://github.com/caura-ai/caura/issues/2315)) ([c0809b6](https://github.com/caura-ai/caura/commit/c0809b68eccaa4c6f674bfb6f648010eb68938ab))
+
+
+### Documentation
+
+* name Connect › Keys, and say who mints agent keys (Prism v2 R9) ([#2316](https://github.com/caura-ai/caura/issues/2316)) ([70f026a](https://github.com/caura-ai/caura/commit/70f026a49e6536c30feda317abf6ec2528547b97))
+
 ## [3.38.0](https://github.com/caura-ai/caura/compare/backend-v3.37.15...backend-v3.38.0) (2026-11-04)
 
 
