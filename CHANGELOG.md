@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.39.1](https://github.com/caura-ai/caura/compare/backend-v3.39.0...backend-v3.39.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **recall:** say "often recalled" only after repeated recalls ([#2323](https://github.com/caura-ai/caura/issues/2323)) ([b672ddc](https://github.com/caura-ai/caura/commit/b672ddcde9c3c2f18921641e9c794b64239eaca7))
+
 ## [3.39.0](https://github.com/caura-ai/caura/compare/backend-v3.38.2...backend-v3.39.0) (2026-11-04)
 
 
