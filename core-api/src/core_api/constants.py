@@ -884,6 +884,8 @@ MEMORY_RECALL_SUMMARY_TEMPERATURE = 0.3
 # rather than lower because RECALL_PROMPT still emits step-by-step reasoning BEFORE
 # the answer, so too tight a cap would truncate the answer itself. If that
 # chain-of-thought is later trimmed from the prompt, this can drop toward ~400.
+# A thinking model's thoughts count against this cap too, and a completion cut at
+# it raises in ``complete_text``, so recall falls back rather than serving it.
 MEMORY_RECALL_SUMMARY_MAX_TOKENS = 500
 
 # ── Insights ──

@@ -125,11 +125,12 @@ def _extract_final_answer(completion: str) -> str:
     """Return the text after the LAST answer marker, stripped.
 
     Fail open: with no marker (older prompt in flight, a model that ignored the
-    format instruction, the ``_fake_recall`` fallback, or a completion truncated
-    by ``MEMORY_RECALL_SUMMARY_MAX_TOKENS`` before the marker was emitted) the
-    full completion is returned unchanged — a verbose summary beats an empty or
-    mangled one. Ditto when the marker is the last thing in the completion and
-    nothing follows it.
+    format instruction, or the ``_fake_recall`` fallback) the full completion is
+    returned unchanged — a verbose summary beats an empty or mangled one. Ditto
+    when the marker is the last thing in the completion and nothing follows it.
+    A completion the provider reports as cut at
+    ``MEMORY_RECALL_SUMMARY_MAX_TOKENS`` never reaches here: ``complete_text``
+    raises on it, and recall falls back instead.
 
     LAST occurrence, not first: the reasoning steps may legitimately quote or
     rehearse an "Answer:" line before committing to the final one.
