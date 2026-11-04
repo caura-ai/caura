@@ -62,7 +62,7 @@ class SearchExplainResponse(BaseModel):
     removed_by: str | None = Field(
         description=(
             "The first step that removed the memory: a filter name (tenant_scope, deleted, held, "
-            "embedding_missing, fleet_scope, visibility_scope, agent_filter, memory_type_filter, "
+            "embedding_missing, fleet_scope, visibility_scope, agent_filter, memory_type_filter, verified_only, "
             "status_filter, status_superseded, temporal_valid_at), not_found, "
             "entity_lookup_short_circuit, below_min_similarity, derived_excluded or beyond_top_k. "
             "Null when returned."
