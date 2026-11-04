@@ -57,6 +57,11 @@ SOURCE_URI_PLACEHOLDER = "text-input"
 #: Upper bound on the ``why`` phrase, so it stays a label and not a sentence.
 WHY_MAX_CHARS = 40
 
+#: Earlier recalls a row needs before ``why`` calls it "often recalled". Any
+#: recall lifts ``recall_boost`` above 1.0 (one recall is ~1.009 at the default
+#: cap), so the boost alone would tag every hit of a repeated query.
+OFTEN_RECALLED_MIN_COUNT = 3
+
 # Strategies whose rows are picked by something other than the score factors.
 _ENTITY_LOOKUP = "entity_lookup"
 _RECENT_STRATEGIES = ("recent_context", "temporal")
@@ -72,11 +77,19 @@ def _source(memory: Any) -> str | None:
     return None
 
 
-def why_phrase(score_parts: Any, *, strategy: str | None = None, injected: bool = False) -> str:
+def why_phrase(
+    score_parts: Any,
+    *,
+    strategy: str | None = None,
+    injected: bool = False,
+    recall_count: int | None = None,
+) -> str:
     """Why a row was returned, in a few words, from what ranking already computed.
 
     Deterministic and cheap: the signals that matched (vector, keyword, entity)
     plus at most one qualifier that fits in ``WHY_MAX_CHARS``. No LLM.
+    "often recalled" needs the recall boost applied AND ``recall_count`` (the
+    row's count before this search) at ``OFTEN_RECALLED_MIN_COUNT`` or more.
     """
     if injected:
         return "newest version of a recalled fact"
@@ -110,7 +123,7 @@ def why_phrase(score_parts: Any, *, strategy: str | None = None, injected: bool 
     # EC-19: present only while the tenant's verified boost is on.
     if (part("verification_boost") or 1.0) > 1.0:
         qualifiers.append("verified")
-    if (part("recall_boost") or 1.0) > 1.0:
+    if (part("recall_boost") or 1.0) > 1.0 and (recall_count or 0) >= OFTEN_RECALLED_MIN_COUNT:
         qualifiers.append("often recalled")
     for q in qualifiers:
         if len(phrase) + 2 + len(q) <= WHY_MAX_CHARS:
@@ -131,7 +144,12 @@ def recall_evidence(
         source=_source(memory),
         trace=getattr(memory, "trace_id", None),
         verification=getattr(memory, "verification_status", None) or DEFAULT_VERIFICATION_STATUS,
-        why=why_phrase(score_parts, strategy=strategy, injected=injected),
+        why=why_phrase(
+            score_parts,
+            strategy=strategy,
+            injected=injected,
+            recall_count=getattr(memory, "recall_count", None),
+        ),
     )
     if detail:
         evidence.observed_at = getattr(memory, "observed_at", None)

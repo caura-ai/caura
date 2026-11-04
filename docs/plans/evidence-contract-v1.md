@@ -158,7 +158,9 @@ compact object, four keys at most:
 - `why` (EC-12): at most 40 characters, built from the score factors and the
   retrieval strategy: the signals that matched (`vector`, `keyword`, `entity`)
   plus at most one qualifier (`reranked`, `in time range`, `recent`,
-  `often recalled`). `entity match` for the entity short-circuit,
+  `often recalled`; that one only with the recall boost applied and at least
+  3 earlier recalls, since a single recall already lifts the boost above 1.0).
+  `entity match` for the entity short-circuit,
   `newest version of a recalled fact` for an injected successor. No LLM.
 
 Keys with no value are left off. `diagnostic=true` (the existing D12 flag)

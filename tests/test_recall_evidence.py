@@ -35,6 +35,7 @@ from core_api.pipeline.steps.search.retrieval_types import (
 )
 from core_api.schemas import MemoryOut, ScoreParts, SearchHitOut, SearchRequest
 from core_api.services.evidence import (
+    OFTEN_RECALLED_MIN_COUNT,
     WHY_MAX_CHARS,
     recall_evidence,
     to_search_hit,
@@ -150,12 +151,6 @@ async def _serialize(
             "vector match, in time range",
         ),
         ({"vec_sim": 0.8}, "recent_context", False, "vector match, recent"),
-        (
-            {"vec_sim": 0.8, "recall_boost": 1.1},
-            None,
-            False,
-            "vector match, often recalled",
-        ),
         (None, "entity_lookup", False, "entity match"),
         (None, "recent_context", False, "recent"),
         (None, None, False, "matched"),
@@ -165,6 +160,45 @@ async def _serialize(
 def test_why_phrase(parts, strategy, injected, expected):
     sp = ScoreParts(**parts) if parts is not None else None
     assert why_phrase(sp, strategy=strategy, injected=injected) == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("recall_count", "recall_boost", "expected"),
+    [
+        # Never recalled: no boost, no phrase.
+        (0, 1.0, "vector match"),
+        # One earlier recall: the boost is just above neutral (~1.009), and
+        # that alone used to tag every hit of a second query (EC-20).
+        (1, 1.0 + 0.1 * 1 / 11, "vector match"),
+        (OFTEN_RECALLED_MIN_COUNT - 1, 1.015, "vector match"),
+        # Several recalls with the boost applied.
+        (OFTEN_RECALLED_MIN_COUNT, 1.0 + 0.1 * 3 / 13, "vector match, often recalled"),
+        (25, 1.07, "vector match, often recalled"),
+        # Many recalls but no boost (recall_boost=false, or decayed out of the
+        # window): the count did not pick the row.
+        (25, 1.0, "vector match"),
+        # Count unknown: never claimed.
+        (None, 1.1, "vector match"),
+    ],
+)
+def test_why_says_often_recalled_only_after_repeated_recalls(
+    recall_count, recall_boost, expected
+):
+    sp = ScoreParts(vec_sim=0.8, recall_boost=recall_boost)
+    assert why_phrase(sp, recall_count=recall_count) == expected
+
+
+@pytest.mark.unit
+def test_recall_evidence_reads_recall_count_from_the_row():
+    sp = ScoreParts(vec_sim=0.8, recall_boost=1.05)
+    assert (
+        recall_evidence(_memory(recall_count=1), score_parts=sp).why == "vector match"
+    )
+    assert (
+        recall_evidence(_memory(recall_count=5), score_parts=sp).why
+        == "vector match, often recalled"
+    )
 
 
 @pytest.mark.unit
@@ -179,7 +213,7 @@ def test_why_never_exceeds_its_bound():
         rerank=0.7,
     )
     for strategy in (None, *(s.value for s in RetrievalStrategy)):
-        phrase = why_phrase(sp, strategy=strategy)
+        phrase = why_phrase(sp, strategy=strategy, recall_count=100)
         assert len(phrase) <= WHY_MAX_CHARS, phrase
 
 
