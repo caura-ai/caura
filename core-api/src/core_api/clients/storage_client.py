@@ -887,6 +887,21 @@ class CoreStorageClient:
         """
         return await self._delete(f"/memories/{memory_id}", tenant_id=tenant_id)
 
+    async def drop_memory(self, memory_id: str, tenant_id: str) -> bool:
+        """A governance drop: soft-delete one memory and clear its text.
+
+        Unlike ``soft_delete_memory``, nothing is kept for an undo window (see
+        ``PostgresService.memory_drop``). False when nothing matched: no such
+        memory, another tenant's, or held for review. ``idempotent=True``: a
+        replay finds the text already cleared and clears nothing more.
+        """
+        result = await self._post(
+            "/memories/drop",
+            {"tenant_id": tenant_id, "memory_id": memory_id},
+            idempotent=True,
+        )
+        return isinstance(result, dict) and bool(result.get("dropped"))
+
     async def set_subject_entity_if_null(
         self, memory_id: str, tenant_id: str, subject_entity_id: str, *, content: str | None = None
     ) -> bool:
@@ -1315,6 +1330,14 @@ class CoreStorageClient:
 
     async def scored_search(self, data: dict) -> list[dict]:
         return await self._post("/memories/scored-search", data, read=True)  # type: ignore[return-value]
+
+    async def explain_scored_search_filters(self, data: dict) -> dict:
+        """EC-06: which ``/scored-search`` filter removes ``data["memory_id"]``.
+
+        ``data`` is a scored-search body plus ``memory_id``; storage evaluates
+        the search's own row filters against that one row.
+        """
+        return await self._post("/memories/scored-search/explain", data, read=True)  # type: ignore[return-value]
 
     async def load_memories_by_ids(self, data: dict) -> list[dict]:
         """ENTITY_LOOKUP short-circuit endpoint (CAURA-687).
@@ -1918,6 +1941,16 @@ class CoreStorageClient:
         """One tenant's value figures."""
         result = await self._post(
             f"/value/query?tenant_id={quote(tenant_id, safe='')}", body, read=True, idempotent=True
+        )
+        return result or {}  # type: ignore[return-value]
+
+    async def evidence_coverage(self, tenant_id: str, body: dict) -> dict:
+        """One tenant's evidence coverage counts (``{"start", "end"}``)."""
+        result = await self._post(
+            f"/value/evidence-coverage?tenant_id={quote(tenant_id, safe='')}",
+            body,
+            read=True,
+            idempotent=True,
         )
         return result or {}  # type: ignore[return-value]
 
@@ -3693,14 +3726,14 @@ class CoreStorageClient:
     # than degrade to [] — a silent empty list would make the lifecycle fanout
     # publish zero messages and report success, hiding the misconfiguration.
     async def list_active_tenants(self) -> list[str]:
-        """Orgs with at least one live (non-soft-deleted) memory."""
+        """Orgs with at least one live (non-soft-deleted) memory, less suppressed ones."""
         result = await self._get("/tenants/active")
         if result is None:
             raise RuntimeError("core-storage-api /tenants/active returned 404")
         return result.get("tenant_ids", [])
 
     async def list_purgeable_tenants(self) -> list[str]:
-        """Orgs with soft-deleted memories older than the max retention window."""
+        """Orgs with soft-deleted memories older than the shortest retention window."""
         result = await self._get("/tenants/purgeable")
         if result is None:
             raise RuntimeError("core-storage-api /tenants/purgeable returned 404")

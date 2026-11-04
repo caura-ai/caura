@@ -19,13 +19,14 @@ import re
 import time
 import traceback
 import uuid as _uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Any, NamedTuple
 from uuid import UUID
 
 from common.constants import predicate_cluster
+from common.llm.untrusted import UNTRUSTED_DATA_RULE, data_block, quote_untrusted
 from common.provider_names import ProviderName
 from common.usage import scoped
 from core_api.cache import cache_delete_if, cache_set_nx
@@ -34,6 +35,7 @@ from core_api.config import settings
 from core_api.constants import CONTRADICTED_STATUSES, SINGLE_VALUE_PREDICATES
 from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
 from core_api.schemas import ContradictionInfo
+from core_api.services.source_trust import author_trust, row_trust
 from core_api.services.subject_preflight import _subjects_differ_with_certainty
 from core_api.services.task_tracker import record_task_failure
 
@@ -182,11 +184,40 @@ def _pick_older(a: dict, b: dict) -> dict:
     return a
 
 
+def _outranked(older: dict, newer: dict, by_author: dict[str, int]) -> bool:
+    """Whether ``newer``'s author is trusted less than ``older``'s.
+
+    A verdict on such a pair demotes nothing and wires no edge: a less-trusted
+    writer must not retire a more-trusted one's row, or have its own value read as
+    current. The detector records the pair as a dispute for review instead. A
+    row's trust is its author's current level, or a derived row's recorded level
+    (``row_trust``); at an equal level the newer row still supersedes.
+    """
+    return row_trust(newer, by_author) < row_trust(older, by_author)
+
+
+async def _trust_by_author(sc, tenant_id: str, new_memory: dict, rows: list[dict]) -> dict[str, int]:
+    """The current trust level of ``new_memory``'s author and of each row's."""
+    agent_ids = [new_memory.get("agent_id"), *(row.get("agent_id") for row in rows)]
+    return await author_trust(tenant_id, agent_ids, sc=sc)
+
+
+def verdict_applied(record: dict) -> bool:
+    """Whether detection applied the verdict a ``memory_conflicts`` record names.
+
+    A dispute (``effect_applied`` false) demoted nothing and wired no edge, so it
+    holds no row demoted, and a dismissal or a retraction has nothing to undo.
+    Records written before the field existed were all applied.
+    """
+    return (record.get("metadata_") or {}).get("effect_applied") is not False
+
+
 async def revert_unheld_loser(sc, tenant_id: str, loser: dict, *, ignore: Callable[[dict], bool]) -> bool:
     """Revert a verdict's ``loser`` to ``active`` when nothing else holds it (M-34).
 
     Held means a row's ``supersedes_id`` points at it, or a ``memory_conflicts``
-    record that is not dismissed says it lost to a live, newer row. ``ignore``
+    record that is not dismissed says it lost to a live, newer row. A dispute
+    (``verdict_applied``) holds nothing: it demoted nothing. ``ignore``
     sets aside the records of the verdict being undone. The loser is then read
     again, last, and reverted only if detection's status is still on it. Every
     read goes to the writer, because each decides the write after it. Returns
@@ -201,7 +232,7 @@ async def revert_unheld_loser(sc, tenant_id: str, loser: dict, *, ignore: Callab
     if await sc.find_by_supersedes_id(tenant_id, loser_id, read=False):
         return False
     for record in await sc.list_memory_conflicts(tenant_id, limit=200, memory_id=loser_id, read=False):
-        if record.get("review_status") == "dismissed" or ignore(record):
+        if record.get("review_status") == "dismissed" or not verdict_applied(record) or ignore(record):
             continue
         new_side, old_side = str(record.get("new_memory_id")), str(record.get("old_memory_id"))
         rival = await sc.get_memory(old_side if new_side == loser_id else new_side, tenant_id, read=False)
@@ -325,27 +356,35 @@ async def _record_conflicts(
     *,
     tenant_id: str,
     tenant_config,
+    disputed: Sequence[tuple[dict, str, float | None]] = (),
+    by_author: dict[str, int] | None = None,
 ) -> None:
     """Write the ``memory_conflicts`` records a detection loop owes, after its flush.
 
     A55 1d records every confirmed pair when ``contradiction_write_conflict_record``
     is on (off by default). An unlinked loser (M-34) is recorded whatever the flag:
     its record is all that still names the memory that replaced it. ``unlinked`` is
-    drawn from ``pairs``, so no pair is written twice.
+    drawn from ``pairs``, so no pair is written twice. A dispute (``_outranked``) is
+    recorded whatever the flag too: nothing else shows it, and the review queue is
+    where it is settled. ``by_author`` puts both authors' trust on each record.
     """
     to_record = pairs if settings.contradiction_write_conflict_record else unlinked
-    if not to_record:
+    if not to_record and not disputed:
         return
     # Not a top-level import: the resolver's relationship module imports this one.
     from core_api.services.contradiction.resolver import record_detected_conflicts
 
-    await record_detected_conflicts(
-        new_memory,
-        to_record,
-        tenant_id=tenant_id,
-        fleet_id=new_memory.get("fleet_id"),
-        tenant_config=tenant_config,
-    )
+    for recorded, outranked in ((to_record, False), (disputed, True)):
+        if recorded:
+            await record_detected_conflicts(
+                new_memory,
+                list(recorded),
+                tenant_id=tenant_id,
+                fleet_id=new_memory.get("fleet_id"),
+                tenant_config=tenant_config,
+                by_author=by_author,
+                outranked=outranked,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +509,11 @@ class _RdfPassResult(NamedTuple):
     ran: bool
     # M-34 — the record_pairs whose loser no edge from this pass points at.
     unlinked_pairs: list[tuple[dict, str, float | None]]
+    # The confirmed pairs left as they were: the newer row's author is trusted
+    # less (``_outranked``). Recorded as disputes rather than applied.
+    disputed_pairs: tuple[tuple[dict, str, float | None], ...] = ()
+    # The authors' trust levels the pass read, for the records.
+    by_author: dict[str, int] | None = None
 
 
 async def _rdf_conflict_pass(
@@ -491,6 +535,8 @@ async def _rdf_conflict_pass(
     contradictions: list[ContradictionInfo] = []
     _record_pairs: list[tuple[dict, str, float | None]] = []
     unlinked: list[tuple[dict, str, float | None]] = []
+    disputed: list[tuple[dict, str, float | None]] = []
+    by_author: dict[str, int] = {}
     ran = bool(
         subject_entity_id and predicate and object_value and predicate.lower() in SINGLE_VALUE_PREDICATES
     )
@@ -523,6 +569,9 @@ async def _rdf_conflict_pass(
             visibility=new_memory.get("visibility", "scope_team"),
             agent_id=new_memory.get("agent_id"),
         )
+        # Each author's trust, for the gate below: one read per author.
+        if rdf_conflicts:
+            by_author = await _trust_by_author(sc, tenant_id, new_memory, rdf_conflicts)
         # CAURA-125 — state-corruption guard. When ``rdf_conflicts``
         # mixes older and newer candidates relative to ``new_memory``,
         # an earlier flipped iteration already marked ``new_memory``
@@ -547,6 +596,12 @@ async def _rdf_conflict_pass(
             older = _pick_older(old, new_memory)
             older_is_new = str(older.get("id")) == str(memory_id)
             newer = new_memory if not older_is_new else old
+            if _outranked(older, newer, by_author):
+                disputed.append((old, "rdf", None))
+                logger.info(
+                    "RDF contradiction disputed: %s may not outdate %s", newer.get("id"), older.get("id")
+                )
+                continue
             older_id = older.get("id")
             newer_id = newer.get("id")
 
@@ -674,7 +729,9 @@ async def _rdf_conflict_pass(
             _log_batch_status_result(rdf_result, path="RDF path", memory_id=memory_id)
         unlinked = _unlinked_pairs(new_memory, _record_pairs, rdf_updates, rdf_result)
 
-    return _RdfPassResult(contradictions, _record_pairs, supersedes_id, ran, unlinked)
+    return _RdfPassResult(
+        contradictions, _record_pairs, supersedes_id, ran, unlinked, tuple(disputed), by_author
+    )
 
 
 #: oss-0927-m-03 — one name for both paths, so "this memory was never checked
@@ -1063,9 +1120,12 @@ async def _detect(
     _record_pairs.extend(_rdf.record_pairs)
     _unlinked.extend(_rdf.unlinked_pairs)
     supersedes_id = _rdf.supersedes_id
+    _disputed = list(_rdf.disputed_pairs)
+    by_author = _rdf.by_author
 
     # --- Path 2: Semantic contradiction (vector similarity + batch LLM check) ---
-    if not contradictions:
+    # A pair the RDF pass disputed is settled as surely as one it applied.
+    if not contradictions and not _disputed:
         candidates = await sc.find_similar_candidates(
             {
                 "memory_id": str(memory_id),
@@ -1126,6 +1186,9 @@ async def _detect(
                 raws = await _llm_contradiction_check_batch(content, candidates, tenant_config)
                 judged = [(*_judge_contradiction(raw), raw) for raw in raws]
 
+            # Each confirmed pair's authors' trust, for the gate below.
+            confirmed = [c for c, (verdict, _c, _r) in zip(candidates, judged) if verdict]
+            by_author = await _trust_by_author(sc, tenant_id, new_memory, confirmed) if confirmed else {}
             # CAURA-125 — state-corruption guard, same rationale as the
             # RDF path above.
             new_memory_is_outdated = False
@@ -1162,6 +1225,14 @@ async def _detect(
                     older = _pick_older(candidate, new_memory)
                     older_is_new = str(older.get("id")) == str(memory_id)
                     newer = new_memory if not older_is_new else candidate
+                    if _outranked(older, newer, by_author):
+                        _disputed.append((candidate, "semantic", _confidence))
+                        logger.info(
+                            "Semantic contradiction disputed: %s may not conflict %s",
+                            newer.get("id"),
+                            older.get("id"),
+                        )
+                        continue
                     older_id = older.get("id")
                     newer_id = newer.get("id")
 
@@ -1242,22 +1313,35 @@ async def _detect(
     # A55 1d / M-34 — the memory_conflicts records; see ``_record_conflicts``.
     # Never touches the status/supersedes effect above.
     await _record_conflicts(
-        new_memory, _record_pairs, _unlinked, tenant_id=tenant_id, tenant_config=tenant_config
+        new_memory,
+        _record_pairs,
+        _unlinked,
+        tenant_id=tenant_id,
+        tenant_config=tenant_config,
+        disputed=_disputed,
+        by_author=by_author,
     )
 
     return contradictions
 
 
-CONTRADICTION_PROMPT = """\
+CONTRADICTION_PROMPT = (
+    """\
 You are a contradiction detector for a business memory system.
 
 Two statements contradict ONLY IF they make incompatible claims about the
 SAME real-world subject. Different subjects -> NOT a contradiction, even if
 the predicates look opposite or the statements look semantically similar.
 
-Statement A (NEW): {new_content}
+"""
+    + UNTRUSTED_DATA_RULE
+    + """
 
-Statement B (EXISTING): {old_content}
+Statement A (NEW):
+{new_content}
+
+Statement B (EXISTING):
+{old_content}
 
 Follow these steps in order:
 
@@ -1358,6 +1442,18 @@ Reply with ONLY a JSON object, no prose, no markdown fences:
   "contradicts": true/false,
   "reason": "one short phrase referencing the subjects and the conflict (or its absence)"}}
 """
+)
+
+
+def render_contradiction_prompt(new_content: str, old_content: str) -> str:
+    """``CONTRADICTION_PROMPT`` for one pair, each statement in a data block.
+
+    The one way to fill it: the judge and the relationship and diagnosis
+    classifiers all go through here, so none pastes a memory's text in raw.
+    """
+    return CONTRADICTION_PROMPT.format(
+        new_content=data_block(new_content[:500]), old_content=data_block(old_content[:500])
+    )
 
 
 # CAURA-129 — entity-aware retraction prompt. Path C's retraction judge
@@ -1373,7 +1469,8 @@ Reply with ONLY a JSON object, no prose, no markdown fences:
 # so ``_judge_contradiction`` parses both unchanged. The new placeholders
 # are ``{new_entities}`` and ``{old_entities}`` — rendered by
 # ``_format_entity_context``.
-ENTITY_AWARE_CONTRADICTION_PROMPT = """\
+ENTITY_AWARE_CONTRADICTION_PROMPT = (
+    """\
 You are a contradiction detector for a business memory system, running
 the second-pass judgement after entity resolution has already linked
 both statements to their canonical entities.
@@ -1403,11 +1500,17 @@ statements' CLAIMS about those entities are mutually exclusive.
     similarity. (Set non_conflict_reason="same_name_distinct_subject"
     when the canonical names happen to match.)
 
-Statement A (NEW): {new_content}
+"""
+    + UNTRUSTED_DATA_RULE
+    + """
+
+Statement A (NEW):
+{new_content}
 RESOLVED ENTITIES for Statement A:
 {new_entities}
 
-Statement B (EXISTING): {old_content}
+Statement B (EXISTING):
+{old_content}
 RESOLVED ENTITIES for Statement B:
 {old_entities}
 
@@ -1486,6 +1589,7 @@ Reply with ONLY a JSON object, no prose, no markdown fences:
   "contradicts": true/false,
   "reason": "one short phrase referencing the resolved subjects and the conflict (or its absence)"}}
 """
+)
 
 
 # CAURA-124 — within-subject false-positive shapes that hard-gate
@@ -1706,7 +1810,7 @@ async def _llm_contradiction_check(
     """
     provider_name = _judge_provider(tenant_config)
 
-    prompt = CONTRADICTION_PROMPT.format(new_content=new_content[:500], old_content=old_content[:500])
+    prompt = render_contradiction_prompt(new_content, old_content)
 
     async def _do_check(llm) -> tuple[bool, float]:
         raw = await llm.complete_json(prompt, **_judge_effort_kwargs())
@@ -1740,7 +1844,8 @@ async def _llm_contradiction_check(
 # (``relationship``/``diagnosis``) were emitted "for A55 reuse" but never
 # consumed — ``record_detected_conflicts`` receives only (candidate, path,
 # confidence) and the A55 engine derives its own classification.
-BATCH_CONTRADICTION_PROMPT = """\
+BATCH_CONTRADICTION_PROMPT = (
+    """\
 You are a contradiction detector for a business memory system.
 
 A NEW statement is compared against several EXISTING candidate statements.
@@ -1750,6 +1855,11 @@ verdict must NOT influence another's.
 Two statements contradict ONLY IF they make incompatible claims about the SAME
 real-world subject. Different subjects -> NOT a contradiction, even if the
 predicates look opposite.
+
+"""
+    + UNTRUSTED_DATA_RULE
+    + " Each candidate's text is a JSON string literal."
+    + """
 
 NEW statement:
 {new_content}
@@ -1794,6 +1904,7 @@ non_conflict_reason put it in "clean". Never add a hit because a batch "should"
 contain one. If NO candidate contradicts, "hits" is {{}} and "clean" lists every
 index.
 """
+)
 
 
 def _expand_sparse_batch(obj: object, n: int) -> list[dict]:
@@ -1852,9 +1963,11 @@ async def _llm_contradiction_check_batch(
     so the safety gates are identical to the per-candidate path. E4: the reply
     is sparse — see ``_expand_sparse_batch``."""
     provider_name = _judge_provider(tenant_config)
-    candidates_block = "\n".join(f"[{i}] {c.get('content', '')[:500]}" for i, c in enumerate(candidates))
+    candidates_block = data_block(
+        "\n".join(f"[{i}] {quote_untrusted(c.get('content', '')[:500])}" for i, c in enumerate(candidates))
+    )
     prompt = BATCH_CONTRADICTION_PROMPT.format(
-        new_content=new_content[:500], candidates_block=candidates_block
+        new_content=data_block(new_content[:500]), candidates_block=candidates_block
     )
 
     async def _do_check(llm) -> list[dict]:
@@ -2131,7 +2244,8 @@ def _format_entity_context(entities: list[dict]) -> str:
         #       for their first missing row — string-equality alone
         #       can't tell them apart.
         entity_id = e.get("entity_id") or f"{_NONE_ID_PREFIX}-{i}>"
-        lines.append(f'- "{name}" (type: {etype}, role: {role}, entity_id: {entity_id})')
+        # The name is quoted: a name holding a quote or a line break stays one bullet.
+        lines.append(f"- {quote_untrusted(name)} (type: {etype}, role: {role}, entity_id: {entity_id})")
     return "\n".join(lines)
 
 
@@ -2452,10 +2566,10 @@ async def _llm_entity_aware_contradiction_check(
     provider_name = _judge_provider(tenant_config)
 
     prompt = ENTITY_AWARE_CONTRADICTION_PROMPT.format(
-        new_content=new_content[:500],
-        old_content=old_content[:500],
-        new_entities=_format_entity_context(new_entities),
-        old_entities=_format_entity_context(old_entities),
+        new_content=data_block(new_content[:500]),
+        old_content=data_block(old_content[:500]),
+        new_entities=data_block(_format_entity_context(new_entities)),
+        old_entities=data_block(_format_entity_context(old_entities)),
     )
 
     async def _do_check(llm) -> tuple[bool, float]:
@@ -2482,7 +2596,8 @@ async def _llm_entity_aware_contradiction_check(
 # group in ONE ``complete_json`` call, carrying each candidate's OWN
 # resolved entity context so the authoritative same-subject grounding is
 # preserved per candidate.
-BATCH_ENTITY_AWARE_CONTRADICTION_PROMPT = """\
+BATCH_ENTITY_AWARE_CONTRADICTION_PROMPT = (
+    """\
 You are a contradiction detector for a business memory system, running
 the second-pass judgement AFTER entity resolution has already linked every
 statement to its canonical entities.
@@ -2508,7 +2623,13 @@ mutually exclusive.
   * ``entity_id`` starting with "<none-" on either side, or a side missing
     a subject-role entity -> same_subject=false.
 
-NEW statement: {new_content}
+"""
+    + UNTRUSTED_DATA_RULE
+    + " Each candidate's text is a JSON string literal."
+    + """
+
+NEW statement:
+{new_content}
 RESOLVED ENTITIES for the NEW statement:
 {new_entities}
 
@@ -2548,6 +2669,7 @@ non_conflict_reason put it in "clean". Never add a hit because a batch "should"
 contain one. If NO candidate contradicts, "hits" is {{}} and "clean" lists every
 index.
 """
+)
 
 
 async def _llm_entity_aware_contradiction_check_batch(
@@ -2568,14 +2690,16 @@ async def _llm_entity_aware_contradiction_check_batch(
     per-candidate entity-aware path.
     """
     provider_name = _judge_provider(tenant_config)
-    candidates_block = "\n".join(
-        f"[{i}] {c.get('content', '')[:500]}\n    RESOLVED ENTITIES: "
-        f"{_format_entity_context(c.get('entities', []))}"
-        for i, c in enumerate(candidates)
+    candidates_block = data_block(
+        "\n".join(
+            f"[{i}] {quote_untrusted(c.get('content', '')[:500])}\n    RESOLVED ENTITIES: "
+            f"{_format_entity_context(c.get('entities', []))}"
+            for i, c in enumerate(candidates)
+        )
     )
     prompt = BATCH_ENTITY_AWARE_CONTRADICTION_PROMPT.format(
-        new_content=new_content[:500],
-        new_entities=_format_entity_context(new_entities),
+        new_content=data_block(new_content[:500]),
+        new_entities=data_block(_format_entity_context(new_entities)),
         candidates_block=candidates_block,
     )
 
@@ -3072,6 +3196,9 @@ async def _retract_unlinked_verdicts(sc, new_memory: dict, tenant_config) -> int
         for record in await sc.list_memory_conflicts(tenant_id, limit=200, memory_id=new_id, read=False):
             if str(record.get("new_memory_id")) != new_id or record.get("review_status") == "dismissed":
                 continue
+            # A dispute demoted nothing, so there is no verdict to retract.
+            if not verdict_applied(record):
+                continue
             other = await sc.get_memory(str(record.get("old_memory_id")), tenant_id, read=False)
             if not other or other.get("deleted_at") is not None or str(other.get("id")) == new_id:
                 continue
@@ -3248,7 +3375,7 @@ async def detect_contradictions_by_entities_async(
             tenant_id=tenant_id,
             supersedes_id=new_memory.get("supersedes_id"),
         )
-        if rdf.contradictions:
+        if rdf.contradictions or rdf.disputed_pairs:
             n_conflicts += len(rdf.contradictions)
             await _record_conflicts(
                 new_memory,
@@ -3256,6 +3383,8 @@ async def detect_contradictions_by_entities_async(
                 rdf.unlinked_pairs,
                 tenant_id=tenant_id,
                 tenant_config=tenant_config,
+                disputed=rdf.disputed_pairs,
+                by_author=rdf.by_author,
             )
             concluded = True
             return
@@ -3651,6 +3780,12 @@ async def detect_contradictions_by_entities_async(
         # run that has already cleared and must not re-wire still depends on
         # starting from the row's own value.
         chain_supersedes_id = new_memory.get("supersedes_id")
+        # Each confirmed pair's authors' trust, for the gate below.
+        confirmed = [
+            c for c, r in zip(candidates, results, strict=False) if not isinstance(r, Exception) and r[0]
+        ]
+        by_author = await _trust_by_author(sc, tenant_id, new_memory, confirmed) if confirmed else {}
+        disputed: list[tuple[dict, str, float | None]] = []
         # CAURA-125 — state-corruption guard; mirrors the RDF and
         # semantic paths in ``_detect()``.
         new_memory_is_outdated = False
@@ -3694,6 +3829,14 @@ async def detect_contradictions_by_entities_async(
                 older = _pick_older(candidate, new_memory)
                 older_is_new = str(older.get("id")) == str(memory_id)
                 newer = new_memory if not older_is_new else candidate
+                if _outranked(older, newer, by_author):
+                    disputed.append((candidate, "entity", _confidence))
+                    logger.info(
+                        "Entity-based contradiction disputed: %s may not conflict %s",
+                        newer.get("id"),
+                        older.get("id"),
+                    )
+                    continue
                 older_id = older.get("id")
                 newer_id = newer.get("id")
 
@@ -3760,6 +3903,8 @@ async def detect_contradictions_by_entities_async(
             _unlinked_pairs(new_memory, record_pairs, updates, entity_result),
             tenant_id=tenant_id,
             tenant_config=tenant_config,
+            disputed=disputed,
+            by_author=by_author,
         )
         concluded = True
 

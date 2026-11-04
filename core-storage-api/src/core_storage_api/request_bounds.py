@@ -13,6 +13,8 @@ TEXT_FIELD_CAPS = {
     "title": 500,
     "source_uri": 2048,
     "run_id": 200,
+    "trace_id": 200,
+    "tool_call_id": 200,
     "predicate": 200,
     "object_value": 10000,
 }

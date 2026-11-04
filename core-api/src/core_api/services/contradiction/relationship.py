@@ -23,7 +23,7 @@ import logging
 
 from core_api.config import settings
 from core_api.providers._retry import call_with_fallback
-from core_api.services.contradiction_detector import CONTRADICTION_PROMPT
+from core_api.services.contradiction_detector import render_contradiction_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -165,10 +165,7 @@ async def classify_relationship(
     # Branch 2 — LLM. Extend a COPY of the base prompt (never mutate the original).
     new_content = str(new_memory.get("content", ""))[:500]
     old_content = str(candidate.get("content", ""))[:500]
-    prompt = (
-        CONTRADICTION_PROMPT.format(new_content=new_content, old_content=old_content)
-        + _RELATIONSHIP_INSTRUCTION
-    )
+    prompt = render_contradiction_prompt(new_content, old_content) + _RELATIONSHIP_INSTRUCTION
 
     raw = await _llm_raw(prompt, tenant_config)
     relationship, source = extract_relationship(raw)

@@ -2,7 +2,15 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, create_model, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    create_model,
+    model_serializer,
+    model_validator,
+)
 
 from common.constants import AGENT_TUNABLE_KEYS, SEARCH_KNOBS
 from core_api.constants import (
@@ -20,6 +28,9 @@ from core_api.constants import (
     MEMORY_TYPES_WRITE_DESCRIPTION,
     MEMORY_VISIBILITIES_PATTERN,
     MIN_TRUST_LEVEL,
+    OBSERVED_AT_DESCRIPTION,
+    TOOL_CALL_ID_DESCRIPTION,
+    TRACE_ID_DESCRIPTION,
     MemoryType,
 )
 from core_api.request_bounds import validate_write_fields
@@ -59,7 +70,35 @@ STRICT_WRITE_BODY = ConfigDict(extra="forbid")
 # an explanatory 422 instead of the generic unknown-field one. Deliberately a
 # short explicit list rather than a pattern: everything not named here keeps the
 # ordinary ``extra="forbid"`` behaviour, so a typo is still just a typo.
-SERVER_OWNED_MEMORY_FIELDS = ("supersedes_id",)
+#
+# Evidence contract v1 (EC-09) adds the verification fields: a memory's
+# verification state is recorded by the server, so a writer can never mark its
+# own memory checked. Refused on update as well as create.
+SERVER_OWNED_MEMORY_FIELDS = ("supersedes_id", "verification_status", "verified_by", "verified_at")
+
+_VERIFICATION_FIELDS = ("verification_status", "verified_by", "verified_at")
+
+
+def server_owned_refusal(present: list[str]) -> str:
+    """The 422 message for a write body that names server-owned fields.
+
+    One sentence per kind of field present, so each names the mechanism that
+    does set it rather than a route that does not exist.
+    """
+    parts = [
+        f"{', '.join(present)} {'is' if len(present) == 1 else 'are'} set by the server, not by the caller."
+    ]
+    if "supersedes_id" in present:
+        parts.append(
+            "Supersession is established by contradiction detection: write the corrected fact as an "
+            "ordinary memory and the detector links it to the row it supersedes."
+        )
+    if any(f in _VERIFICATION_FIELDS for f in present):
+        parts.append(
+            "Every memory starts 'unverified' and only the server records a verification. To attach "
+            "evidence to a write, send source_uri or tool_call_id."
+        )
+    return " ".join(parts)
 
 
 # --- tenant_id defaulting (ax-0917-m-12) ---
@@ -184,6 +223,9 @@ class MemoryCreate(TenantScopedBody):
     weight: float | None = Field(default=None, ge=0.0, le=1.0)
     source_uri: str | None = Field(default=None, max_length=2048)
     run_id: str | None = Field(default=None, max_length=200)
+    observed_at: datetime | None = Field(default=None, description=OBSERVED_AT_DESCRIPTION)
+    trace_id: str | None = Field(default=None, max_length=200, description=TRACE_ID_DESCRIPTION)
+    tool_call_id: str | None = Field(default=None, max_length=200, description=TOOL_CALL_ID_DESCRIPTION)
     metadata: dict | None = Field(default=None, description=CALLER_METADATA_DESCRIPTION)
     origin: OriginReport | None = Field(
         default=None,
@@ -228,6 +270,8 @@ class MemoryCreate(TenantScopedBody):
     def _refuse_server_owned_fields(cls, data):
         """C6 — refuse ``supersedes_id`` on create, and say why.
 
+        EC-09 adds the verification fields to the same list and message.
+
         Supersession is established by the SERVER, never by the caller: the
         contradiction detector decides that a new memory retires an older one
         and writes the pointer through ``update_memory_status``, which is
@@ -251,12 +295,7 @@ class MemoryCreate(TenantScopedBody):
         if isinstance(data, dict):
             present = [f for f in SERVER_OWNED_MEMORY_FIELDS if f in data]
             if present:
-                raise ValueError(
-                    f"{', '.join(present)} is set by the server, not by the caller, and cannot be "
-                    "supplied on create. Supersession is established by contradiction detection: "
-                    "write the corrected fact as an ordinary memory and the detector links it to "
-                    "the row it supersedes."
-                )
+                raise ValueError(server_owned_refusal(present))
         return data
 
     @model_validator(mode="before")
@@ -304,6 +343,10 @@ class BulkMemoryItem(BaseModel):
     weight: float | None = Field(default=None)
     source_uri: str | None = None
     run_id: str | None = None
+    # Evidence contract v1. Size caps are enforced per item, as for run_id.
+    observed_at: datetime | None = Field(default=None, description=OBSERVED_AT_DESCRIPTION)
+    trace_id: str | None = Field(default=None, description=TRACE_ID_DESCRIPTION)
+    tool_call_id: str | None = Field(default=None, description=TOOL_CALL_ID_DESCRIPTION)
     metadata: dict | None = None
     entity_links: list[EntityLinkIn] = []
     expires_at: datetime | None = Field(default=None, description=EXPIRES_AT_DESCRIPTION)
@@ -463,6 +506,16 @@ class MemoryUpdate(BaseModel):
         ),
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_server_owned_fields(cls, data):
+        """EC-09 — the create refusal, on update: a PATCH cannot set them either."""
+        if isinstance(data, dict):
+            present = [f for f in SERVER_OWNED_MEMORY_FIELDS if f in data]
+            if present:
+                raise ValueError(server_owned_refusal(present))
+        return data
+
     @model_validator(mode="after")
     def metadata_mode_requires_metadata(self) -> "MemoryUpdate":
         """Reject ``{"metadata_mode": "<merge|replace>"}`` (a real
@@ -539,12 +592,26 @@ class MemoryOut(BaseModel):
     # to agent_id. Populated via a LEFT JOIN in the storage query methods, not
     # stored on the memory row.
     agent_display_name: str | None = None
+    # The author's current trust level (agents.trust_level), from the same
+    # join, so a reader can weigh a row by who wrote it. Null when the author
+    # has no agents row (platform writers, broker:<install> ids).
+    agent_trust_level: int | None = None
     memory_type: str
     title: str | None = None
     content: str
     weight: float
     source_uri: str | None
     run_id: str | None
+    # Evidence contract v1 (docs/plans/evidence-contract-v1.md). ``trace_id`` is
+    # the caller's own or the one the server stamped; the verification fields
+    # are server-owned. Defaulted so a row read before migration 071 still
+    # validates.
+    observed_at: datetime | None = None
+    trace_id: str | None = None
+    tool_call_id: str | None = None
+    verification_status: str = "unverified"
+    verified_by: str | None = None
+    verified_at: datetime | None = None
     # Two flags here tell a caller the write is not fully settled yet:
     #
     #   embedding_pending: true   — the row was stored without an embedding and a
@@ -636,6 +703,66 @@ class MemoryOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class RecallEvidence(BaseModel):
+    """Where a recalled memory came from, whether anyone checked it, and why it was picked."""
+
+    # Evidence contract v1 (EC-10). The first four keys are the compact default
+    # every search hit carries; the rest appear only on a ``diagnostic=true``
+    # call. A key with no value is left off the wire rather than sent as null:
+    # this object rides on every row of every recall, so a null costs tokens and
+    # says nothing the absence does not. ``test_recall_evidence.py`` pins the
+    # compact size per row.
+    source: str | None = Field(
+        default=None,
+        description=(
+            "'tool:<tool_call_id>' when the writer named the tool call, else the "
+            "memory's source_uri; absent when neither (ingest's 'text-input' "
+            "placeholder is not a source)."
+        ),
+    )
+    trace: str | None = Field(
+        default=None, description="The trace_id of the session or request that wrote it."
+    )
+    verification: str | None = Field(
+        default=None,
+        description="verification_status: unverified, tool_observed, corroborated, human_verified or disputed.",
+    )
+    why: str | None = Field(
+        default=None,
+        description="Short reason the row was returned, from its ranking factors (no LLM).",
+    )
+    # Detail — diagnostic=true only.
+    observed_at: datetime | None = None
+    run_id: str | None = None
+    tool_call_id: str | None = None
+    source_uri: str | None = None
+    verified_by: str | None = None
+    verified_at: datetime | None = None
+    strategy: str | None = Field(default=None, description="The retrieval strategy that served the query.")
+
+    @model_serializer(mode="wrap")
+    def _drop_empty(self, handler):  # type: ignore[no-untyped-def]
+        return {k: v for k, v in handler(self).items() if v is not None}
+
+
+class SearchHitOut(MemoryOut):
+    """A memory as search and recall return it: MemoryOut plus its evidence."""
+
+    # The six evidence-contract columns are not repeated at the top level of a
+    # hit: ``evidence`` carries them (compact by default, all of them on
+    # ``diagnostic=true``), and a row sent to an agent on every recall should
+    # not pay for the same facts twice. Still readable as attributes in-process
+    # (the brief, recall logging); only serialization drops them. List, get and
+    # write responses keep them at the top level.
+    observed_at: datetime | None = Field(default=None, exclude=True)
+    trace_id: str | None = Field(default=None, exclude=True)
+    tool_call_id: str | None = Field(default=None, exclude=True)
+    verification_status: str = Field(default="unverified", exclude=True)
+    verified_by: str | None = Field(default=None, exclude=True)
+    verified_at: datetime | None = Field(default=None, exclude=True)
+    evidence: RecallEvidence | None = None
+
+
 # Kept to ONE line, because a model docstring becomes the schema's public
 # ``description`` in ``openapi.broker.json`` — maintainer rationale belongs here, in a
 # comment, not in the frozen contract. Three things about this model are load-bearing:
@@ -666,12 +793,20 @@ class MemoryDetailResponse(BaseModel):
     fleet_id: str | None = None
     agent_id: str
     agent_display_name: str | None = None
+    agent_trust_level: int | None = None
     memory_type: str
     title: str | None = None
     content: str
     weight: float | None = None
     source_uri: str | None = None
     run_id: str | None = None
+    # Evidence contract v1; same contract as on ``MemoryOut``.
+    observed_at: str | None = None
+    trace_id: str | None = None
+    tool_call_id: str | None = None
+    verification_status: str = "unverified"
+    verified_by: str | None = None
+    verified_at: str | None = None
     # Exposed as ``metadata``; storage serialises the JSONB column as ``metadata_``
     # and the route renames it on the way out.
     metadata: dict | None = None
@@ -920,10 +1055,26 @@ class SearchWarning(BaseModel):
     details: dict = Field(default_factory=dict, description="Machine-readable context.")
 
 
+class EmptyRecallHint(BaseModel):
+    """EC-05 — the closest result of an EMPTY search, and the cut-off it missed.
+
+    Present only when a search returned no items but a memory the caller can
+    read scored below the similarity cut-off. That memory passed every other
+    filter (tenant, fleet, visibility, agent, type, status, dates) — the cut-off
+    is the only reason it was not returned.
+    """
+
+    memory_id: str = Field(description="Id of the closest candidate; read it by id to judge it.")
+    title: str = Field(description="Its title (or a content preview), one line, at most 80 characters.")
+    similarity: float = Field(description="Its cosine similarity to the query.")
+    min_similarity: float = Field(description="The similarity cut-off this search applied.")
+    message: str = Field(description="One-line human-readable summary of the above.")
+
+
 class SearchResponse(BaseModel):
     """Envelope for search results — matches PaginatedMemoryResponse shape."""
 
-    items: list[MemoryOut]
+    items: list[SearchHitOut]
     # Whether this search dispatched a ``recall_count`` bump for the rows it
     # returned. False means the returned memories were NOT reinforced, and the
     # three reasons are all invisible from the request alone: the caller
@@ -952,6 +1103,15 @@ class SearchResponse(BaseModel):
     # change ``diagnostic``'s existing serialization. Additive for integrators —
     # a new nullable key alongside one they already tolerate.
     warnings: list[SearchWarning] | None = None
+    # EC-05 — ``null`` unless ``items`` is empty AND a readable memory scored
+    # below the cut-off. Same nullable-additive shape as ``warnings``.
+    empty_hint: EmptyRecallHint | None = Field(
+        default=None,
+        description=(
+            "Only when items is empty: the closest memory that scored below the "
+            "similarity cut-off, so an empty result is not mistaken for 'nothing saved'."
+        ),
+    )
 
 
 class SearchRequest(TenantScopedBody):
@@ -1107,7 +1267,20 @@ class SearchRequest(TenantScopedBody):
     # D12 — when true, the response carries a ``diagnostic`` retrieval trace
     # (full candidate set, score factors, exclusion reasons, applied knobs).
     # Results are unchanged and no recall_count is bumped on a diagnostic call.
+    # EC-10 — it also widens each hit's ``evidence`` to the full detail.
     diagnostic: bool = False
+    # Evidence contract v1 (EC-11). A storage filter applied with the others
+    # (fleet, type, status), so the scored search, the entity short-circuit and
+    # successor injection all honour it and the empty-result explanations see
+    # the same predicate. Deliberately not a ranking input in v1.
+    verified_only: bool = Field(
+        default=False,
+        description=(
+            "Return only memories someone or something checked: "
+            "verification_status tool_observed, corroborated or human_verified. "
+            "A filter only; ranking is unchanged."
+        ),
+    )
     # pm-0918-c-03. Inherited by ``RecallRequest`` below, deliberately: /recall
     # summarises these rows into a brief, so a short fragment restating its
     # parent costs brief tokens on exactly the surface where they are scarcest.

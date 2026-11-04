@@ -146,7 +146,23 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # cannot pass a key the schema does not list. About +47 counted by hand on top
 # of L-119's unmeasured +55; tiktoken was again not available, so the next
 # entry should measure the fixture. Ceiling 5570 -> 5620.
-CEILING_TOKENS = 5620
+#
+# 2026-11-04 (evidence contract v1, EC-08): 5691 cl100k, measured with tiktoken
+# from the fixture; main measured 5592 before it, so the earlier hand counts
+# overshot by 28. ``caura_write`` gained ``observed_at``, ``trace_id`` and
+# ``tool_call_id``, which REST ``POST /memories`` takes in the same change: an
+# MCP caller cannot record which tool call a memory came from unless the schema
+# lists it. +99, nearly all of it the ``anyOf`` string|null boilerplate each
+# optional parameter costs; the descriptions are three to five words. Ceiling
+# 5620 -> 5720, leaving 29.
+#
+# 2026-11-04 (evidence contract v1, EC-14): 5743 cl100k (+23 over main's 5720,
+# where EC-10/11/12 left it at the ceiling), measured with tiktoken from the
+# fixture. ``caura_manage`` gained ``verify`` and ``unverify`` as ops rather
+# than a new tool: two words in the ``op`` roll-call, one clause naming the
+# trust bar, and the plugin-gap clause naming them, since the plugin dispatches
+# neither. Ceiling 5720 -> 5743, raised by exactly the delta, leaving 0.
+CEILING_TOKENS = 5743
 
 
 def _count(path: Path) -> int:

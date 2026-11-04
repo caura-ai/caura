@@ -26,7 +26,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from core_api.schemas import MemoryOut, SearchWarning
+from core_api.schemas import EmptyRecallHint, SearchHitOut, SearchWarning
 
 # --------------------------------------------------------------------------
 # memories / recall / health / version
@@ -197,6 +197,16 @@ class MemoryStatusPatchResponse(BaseModel):
     new_status: str
 
 
+class MemoryVerificationResponse(BaseModel):
+    """``POST /memories/{id}/verify`` and ``/unverify`` (evidence contract v1, EC-14)."""
+
+    memory_id: str
+    old_verification_status: str
+    verification_status: str | None
+    verified_by: str | None
+    verified_at: str | None
+
+
 class RecallDiagnostic(BaseModel):
     recall_prompt: str | None
     # WT-1 — ``summary`` carries only the extracted final answer; the raw
@@ -205,8 +215,20 @@ class RecallDiagnostic(BaseModel):
         description="Unfiltered LLM completion (reasoning scaffold + answer marker) that summary "
         "was extracted from; null when no LLM ran (no matches, or summarization disabled)."
     )
-    recall_model: str | None
-    recall_provider: str | None
+    recall_model: str | None = Field(
+        description="Model that wrote recall_raw; null when no LLM ran. Can differ from "
+        "recall_configured_model, because a provider with no key falls back to the platform LLM."
+    )
+    recall_provider: str | None = Field(
+        description="Provider that wrote recall_raw: the configured one, the fallback provider, the "
+        "platform LLM, or 'fake' for the unsynthesized fallback; null when no LLM ran."
+    )
+    recall_configured_model: str | None = Field(
+        default=None, description="The tenant's resolved recall model setting."
+    )
+    recall_configured_provider: str | None = Field(
+        default=None, description="The tenant's resolved recall provider setting."
+    )
     all_candidates: list
     top_k_used: int | None = Field(
         description="Row budget the search ran with, after the agent and tenant search profiles and any "
@@ -224,7 +246,7 @@ class RecallResponse(BaseModel):
     query: str
     summary: str
     memory_count: int
-    memories: list[MemoryOut] = Field(
+    memories: list[SearchHitOut] = Field(
         description="The matched rows in rank order, as /search returns them; the summary reads them by date."
     )
     # ax-0917-h-03 — DEPRECATED, and deliberately still emitted by default here.
@@ -242,7 +264,7 @@ class RecallResponse(BaseModel):
     # ``memories`` first and only fall back (clients/python .../models.py,
     # clients/typescript/src/index.ts), and the plugin's items reader is only
     # ever fed /search.
-    items: list[MemoryOut] | None = Field(
+    items: list[SearchHitOut] | None = Field(
         default=None,
         deprecated=True,
         description=(
@@ -272,6 +294,14 @@ class RecallResponse(BaseModel):
             "parameters the endpoint does not read and therefore ignored, or "
             "'filter_agent_unknown' when the agent filter names an id this "
             "tenant has never seen."
+        ),
+    )
+    # EC-05 — absent unless the recall found nothing; same object /search sends.
+    empty_hint: EmptyRecallHint | None = Field(
+        default=None,
+        description=(
+            "Only when no memory was recalled: the closest memory that scored below "
+            "the similarity cut-off, so an empty recall is not mistaken for 'nothing saved'."
         ),
     )
 

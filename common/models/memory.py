@@ -4,6 +4,7 @@ from datetime import datetime
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -17,7 +18,7 @@ from sqlalchemy.dialects.postgresql import JSON, JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from common.constants import VECTOR_DIM
+from common.constants import NON_EVIDENCE_SOURCE_URIS, VECTOR_DIM
 from common.models.base import Base
 
 #: Row-state predicate for "this live memory still has background work coming".
@@ -67,6 +68,52 @@ STRANDED_EMBEDDING_SQL = (
     f"({PENDING_EMBEDDING_SQL} AND created_at < now() - interval '1 hour')"
 )
 
+#: Evidence contract v1 (``docs/plans/evidence-contract-v1.md``). Who checked a
+#: memory, as the SERVER records it: no write body may set these. ``unverified``
+#: is every row's default; ``corroborated`` is reserved and set by nothing in v1.
+#: Migration 071's CHECK holds the column to this tuple.
+VERIFICATION_STATUSES = (
+    "unverified",
+    "tool_observed",
+    "corroborated",
+    "human_verified",
+    "disputed",
+)
+DEFAULT_VERIFICATION_STATUS = "unverified"
+#: The statuses ``verified_only`` recall keeps: someone or something checked the
+#: row. ``unverified`` and ``disputed`` are the two it drops.
+VERIFIED_STATUSES = ("tool_observed", "corroborated", "human_verified")
+
+
+def is_real_source_uri(source_uri: str | None) -> bool:
+    """Whether ``source_uri`` names a source a reader could follow.
+
+    Not one of ``NON_EVIDENCE_SOURCE_URIS`` (ingest's ``text-input``
+    placeholder, benchmark schemes), compared trimmed and lowercased: the rule
+    the evidence coverage report counts external evidence with.
+    """
+    uri = (source_uri or "").strip().lower()
+    if not uri:
+        return False
+    return not any(
+        uri.startswith(v) if v.endswith(":") else uri == v
+        for v in NON_EVIDENCE_SOURCE_URIS
+    )
+
+
+def automatic_verification_status(
+    source_uri: str | None, tool_call_id: str | None
+) -> str:
+    """The verification state the server derives from a row's own evidence (EC-13).
+
+    ``tool_observed`` when the row points at a tool call or a real source,
+    else ``unverified``. Never ``human_verified`` or ``disputed``: those come
+    from a person or the contradiction pipeline, not from the row.
+    """
+    if (tool_call_id and tool_call_id.strip()) or is_real_source_uri(source_uri):
+        return "tool_observed"
+    return DEFAULT_VERIFICATION_STATUS
+
 
 class Memory(Base):
     __tablename__ = "memories"
@@ -88,6 +135,21 @@ class Memory(Base):
     )
     source_uri: Mapped[str | None] = mapped_column(Text)
     run_id: Mapped[str | None] = mapped_column(Text)
+    # Evidence contract v1 (migration 071). ``observed_at``: when the fact was
+    # observed, as the writer reports it (NULL when it did not say;
+    # ``created_at`` is the write time). ``trace_id``: the session or request the
+    # write came from: the client's own if it sent one, else stamped by core-api
+    # (``session_context.server_trace_id``). Not ``run_id``, which stays the
+    # client's. ``tool_call_id``: the tool call whose result this records.
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    trace_id: Mapped[str | None] = mapped_column(Text)
+    tool_call_id: Mapped[str | None] = mapped_column(Text)
+    # Server-owned, see ``VERIFICATION_STATUSES``.
+    verification_status: Mapped[str] = mapped_column(
+        Text, server_default=text("'unverified'"), nullable=False
+    )
+    verified_by: Mapped[str | None] = mapped_column(Text)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # ``json``, not JSONB: migration 001 creates it that way (CAURA-595), and
     # ``test_models_match_the_migrated_schema`` holds the model to the schema.
     metadata_: Mapped[dict | None] = mapped_column("metadata", JSON)
@@ -302,6 +364,21 @@ class Memory(Base):
             "tenant_id",
             postgresql_where=text(f"deleted_at IS NULL AND {PENDING_WORK_SQL}"),
         ),
+        # Backs the planned ``verified_only`` recall filter. Partial, so it holds
+        # only rows that left ``unverified``. Created CONCURRENTLY in migration
+        # 071 with the same key and predicate.
+        Index(
+            "ix_memories_verification",
+            "tenant_id",
+            "verification_status",
+            postgresql_where=text("verification_status <> 'unverified'"),
+        ),
+        CheckConstraint(
+            "verification_status IN ("
+            + ", ".join(f"'{v}'" for v in VERIFICATION_STATUSES)
+            + ")",
+            name="ck_memories_verification_status",
+        ),
     )
 
 
@@ -342,7 +419,9 @@ Index(
     "ix_memories_session",
     Memory.tenant_id,
     Memory.metadata_["session_id"].astext,
-    postgresql_where=text("deleted_at IS NULL AND (metadata ->> 'session_id') IS NOT NULL"),
+    postgresql_where=text(
+        "deleted_at IS NULL AND (metadata ->> 'session_id') IS NOT NULL"
+    ),
 )
 
 

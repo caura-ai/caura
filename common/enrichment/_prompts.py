@@ -95,6 +95,7 @@ from common.enrichment.constants import (
     MEMORY_TYPES,
     SERVER_RESERVED_MEMORY_TYPES,
 )
+from common.llm.untrusted import UNTRUSTED_DATA_RULE
 
 # The auto-classifier is only ever offered the agent-writable, non-deprecated
 # types. The server-reserved types (insight/outcome/rule) are authored
@@ -247,6 +248,10 @@ Analyze the following memory content and return a JSON object with these fields:
 
 Return ONLY valid JSON (no markdown fences):
 {{"memory_type": "...", "weight": 0.5, "title": "...", "summary": "...", "ts_valid_start": null, "ts_valid_end": null, "contains_pii": false, "pii_types": [], "atomic_facts": null, "business_relevance": "business"}}
+
+"""
+    + UNTRUSTED_DATA_RULE
+    + """
 
 Content:
 {content}

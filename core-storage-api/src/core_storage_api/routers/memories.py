@@ -58,6 +58,8 @@ _DATETIME_FIELDS = {
     "ts_valid_start",
     "ts_valid_end",
     "last_dedup_checked_at",
+    "observed_at",
+    "verified_at",
 }
 
 
@@ -256,6 +258,8 @@ async def scored_search(request: Request) -> list[dict]:
                 # A63 — history questions lift the status demotion so
                 # superseded values stay reachable.
                 history_query=bool(body.get("history_query", False)),
+                # Evidence contract v1 — a filter, not a ranking input.
+                verified_only=bool(body.get("verified_only", False)),
             )
         for r in results:
             # MEMORY_LIST_FIELDS, not MEMORY_FIELDS (audit oss-0814-m-39): this
@@ -338,6 +342,40 @@ async def scored_search(request: Request) -> list[dict]:
     return out
 
 
+@router.post("/scored-search/explain")
+async def scored_search_explain(request: Request) -> dict:
+    """Which scored-search filter removes ``memory_id`` for this request (EC-06).
+
+    Takes the ``/scored-search`` body (core-api sends the very payload it built
+    for the search) plus ``memory_id``, and answers per filter with
+    ``PostgresService.memory_explain_filters``. Only the filter arguments are
+    read: scoring knobs cannot remove a row, so ``search_params`` and the
+    embedding are not required here.
+    """
+    body: dict = await request.json()
+    memory_id = _require_uuid(body, "memory_id")
+    tenant_id = _require(body, "tenant_id")
+    valid_at = body.get("valid_at")
+    if isinstance(valid_at, str):
+        valid_at = datetime.fromisoformat(valid_at)
+    return await _svc.memory_explain_filters(
+        memory_id,
+        tenant_id,
+        body.get("query") or "",
+        fleet_ids=body.get("fleet_ids"),
+        caller_agent_id=body.get("caller_agent_id"),
+        caller_tenant_id=body.get("caller_tenant_id"),
+        filter_agent_id=body.get("filter_agent_id"),
+        memory_type_filter=body.get("memory_type_filter"),
+        status_filter=body.get("status_filter"),
+        valid_at=valid_at,
+        readable_tenant_ids=body.get("readable_tenant_ids") or None,
+        history_query=bool(body.get("history_query", False)),
+        strict_fleet_scoping=body.get("strict_fleet_scoping", False),
+        verified_only=bool(body.get("verified_only", False)),
+    )
+
+
 @router.post("/load-by-ids")
 async def load_by_ids(request: Request) -> list[dict]:
     """Load memories by ID with visibility/fleet/agent filters applied.
@@ -395,6 +433,7 @@ async def load_by_ids(request: Request) -> list[dict]:
                 valid_at=valid_at,
                 readable_tenant_ids=body.get("readable_tenant_ids") or None,
                 strict_fleet_scoping=body.get("strict_fleet_scoping", False),
+                verified_only=bool(body.get("verified_only", False)),
             )
         # No vectors (L-188): ClassifyQuery builds result rows from these, and
         # a result carries no vector.
@@ -540,6 +579,19 @@ async def purge_entity_artifacts(request: Request) -> dict:
     )
 
 
+@router.post("/drop")
+async def drop_memory(request: Request) -> dict:
+    """A governance drop: soft-delete one memory and clear its text (``memory_drop``).
+
+    Body carries ``tenant_id`` and ``memory_id``. ``{"dropped": false}`` when
+    nothing matched (no such memory, another tenant's, or held), not a 404, so a
+    replay of a drop that already landed is not an error.
+    """
+    body: dict = await request.json()
+    dropped = await _svc.memory_drop(_require(body, "tenant_id"), _require_uuid(body, "memory_id"))
+    return {"dropped": dropped}
+
+
 @router.post("/find-successors")
 async def find_successors(request: Request) -> list[dict]:
     body: dict = await request.json()
@@ -561,6 +613,7 @@ async def find_successors(request: Request) -> list[dict]:
         # Where the search read, so its stale rows' corrections are found
         # there too (L-43); absent reads the home tenant, as before.
         readable_tenant_ids=body.get("readable_tenant_ids") or None,
+        verified_only=bool(body.get("verified_only", False)),
     )
     # ``successor_of`` names the row each one replaced: its ``supersedes_id``,
     # or for a contradiction's further loser the one its record names (M-34).
@@ -2379,12 +2432,13 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
         from sqlalchemy import update as sql_update
 
         from common.models import Memory
-        from core_storage_api.services.postgres_service import get_session
+        from core_storage_api.services.postgres_service import get_session, verification_on_status_change
 
         try:
             expected_uuid = UUID(str(expected_supersedes_id))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="expected_supersedes_id must be a UUID") from exc
+        verification = verification_on_status_change(status)
         async with get_session() as session:
             result = await session.execute(
                 sql_update(Memory)
@@ -2412,6 +2466,10 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                     status_changed_at=case(
                         (Memory.status.is_distinct_from(status), datetime.now(UTC)),
                         else_=Memory.status_changed_at,
+                    ),
+                    # EC-13, as on every status write (``memory_update_status``).
+                    verification_status=(
+                        Memory.verification_status if verification is None else verification
                     ),
                 )
             )

@@ -1,4 +1,4 @@
-"""Unit tests for ``caura_manage`` (op: read | update | transition | delete | bulk_delete | lineage).
+"""Unit tests for ``caura_manage`` (op: read | update | transition | delete | bulk_delete | lineage | verify | unverify).
 
 Covers:
 - Unknown ``op`` → ``INVALID_ARGUMENTS`` envelope listing the expected ops.
@@ -75,7 +75,9 @@ async def test_manage_invalid_op_errors(mcp_env):
         "lineage",
         "read",
         "transition",
+        "unverify",
         "update",
+        "verify",
     ]
 
 

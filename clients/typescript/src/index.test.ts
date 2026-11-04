@@ -93,6 +93,40 @@ test("write per-call agentId overrides the default", async () => {
   await client.write("x", { agentId: "override" });
 });
 
+test("write sends the evidence it is given, in the server's spelling", async () => {
+  let body: Record<string, unknown> = {};
+  const client = makeClient((_url, init) => {
+    body = JSON.parse(init.body as string);
+    return jsonResponse(201, { id: "m1", content: "x" });
+  });
+  await client.write("x", {
+    sourceUri: "https://example.test/runbook",
+    toolCallId: "toolu_01ABC",
+    observedAt: new Date("2026-11-01T09:30:00Z"),
+    traceId: "own-trace",
+  });
+  assert.equal(body.source_uri, "https://example.test/runbook");
+  assert.equal(body.tool_call_id, "toolu_01ABC");
+  assert.equal(body.observed_at, "2026-11-01T09:30:00.000Z");
+  assert.equal(body.trace_id, "own-trace");
+  for (const camel of ["sourceUri", "toolCallId", "observedAt", "traceId"]) {
+    assert.equal(camel in body, false, camel);
+  }
+});
+
+test("write without evidence sends none of its fields", async () => {
+  // An older server refuses a field it does not declare, so none go out unasked.
+  let body: Record<string, unknown> = {};
+  const client = makeClient((_url, init) => {
+    body = JSON.parse(init.body as string);
+    return jsonResponse(201, { id: "m1", content: "x" });
+  });
+  await client.write("x");
+  for (const k of ["source_uri", "tool_call_id", "observed_at", "trace_id"]) {
+    assert.equal(k in body, false, k);
+  }
+});
+
 test("search posts to /search and returns a list", async () => {
   const client = makeClient((url, init) => {
     assert.equal(new URL(url).pathname, "/api/v1/search");

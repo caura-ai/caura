@@ -147,6 +147,8 @@ def test_op_dispatched_tools_have_expected_op_sets():
         "delete",
         "bulk_delete",
         "lineage",
+        "verify",
+        "unverify",
     }
     assert doc_ops == {"write", "read", "query", "delete", "list_collections", "search"}
 

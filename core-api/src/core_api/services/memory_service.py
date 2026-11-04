@@ -95,8 +95,9 @@ from core_api.errors import (
     AUTH_KEPT_PRIVATE_BY_POLICY,
     coded_detail,
 )
-from core_api.request_bounds import validate_write_fields
+from core_api.request_bounds import TEXT_FIELD_CAPS, validate_write_fields
 from core_api.schemas import (
+    SERVER_OWNED_MEMORY_FIELDS,
     BulkItemResult,
     BulkMemoryCreate,
     BulkMemoryItem,
@@ -107,6 +108,8 @@ from core_api.schemas import (
     MemoryOut,
     MemoryUpdate,
     ScoreParts,
+    SearchHitOut,
+    server_owned_refusal,
 )
 from core_api.search_trim import (
     is_derived_fanout_row,
@@ -118,6 +121,7 @@ from core_api.services.auto_capture import CAPTURE_KEY, capture_of, stamp_captur
 from core_api.services.contradiction_detector import _pick_older, revert_unheld_loser
 from core_api.services.entity_extraction_worker import process_entity_extraction
 from core_api.services.entity_tokens import extract_entity_tokens
+from core_api.services.evidence import evidence_payload, to_search_hit
 from core_api.services.governance_gate import (
     ACTION_NB_KEEP_PRIVATE,
     ACTION_PII_DROP,
@@ -789,12 +793,14 @@ def _dict_to_memory_out(
         fleet_id=mem.get("fleet_id"),
         agent_id=mem.get("agent_id"),
         agent_display_name=mem.get("agent_display_name"),
+        agent_trust_level=mem.get("agent_trust_level"),
         memory_type=mem.get("memory_type"),
         title=mem.get("title"),
         content=mem.get("content"),
         weight=mem.get("weight"),
         source_uri=mem.get("source_uri"),
         run_id=mem.get("run_id"),
+        **_evidence_out(mem),
         metadata=metadata,
         created_at=mem.get("created_at"),
         expires_at=mem.get("expires_at"),
@@ -821,6 +827,22 @@ def _mem_attr(memory, key: str, default=None):
     return getattr(memory, key, default)
 
 
+def _evidence_out(memory) -> dict:
+    """Evidence contract v1 fields for ``MemoryOut``, from a row or an ORM object.
+
+    ``verification_status`` falls back to the column default: a row serialised
+    without it (an older storage, a hand-built dict) is unverified, not invalid.
+    """
+    return {
+        "observed_at": _mem_attr(memory, "observed_at"),
+        "trace_id": _mem_attr(memory, "trace_id"),
+        "tool_call_id": _mem_attr(memory, "tool_call_id"),
+        "verification_status": _mem_attr(memory, "verification_status") or "unverified",
+        "verified_by": _mem_attr(memory, "verified_by"),
+        "verified_at": _mem_attr(memory, "verified_at"),
+    }
+
+
 def _memory_to_out(
     memory,
     entity_links: list[EntityLinkOut] | None = None,
@@ -843,12 +865,14 @@ def _memory_to_out(
         fleet_id=_mem_attr(memory, "fleet_id"),
         agent_id=_mem_attr(memory, "agent_id"),
         agent_display_name=_mem_attr(memory, "agent_display_name"),
+        agent_trust_level=_mem_attr(memory, "agent_trust_level"),
         memory_type=_mem_attr(memory, "memory_type"),
         title=_mem_attr(memory, "title"),
         content=_mem_attr(memory, "content"),
         weight=_mem_attr(memory, "weight"),
         source_uri=_mem_attr(memory, "source_uri"),
         run_id=_mem_attr(memory, "run_id"),
+        **_evidence_out(memory),
         metadata=metadata,
         created_at=_mem_attr(memory, "created_at"),
         expires_at=_mem_attr(memory, "expires_at"),
@@ -877,7 +901,9 @@ def _memory_to_out(
     agent=lambda a: a["data"].agent_id,
     fleet=lambda a: a["data"].fleet_id,
 )
-async def create_memory(data: MemoryCreate, *, is_inferred: bool = False) -> MemoryOut:
+async def create_memory(
+    data: MemoryCreate, *, is_inferred: bool = False, system_values: dict | None = None
+) -> MemoryOut:
     """Create one memory.
 
     ``is_inferred`` is INTERNAL and keyword-only — deliberately not a field on
@@ -887,9 +913,19 @@ async def create_memory(data: MemoryCreate, *, is_inferred: bool = False) -> Mem
     caller pick which side of that invariant it sits on, which is the opposite of
     a guard. Platform writers (the crystallizer, insights) pass True; every other
     caller gets the default.
+
+    ``system_values`` is INTERNAL too: platform-written metadata from an internal
+    writer (``source_trust``, from the crystallizer and evolve). It is set after
+    the caller's metadata is sanitised, which would otherwise strip it.
     """
     if not data.agent_id:
         raise ValueError("agent_id must be resolved before calling create_memory")
+    # Evidence contract v1: a write names the session or request it came from,
+    # the caller's own trace_id when it sent one.
+    if data.trace_id is None:
+        from core_api.session_context import server_trace_id
+
+        data.trace_id = server_trace_id()
     # Reserved-id guard (`main` fix): single chokepoint for REST + MCP + STM.
     # data.agent_id is already the resolved effective identity here.
     try:
@@ -916,6 +952,10 @@ async def create_memory(data: MemoryCreate, *, is_inferred: bool = False) -> Mem
         from core_api.session_context import current_session_id
 
         stamp_capture(data, current_session_id())
+    if system_values:
+        data.metadata = data.metadata or {}
+        for key, value in system_values.items():
+            set_system_value(data.metadata, key, value)
     out = await _run_write_pipeline(data, is_inferred=is_inferred)
     # Value metering: where this memory came from (its session's work), once.
     from core_api.services.value_ledger import schedule_origin
@@ -1026,6 +1066,9 @@ async def _run_write_pipeline(data: MemoryCreate, *, is_inferred: bool = False) 
                 weight=fields["weight"],
                 source_uri=data.source_uri,
                 run_id=data.run_id,
+                observed_at=data.observed_at,
+                trace_id=data.trace_id,
+                tool_call_id=data.tool_call_id,
                 # ``fields["metadata"]`` is always a dict — initialised
                 # as ``data.metadata or {}`` in MergeEnrichmentFields. The
                 # previous ``or None`` coerced an intentional ``{}`` to
@@ -1308,6 +1351,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
             "weight": fields["weight"],
             "source_uri": data.source_uri,
             "run_id": data.run_id,
+            **evidence_payload(data),
             # See ``write_memory_row`` for the falsy-``{}`` trap.
             "metadata_": _parent_metadata(),
             "content_hash": ch,
@@ -1419,6 +1463,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                     "weight": fields["weight"],
                     "source_uri": data.source_uri,
                     "run_id": data.run_id,
+                    **evidence_payload(data),
                     "metadata_": child_meta,
                     "content_hash": child_ch,
                     "client_request_id": _auto_chunk_request_id(),
@@ -1557,6 +1602,30 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
     return _memory_out_with_created_links(ctx, memory)
 
 
+# The broker's own metadata keys for the session and the tool call a capture
+# came from (caura-daemon ``FormatMemoryMetadata``, PostToolUse hook).
+_BROKER_SESSION_KEY = "session_id"
+_BROKER_TOOL_CALL_KEY = "tool_use_id"
+
+
+def _adopt_broker_evidence(item: BulkMemoryItem) -> None:
+    """Fill a broker item's ``trace_id`` / ``tool_call_id`` from its metadata.
+
+    Only where the item sent none, and only a value the column would take:
+    an item is never refused over evidence the broker did not send as such.
+    """
+    from core_api.session_context import valid_session_id
+
+    metadata = item.metadata or {}
+    if item.trace_id is None:
+        session = metadata.get(_BROKER_SESSION_KEY)
+        item.trace_id = valid_session_id(session) if isinstance(session, str) else None
+    if item.tool_call_id is None:
+        tool_call = metadata.get(_BROKER_TOOL_CALL_KEY)
+        if isinstance(tool_call, str) and 0 < len(tool_call.strip()) <= TEXT_FIELD_CAPS["tool_call_id"]:
+            item.tool_call_id = tool_call.strip()
+
+
 @scoped(
     "write",
     tenant=lambda a: a["data"].tenant_id,
@@ -1570,8 +1639,13 @@ async def create_memories_bulk(
     memory_type_is_agent_set: bool | None = None,
     is_inferred: bool = False,
     from_broker: bool = False,
+    system_values: list[dict] | None = None,
 ) -> BulkMemoryResponse:
     """Create multiple memories with per-attempt idempotency (CAURA-602).
+
+    ``system_values``, INTERNAL like ``is_inferred``, holds one dict of
+    platform-written metadata per item, aligned with ``data.items`` (insights
+    passes ``source_trust``). Each is set after the item's metadata is sanitised.
 
     ``from_broker`` takes the batch at the broker's word: the rules receipt each
     item's metadata carries (``rules_receipt``, g2.8) is kept, and an item may
@@ -1615,6 +1689,11 @@ async def create_memories_bulk(
     t0 = time.perf_counter()
     items = data.items
     n = len(items)
+    # Evidence contract v1: the trace_id an item without its own is stamped with.
+    # One per call, so a batch reads as the one request it was.
+    from core_api.session_context import server_trace_id
+
+    batch_trace_id = server_trace_id()
 
     # C25 (M-48). This path does not go through ``create_memory``, so its
     # sanitation did not cover POST /memories/bulk or the MCP batch tool.
@@ -1652,6 +1731,18 @@ async def create_memories_bulk(
     for item in items:
         if item.metadata:
             item.metadata = sanitize_caller_metadata(item.metadata)
+    for item, values in zip(items, system_values or [], strict=False):
+        if values:
+            item.metadata = item.metadata or {}
+            for key, value in values.items():
+                set_system_value(item.metadata, key, value)
+    # Evidence contract v1 (EC-15): the broker already names the session and
+    # the tool call each capture came from, in metadata. Those are what
+    # ``trace_id`` / ``tool_call_id`` mean, so a broker item that does not send
+    # them takes them from there instead of the per-request batch id.
+    if from_broker:
+        for item in items:
+            _adopt_broker_evidence(item)
 
     # -- Per-item validation. Short content used to raise a 422 for the
     # whole batch; now it's a per-item "error" result. Indices in this
@@ -1716,9 +1807,14 @@ async def create_memories_bulk(
     # note on the model) precisely so the unknown keys land in ``model_extra``
     # and can be reported HERE, per item, instead of 422-ing the whole batch
     # and taking the valid siblings down with the typo.
+    #
+    # A server-owned field (``supersedes_id``, the verification fields) gets the
+    # same explanatory refusal as on single-write (C6, EC-09) instead.
     unknown_field_errors: dict[int, str] = {
         i: (
-            "unknown field(s) not permitted: "
+            server_owned_refusal(owned)
+            if (owned := [f for f in SERVER_OWNED_MEMORY_FIELDS if f in item.model_extra])
+            else "unknown field(s) not permitted: "
             + ", ".join(sorted(item.model_extra))
             + f". Allowed fields: {', '.join(sorted(BulkMemoryItem.model_fields))}"
         )
@@ -1798,6 +1894,43 @@ async def create_memories_bulk(
         # errors in the results loop below.
         if governance_errors:
             valid_indices = [i for i in valid_indices if i not in governance_errors]
+
+    # -- The business/personal pre-gate, per item, as a single create runs it
+    # (``BusinessPersonalPregate``). After the deterministic gate, so it judges
+    # the text that would be stored; before the hash and the providers, so a
+    # refused item costs no embedding or enrichment. A personal item is a
+    # per-item error; under ``fail_closed`` an unavailable classifier refuses
+    # the batch with 503, as it refuses a single write. Imported here because
+    # the pipeline steps import this module.
+    from core_api.pipeline.steps.write.business_personal_pregate import (
+        enforce_business_personal_pregate,
+        pregate_applies,
+    )
+
+    if valid_indices and pregate_applies(tenant_config):
+        pregate_slots = asyncio.Semaphore(BULK_ENRICHMENT_CONCURRENCY)
+
+        async def _pregate(idx: int) -> int | None:
+            async with pregate_slots:
+                try:
+                    await enforce_business_personal_pregate(
+                        tenant_config,
+                        content=items[idx].content,
+                        tenant_id=data.tenant_id,
+                        agent_id=data.agent_id,
+                        write_mode="bulk",
+                    )
+                except HTTPException as exc:
+                    if exc.status_code != 422:
+                        raise
+                    return idx
+            return None
+
+        verdicts = await asyncio.gather(*(_pregate(i) for i in valid_indices))
+        refused = {idx for idx in verdicts if idx is not None}
+        for idx in refused:
+            governance_errors[idx] = "rejected by content policy: non-business content"
+        valid_indices = [i for i in valid_indices if i not in refused]
 
     # -- Batch hash dedup, BEFORE embed and enrich (OSS 08/14 M-38).
     #
@@ -2254,6 +2387,9 @@ async def create_memories_bulk(
             "weight": weight,
             "source_uri": item.source_uri,
             "run_id": item.run_id,
+            # Evidence contract v1: the item's own trace_id, else the batch's.
+            **evidence_payload(item),
+            "trace_id": item.trace_id or batch_trace_id,
             # See ``write_memory_row`` for the falsy-``{}`` trap. The
             # bulk path doesn't append ``write_latency_ms`` so an item
             # with ``item.metadata={}`` and no enrichment-added keys
@@ -2550,6 +2686,7 @@ async def create_memories_bulk(
                                 "metadata_": mem_data["metadata_"],
                             },
                             tenant_config,
+                            llm_verdict=bool(enrichments[orig_idx].llm_ms),
                         ),
                         "governance_remediation",
                         mem_id,
@@ -3451,6 +3588,7 @@ async def fan_out_atomic_facts(
     parent_expires_at=None,
     parent_run_id: str | None = None,
     parent_source_uri: str | None = None,
+    parent_evidence: dict | None = None,
 ) -> dict[str, int]:
     """Create one child memory per extracted atomic fact.
 
@@ -3477,7 +3615,9 @@ async def fan_out_atomic_facts(
     onto every child, as the auto-chunk children already get them: a child is
     the parent's content, so it must expire with it (the expiry sweep archives
     by ``expires_at``) and keep its provenance. Accepted as a datetime or the
-    ISO string a storage row carries.
+    ISO string a storage row carries. ``parent_evidence`` is the parent row (or
+    ``evidence_payload`` of it); its evidence-contract columns are copied the
+    same way.
 
     Returns ``{"created", "deduped", "unembedded"}``. Never raises for a single
     fact — each failure mode is counted and logged, so one bad fact cannot cost
@@ -3638,6 +3778,8 @@ async def fan_out_atomic_facts(
                     ),
                     "run_id": parent_run_id,
                     "source_uri": parent_source_uri,
+                    # The source the child carries decides its verification state.
+                    **evidence_payload({**(parent_evidence or {}), "source_uri": parent_source_uri}),
                 }
             )
         except DuplicateMemoryError:
@@ -4203,7 +4345,9 @@ async def _enrich_memory_background(
     if run_governance_remediation and governed_row is not None:
         from core_api.services.governance_remediation import remediate_after_enrichment
 
-        outcome = await remediate_after_enrichment(governed_row, governance_config)
+        outcome = await remediate_after_enrichment(
+            governed_row, governance_config, llm_verdict=bool(enrichment.llm_ms)
+        )
         if outcome.dropped:
             # ``None``: the row no longer exists, and the return value's whole
             # meaning is "here is the live governed row".
@@ -4257,6 +4401,7 @@ async def _enrich_memory_background(
                 parent_expires_at=mem.get("expires_at"),
                 parent_run_id=mem.get("run_id"),
                 parent_source_uri=mem.get("source_uri"),
+                parent_evidence=mem,
             )
 
         # OSS 09/02 L-20 — the entity-extraction fan-out that stood here is
@@ -4637,6 +4782,19 @@ async def update_memory(
             agent_id=agent_id or mem.get("agent_id"),
             content=data.content,
             gov=getattr(tenant_config, "governance_pii", None),
+        )
+        # And the business/personal pre-gate, as on create: 422 for personal
+        # text, 503 under ``fail_closed`` when the classifier cannot judge it.
+        from core_api.pipeline.steps.write.business_personal_pregate import (
+            enforce_business_personal_pregate,
+        )
+
+        await enforce_business_personal_pregate(
+            tenant_config,
+            content=data.content,
+            tenant_id=tenant_id,
+            agent_id=agent_id or mem.get("agent_id"),
+            write_mode="update",
         )
         # Synchronous update: the caller awaits the re-embed.
         new_embedding = await get_embedding(data.content, tenant_config, background=False)
@@ -5965,7 +6123,14 @@ async def search_memories(
     # SIDE-59 — always-on (non-diagnostic) channel for the resolved retrieval
     # strategy and any strategy-applied top_k cap. Pipeline path only.
     retrieval_ctx: dict | None = None,
-) -> list[MemoryOut]:
+    # EC-05 — filled with ``{"hint": {...}}`` when the search returned nothing
+    # but a readable candidate scored below the cut-off. Pipeline path only.
+    empty_hint_ctx: dict | None = None,
+    # Evidence contract v1 — keep only rows someone or something checked
+    # (``VERIFIED_STATUSES``). A storage filter beside the others, never a
+    # ranking input.
+    verified_only: bool = False,
+) -> list[SearchHitOut]:
     # ``allow_recall_bump`` defaults True so every existing caller — MCP
     # ``caura_recall``, the internal search paths — keeps bumping exactly as
     # before. Only ``POST /search`` passes False, and only for an identity the
@@ -6000,6 +6165,8 @@ async def search_memories(
             include_derived=include_derived,
             top_k_explicit=top_k_explicit,
             retrieval_ctx=retrieval_ctx,
+            empty_hint_ctx=empty_hint_ctx,
+            verified_only=verified_only,
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
     # The legacy path bumps recall_count unconditionally (no caller-agent gate,
@@ -6029,6 +6196,7 @@ async def search_memories(
         allow_recall_bump=allow_recall_bump,
         include_derived=include_derived,
         top_k_explicit=top_k_explicit,
+        verified_only=verified_only,
     )
     if recall_ctx is not None:
         recall_ctx["recall_tracked"] = bool(legacy_results) and allow_recall_bump
@@ -6075,9 +6243,24 @@ async def _search_memories_pipeline(
     # SIDE-59 — always-on (non-diagnostic) channel for the resolved retrieval
     # strategy and any strategy-applied top_k cap. Pipeline path only.
     retrieval_ctx: dict | None = None,
-) -> list[MemoryOut]:
+    # EC-05 — filled with ``{"hint": {...}}`` when the search returned nothing
+    # but a readable candidate scored below the cut-off. Pipeline path only.
+    empty_hint_ctx: dict | None = None,
+    # EC-06 — ``{"memory_id": ...}`` runs the explain composition instead of
+    # the search one, for that memory; the finished context's ``data`` is
+    # handed back under ``explain_ctx["data"]``. Same context, same steps up to
+    # the result set, so the explanation is of the search that would run.
+    explain_ctx: dict | None = None,
+    # Evidence contract v1 — keep only rows someone or something checked
+    # (``VERIFIED_STATUSES``). A storage filter beside the others, never a
+    # ranking input.
+    verified_only: bool = False,
+) -> list[SearchHitOut]:
     """Pipeline-based search_memories -- same logic, decomposed into timed steps."""
-    from core_api.pipeline.compositions.search import build_search_pipeline
+    from core_api.pipeline.compositions.search import (
+        build_search_explain_pipeline,
+        build_search_pipeline,
+    )
     from core_api.pipeline.context import PipelineContext
 
     ctx = PipelineContext(
@@ -6119,12 +6302,19 @@ async def _search_memories_pipeline(
             # the request layer would silently fall back to the tenant default,
             # and the request flag is the layer a caller can actually see.
             "include_derived": resolve_include_derived(include_derived, tenant_config),
+            "verified_only": verified_only,
         },
         tenant_config=tenant_config,
     )
 
-    pipeline = build_search_pipeline()
+    if explain_ctx is not None:
+        ctx.data["explain_memory_id"] = explain_ctx["memory_id"]
+        pipeline = build_search_explain_pipeline()
+    else:
+        pipeline = build_search_pipeline()
     result = await pipeline.run(ctx)
+    if explain_ctx is not None:
+        explain_ctx["data"] = ctx.data
 
     if result.failed:
         from core_api.pipeline.step import StepOutcome
@@ -6182,6 +6372,17 @@ async def _search_memories_pipeline(
     if warnings_ctx is not None:
         warnings_ctx.extend(ctx.data.get("warnings", []) or [])
 
+    if empty_hint_ctx is not None and not ctx.data["results"]:
+        from core_api.empty_hint import build_empty_hint
+
+        hint = build_empty_hint(
+            ctx.data.get("raw_rows"),
+            min_similarity=(ctx.data.get("search_params") or {}).get("min_similarity"),
+            include_derived=ctx.data.get("include_derived", True),
+        )
+        if hint is not None:
+            empty_hint_ctx["hint"] = hint
+
     return ctx.data["results"]
 
 
@@ -6214,7 +6415,8 @@ async def _search_memories_legacy(
     allow_recall_bump: bool = True,
     include_derived: bool | None = None,
     top_k_explicit: bool = False,
-) -> list[MemoryOut]:
+    verified_only: bool = False,
+) -> list[SearchHitOut]:
     """Legacy search -- uses scored_search storage API endpoint."""
     sc = get_storage_client()
 
@@ -6305,6 +6507,7 @@ async def _search_memories_legacy(
         "caller_tenant_id": caller_tenant_id,
         "memory_type_filter": memory_type_filter,
         "status_filter": status_filter,
+        "verified_only": verified_only,
         "valid_at": valid_at.isoformat() if valid_at else None,
         "top_k": _overfetch_top_k,
         # Core-api-local, NOT a scoring knob: the route never reads it, and the
@@ -6380,21 +6583,25 @@ async def _search_memories_legacy(
             EntityLinkOut(entity_id=el.get("entity_id"), role=el.get("role"))
             for el in links_data.get(mid_str, [])
         ]
+        # EC-10 — the same ``evidence`` the pipeline attaches; this path keeps
+        # no score factors, so ``why`` falls back to the generic phrase.
         results.append(
-            _dict_to_memory_out(
-                row,
-                entity_links=entity_links,
-                # Raw vector cosine (``vec_sim``), NOT ``score`` (the ranking
-                # composite, which exceeds 1.0 and is useless for threshold
-                # gating). Mirrors LoadAndSerialize in the pipeline path so both
-                # surfaces agree (test_search_pipeline_equivalence) — see F-14.
-                # None for a row with no embedding, whose 0.0 is storage's
-                # sentinel, not a cosine (L-113).
-                similarity=(
-                    round(float(row["vec_sim"]), 4)
-                    if row.get("vec_sim") is not None and row.get("has_embedding", True) is not False
-                    else None
-                ),
+            to_search_hit(
+                _dict_to_memory_out(
+                    row,
+                    entity_links=entity_links,
+                    # Raw vector cosine (``vec_sim``), NOT ``score`` (the ranking
+                    # composite, which exceeds 1.0 and is useless for threshold
+                    # gating). Mirrors LoadAndSerialize in the pipeline path so both
+                    # surfaces agree (test_search_pipeline_equivalence) — see F-14.
+                    # None for a row with no embedding, whose 0.0 is storage's
+                    # sentinel, not a cosine (L-113).
+                    similarity=(
+                        round(float(row["vec_sim"]), 4)
+                        if row.get("vec_sim") is not None and row.get("has_embedding", True) is not False
+                        else None
+                    ),
+                )
             )
         )
 

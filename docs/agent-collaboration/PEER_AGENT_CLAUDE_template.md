@@ -192,7 +192,9 @@ For all durable memory, use the `caura` memory tools of THIS Caura server (in Co
 
 Call `peer(op="memory_context", args={"delivery_id":"..."})`, then pass the
 returned object unchanged as `metadata` to the existing same-tenant Caura core
-memory tool: `caura_write(content="<decision/outcome>", metadata=<context>)`.
+memory tool: `caura_write(content="<decision/outcome>", metadata=<context>,
+source_uri="caura-bus:message/<message_id>")`, so the memory names the message
+it records.
 For a sent completion use its returned `message_id`; for received work use its
 delivery ID. Context has exactly `source`, `tenant_id`, `thread_id`, `message_id`,
 `delivery_id`, `peer_agent_ids`, `kind`, `ts`, plus optional `human_decision`.

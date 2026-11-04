@@ -27,9 +27,11 @@ Lifespan ordering:
    read-only sample that logs how many live memories are still unembedded;
    and ``lifecycle-reconcile`` (hourly, half past), which republishes audit
    rows a fanout wrote but never published a message for, offset off the
-   fanout hours it repairs; and ``entity-extraction-rerun`` (hourly, quarter
-   to), which re-runs entity extraction for memories that lost it. A
-   thirteenth, ``embed-backfill``, registers only when
+   fanout hours it repairs; ``entity-extraction-rerun`` (hourly, quarter
+   to), which re-runs entity extraction for memories that lost it; and
+   ``enrichment-rerun`` (hourly, quarter past), which enriches again the
+   memories an LLM governance policy could not judge. A fourteenth,
+   ``embed-backfill``, registers only when
    ``embed_backfill_enabled`` is set, because its Pub/Sub topic is
    Terraform-provisioned and firing into an unprovisioned topic would just
    error every night.
@@ -88,6 +90,7 @@ from core_operations.tasks import (
     run_crystallize_tick,
     run_embed_backfill_tick,
     run_embedding_coverage_tick,
+    run_enrichment_rerun_tick,
     run_entity_extraction_rerun_tick,
     run_entity_link_tick,
     run_insights_tick,
@@ -223,6 +226,16 @@ def _register_scheduled_tasks() -> None:
         3600,
         run_entity_extraction_rerun_tick,
         delay_provider=lambda: seconds_until_next_utc_minute_past(45),
+    )
+    # Enriches again the memories an LLM governance policy could not judge,
+    # because every provider failed and enrichment fell back to the keyword
+    # heuristic (core-api ``services.enrichment_rerun``). Hourly at quarter
+    # past, clear of the other hourly jobs; answered at once, like the above.
+    scheduler.register(
+        "enrichment-rerun",
+        3600,
+        run_enrichment_rerun_tick,
+        delay_provider=lambda: seconds_until_next_utc_minute_past(15),
     )
     # Interviewer Phase 1: hourly queue-only tick; per-tenant period_hours
     # gates actual command creation, so opted-out tenants pay zero cost.

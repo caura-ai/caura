@@ -70,6 +70,7 @@ from core_api.schemas import (
     BulkMemoryCreate,
     BulkMemoryItem,
     BulkMemoryResponse,
+    EmptyRecallHint,
     HeldMemoryPage,
     IngestCommitRequest,
     IngestRequest,
@@ -100,6 +101,7 @@ from core_api.services.agent_service import (
     enforce_fleet_read_many,
     enforce_fleet_write,
     enforce_transition,
+    enforce_verify,
     enforce_visibility_write,
     get_or_create_agent,
     lookup_agent,
@@ -148,6 +150,7 @@ from core_api.services.usage_service import (
     recall_operation,
     set_usage_headers,
 )
+from core_api.services.verification import change_verification, verifier_id
 from core_api.tasks import track_task
 
 logger = logging.getLogger(__name__)
@@ -1405,12 +1408,20 @@ async def get_memory(
         "fleet_id": memory["fleet_id"],
         "agent_id": memory["agent_id"],
         "agent_display_name": memory.get("agent_display_name"),
+        "agent_trust_level": memory.get("agent_trust_level"),
         "memory_type": memory["memory_type"],
         "title": memory["title"],
         "content": memory["content"],
         "weight": float(memory["weight"]) if memory["weight"] is not None else None,
         "source_uri": memory["source_uri"],
         "run_id": memory["run_id"],
+        # Evidence contract v1 (migration 071).
+        "observed_at": memory.get("observed_at"),
+        "trace_id": memory.get("trace_id"),
+        "tool_call_id": memory.get("tool_call_id"),
+        "verification_status": memory.get("verification_status") or "unverified",
+        "verified_by": memory.get("verified_by"),
+        "verified_at": memory.get("verified_at"),
         # Storage serialises the JSONB column under ``metadata_``; the API
         # response exposes it as ``metadata``.
         "metadata": memory.get("metadata_"),
@@ -2451,6 +2462,99 @@ async def update_memory_status(
     return {"memory_id": str(memory_id), "old_status": old_status, "new_status": status}
 
 
+async def _change_verification(memory_id: UUID, tenant_id: str, auth: AuthContext, *, verify: bool) -> dict:
+    """Shared body of ``POST /memories/{id}/verify`` and ``/unverify`` (EC-14).
+
+    Who may: a signed-in person, the admin key, a tenant key (the OSS contract:
+    tenant key = tenant admin), and an agent at ``trust_level >= 3`` that may
+    write the row (``enforce_verify``, then the cross-fleet check transitions
+    use). An install or cross-tenant credential may not: those are machine
+    credentials of a fleet, not the tenant's own. A ``disputed`` memory is
+    verified by a person or an admin credential only.
+    """
+    auth.enforce_read_only()
+    auth.enforce_tenant(tenant_id)
+    auth.enforce_tenant_admin_credential("verify memories" if verify else "unverify memories")
+    sc = get_storage_client()
+    memory = await sc.get_memory(str(memory_id), tenant_id)
+    if not memory:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    if auth.agent_id:
+        await enforce_verify(
+            tenant_id,
+            auth.agent_id,
+            disputed=memory.get("verification_status") == "disputed",
+            verify=verify,
+        )
+        allowed = await authorize_memory_access(
+            tenant_id,
+            auth.agent_id,
+            visibility=memory.get("visibility"),
+            owner_agent_id=memory.get("agent_id"),
+            fleet_id=memory.get("fleet_id"),
+            write=True,
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    AUTH_FLEET_SCOPE_FORBIDDEN,
+                    f"Agent '{auth.agent_id}' cannot modify memory in fleet '{memory.get('fleet_id')}'.",
+                ),
+            )
+    result = await change_verification(
+        tenant_id=tenant_id,
+        memory=memory,
+        verify=verify,
+        verified_by=verifier_id(
+            agent_id=auth.agent_id, user_id=auth.user_id, credential_kind=auth.actor_kind
+        ),
+        audit_agent_id=auth.agent_id,
+        audit_detail={"via": "rest", **auth.audit_actor()},
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return result
+
+
+@router.post(
+    "/memories/{memory_id}/verify",
+    responses={200: {"model": _oar.MemoryVerificationResponse}},
+)
+async def verify_memory(
+    memory_id: UUID,
+    tenant_id: str = Query(...),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Mark a memory ``human_verified`` (evidence contract v1, EC-14).
+
+    Sets ``verified_by`` to the caller (a person's user id, ``agent:<id>``, or
+    the credential kind) and ``verified_at`` to now, and writes an audit entry.
+    Open to a signed-in person, an admin or tenant key, and an agent at
+    ``trust_level >= 3``; anyone else gets 403. Only a person or an admin
+    credential may verify a ``disputed`` memory.
+    """
+    return await _change_verification(memory_id, tenant_id, auth, verify=True)
+
+
+@router.post(
+    "/memories/{memory_id}/unverify",
+    responses={200: {"model": _oar.MemoryVerificationResponse}},
+)
+async def unverify_memory(
+    memory_id: UUID,
+    tenant_id: str = Query(...),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Withdraw a memory's verification (EC-14).
+
+    Clears ``verified_by``/``verified_at``. The state returns to what the row's
+    own evidence says (``tool_observed`` or ``unverified``); a ``disputed``
+    memory stays ``disputed``. Same callers as ``/verify``, audited the same way.
+    """
+    return await _change_verification(memory_id, tenant_id, auth, verify=False)
+
+
 @router.patch("/memories/{memory_id}", response_model=MemoryOut)
 async def update_memory_endpoint(
     memory_id: UUID,
@@ -2953,6 +3057,8 @@ async def _search_inner(
     # does not read — the same silent-drop that hid ``limit`` on /recall is live
     # on /search, which shares this body.
     search_warnings: list = _unknown_param_warnings(body, route="memory-search")
+    # EC-05 — the closest below-cut-off memory, filled only on an empty result.
+    empty_hint_ctx: dict = {}
     try:
         config = await resolve_config(body.tenant_id)
         # Widen the read predicate when the caller authenticated with
@@ -3009,6 +3115,8 @@ async def _search_inner(
             # the FIELD name in ``model_fields_set`` for either spelling.
             top_k_explicit="top_k" in body.model_fields_set,
             retrieval_ctx=retrieval_ctx,
+            empty_hint_ctx=empty_hint_ctx,
+            verified_only=body.verified_only,
         )
     except HTTPException:
         # Auth / tenant errors raised downstream are expected outcomes,
@@ -3072,13 +3180,17 @@ async def _search_inner(
     _set_retrieval_headers(response, retrieval_ctx)
     # A28 — null when empty (matches ``diagnostic``); purely additive.
     warn_out = [SearchWarning(**w) for w in search_warnings] or None
+    hint_out = EmptyRecallHint(**empty_hint_ctx["hint"]) if "hint" in empty_hint_ctx else None
     if not body.diagnostic:
-        return SearchResponse(items=results, recall_tracked=recall_tracked, warnings=warn_out)
+        return SearchResponse(
+            items=results, recall_tracked=recall_tracked, warnings=warn_out, empty_hint=hint_out
+        )
     counts = diagnostic_ctx.get("counts", {}) or {}
     return SearchResponse(
         items=results,
         recall_tracked=recall_tracked,
         warnings=warn_out,
+        empty_hint=hint_out,
         diagnostic=SearchDiagnostic(
             retrieval_strategy=diagnostic_ctx.get("retrieval_strategy"),
             top_k_requested=diagnostic_ctx.get("diagnostic_original_top_k"),
@@ -3404,6 +3516,8 @@ async def recall_endpoint(
     diagnostic_ctx: dict = {}
     # A28 / CAURA-723 — same collect-then-serialize shape /search uses.
     recall_warnings: list = []
+    # EC-05 — same channel /search uses; filled only on an empty recall.
+    empty_hint_ctx: dict = {}
 
     # ── Phase 1: DB-bound — config + search ──────────────────────
     config = await resolve_config(body.tenant_id)
@@ -3460,6 +3574,8 @@ async def recall_endpoint(
         include_derived=body.include_derived,
         # SIDE-57 — same body as /search, same rule: a named top_k is honoured.
         top_k_explicit="top_k" in body.model_fields_set,
+        empty_hint_ctx=empty_hint_ctx,
+        verified_only=body.verified_only,
     )
 
     # CAURA-723 — same shape as /search, and before the LLM brief so a
@@ -3494,6 +3610,7 @@ async def recall_endpoint(
         top_k=body.top_k,
         t0=t0,
         items_alias=body.items_alias,
+        tenant_id=body.tenant_id,
     )
     # ax-0917-h-05 — same A28 channel /search uses, and the reason this route
     # needed it most: ``limit`` is now an alias of ``top_k`` (schemas.py), but
@@ -3512,6 +3629,9 @@ async def recall_endpoint(
     recall_warnings.extend(_unknown_param_warnings(body, route="memory-recall"))
     if recall_warnings:
         brief["warnings"] = recall_warnings
+    # EC-05 — added only when present, for the same plain-dict reason as above.
+    if "hint" in empty_hint_ctx:
+        brief["empty_hint"] = empty_hint_ctx["hint"]
     return brief
 
 

@@ -122,3 +122,17 @@ async def query_value(tenant_id: str, body: ValueQuery) -> dict:
     if body.end <= body.start:
         raise HTTPException(status_code=422, detail="'end' must be after 'start'")
     return await _svc.value_query(tenant_id, start=body.start, end=body.end, top=body.top)
+
+
+class Window(BaseModel):
+    start: datetime
+    end: datetime
+
+
+@router.post("/evidence-coverage")
+async def evidence_coverage(tenant_id: str, body: Window) -> dict:
+    """One tenant's evidence coverage counts in ``[start, end)`` (evidence contract v1)."""
+    _require_tenant(tenant_id)
+    if body.end <= body.start:
+        raise HTTPException(status_code=422, detail="'end' must be after 'start'")
+    return await _svc.evidence_coverage(tenant_id, start=body.start, end=body.end)

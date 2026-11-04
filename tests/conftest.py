@@ -995,9 +995,10 @@ def _no_session_carried_over():
     behind, and the database-free bulk writes that ran next reached PostgreSQL.
     """
     yield
-    from core_api.session_context import set_session
+    from core_api.session_context import set_request_id, set_session
 
     set_session(None, None)
+    set_request_id(None)
 
 
 @pytest.fixture

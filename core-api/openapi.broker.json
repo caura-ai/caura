@@ -195,6 +195,19 @@
             ],
             "title": "Object Value"
           },
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the fact was observed, if earlier than the write (e.g. when a tool returned it). Leave unset when unknown; created_at is the write time.",
+            "title": "Observed At"
+          },
           "predicate": {
             "anyOf": [
               {
@@ -262,6 +275,30 @@
               }
             ],
             "title": "Subject Entity Id"
+          },
+          "tool_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Id of the tool call whose result this memory records.",
+            "title": "Tool Call Id"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Session or trace this write belongs to. Omit it and the server stamps the MCP session id, the X-Caura-Session-Id header, or an id for this request. Distinct from run_id.",
+            "title": "Trace Id"
           },
           "ts_valid_end": {
             "anyOf": [
@@ -427,6 +464,45 @@
           "old_content_preview"
         ],
         "title": "ContradictionInfo",
+        "type": "object"
+      },
+      "EmptyRecallHint": {
+        "description": "EC-05 — the closest result of an EMPTY search, and the cut-off it missed.\n\nPresent only when a search returned no items but a memory the caller can\nread scored below the similarity cut-off. That memory passed every other\nfilter (tenant, fleet, visibility, agent, type, status, dates) — the cut-off\nis the only reason it was not returned.",
+        "properties": {
+          "memory_id": {
+            "description": "Id of the closest candidate; read it by id to judge it.",
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "message": {
+            "description": "One-line human-readable summary of the above.",
+            "title": "Message",
+            "type": "string"
+          },
+          "min_similarity": {
+            "description": "The similarity cut-off this search applied.",
+            "title": "Min Similarity",
+            "type": "number"
+          },
+          "similarity": {
+            "description": "Its cosine similarity to the query.",
+            "title": "Similarity",
+            "type": "number"
+          },
+          "title": {
+            "description": "Its title (or a content preview), one line, at most 80 characters.",
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "memory_id",
+          "title",
+          "similarity",
+          "min_similarity",
+          "message"
+        ],
+        "title": "EmptyRecallHint",
         "type": "object"
       },
       "EntityLinkIn": {
@@ -705,6 +781,17 @@
             "title": "Agent Id",
             "type": "string"
           },
+          "agent_trust_level": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Trust Level"
+          },
           "content": {
             "title": "Content",
             "type": "string"
@@ -841,6 +928,17 @@
             ],
             "title": "Object Value"
           },
+          "observed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
           "predicate": {
             "anyOf": [
               {
@@ -931,6 +1029,28 @@
             ],
             "title": "Title"
           },
+          "tool_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Call Id"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          },
           "ts_valid_end": {
             "anyOf": [
               {
@@ -952,6 +1072,33 @@
               }
             ],
             "title": "Ts Valid Start"
+          },
+          "verification_status": {
+            "default": "unverified",
+            "title": "Verification Status",
+            "type": "string"
+          },
+          "verified_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified At"
+          },
+          "verified_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified By"
           },
           "visibility": {
             "title": "Visibility",
@@ -999,6 +1146,17 @@
             "title": "Agent Id",
             "type": "string"
           },
+          "agent_trust_level": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Trust Level"
+          },
           "confidence": {
             "anyOf": [
               {
@@ -1026,6 +1184,1001 @@
             },
             "title": "Entity Links",
             "type": "array"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "fleet_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fleet Id"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "injected": {
+            "default": false,
+            "title": "Injected",
+            "type": "boolean"
+          },
+          "is_inferred": {
+            "default": false,
+            "title": "Is Inferred",
+            "type": "boolean"
+          },
+          "last_recalled_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Recalled At"
+          },
+          "memory_type": {
+            "title": "Memory Type",
+            "type": "string"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          },
+          "object_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Value"
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "predicate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Predicate"
+          },
+          "recall_count": {
+            "default": 0,
+            "title": "Recall Count",
+            "type": "integer"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "score_parts": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScoreParts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "similarity": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Similarity"
+          },
+          "source_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Uri"
+          },
+          "status": {
+            "default": "active",
+            "title": "Status",
+            "type": "string"
+          },
+          "subject_entity_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Entity Id"
+          },
+          "superseded_by": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ContradictionInfo"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded By"
+          },
+          "supersedes_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Id"
+          },
+          "system_metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Metadata"
+          },
+          "tenant_id": {
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "tool_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Call Id"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          },
+          "ts_valid_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ts Valid End"
+          },
+          "ts_valid_start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ts Valid Start"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UsageSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "verification_status": {
+            "default": "unverified",
+            "title": "Verification Status",
+            "type": "string"
+          },
+          "verified_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified At"
+          },
+          "verified_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified By"
+          },
+          "visibility": {
+            "default": "scope_team",
+            "title": "Visibility",
+            "type": "string"
+          },
+          "weight": {
+            "title": "Weight",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "tenant_id",
+          "agent_id",
+          "memory_type",
+          "content",
+          "weight",
+          "source_uri",
+          "run_id",
+          "metadata",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "MemoryOut",
+        "type": "object"
+      },
+      "MemoryType": {
+        "description": "Typed enum for the memory-type vocabulary.\n\nInheriting from ``str`` keeps full backward compatibility with the\nstring-based call sites: ``MemoryType.FACT == \"fact\"`` is True,\ndict lookup with the enum hashes the same as the literal, JSON\nserialisation emits the bare string, and SQLAlchemy reads of a\n``Text`` column coerce cleanly via Pydantic.",
+        "enum": [
+          "fact",
+          "episode",
+          "decision",
+          "preference",
+          "task",
+          "semantic",
+          "intention",
+          "plan",
+          "commitment",
+          "action",
+          "outcome",
+          "cancellation",
+          "rule",
+          "insight"
+        ],
+        "title": "MemoryType",
+        "type": "string"
+      },
+      "MemoryUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "anyOf": [
+              {
+                "maxLength": 10000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content"
+          },
+          "entity_links": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/EntityLinkIn"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Entity links to **add** to this memory. Additive, unlike ``metadata``: links already on the memory are kept even when this list does not name them, and re-sending a pair already present leaves its existing ``role`` unchanged rather than overwriting it. There is no replace mode and no way to remove a link through this endpoint. An ``entity_id`` outside the caller's tenant is rejected with 422.",
+            "title": "Entity Links"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional retention hint. Once this time passes, the row moves to status outdated on the next lifecycle tick and drops out of default search results. Not a hard cutoff: the row remains readable until that tick runs. Distinct from ts_valid_end, which closes a temporal-validity interval rather than expressing retention.",
+            "title": "Expires At"
+          },
+          "memory_type": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MemoryType"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Memory type. Auto-classified by LLM if omitted. Valid values: fact, episode, decision, preference, task, plan, action."
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Free-form metadata stored with the memory. Keys you send are yours: enrichment never overwrites a `summary` or `tags` you supply here, on this write or on any later one — the platform's own versions go to `system_metadata` instead. Platform-reserved keys (timings, governance verdicts, provenance) are stripped from this dict; send them and they are dropped, not stored.",
+            "title": "Metadata"
+          },
+          "metadata_mode": {
+            "anyOf": [
+              {
+                "pattern": "^(merge|replace)$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How to apply ``metadata``: ``merge`` (default when omitted or ``null``) does a top-level JSONB ``||`` merge, preserving keys not present in the patch; ``replace`` overwrites the column wholesale.",
+            "title": "Metadata Mode"
+          },
+          "object_value": {
+            "anyOf": [
+              {
+                "maxLength": 10000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Value"
+          },
+          "predicate": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Predicate"
+          },
+          "source_uri": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Uri"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "pattern": "^(active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted)$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "subject_entity_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Entity Id"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "ts_valid_end": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ts Valid End"
+          },
+          "ts_valid_start": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ts Valid Start"
+          },
+          "visibility": {
+            "anyOf": [
+              {
+                "pattern": "^(scope_agent|scope_team|scope_org)$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visibility"
+          },
+          "weight": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight"
+          }
+        },
+        "title": "MemoryUpdate",
+        "type": "object"
+      },
+      "PaginatedMemoryResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "PaginatedMemoryResponse",
+        "type": "object"
+      },
+      "RecallEvidence": {
+        "description": "Where a recalled memory came from, whether anyone checked it, and why it was picked.",
+        "properties": {
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "'tool:<tool_call_id>' when the writer named the tool call, else the memory's source_uri; absent when neither (ingest's 'text-input' placeholder is not a source).",
+            "title": "Source"
+          },
+          "source_uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Uri"
+          },
+          "strategy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The retrieval strategy that served the query.",
+            "title": "Strategy"
+          },
+          "tool_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Call Id"
+          },
+          "trace": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The trace_id of the session or request that wrote it.",
+            "title": "Trace"
+          },
+          "verification": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "verification_status: unverified, tool_observed, corroborated, human_verified or disputed.",
+            "title": "Verification"
+          },
+          "verified_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified At"
+          },
+          "verified_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified By"
+          },
+          "why": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Short reason the row was returned, from its ranking factors (no LLM).",
+            "title": "Why"
+          }
+        },
+        "title": "RecallEvidence",
+        "type": "object"
+      },
+      "ScoreParts": {
+        "description": "D12 — per-factor breakdown of the ranking composite ``MemoryOut.score``.\n\nEvery factor mirrors a column the scored-search SQL already computes and\nreturns per row; this model only surfaces them. All fields are nullable:\nFTS-only rows have no ``vec_sim``, entity-lookup short-circuit rows have no\nFTS rank, and successor-injected rows were never scored at all.\n\n``rerank`` is the second-stage reranker's score, set only on rows it\nreordered. ``MemoryOut.score`` stays the first-stage composite.",
+        "properties": {
+          "entity_boost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Boost"
+          },
+          "freshness": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Freshness"
+          },
+          "fts_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fts Score"
+          },
+          "recall_boost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recall Boost"
+          },
+          "rerank": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rerank"
+          },
+          "status_penalty": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Penalty"
+          },
+          "temporal_boost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Temporal Boost"
+          },
+          "vec_sim": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vec Sim"
+          }
+        },
+        "title": "ScoreParts",
+        "type": "object"
+      },
+      "SearchDiagnostic": {
+        "description": "D12 — retrieval trace returned when ``SearchRequest.diagnostic`` is true.\n\nAnswers \"why did each result appear (and what got cut)\": the full widened\ncandidate set with per-row score factors and exclusion reasons, the applied\nknobs, and the strategy the classifier picked. Requesting it does NOT change\nthe ``items`` a caller gets back, and a diagnostic call never bumps\n``recall_count`` — it is inspection, not use.",
+        "properties": {
+          "all_candidates": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "All Candidates",
+            "type": "array"
+          },
+          "candidates_considered": {
+            "default": 0,
+            "title": "Candidates Considered",
+            "type": "integer"
+          },
+          "entity_match_declined": {
+            "default": false,
+            "description": "True when the entity match was refused as over-broad (> ENTITY_LOOKUP_MAX_MATCHES). This is the only decline that also suppresses the per-row entity boost; an under-filled pool falls through with the boost still applied and reports False here.",
+            "title": "Entity Match Declined",
+            "type": "boolean"
+          },
+          "entity_matches": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Entities the query's tokens matched in entity FTS, counted before the over-broad decline empties the set. None means the lookup never ran (entity retrieval off, no entity-shaped tokens, or a swallowed failure) — distinct from 0, which means it ran and matched nothing.",
+            "title": "Entity Matches"
+          },
+          "excluded_below_min_similarity": {
+            "default": 0,
+            "title": "Excluded Below Min Similarity",
+            "type": "integer"
+          },
+          "excluded_by_top_k_trim": {
+            "default": 0,
+            "title": "Excluded By Top K Trim",
+            "type": "integer"
+          },
+          "min_similarity_applied": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Similarity Applied"
+          },
+          "retrieval_strategy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieval Strategy"
+          },
+          "returned": {
+            "default": 0,
+            "title": "Returned",
+            "type": "integer"
+          },
+          "search_params": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "Search Params",
+            "type": "object"
+          },
+          "top_k_requested": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top K Requested"
+          }
+        },
+        "title": "SearchDiagnostic",
+        "type": "object"
+      },
+      "SearchHitOut": {
+        "description": "A memory as search and recall return it: MemoryOut plus its evidence.",
+        "properties": {
+          "agent_display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Display Name"
+          },
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "agent_trust_level": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Trust Level"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "entity_links": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/EntityLinkOut"
+            },
+            "title": "Entity Links",
+            "type": "array"
+          },
+          "evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecallEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "expires_at": {
             "anyOf": [
@@ -1313,449 +2466,7 @@
           "created_at",
           "expires_at"
         ],
-        "title": "MemoryOut",
-        "type": "object"
-      },
-      "MemoryType": {
-        "description": "Typed enum for the memory-type vocabulary.\n\nInheriting from ``str`` keeps full backward compatibility with the\nstring-based call sites: ``MemoryType.FACT == \"fact\"`` is True,\ndict lookup with the enum hashes the same as the literal, JSON\nserialisation emits the bare string, and SQLAlchemy reads of a\n``Text`` column coerce cleanly via Pydantic.",
-        "enum": [
-          "fact",
-          "episode",
-          "decision",
-          "preference",
-          "task",
-          "semantic",
-          "intention",
-          "plan",
-          "commitment",
-          "action",
-          "outcome",
-          "cancellation",
-          "rule",
-          "insight"
-        ],
-        "title": "MemoryType",
-        "type": "string"
-      },
-      "MemoryUpdate": {
-        "additionalProperties": false,
-        "properties": {
-          "content": {
-            "anyOf": [
-              {
-                "maxLength": 10000,
-                "minLength": 1,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Content"
-          },
-          "entity_links": {
-            "anyOf": [
-              {
-                "items": {
-                  "$ref": "#/components/schemas/EntityLinkIn"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Entity links to **add** to this memory. Additive, unlike ``metadata``: links already on the memory are kept even when this list does not name them, and re-sending a pair already present leaves its existing ``role`` unchanged rather than overwriting it. There is no replace mode and no way to remove a link through this endpoint. An ``entity_id`` outside the caller's tenant is rejected with 422.",
-            "title": "Entity Links"
-          },
-          "expires_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Optional retention hint. Once this time passes, the row moves to status outdated on the next lifecycle tick and drops out of default search results. Not a hard cutoff: the row remains readable until that tick runs. Distinct from ts_valid_end, which closes a temporal-validity interval rather than expressing retention.",
-            "title": "Expires At"
-          },
-          "memory_type": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/MemoryType"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Memory type. Auto-classified by LLM if omitted. Valid values: fact, episode, decision, preference, task, plan, action."
-          },
-          "metadata": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Free-form metadata stored with the memory. Keys you send are yours: enrichment never overwrites a `summary` or `tags` you supply here, on this write or on any later one — the platform's own versions go to `system_metadata` instead. Platform-reserved keys (timings, governance verdicts, provenance) are stripped from this dict; send them and they are dropped, not stored.",
-            "title": "Metadata"
-          },
-          "metadata_mode": {
-            "anyOf": [
-              {
-                "pattern": "^(merge|replace)$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "How to apply ``metadata``: ``merge`` (default when omitted or ``null``) does a top-level JSONB ``||`` merge, preserving keys not present in the patch; ``replace`` overwrites the column wholesale.",
-            "title": "Metadata Mode"
-          },
-          "object_value": {
-            "anyOf": [
-              {
-                "maxLength": 10000,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Object Value"
-          },
-          "predicate": {
-            "anyOf": [
-              {
-                "maxLength": 200,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Predicate"
-          },
-          "source_uri": {
-            "anyOf": [
-              {
-                "maxLength": 2048,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Source Uri"
-          },
-          "status": {
-            "anyOf": [
-              {
-                "pattern": "^(active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted)$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Status"
-          },
-          "subject_entity_id": {
-            "anyOf": [
-              {
-                "format": "uuid",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Subject Entity Id"
-          },
-          "title": {
-            "anyOf": [
-              {
-                "maxLength": 500,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Title"
-          },
-          "ts_valid_end": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Ts Valid End"
-          },
-          "ts_valid_start": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Ts Valid Start"
-          },
-          "visibility": {
-            "anyOf": [
-              {
-                "pattern": "^(scope_agent|scope_team|scope_org)$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Visibility"
-          },
-          "weight": {
-            "anyOf": [
-              {
-                "maximum": 1.0,
-                "minimum": 0.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Weight"
-          }
-        },
-        "title": "MemoryUpdate",
-        "type": "object"
-      },
-      "PaginatedMemoryResponse": {
-        "properties": {
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/MemoryOut"
-            },
-            "title": "Items",
-            "type": "array"
-          },
-          "next_cursor": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Next Cursor"
-          }
-        },
-        "required": [
-          "items"
-        ],
-        "title": "PaginatedMemoryResponse",
-        "type": "object"
-      },
-      "ScoreParts": {
-        "description": "D12 — per-factor breakdown of the ranking composite ``MemoryOut.score``.\n\nEvery factor mirrors a column the scored-search SQL already computes and\nreturns per row; this model only surfaces them. All fields are nullable:\nFTS-only rows have no ``vec_sim``, entity-lookup short-circuit rows have no\nFTS rank, and successor-injected rows were never scored at all.\n\n``rerank`` is the second-stage reranker's score, set only on rows it\nreordered. ``MemoryOut.score`` stays the first-stage composite.",
-        "properties": {
-          "entity_boost": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Entity Boost"
-          },
-          "freshness": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Freshness"
-          },
-          "fts_score": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Fts Score"
-          },
-          "recall_boost": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Recall Boost"
-          },
-          "rerank": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Rerank"
-          },
-          "status_penalty": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Status Penalty"
-          },
-          "temporal_boost": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Temporal Boost"
-          },
-          "vec_sim": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Vec Sim"
-          }
-        },
-        "title": "ScoreParts",
-        "type": "object"
-      },
-      "SearchDiagnostic": {
-        "description": "D12 — retrieval trace returned when ``SearchRequest.diagnostic`` is true.\n\nAnswers \"why did each result appear (and what got cut)\": the full widened\ncandidate set with per-row score factors and exclusion reasons, the applied\nknobs, and the strategy the classifier picked. Requesting it does NOT change\nthe ``items`` a caller gets back, and a diagnostic call never bumps\n``recall_count`` — it is inspection, not use.",
-        "properties": {
-          "all_candidates": {
-            "default": [],
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "title": "All Candidates",
-            "type": "array"
-          },
-          "candidates_considered": {
-            "default": 0,
-            "title": "Candidates Considered",
-            "type": "integer"
-          },
-          "entity_match_declined": {
-            "default": false,
-            "description": "True when the entity match was refused as over-broad (> ENTITY_LOOKUP_MAX_MATCHES). This is the only decline that also suppresses the per-row entity boost; an under-filled pool falls through with the boost still applied and reports False here.",
-            "title": "Entity Match Declined",
-            "type": "boolean"
-          },
-          "entity_matches": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Entities the query's tokens matched in entity FTS, counted before the over-broad decline empties the set. None means the lookup never ran (entity retrieval off, no entity-shaped tokens, or a swallowed failure) — distinct from 0, which means it ran and matched nothing.",
-            "title": "Entity Matches"
-          },
-          "excluded_below_min_similarity": {
-            "default": 0,
-            "title": "Excluded Below Min Similarity",
-            "type": "integer"
-          },
-          "excluded_by_top_k_trim": {
-            "default": 0,
-            "title": "Excluded By Top K Trim",
-            "type": "integer"
-          },
-          "min_similarity_applied": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Min Similarity Applied"
-          },
-          "retrieval_strategy": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Retrieval Strategy"
-          },
-          "returned": {
-            "default": 0,
-            "title": "Returned",
-            "type": "integer"
-          },
-          "search_params": {
-            "additionalProperties": true,
-            "default": {},
-            "title": "Search Params",
-            "type": "object"
-          },
-          "top_k_requested": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Top K Requested"
-          }
-        },
-        "title": "SearchDiagnostic",
+        "title": "SearchHitOut",
         "type": "object"
       },
       "SearchRequest": {
@@ -1909,6 +2620,12 @@
             ],
             "description": "As-of time for the question (ISO 8601). Rows whose ts_valid_start is after this date are excluded and rows whose ts_valid_end is before it are down-weighted; relative dates in the query ('last month') are resolved against it. When the tenant's search.default_profile sets freshness_reference=1, freshness and the temporal window are ALSO measured from this time against each row's event time (ts_valid_start, else created_at) instead of from now() — the setting for backfilled corpora where ingest time carries no signal. Naive values are read as UTC.",
             "title": "Valid At"
+          },
+          "verified_only": {
+            "default": false,
+            "description": "Return only memories someone or something checked: verification_status tool_observed, corroborated or human_verified. A filter only; ranking is unchanged.",
+            "title": "Verified Only",
+            "type": "boolean"
           }
         },
         "required": [
@@ -1930,9 +2647,20 @@
               }
             ]
           },
+          "empty_hint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EmptyRecallHint"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only when items is empty: the closest memory that scored below the similarity cut-off, so an empty result is not mistaken for 'nothing saved'."
+          },
           "items": {
             "items": {
-              "$ref": "#/components/schemas/MemoryOut"
+              "$ref": "#/components/schemas/SearchHitOut"
             },
             "title": "Items",
             "type": "array"

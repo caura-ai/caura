@@ -165,6 +165,19 @@ _INTERRUPTED = [
         "ALTER TABLE documents ADD COLUMN agent_id text",
         "ix_documents_tenant_agent",
     ),
+    (
+        # Everything 071 commits before its block: the six columns and the
+        # NOT VALID check, in one statement as the retry meets them.
+        "071",
+        "070",
+        ("memories", "verification_status"),
+        "ALTER TABLE memories ADD COLUMN observed_at timestamptz, ADD COLUMN trace_id text, "
+        "ADD COLUMN tool_call_id text, ADD COLUMN verification_status text NOT NULL DEFAULT 'unverified', "
+        "ADD COLUMN verified_by text, ADD COLUMN verified_at timestamptz, "
+        "ADD CONSTRAINT ck_memories_verification_status CHECK (verification_status IN "
+        "('unverified', 'tool_observed', 'corroborated', 'human_verified', 'disputed')) NOT VALID",
+        "ix_memories_verification",
+    ),
 ]
 
 

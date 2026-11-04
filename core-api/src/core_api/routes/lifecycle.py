@@ -203,8 +203,9 @@ async def _list_tenants_for_action(action: str) -> list[str]:
     retention window. The archive ``deleted_at IS NULL`` filter would
     silently drop the orgs we most need to run against (e.g. an org
     that 100%-soft-deleted its memories), so purge gets its own
-    helper bounded to soft-deleted rows older than
-    ``MEMORY_RETENTION_MAX_DAYS``.
+    helper bounded to soft-deleted rows older than the shortest window an
+    org can set (``MEMORY_RETENTION_MIN_DAYS``). Suppressed tenants are in
+    the purge list only.
 
     Each helper now reads through core-storage-api (Fix 2 Phase 1), so no
     core-api DB session is involved.
@@ -609,6 +610,26 @@ async def rerun_lost_entity_extractions(
     counts = await rerun_lost_extractions()
     if counts["memories"] or counts["unreadable_tenants"]:
         logger.info("entity extraction re-run sweep", extra=counts)
+    return counts
+
+
+@router.post("/admin/enrichment/rerun-unjudged")
+async def rerun_unjudged_enrichments(
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict:
+    """Enrich again the memories an LLM governance policy could not judge
+    (``services.enrichment_rerun``).
+
+    core-operations' hourly ``enrichment-rerun`` job calls this. Like the
+    extraction re-run above, it marks the open rows, schedules the re-runs in
+    the background and returns counts without waiting for them.
+    """
+    auth.enforce_admin()
+    from core_api.services.enrichment_rerun import rerun_unjudged_enrichments as sweep
+
+    counts = await sweep()
+    if counts["memories"] or counts["unreadable_tenants"]:
+        logger.info("enrichment re-run sweep", extra=counts)
     return counts
 
 

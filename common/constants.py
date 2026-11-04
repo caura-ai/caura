@@ -897,3 +897,25 @@ DOCUMENT_STATUS_CHANGED = "document_status_changed"
 # was computed from (``expected_content``) found the row holding other text: a
 # later edit replaced it. Nothing was written (O16).
 MEMORY_CONTENT_CHANGED = "memory_content_changed"
+
+#: The evidence coverage report's rules (``GET /api/v1/reports/evidence-coverage``).
+#: Agent ids that name no agent: a missing one, the MCP default (``mcp-agent``,
+#: "caller specified nothing") and the shared ``main`` firehose identity. A row
+#: written under one of these does not count as attributed.
+PLACEHOLDER_AGENT_IDS = ("", "mcp-agent", "main")
+#: ``source_uri`` values that are not external evidence, compared lowercased.
+#: An entry ending in ``:`` is a scheme and matches every uri that starts with
+#: it (benchmark corpora); any other entry matches exactly (``text-input`` is
+#: ingest's placeholder for pasted content).
+NON_EVIDENCE_SOURCE_URIS = (
+    "text-input",
+    "longmemeval:",
+    "locomo:",
+    "stale:",
+    "clbench:",
+    "test:",
+    "lme:",
+    "bench:",
+    "seed:",
+    "benchmark:",
+)
