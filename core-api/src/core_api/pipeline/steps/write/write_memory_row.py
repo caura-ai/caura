@@ -19,6 +19,7 @@ from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
 from core_api.pipeline.steps.write.hold_low_trust_write import HoldLowTrustWrite
 from core_api.schemas import EntityLinkIn
+from core_api.services.evidence import evidence_payload
 from core_api.services.hooks import get_hooks
 from core_api.services.system_metadata import set_system_value
 from core_api.services.write_hold import claim_settings, insert_deciding_again
@@ -239,6 +240,8 @@ class WriteMemoryRow:
             "weight": fields["weight"],
             "source_uri": data.source_uri,
             "run_id": data.run_id,
+            # Evidence contract v1; ``trace_id`` is already stamped (``create_memory``).
+            **evidence_payload(data),
             # Pass the dict through. ``write_latency_ms`` is always
             # added at line 35, so ``metadata`` is never falsy here —
             # the previous ``or None`` was dead code that, if ever

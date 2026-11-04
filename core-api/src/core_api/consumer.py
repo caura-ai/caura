@@ -112,6 +112,7 @@ async def _fan_out_persisted_atomic_facts(sc, memory: dict, payload, outcome) ->
                 parent_expires_at=memory.get("expires_at"),
                 parent_run_id=memory.get("run_id"),
                 parent_source_uri=memory.get("source_uri"),
+                parent_evidence=memory,
             )
         except Exception as exc:
             # Marker deliberately left in place: the facts are still stored, so a

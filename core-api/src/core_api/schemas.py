@@ -20,6 +20,9 @@ from core_api.constants import (
     MEMORY_TYPES_WRITE_DESCRIPTION,
     MEMORY_VISIBILITIES_PATTERN,
     MIN_TRUST_LEVEL,
+    OBSERVED_AT_DESCRIPTION,
+    TOOL_CALL_ID_DESCRIPTION,
+    TRACE_ID_DESCRIPTION,
     MemoryType,
 )
 from core_api.request_bounds import validate_write_fields
@@ -59,7 +62,35 @@ STRICT_WRITE_BODY = ConfigDict(extra="forbid")
 # an explanatory 422 instead of the generic unknown-field one. Deliberately a
 # short explicit list rather than a pattern: everything not named here keeps the
 # ordinary ``extra="forbid"`` behaviour, so a typo is still just a typo.
-SERVER_OWNED_MEMORY_FIELDS = ("supersedes_id",)
+#
+# Evidence contract v1 (EC-09) adds the verification fields: a memory's
+# verification state is recorded by the server, so a writer can never mark its
+# own memory checked. Refused on update as well as create.
+SERVER_OWNED_MEMORY_FIELDS = ("supersedes_id", "verification_status", "verified_by", "verified_at")
+
+_VERIFICATION_FIELDS = ("verification_status", "verified_by", "verified_at")
+
+
+def server_owned_refusal(present: list[str]) -> str:
+    """The 422 message for a write body that names server-owned fields.
+
+    One sentence per kind of field present, so each names the mechanism that
+    does set it rather than a route that does not exist.
+    """
+    parts = [
+        f"{', '.join(present)} {'is' if len(present) == 1 else 'are'} set by the server, not by the caller."
+    ]
+    if "supersedes_id" in present:
+        parts.append(
+            "Supersession is established by contradiction detection: write the corrected fact as an "
+            "ordinary memory and the detector links it to the row it supersedes."
+        )
+    if any(f in _VERIFICATION_FIELDS for f in present):
+        parts.append(
+            "Every memory starts 'unverified' and only the server records a verification. To attach "
+            "evidence to a write, send source_uri or tool_call_id."
+        )
+    return " ".join(parts)
 
 
 # --- tenant_id defaulting (ax-0917-m-12) ---
@@ -184,6 +215,9 @@ class MemoryCreate(TenantScopedBody):
     weight: float | None = Field(default=None, ge=0.0, le=1.0)
     source_uri: str | None = Field(default=None, max_length=2048)
     run_id: str | None = Field(default=None, max_length=200)
+    observed_at: datetime | None = Field(default=None, description=OBSERVED_AT_DESCRIPTION)
+    trace_id: str | None = Field(default=None, max_length=200, description=TRACE_ID_DESCRIPTION)
+    tool_call_id: str | None = Field(default=None, max_length=200, description=TOOL_CALL_ID_DESCRIPTION)
     metadata: dict | None = Field(default=None, description=CALLER_METADATA_DESCRIPTION)
     origin: OriginReport | None = Field(
         default=None,
@@ -228,6 +262,8 @@ class MemoryCreate(TenantScopedBody):
     def _refuse_server_owned_fields(cls, data):
         """C6 — refuse ``supersedes_id`` on create, and say why.
 
+        EC-09 adds the verification fields to the same list and message.
+
         Supersession is established by the SERVER, never by the caller: the
         contradiction detector decides that a new memory retires an older one
         and writes the pointer through ``update_memory_status``, which is
@@ -251,12 +287,7 @@ class MemoryCreate(TenantScopedBody):
         if isinstance(data, dict):
             present = [f for f in SERVER_OWNED_MEMORY_FIELDS if f in data]
             if present:
-                raise ValueError(
-                    f"{', '.join(present)} is set by the server, not by the caller, and cannot be "
-                    "supplied on create. Supersession is established by contradiction detection: "
-                    "write the corrected fact as an ordinary memory and the detector links it to "
-                    "the row it supersedes."
-                )
+                raise ValueError(server_owned_refusal(present))
         return data
 
     @model_validator(mode="before")
@@ -304,6 +335,10 @@ class BulkMemoryItem(BaseModel):
     weight: float | None = Field(default=None)
     source_uri: str | None = None
     run_id: str | None = None
+    # Evidence contract v1. Size caps are enforced per item, as for run_id.
+    observed_at: datetime | None = Field(default=None, description=OBSERVED_AT_DESCRIPTION)
+    trace_id: str | None = Field(default=None, description=TRACE_ID_DESCRIPTION)
+    tool_call_id: str | None = Field(default=None, description=TOOL_CALL_ID_DESCRIPTION)
     metadata: dict | None = None
     entity_links: list[EntityLinkIn] = []
     expires_at: datetime | None = Field(default=None, description=EXPIRES_AT_DESCRIPTION)
@@ -463,6 +498,16 @@ class MemoryUpdate(BaseModel):
         ),
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_server_owned_fields(cls, data):
+        """EC-09 — the create refusal, on update: a PATCH cannot set them either."""
+        if isinstance(data, dict):
+            present = [f for f in SERVER_OWNED_MEMORY_FIELDS if f in data]
+            if present:
+                raise ValueError(server_owned_refusal(present))
+        return data
+
     @model_validator(mode="after")
     def metadata_mode_requires_metadata(self) -> "MemoryUpdate":
         """Reject ``{"metadata_mode": "<merge|replace>"}`` (a real
@@ -549,6 +594,16 @@ class MemoryOut(BaseModel):
     weight: float
     source_uri: str | None
     run_id: str | None
+    # Evidence contract v1 (docs/plans/evidence-contract-v1.md). ``trace_id`` is
+    # the caller's own or the one the server stamped; the verification fields
+    # are server-owned. Defaulted so a row read before migration 071 still
+    # validates.
+    observed_at: datetime | None = None
+    trace_id: str | None = None
+    tool_call_id: str | None = None
+    verification_status: str = "unverified"
+    verified_by: str | None = None
+    verified_at: datetime | None = None
     # Two flags here tell a caller the write is not fully settled yet:
     #
     #   embedding_pending: true   — the row was stored without an embedding and a
@@ -677,6 +732,13 @@ class MemoryDetailResponse(BaseModel):
     weight: float | None = None
     source_uri: str | None = None
     run_id: str | None = None
+    # Evidence contract v1; same contract as on ``MemoryOut``.
+    observed_at: str | None = None
+    trace_id: str | None = None
+    tool_call_id: str | None = None
+    verification_status: str = "unverified"
+    verified_by: str | None = None
+    verified_at: str | None = None
     # Exposed as ``metadata``; storage serialises the JSONB column as ``metadata_``
     # and the route renames it on the way out.
     metadata: dict | None = None

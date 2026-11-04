@@ -59,7 +59,12 @@ def test_a_valid_create_body_is_untouched():
 def test_server_owned_list_is_narrow():
     """Widening this is a wire-contract decision, not a refactor: every name
     here converts a generic 422 into a specific refusal."""
-    assert SERVER_OWNED_MEMORY_FIELDS == ("supersedes_id",)
+    assert SERVER_OWNED_MEMORY_FIELDS == (
+        "supersedes_id",
+        "verification_status",
+        "verified_by",
+        "verified_at",
+    )
 
 
 # ── D6 ────────────────────────────────────────────────────────────────────

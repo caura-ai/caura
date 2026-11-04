@@ -1104,6 +1104,27 @@
       },
       {
         "default": null,
+        "description": "ISO time (single only).",
+        "name": "observed_at",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Single only; default: session.",
+        "name": "trace_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
+        "description": "Single only.",
+        "name": "tool_call_id",
+        "required": false,
+        "type": "str | None"
+      },
+      {
+        "default": null,
         "description": "Metadata (single only). Your summary/tags survive enrichment.",
         "name": "metadata",
         "required": false,

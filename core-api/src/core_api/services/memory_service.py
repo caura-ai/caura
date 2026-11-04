@@ -97,6 +97,7 @@ from core_api.errors import (
 )
 from core_api.request_bounds import validate_write_fields
 from core_api.schemas import (
+    SERVER_OWNED_MEMORY_FIELDS,
     BulkItemResult,
     BulkMemoryCreate,
     BulkMemoryItem,
@@ -107,6 +108,7 @@ from core_api.schemas import (
     MemoryOut,
     MemoryUpdate,
     ScoreParts,
+    server_owned_refusal,
 )
 from core_api.search_trim import (
     is_derived_fanout_row,
@@ -118,6 +120,7 @@ from core_api.services.auto_capture import CAPTURE_KEY, capture_of, stamp_captur
 from core_api.services.contradiction_detector import _pick_older, revert_unheld_loser
 from core_api.services.entity_extraction_worker import process_entity_extraction
 from core_api.services.entity_tokens import extract_entity_tokens
+from core_api.services.evidence import evidence_payload
 from core_api.services.governance_gate import (
     ACTION_NB_KEEP_PRIVATE,
     ACTION_PII_DROP,
@@ -796,6 +799,7 @@ def _dict_to_memory_out(
         weight=mem.get("weight"),
         source_uri=mem.get("source_uri"),
         run_id=mem.get("run_id"),
+        **_evidence_out(mem),
         metadata=metadata,
         created_at=mem.get("created_at"),
         expires_at=mem.get("expires_at"),
@@ -820,6 +824,22 @@ def _mem_attr(memory, key: str, default=None):
     if isinstance(memory, dict):
         return memory.get(key, default)
     return getattr(memory, key, default)
+
+
+def _evidence_out(memory) -> dict:
+    """Evidence contract v1 fields for ``MemoryOut``, from a row or an ORM object.
+
+    ``verification_status`` falls back to the column default: a row serialised
+    without it (an older storage, a hand-built dict) is unverified, not invalid.
+    """
+    return {
+        "observed_at": _mem_attr(memory, "observed_at"),
+        "trace_id": _mem_attr(memory, "trace_id"),
+        "tool_call_id": _mem_attr(memory, "tool_call_id"),
+        "verification_status": _mem_attr(memory, "verification_status") or "unverified",
+        "verified_by": _mem_attr(memory, "verified_by"),
+        "verified_at": _mem_attr(memory, "verified_at"),
+    }
 
 
 def _memory_to_out(
@@ -851,6 +871,7 @@ def _memory_to_out(
         weight=_mem_attr(memory, "weight"),
         source_uri=_mem_attr(memory, "source_uri"),
         run_id=_mem_attr(memory, "run_id"),
+        **_evidence_out(memory),
         metadata=metadata,
         created_at=_mem_attr(memory, "created_at"),
         expires_at=_mem_attr(memory, "expires_at"),
@@ -898,6 +919,12 @@ async def create_memory(
     """
     if not data.agent_id:
         raise ValueError("agent_id must be resolved before calling create_memory")
+    # Evidence contract v1: a write names the session or request it came from,
+    # the caller's own trace_id when it sent one.
+    if data.trace_id is None:
+        from core_api.session_context import server_trace_id
+
+        data.trace_id = server_trace_id()
     # Reserved-id guard (`main` fix): single chokepoint for REST + MCP + STM.
     # data.agent_id is already the resolved effective identity here.
     try:
@@ -1038,6 +1065,9 @@ async def _run_write_pipeline(data: MemoryCreate, *, is_inferred: bool = False) 
                 weight=fields["weight"],
                 source_uri=data.source_uri,
                 run_id=data.run_id,
+                observed_at=data.observed_at,
+                trace_id=data.trace_id,
+                tool_call_id=data.tool_call_id,
                 # ``fields["metadata"]`` is always a dict — initialised
                 # as ``data.metadata or {}`` in MergeEnrichmentFields. The
                 # previous ``or None`` coerced an intentional ``{}`` to
@@ -1320,6 +1350,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
             "weight": fields["weight"],
             "source_uri": data.source_uri,
             "run_id": data.run_id,
+            **evidence_payload(data),
             # See ``write_memory_row`` for the falsy-``{}`` trap.
             "metadata_": _parent_metadata(),
             "content_hash": ch,
@@ -1431,6 +1462,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                     "weight": fields["weight"],
                     "source_uri": data.source_uri,
                     "run_id": data.run_id,
+                    **evidence_payload(data),
                     "metadata_": child_meta,
                     "content_hash": child_ch,
                     "client_request_id": _auto_chunk_request_id(),
@@ -1632,6 +1664,11 @@ async def create_memories_bulk(
     t0 = time.perf_counter()
     items = data.items
     n = len(items)
+    # Evidence contract v1: the trace_id an item without its own is stamped with.
+    # One per call, so a batch reads as the one request it was.
+    from core_api.session_context import server_trace_id
+
+    batch_trace_id = server_trace_id()
 
     # C25 (M-48). This path does not go through ``create_memory``, so its
     # sanitation did not cover POST /memories/bulk or the MCP batch tool.
@@ -1738,9 +1775,14 @@ async def create_memories_bulk(
     # note on the model) precisely so the unknown keys land in ``model_extra``
     # and can be reported HERE, per item, instead of 422-ing the whole batch
     # and taking the valid siblings down with the typo.
+    #
+    # A server-owned field (``supersedes_id``, the verification fields) gets the
+    # same explanatory refusal as on single-write (C6, EC-09) instead.
     unknown_field_errors: dict[int, str] = {
         i: (
-            "unknown field(s) not permitted: "
+            server_owned_refusal(owned)
+            if (owned := [f for f in SERVER_OWNED_MEMORY_FIELDS if f in item.model_extra])
+            else "unknown field(s) not permitted: "
             + ", ".join(sorted(item.model_extra))
             + f". Allowed fields: {', '.join(sorted(BulkMemoryItem.model_fields))}"
         )
@@ -2313,6 +2355,9 @@ async def create_memories_bulk(
             "weight": weight,
             "source_uri": item.source_uri,
             "run_id": item.run_id,
+            # Evidence contract v1: the item's own trace_id, else the batch's.
+            **evidence_payload(item),
+            "trace_id": item.trace_id or batch_trace_id,
             # See ``write_memory_row`` for the falsy-``{}`` trap. The
             # bulk path doesn't append ``write_latency_ms`` so an item
             # with ``item.metadata={}`` and no enrichment-added keys
@@ -3511,6 +3556,7 @@ async def fan_out_atomic_facts(
     parent_expires_at=None,
     parent_run_id: str | None = None,
     parent_source_uri: str | None = None,
+    parent_evidence: dict | None = None,
 ) -> dict[str, int]:
     """Create one child memory per extracted atomic fact.
 
@@ -3537,7 +3583,9 @@ async def fan_out_atomic_facts(
     onto every child, as the auto-chunk children already get them: a child is
     the parent's content, so it must expire with it (the expiry sweep archives
     by ``expires_at``) and keep its provenance. Accepted as a datetime or the
-    ISO string a storage row carries.
+    ISO string a storage row carries. ``parent_evidence`` is the parent row (or
+    ``evidence_payload`` of it); its evidence-contract columns are copied the
+    same way.
 
     Returns ``{"created", "deduped", "unembedded"}``. Never raises for a single
     fact — each failure mode is counted and logged, so one bad fact cannot cost
@@ -3698,6 +3746,7 @@ async def fan_out_atomic_facts(
                     ),
                     "run_id": parent_run_id,
                     "source_uri": parent_source_uri,
+                    **evidence_payload(parent_evidence or {}),
                 }
             )
         except DuplicateMemoryError:
@@ -4319,6 +4368,7 @@ async def _enrich_memory_background(
                 parent_expires_at=mem.get("expires_at"),
                 parent_run_id=mem.get("run_id"),
                 parent_source_uri=mem.get("source_uri"),
+                parent_evidence=mem,
             )
 
         # OSS 09/02 L-20 — the entity-extraction fan-out that stood here is

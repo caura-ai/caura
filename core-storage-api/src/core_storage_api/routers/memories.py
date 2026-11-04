@@ -58,6 +58,8 @@ _DATETIME_FIELDS = {
     "ts_valid_start",
     "ts_valid_end",
     "last_dedup_checked_at",
+    "observed_at",
+    "verified_at",
 }
 
 
