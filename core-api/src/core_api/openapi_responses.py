@@ -205,8 +205,20 @@ class RecallDiagnostic(BaseModel):
         description="Unfiltered LLM completion (reasoning scaffold + answer marker) that summary "
         "was extracted from; null when no LLM ran (no matches, or summarization disabled)."
     )
-    recall_model: str | None
-    recall_provider: str | None
+    recall_model: str | None = Field(
+        description="Model that wrote recall_raw; null when no LLM ran. Can differ from "
+        "recall_configured_model, because a provider with no key falls back to the platform LLM."
+    )
+    recall_provider: str | None = Field(
+        description="Provider that wrote recall_raw: the configured one, the fallback provider, the "
+        "platform LLM, or 'fake' for the unsynthesized fallback; null when no LLM ran."
+    )
+    recall_configured_model: str | None = Field(
+        default=None, description="The tenant's resolved recall model setting."
+    )
+    recall_configured_provider: str | None = Field(
+        default=None, description="The tenant's resolved recall provider setting."
+    )
     all_candidates: list
     top_k_used: int | None = Field(
         description="Row budget the search ran with, after the agent and tenant search profiles and any "

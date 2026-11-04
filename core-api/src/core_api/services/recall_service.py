@@ -273,6 +273,8 @@ async def summarize_memories(
                 "recall_raw": None,
                 "recall_model": None,
                 "recall_provider": None,
+                "recall_configured_model": None,
+                "recall_configured_provider": None,
                 "all_candidates": diagnostic_ctx.get("all_candidates", []),
                 "top_k_used": top_k_used,
                 "retrieval_strategy": diagnostic_ctx.get("retrieval_strategy"),
@@ -320,7 +322,9 @@ async def summarize_memories(
                 "recall_prompt": None,
                 "recall_raw": None,
                 "recall_model": None,
-                "recall_provider": provider,
+                "recall_provider": None,
+                "recall_configured_model": None,
+                "recall_configured_provider": provider,
                 "all_candidates": diagnostic_ctx.get("all_candidates", []),
                 "top_k_used": top_k_used,
                 "retrieval_strategy": diagnostic_ctx.get("retrieval_strategy"),
@@ -347,6 +351,12 @@ async def summarize_memories(
         premise_guard_block=(PREMISE_GUARD_BLOCK if getattr(config, "recall_premise_guard", False) else ""),
     )
 
+    # Who wrote the completion, which the configured provider and model do not
+    # say. A provider with no key resolves to the platform LLM and ignores
+    # ``recall_model`` (``common.llm.registry.get_llm_provider``); a failed
+    # primary can be answered by the fallback provider or by ``_fake_recall``.
+    answered_by: dict[str, str | None] = {"provider": None, "model": None}
+
     def _fake_recall() -> str:
         """No-LLM fallback: the top memory contents, labelled as unsynthesized.
 
@@ -361,17 +371,21 @@ async def summarize_memories(
         the same as no flag. Same shape as ``interview_service._fake_report``'s
         "(LLM unavailable; unsynthesized)".
         """
+        answered_by.update(provider="fake", model=None)
         joined = " ".join(m.content[:100] for m in memories[:3])
         if not joined:
             return "No summary available (no LLM provider answered)."
         return f"(LLM unavailable; top {min(len(memories), 3)} memories unsynthesized) {joined}"
 
     async def _do_recall(llm) -> str:
-        return await llm.complete_text(
+        completion = await llm.complete_text(
             prompt,
             temperature=MEMORY_RECALL_SUMMARY_TEMPERATURE,
             max_tokens=MEMORY_RECALL_SUMMARY_MAX_TOKENS,
         )
+        # Only after it answered: a primary that raises is not the author.
+        answered_by.update(provider=llm.provider_name, model=llm.model)
+        return completion
 
     recall_model = getattr(config, "recall_model", None)
     completion = await call_with_fallback(
@@ -420,8 +434,10 @@ async def summarize_memories(
             # WT-1 — the unfiltered completion (reasoning scaffold + marker),
             # for debugging what the extraction saw.
             "recall_raw": completion,
-            "recall_model": recall_model or "default",
-            "recall_provider": provider,
+            "recall_model": answered_by["model"],
+            "recall_provider": answered_by["provider"],
+            "recall_configured_model": recall_model or "default",
+            "recall_configured_provider": provider,
             "all_candidates": diagnostic_ctx.get("all_candidates", []),
             "top_k_used": top_k_used,
             "retrieval_strategy": diagnostic_ctx.get("retrieval_strategy"),
