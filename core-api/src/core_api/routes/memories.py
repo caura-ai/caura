@@ -3495,6 +3495,7 @@ async def recall_endpoint(
         top_k=body.top_k,
         t0=t0,
         items_alias=body.items_alias,
+        tenant_id=body.tenant_id,
     )
     # ax-0917-h-05 — same A28 channel /search uses, and the reason this route
     # needed it most: ``limit`` is now an alias of ``top_k`` (schemas.py), but

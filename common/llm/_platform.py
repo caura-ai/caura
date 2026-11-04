@@ -45,22 +45,27 @@ _platform_llm: LLMProvider | None = None
 # Module-level so tests can join it for deterministic assertions.
 _warmup_thread: threading.Thread | None = None
 
+# A second platform model that recall uses for the tenants listed, and only
+# for them (see _init_platform_recall_llm). Empty set: no tenant uses it.
+_platform_recall_llm: LLMProvider | None = None
+_platform_recall_tenants: frozenset[str] = frozenset()
+_recall_warmup_thread: threading.Thread | None = None
 
-def _start_warmup_thread(provider: LLMProvider) -> None:
+
+def _start_warmup_thread(provider: LLMProvider) -> threading.Thread | None:
     """Kick off the provider's client warm-up on a daemon thread.
 
     Never raises: a warm-up failure is logged and the provider falls
     back to building its client lazily on first call (the pre-warm-up
     behavior). Daemon so a hung credential fetch can never block
-    process shutdown.
+    process shutdown. Returns the thread, or None when the provider
+    needs no warming.
     """
-    global _warmup_thread
-
     # Duck-typed: ``warm_up`` is provider-specific (not part of the
     # ``LLMProvider`` Protocol) — providers without one need no warming.
     warm_up = getattr(provider, "warm_up", None)
     if warm_up is None:
-        return
+        return None
 
     def _warm() -> None:
         try:
@@ -72,16 +77,18 @@ def _start_warmup_thread(provider: LLMProvider) -> None:
                 exc_info=True,
             )
 
-    _warmup_thread = threading.Thread(
+    thread = threading.Thread(
         target=_warm, name="platform-llm-client-warmup", daemon=True
     )
-    _warmup_thread.start()
+    thread.start()
+    return thread
 _platform_init_errors: list[str] = []
 
 __all__ = [
     "get_platform_embedding",
     "get_platform_init_errors",
     "get_platform_llm",
+    "get_platform_recall_llm",
     "init_platform_providers",
 ]
 
@@ -92,7 +99,7 @@ def init_platform_providers() -> None:
     Initialises BOTH the LLM and embedding singletons. Called once
     during app lifespan startup.
     """
-    global _platform_llm
+    global _platform_llm, _warmup_thread
 
     _platform_llm = None
     _platform_init_errors.clear()
@@ -142,7 +149,7 @@ def init_platform_providers() -> None:
                 # Non-fatal by design: environments without ADC
                 # (tests, misconfigured installs) log a warning and
                 # fall back to the lazy build on first call.
-                _start_warmup_thread(_platform_llm)
+                _warmup_thread = _start_warmup_thread(_platform_llm)
             except Exception:
                 logger.exception("Failed to initialize platform Vertex LLM provider")
                 _platform_init_errors.append("vertex-llm")
@@ -179,15 +186,82 @@ def init_platform_providers() -> None:
         )
         _platform_init_errors.append("unknown-llm-provider")
 
+    _init_platform_recall_llm(provider, project_id, location)
+
     # ── Embedding ────────────────────────────────────────────────────
     # Delegated to common.embedding so core-worker shares the same
     # singleton implementation. Errors are aggregated below.
     _init_platform_embedding()
 
 
+def _init_platform_recall_llm(provider: str, project_id: str, location: str) -> None:
+    """Build the Vertex model recall uses for the listed tenants.
+
+    ``PLATFORM_RECALL_LLM_MODEL`` names the model and
+    ``PLATFORM_RECALL_LLM_TENANTS`` the tenant ids, comma-separated. Both are
+    deployment config, set by whoever deploys; no tenant setting reaches
+    either. With both unset, recall uses the platform LLM for every tenant, as
+    before. It exists to try another model on chosen tenants of one
+    deployment, such as a test tenant on staging, while the rest keep the
+    default. It shares the platform LLM's project and location.
+    """
+    global _platform_recall_llm, _platform_recall_tenants, _recall_warmup_thread
+
+    _platform_recall_llm = None
+    _platform_recall_tenants = frozenset()
+    model = os.environ.get("PLATFORM_RECALL_LLM_MODEL", "").strip()
+    tenants = frozenset(
+        t.strip()
+        for t in os.environ.get("PLATFORM_RECALL_LLM_TENANTS", "").split(",")
+        if t.strip()
+    )
+    if not model and not tenants:
+        return
+    # Half-configured is a mistake worth surfacing on /health, not a choice.
+    if not (model and tenants):
+        logger.warning(
+            "PLATFORM_RECALL_LLM_MODEL and PLATFORM_RECALL_LLM_TENANTS must be "
+            "set together; recall uses the platform LLM for every tenant"
+        )
+        _platform_init_errors.append("recall-llm-config")
+        return
+    if provider != ProviderName.VERTEX or not project_id:
+        logger.warning(
+            "PLATFORM_RECALL_LLM_MODEL needs PLATFORM_LLM_PROVIDER=vertex and "
+            "PLATFORM_LLM_GCP_PROJECT_ID; recall uses the platform LLM"
+        )
+        _platform_init_errors.append("recall-llm-config")
+        return
+    try:
+        from common.llm.providers.vertex import VertexLLMProvider
+
+        llm = VertexLLMProvider(
+            project_id=project_id,
+            location=location or "us-central1",
+            model=model,
+        )
+    except Exception:
+        logger.exception("Failed to initialize platform recall Vertex LLM provider")
+        _platform_init_errors.append("vertex-recall-llm")
+        return
+    _platform_recall_llm = llm
+    _platform_recall_tenants = tenants
+    logger.info("Platform recall LLM: vertex/%s for %d tenant(s)", model, len(tenants))
+    # Same reason as the platform LLM's warm-up: an unwarmed client costs
+    # about 13s on its first call, close to recall's 15s cap.
+    _recall_warmup_thread = _start_warmup_thread(llm)
+
+
 def get_platform_llm() -> LLMProvider | None:
     """Return the platform LLM singleton, or None if not configured."""
     return _platform_llm
+
+
+def get_platform_recall_llm(tenant_id: str | None) -> LLMProvider | None:
+    """The recall model for ``tenant_id`` when the deployment lists it, else None."""
+    if tenant_id is None or tenant_id not in _platform_recall_tenants:
+        return None
+    return _platform_recall_llm
 
 
 def get_platform_init_errors() -> list[str]:

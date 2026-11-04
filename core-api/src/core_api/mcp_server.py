@@ -1779,6 +1779,7 @@ async def caura_recall(
                 # tool's JSON body — while it explicitly makes REST response
                 # shapes part of the contract.
                 items_alias=False,
+                tenant_id=tenant_id,
             )
         return _with_latency(_dumps(payload), t0)
     except HTTPException as e:
