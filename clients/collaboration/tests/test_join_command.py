@@ -39,6 +39,7 @@ class Dashboard:
         self.totp = None
         self.tenants = [TENANT, "personal-alice"]
         self.mint_status = 201
+        self.revoke_status = 204
         self.logged_out = False
 
     def add(self, agent, created_by=USER, label="manual", revoked=False, tenant=TENANT):
@@ -113,6 +114,8 @@ class Dashboard:
             }
             return httpx.Response(201, json={**row, "raw_key": raw})
         if path.startswith(creds + "/") and request.method == "DELETE":
+            if self.revoke_status != 204:
+                return httpx.Response(self.revoke_status, json={"detail": "nope"})
             cred_id = path.rsplit("/", 1)[1]
             for row in self.creds:
                 if row["id"] == cred_id:
@@ -381,6 +384,31 @@ def test_setup_failure_revokes_the_new_key(env, monkeypatch):
     assert result.exit_code == 1
     assert "the new key was revoked" in result.output
     assert env.dashboard.revoked() == [env.dashboard.creds[-1]["id"]]
+
+
+# The app's keys page is Connect › Keys; there is no API Credentials page to
+# send someone to (Prism App Review v2 N077).
+def test_a_new_key_that_could_not_be_revoked_names_the_keys_page(env, monkeypatch):
+    from caura_bus_cli import setup as setup_mod
+
+    def denied(*args):
+        raise setup_mod.SetupError("private config write failed")
+
+    monkeypatch.setattr(setup_mod, "wire_claude", denied)
+    env.dashboard.revoke_status = 500
+    result = invoke("--dir", str(env.project))
+    assert result.exit_code == 1
+    assert "the new key was NOT revoked (revoke it in Connect > Keys)" in result.output
+    assert "API Credentials" not in result.output
+
+
+def test_a_previous_key_that_could_not_be_revoked_names_the_keys_page(env):
+    assert invoke("--dir", str(env.project)).exit_code == 0
+    env.dashboard.revoke_status = 500
+    result = invoke("--dir", str(env.project))
+    assert result.exit_code == 0, result.output
+    assert "could NOT be revoked; revoke it in Connect > Keys" in result.output
+    assert "API Credentials" not in result.output
 
 
 def test_unknown_tenant_is_refused(env):

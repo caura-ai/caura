@@ -68,8 +68,11 @@ the broker does not take (`--tenant`, `--no-hooks`) are listed as notes.
 
 ## Connect your agent with an existing key
 
-Get an agent key from your Caura admin (the dashboard's API Credentials page),
-then run `setup` from a plain terminal in its project directory. Keep Claude
+Get an agent key from your Caura admin. On caura.ai, someone with the **Manage
+API credentials** permission mints one with
+`POST /api/v1/admin/agent-keys/provision`; **Connect › Keys** in the Caura app
+makes only tenant-scoped keys, which carry no agent identity for `setup` to
+read. Then run `setup` from a plain terminal in its project directory. Keep Claude
 Code stopped during setup and start it again afterwards; restart Codex after
 setup:
 
