@@ -26,6 +26,7 @@ from typing import Any, NamedTuple
 from uuid import UUID
 
 from common.constants import predicate_cluster
+from common.llm.untrusted import UNTRUSTED_DATA_RULE, data_block, quote_untrusted
 from common.provider_names import ProviderName
 from common.usage import scoped
 from core_api.cache import cache_delete_if, cache_set_nx
@@ -1324,16 +1325,23 @@ async def _detect(
     return contradictions
 
 
-CONTRADICTION_PROMPT = """\
+CONTRADICTION_PROMPT = (
+    """\
 You are a contradiction detector for a business memory system.
 
 Two statements contradict ONLY IF they make incompatible claims about the
 SAME real-world subject. Different subjects -> NOT a contradiction, even if
 the predicates look opposite or the statements look semantically similar.
 
-Statement A (NEW): {new_content}
+"""
+    + UNTRUSTED_DATA_RULE
+    + """
 
-Statement B (EXISTING): {old_content}
+Statement A (NEW):
+{new_content}
+
+Statement B (EXISTING):
+{old_content}
 
 Follow these steps in order:
 
@@ -1434,6 +1442,18 @@ Reply with ONLY a JSON object, no prose, no markdown fences:
   "contradicts": true/false,
   "reason": "one short phrase referencing the subjects and the conflict (or its absence)"}}
 """
+)
+
+
+def render_contradiction_prompt(new_content: str, old_content: str) -> str:
+    """``CONTRADICTION_PROMPT`` for one pair, each statement in a data block.
+
+    The one way to fill it: the judge and the relationship and diagnosis
+    classifiers all go through here, so none pastes a memory's text in raw.
+    """
+    return CONTRADICTION_PROMPT.format(
+        new_content=data_block(new_content[:500]), old_content=data_block(old_content[:500])
+    )
 
 
 # CAURA-129 — entity-aware retraction prompt. Path C's retraction judge
@@ -1449,7 +1469,8 @@ Reply with ONLY a JSON object, no prose, no markdown fences:
 # so ``_judge_contradiction`` parses both unchanged. The new placeholders
 # are ``{new_entities}`` and ``{old_entities}`` — rendered by
 # ``_format_entity_context``.
-ENTITY_AWARE_CONTRADICTION_PROMPT = """\
+ENTITY_AWARE_CONTRADICTION_PROMPT = (
+    """\
 You are a contradiction detector for a business memory system, running
 the second-pass judgement after entity resolution has already linked
 both statements to their canonical entities.
@@ -1479,11 +1500,17 @@ statements' CLAIMS about those entities are mutually exclusive.
     similarity. (Set non_conflict_reason="same_name_distinct_subject"
     when the canonical names happen to match.)
 
-Statement A (NEW): {new_content}
+"""
+    + UNTRUSTED_DATA_RULE
+    + """
+
+Statement A (NEW):
+{new_content}
 RESOLVED ENTITIES for Statement A:
 {new_entities}
 
-Statement B (EXISTING): {old_content}
+Statement B (EXISTING):
+{old_content}
 RESOLVED ENTITIES for Statement B:
 {old_entities}
 
@@ -1562,6 +1589,7 @@ Reply with ONLY a JSON object, no prose, no markdown fences:
   "contradicts": true/false,
   "reason": "one short phrase referencing the resolved subjects and the conflict (or its absence)"}}
 """
+)
 
 
 # CAURA-124 — within-subject false-positive shapes that hard-gate
@@ -1782,7 +1810,7 @@ async def _llm_contradiction_check(
     """
     provider_name = _judge_provider(tenant_config)
 
-    prompt = CONTRADICTION_PROMPT.format(new_content=new_content[:500], old_content=old_content[:500])
+    prompt = render_contradiction_prompt(new_content, old_content)
 
     async def _do_check(llm) -> tuple[bool, float]:
         raw = await llm.complete_json(prompt, **_judge_effort_kwargs())
@@ -1816,7 +1844,8 @@ async def _llm_contradiction_check(
 # (``relationship``/``diagnosis``) were emitted "for A55 reuse" but never
 # consumed — ``record_detected_conflicts`` receives only (candidate, path,
 # confidence) and the A55 engine derives its own classification.
-BATCH_CONTRADICTION_PROMPT = """\
+BATCH_CONTRADICTION_PROMPT = (
+    """\
 You are a contradiction detector for a business memory system.
 
 A NEW statement is compared against several EXISTING candidate statements.
@@ -1826,6 +1855,11 @@ verdict must NOT influence another's.
 Two statements contradict ONLY IF they make incompatible claims about the SAME
 real-world subject. Different subjects -> NOT a contradiction, even if the
 predicates look opposite.
+
+"""
+    + UNTRUSTED_DATA_RULE
+    + " Each candidate's text is a JSON string literal."
+    + """
 
 NEW statement:
 {new_content}
@@ -1870,6 +1904,7 @@ non_conflict_reason put it in "clean". Never add a hit because a batch "should"
 contain one. If NO candidate contradicts, "hits" is {{}} and "clean" lists every
 index.
 """
+)
 
 
 def _expand_sparse_batch(obj: object, n: int) -> list[dict]:
@@ -1928,9 +1963,11 @@ async def _llm_contradiction_check_batch(
     so the safety gates are identical to the per-candidate path. E4: the reply
     is sparse — see ``_expand_sparse_batch``."""
     provider_name = _judge_provider(tenant_config)
-    candidates_block = "\n".join(f"[{i}] {c.get('content', '')[:500]}" for i, c in enumerate(candidates))
+    candidates_block = data_block(
+        "\n".join(f"[{i}] {quote_untrusted(c.get('content', '')[:500])}" for i, c in enumerate(candidates))
+    )
     prompt = BATCH_CONTRADICTION_PROMPT.format(
-        new_content=new_content[:500], candidates_block=candidates_block
+        new_content=data_block(new_content[:500]), candidates_block=candidates_block
     )
 
     async def _do_check(llm) -> list[dict]:
@@ -2207,7 +2244,8 @@ def _format_entity_context(entities: list[dict]) -> str:
         #       for their first missing row — string-equality alone
         #       can't tell them apart.
         entity_id = e.get("entity_id") or f"{_NONE_ID_PREFIX}-{i}>"
-        lines.append(f'- "{name}" (type: {etype}, role: {role}, entity_id: {entity_id})')
+        # The name is quoted: a name holding a quote or a line break stays one bullet.
+        lines.append(f"- {quote_untrusted(name)} (type: {etype}, role: {role}, entity_id: {entity_id})")
     return "\n".join(lines)
 
 
@@ -2528,10 +2566,10 @@ async def _llm_entity_aware_contradiction_check(
     provider_name = _judge_provider(tenant_config)
 
     prompt = ENTITY_AWARE_CONTRADICTION_PROMPT.format(
-        new_content=new_content[:500],
-        old_content=old_content[:500],
-        new_entities=_format_entity_context(new_entities),
-        old_entities=_format_entity_context(old_entities),
+        new_content=data_block(new_content[:500]),
+        old_content=data_block(old_content[:500]),
+        new_entities=data_block(_format_entity_context(new_entities)),
+        old_entities=data_block(_format_entity_context(old_entities)),
     )
 
     async def _do_check(llm) -> tuple[bool, float]:
@@ -2558,7 +2596,8 @@ async def _llm_entity_aware_contradiction_check(
 # group in ONE ``complete_json`` call, carrying each candidate's OWN
 # resolved entity context so the authoritative same-subject grounding is
 # preserved per candidate.
-BATCH_ENTITY_AWARE_CONTRADICTION_PROMPT = """\
+BATCH_ENTITY_AWARE_CONTRADICTION_PROMPT = (
+    """\
 You are a contradiction detector for a business memory system, running
 the second-pass judgement AFTER entity resolution has already linked every
 statement to its canonical entities.
@@ -2584,7 +2623,13 @@ mutually exclusive.
   * ``entity_id`` starting with "<none-" on either side, or a side missing
     a subject-role entity -> same_subject=false.
 
-NEW statement: {new_content}
+"""
+    + UNTRUSTED_DATA_RULE
+    + " Each candidate's text is a JSON string literal."
+    + """
+
+NEW statement:
+{new_content}
 RESOLVED ENTITIES for the NEW statement:
 {new_entities}
 
@@ -2624,6 +2669,7 @@ non_conflict_reason put it in "clean". Never add a hit because a batch "should"
 contain one. If NO candidate contradicts, "hits" is {{}} and "clean" lists every
 index.
 """
+)
 
 
 async def _llm_entity_aware_contradiction_check_batch(
@@ -2644,14 +2690,16 @@ async def _llm_entity_aware_contradiction_check_batch(
     per-candidate entity-aware path.
     """
     provider_name = _judge_provider(tenant_config)
-    candidates_block = "\n".join(
-        f"[{i}] {c.get('content', '')[:500]}\n    RESOLVED ENTITIES: "
-        f"{_format_entity_context(c.get('entities', []))}"
-        for i, c in enumerate(candidates)
+    candidates_block = data_block(
+        "\n".join(
+            f"[{i}] {quote_untrusted(c.get('content', '')[:500])}\n    RESOLVED ENTITIES: "
+            f"{_format_entity_context(c.get('entities', []))}"
+            for i, c in enumerate(candidates)
+        )
     )
     prompt = BATCH_ENTITY_AWARE_CONTRADICTION_PROMPT.format(
-        new_content=new_content[:500],
-        new_entities=_format_entity_context(new_entities),
+        new_content=data_block(new_content[:500]),
+        new_entities=data_block(_format_entity_context(new_entities)),
         candidates_block=candidates_block,
     )
 
