@@ -162,7 +162,9 @@ request is refused `401` before any identity header is consulted.
 **Audit attribution**
 
 New memory-update events record `content_changed` without content excerpts or
-content digests, including when no PII policy is configured. Derived-child
+content digests, including when no PII policy is configured. Memory events
+record no title, and an edit to the title, `object_value`, `source_uri` or
+`predicate` is listed in `text_changed` without the old or new text. Derived-child
 delete events retain `owner_agent_id` separately from the authenticated actor.
 REST and MCP use the same normalized credential-kind labels.
 

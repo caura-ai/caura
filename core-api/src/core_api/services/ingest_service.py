@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import HTTPException
 
+from common.constants import INGEST_DOCUMENTS_COLLECTION
 from common.embedding import get_embedding
 from common.enrichment.constants import DEFAULT_MEMORY_TYPE
 from common.provider_names import ProviderName
@@ -136,12 +137,6 @@ _PREVIEW_CONCURRENCY = 4
 # 'hi'"). We short-circuit instead and return ``skipped_reason``.
 _INGEST_MIN_CONTENT_CHARS = 20
 
-
-# Parent-Document collection name. Each successful ingest_commit writes ONE
-# row into ``documents`` with this collection and ``doc_id=<run_id>`` so the
-# batch of memories has a queryable, embeddable parent record. Each memory
-# joins back via the top-level ``memories.run_id`` column.
-INGEST_DOCUMENTS_COLLECTION = "ingest-sources"
 
 # Max chars from joined fact contents to put in the parent Document's
 # ``data["summary"]`` (which gets embedded for semantic search). Keeps the

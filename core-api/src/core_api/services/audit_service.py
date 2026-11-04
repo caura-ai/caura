@@ -30,6 +30,11 @@ from core_api.services.audit_queue import get_audit_queue
 
 logger = logging.getLogger(__name__)
 
+# A memory's free-text fields. A memory audit row records that one changed, never
+# its text: the log is hash-chained, so a row cannot be redacted when the memory
+# is deleted later.
+_MEMORY_TEXT_FIELDS = frozenset({"title", "object_value", "source_uri", "predicate"})
+
 
 async def _post_audit_sync(payload: dict) -> None:
     """Synchronous fallback write to core-storage-api (same shape as
@@ -76,7 +81,15 @@ async def log_action(
             detail["content_changed"] = True
             # This boundary has no PII verdict. Drop raw content without
             # deriving a permanent digest from unchecked caller input.
+        if resource_type == "memory":
+            text_changed = sorted(field for field in changes if field in _MEMORY_TEXT_FIELDS)
+            for field in text_changed:
+                del changes[field]
+            if text_changed:
+                detail["text_changed"] = text_changed
         detail["changes"] = changes
+    if resource_type == "memory":
+        detail.pop("title", None)
     principal = audit_principal.get()
     if principal is not None:
         claimed_agent_id = agent_id
