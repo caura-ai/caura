@@ -3726,14 +3726,14 @@ class CoreStorageClient:
     # than degrade to [] — a silent empty list would make the lifecycle fanout
     # publish zero messages and report success, hiding the misconfiguration.
     async def list_active_tenants(self) -> list[str]:
-        """Orgs with at least one live (non-soft-deleted) memory."""
+        """Orgs with at least one live (non-soft-deleted) memory, less suppressed ones."""
         result = await self._get("/tenants/active")
         if result is None:
             raise RuntimeError("core-storage-api /tenants/active returned 404")
         return result.get("tenant_ids", [])
 
     async def list_purgeable_tenants(self) -> list[str]:
-        """Orgs with soft-deleted memories older than the max retention window."""
+        """Orgs with soft-deleted memories older than the shortest retention window."""
         result = await self._get("/tenants/purgeable")
         if result is None:
             raise RuntimeError("core-storage-api /tenants/purgeable returned 404")
