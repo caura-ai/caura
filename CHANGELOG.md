@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.37.15](https://github.com/caura-ai/caura/compare/backend-v3.37.14...backend-v3.37.15) (2026-11-04)
+
+
+### Bug Fixes
+
+* **derived:** keep source trust on crystals, rules and insights ([#2295](https://github.com/caura-ai/caura/issues/2295)) ([0789760](https://github.com/caura-ai/caura/commit/0789760f42c4d3040467a200ee7eaad2abd0475c))
+
 ## [3.37.14](https://github.com/caura-ai/caura/compare/backend-v3.37.13...backend-v3.37.14) (2026-11-03)
 
 
