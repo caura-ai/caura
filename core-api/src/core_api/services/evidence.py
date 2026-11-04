@@ -107,6 +107,9 @@ def why_phrase(score_parts: Any, *, strategy: str | None = None, injected: bool 
         qualifiers.append("in time range")
     elif strategy in _RECENT_STRATEGIES:
         qualifiers.append("recent")
+    # EC-19: present only while the tenant's verified boost is on.
+    if (part("verification_boost") or 1.0) > 1.0:
+        qualifiers.append("verified")
     if (part("recall_boost") or 1.0) > 1.0:
         qualifiers.append("often recalled")
     for q in qualifiers:

@@ -91,6 +91,7 @@ from common.constants import (
     SEMANTIC_DEDUP_THRESHOLD,
     SESSION_ROLLBACK_ACTION,
     TYPE_DECAY_DAYS,
+    VERIFIED_BOOST_DEFAULT_FACTORS,
     predicate_cluster,
 )
 from common.entity_naming import (
@@ -4363,6 +4364,11 @@ class PostgresService:
         # (knob off → now()); only the conjunction retargets the clock, so no
         # caller that exists today moves.
         _freshness_reference = int(sp.get("freshness_reference", 0) or 0)
+        # EC-19: multiply the score by a bounded factor for the row's
+        # ``verification_status``. Anything but 1 is off, and off adds nothing to
+        # the statement — no column, no CASE, no factor — so the default SQL stays
+        # byte-identical (test_verified_boost_statement pins that).
+        _verified_boost = int(sp.get("verified_boost", 0) or 0) == 1
         ref_ts: ColumnElement[Any]
         anchor_to_valid_at = False
         if _freshness_reference == 1 and valid_at_ts is not None:
@@ -4533,6 +4539,8 @@ class PostgresService:
                     Memory.created_at,
                 ).label("recall_used_at")
             )
+        if _verified_boost:
+            ingredient_cols.append(Memory.verification_status.label("verification_status"))
         ingredients_stmt = select(*ingredient_cols).where(*row_filters)
 
         if use_ann_pool:
@@ -4899,6 +4907,35 @@ class PostgresService:
         else:
             entity_boost = literal_column("1.0").label("entity_boost")
 
+        # EC-19 verification boost — only when the tenant turned it on. One
+        # bounded multiplier applied LAST under either formula, like
+        # ``status_penalty``: it can reorder rows whose scores sit within a few
+        # percent, never lift an unrelated row over a relevant one.
+        verification_boost: Any = None
+        if _verified_boost:
+            # One literal read per key: test_sql_flags_match_how_storage_reads_each_knob
+            # holds the ``SEARCH_KNOBS`` sql flags to the reads it can see here.
+            _vf = VERIFIED_BOOST_DEFAULT_FACTORS
+            verification_boost = case(
+                (
+                    ing.c.verification_status == "human_verified",
+                    float(sp.get("verified_boost_human", _vf["verified_boost_human"])),
+                ),
+                (
+                    ing.c.verification_status == "tool_observed",
+                    float(sp.get("verified_boost_tool", _vf["verified_boost_tool"])),
+                ),
+                (
+                    ing.c.verification_status == "corroborated",
+                    float(sp.get("verified_boost_corroborated", _vf["verified_boost_corroborated"])),
+                ),
+                (
+                    ing.c.verification_status == "disputed",
+                    float(sp.get("verified_boost_disputed", _vf["verified_boost_disputed"])),
+                ),
+                else_=1.0,
+            ).label("verification_boost")
+
         if _score_formula == 1:
             # -- A50 UNIFIED formula: relevance-dominant, bounded additive, query-gated --
             # score = similarity (dominant) + small ADDITIVE, GATED nudges, then x status.
@@ -4914,15 +4951,15 @@ class PostgresService:
             _V2_W_STALE = 0.20  # staleness penalty (currency_factor is 1.0 when current -> term 0)
             _recency_gate = 1.0 if temporal_window is not None else 0.0
             score = (
-                (
-                    similarity
-                    + _V2_W_FRESH * _recency_gate * (freshness - _freshness_floor)
-                    + _V2_W_DATE * (date_range_boost - 1.0)
-                    + _V2_W_ENTITY * (entity_boost - 1.0)
-                    - _V2_W_STALE * (1.0 - currency_factor)
-                )
-                * status_penalty
-            ).label("score")
+                similarity
+                + _V2_W_FRESH * _recency_gate * (freshness - _freshness_floor)
+                + _V2_W_DATE * (date_range_boost - 1.0)
+                + _V2_W_ENTITY * (entity_boost - 1.0)
+                - _V2_W_STALE * (1.0 - currency_factor)
+            ) * status_penalty
+            if verification_boost is not None:
+                score = score * verification_boost
+            score = score.label("score")
         else:
             # -- LEGACY formula: multiplicative boost stack (unchanged) --
             score = (
@@ -4934,7 +4971,10 @@ class PostgresService:
                 * date_range_boost
                 * currency_factor
                 * status_penalty
-            ).label("score")
+            )
+            if verification_boost is not None:
+                score = score * verification_boost
+            score = score.label("score")
 
         # -- Branch layer: candidate selection over the scored ingredients --
         # The select list is the same column contract the outer query and
@@ -4965,6 +5005,8 @@ class PostgresService:
             recall_boost_expr,
             temporal_boost,
         )
+        if verification_boost is not None:
+            scored_stmt = scored_stmt.add_columns(verification_boost)
 
         if _candidate_pool_size > 0:
             # A49: select the candidate POOL by semantic relevance (``similarity``)
@@ -5027,6 +5069,7 @@ class PostgresService:
         # path selects a typed NULL so the row shape is identical either way
         # and the route serialises one contract.
         pool_arms_col = pool_cte.c.arms.label("pool_arms") if use_ann_pool else null().label("pool_arms")
+        verification_cols = [scored_cte.c.verification_boost] if verification_boost is not None else []
         stmt = (
             select(
                 Memory,
@@ -5043,6 +5086,7 @@ class PostgresService:
                 scored_cte.c.recall_boost,
                 scored_cte.c.temporal_boost,
                 pool_arms_col,
+                *verification_cols,
                 *_AUTHOR_COLUMNS,
             )
             .join(scored_cte, Memory.id == scored_cte.c.mem_id)
@@ -5134,6 +5178,8 @@ class PostgresService:
                     entity_boost=row.entity_boost,
                     recall_boost=row.recall_boost,
                     temporal_boost=row.temporal_boost,
+                    # EC-19: None while the boost is off — not applied, not 1.0.
+                    verification_boost=getattr(row, "verification_boost", None),
                     pool_arms=row.pool_arms,
                     entity_links=[],
                 )

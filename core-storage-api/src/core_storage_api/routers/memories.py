@@ -303,6 +303,12 @@ async def scored_search(request: Request) -> list[dict]:
             for _factor in ("fts_score", "freshness", "entity_boost", "recall_boost", "temporal_boost"):
                 _v = getattr(r, _factor, None)
                 row[_factor] = float(_v) if _v is not None else None
+            # EC-19: only while the tenant's verified boost is on. Off, the
+            # factor was never computed, so the key stays absent rather than
+            # claiming a 1.0 that no SQL produced.
+            _vb = getattr(r, "verification_boost", None)
+            if _vb is not None:
+                row["verification_boost"] = float(_vb)
             # D12 arm provenance (ann-pool mode): which pool arms admitted the
             # row ("ann+fts", "boosted", ...). NULL on the default path and on
             # pre-provenance storage rows — "not reported", not "no arms".
