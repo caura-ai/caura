@@ -2,6 +2,7 @@
 
 from core_api.pipeline.steps.search.classify_query import ClassifyQuery
 from core_api.pipeline.steps.search.execute_scored_search import ExecuteScoredSearch
+from core_api.pipeline.steps.search.explain_memory_filters import ExplainMemoryFilters
 from core_api.pipeline.steps.search.extract_temporal_hint import ExtractTemporalHint
 from core_api.pipeline.steps.search.inject_stm_context import InjectSTMContext
 from core_api.pipeline.steps.search.load_and_serialize import LoadAndSerialize
@@ -22,6 +23,7 @@ from core_api.pipeline.steps.search.track_recalls import TrackRecalls
 __all__ = [
     "ClassifyQuery",
     "ExecuteScoredSearch",
+    "ExplainMemoryFilters",
     "ExtractTemporalHint",
     "InjectSTMContext",
     "LoadAndSerialize",

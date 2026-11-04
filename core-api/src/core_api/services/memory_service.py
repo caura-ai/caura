@@ -6207,9 +6207,17 @@ async def _search_memories_pipeline(
     # EC-05 — filled with ``{"hint": {...}}`` when the search returned nothing
     # but a readable candidate scored below the cut-off. Pipeline path only.
     empty_hint_ctx: dict | None = None,
+    # EC-06 — ``{"memory_id": ...}`` runs the explain composition instead of
+    # the search one, for that memory; the finished context's ``data`` is
+    # handed back under ``explain_ctx["data"]``. Same context, same steps up to
+    # the result set, so the explanation is of the search that would run.
+    explain_ctx: dict | None = None,
 ) -> list[MemoryOut]:
     """Pipeline-based search_memories -- same logic, decomposed into timed steps."""
-    from core_api.pipeline.compositions.search import build_search_pipeline
+    from core_api.pipeline.compositions.search import (
+        build_search_explain_pipeline,
+        build_search_pipeline,
+    )
     from core_api.pipeline.context import PipelineContext
 
     ctx = PipelineContext(
@@ -6255,8 +6263,14 @@ async def _search_memories_pipeline(
         tenant_config=tenant_config,
     )
 
-    pipeline = build_search_pipeline()
+    if explain_ctx is not None:
+        ctx.data["explain_memory_id"] = explain_ctx["memory_id"]
+        pipeline = build_search_explain_pipeline()
+    else:
+        pipeline = build_search_pipeline()
     result = await pipeline.run(ctx)
+    if explain_ctx is not None:
+        explain_ctx["data"] = ctx.data
 
     if result.failed:
         from core_api.pipeline.step import StepOutcome

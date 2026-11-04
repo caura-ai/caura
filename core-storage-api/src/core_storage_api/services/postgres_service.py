@@ -512,6 +512,161 @@ def _visibility_scope_clause(
     )
 
 
+def _fts_guard_clause(query: str, ts_query: ColumnElement[Any]) -> ColumnElement[bool]:
+    """``search_vector @@ ts_query``, or ``false()`` for a blank query.
+
+    Why blank must be ``false()`` is told where the scorer builds it, in
+    ``memory_scored_search``. Shared with ``memory_explain_filters`` so the
+    explanation's admission and carve-out checks match the search's.
+    """
+    return Memory.search_vector.op("@@")(ts_query) if query and query.strip() else false()
+
+
+def _scored_search_row_filters(
+    *,
+    tenant_id: str,
+    readable_tenant_ids: list[str] | None,
+    fts_guard: ColumnElement[bool],
+    fleet_ids: list[str] | None,
+    strict_fleet_scoping: bool,
+    caller_agent_id: str | None,
+    caller_tenant_id: str | None,
+    filter_agent_id: str | None,
+    memory_type_filter: str | None,
+    status_filter: str | None,
+    history_query: bool,
+    valid_at: datetime | None,
+) -> list[tuple[str, ColumnElement[bool]]]:
+    """The scored search's row-level filters, each named for what it removes.
+
+    ONE builder for two consumers: ``memory_scored_search`` ANDs the
+    predicates (names dropped, order kept, so the statement is unchanged), and
+    ``memory_explain_filters`` (EC-06) evaluates each one against a single row
+    to name the first filter that removed it. The explanation is only true
+    while both read the same list, which is why the list lives here and not
+    in either method. The names are the reason codes core-api reports; adding
+    a filter means naming it.
+
+    ``fts_guard`` is the query's ``search_vector @@ plainto_tsquery`` match
+    (``false()`` for a blank query), built by the caller because the scorer
+    also projects it.
+    """
+    row_filters: list[tuple[str, ColumnElement[bool]]] = [
+        # Multi-tenant read predicate: when ``readable_tenant_ids``
+        # is provided (cross-tenant agent key), reads widen across
+        # the full set; otherwise we stay single-tenant for the
+        # common case. Result rows still carry ``Memory.tenant_id``
+        # so the caller can attribute each row to its source tenant.
+        (
+            "tenant_scope",
+            (
+                Memory.tenant_id.in_(readable_tenant_ids)
+                if readable_tenant_ids
+                else Memory.tenant_id == tenant_id
+            ),
+        ),
+        ("deleted", Memory.deleted_at.is_(None)),
+        ("held", Memory.status != QUARANTINED_MEMORY_STATUS),
+        # CAURA-594: NULL-embedding rows are admitted only if they also
+        # match the FTS query — otherwise they'd rank on `Memory.weight *
+        # freshness * ...` alone and could fill top_k slots with rows
+        # that have no relationship to the query. This is NOT only a
+        # backfill window: the embed backfill is gated off by default and
+        # has never run (oss-0924-m-05, measured 2026-09-26), so for an
+        # un-embedded row this guard is the only relevance test it ever
+        # faces. `search_vector @@ ts_query` is GIN-indexed, so the
+        # extra predicate is free for rows that already had to scan
+        # the tenant/fleet slice.
+        # Other paths (find_semantic_duplicate, find_similar_candidates,
+        # find_near_duplicate_pairs, compute_health_stats) keep their
+        # NULL guards — vector-pure operations where a NULL operand has
+        # no comparable semantics.
+        #
+        # THIS PREDICATE IS LOAD-BEARING FOR THE OTHER SERVICE, which is not
+        # visible from here: core-api's ``passes_relevance_filter`` returns
+        # True unconditionally for a NULL-embedding row, because the floor it
+        # applies compares against ``vec_sim`` and these rows only carry the
+        # 0.0 sentinel in ``memory_scored_search``. The guard below is
+        # therefore the ONLY relevance test such a row ever faces end to end —
+        # drop it and nothing downstream can judge what it admits. See that
+        # function's docstring and tests/test_oss_0923_unembedded_relevance_floor.py.
+        (
+            "embedding_missing",
+            or_(
+                Memory.embedding.is_not(None),
+                fts_guard,
+            ),
+        ),
+    ]
+
+    if fleet_ids:
+        row_filters.append(
+            ("fleet_scope", _fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
+        )
+
+    row_filters.append(
+        ("visibility_scope", _visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
+    )
+
+    if filter_agent_id:
+        row_filters.append(("agent_filter", Memory.agent_id == filter_agent_id))
+    if memory_type_filter:
+        row_filters.append(("memory_type_filter", Memory.memory_type == memory_type_filter))
+    if status_filter:
+        row_filters.append(("status_filter", Memory.status == status_filter))
+    elif history_query:
+        # A63 — a history question ("what was…", "did I switch…",
+        # "how long have I been…") needs the superseded value: the
+        # older side of an update is EXACTLY what the caller asked
+        # for, so neither the exclusion below nor the status_penalty
+        # applies. Ranking is pure relevance; present-state queries
+        # keep both protections.
+        pass
+    else:
+        # Exclude superseded memories from default search results. The
+        # contradiction detector marks the older row ``outdated`` (RDF
+        # path) or ``conflicted`` (semantic path) and points the newer
+        # one at it via ``supersedes_id``. Surfacing both would dilute
+        # ranking with stale claims agents shouldn't act on. Callers
+        # that need to inspect superseded rows pass an explicit
+        # ``status_filter`` to override.
+        #
+        # Carve-out: a ``conflicted`` row that is an EXACT lexical match
+        # for the query is kept. ``conflicted`` (unlike ``outdated``) means
+        # "a competing claim exists", not "definitively retracted" — and the
+        # semantic contradiction path mismarks near-duplicate-but-distinct
+        # entities (e.g. ``Wayne #0000`` vs ``Wayne #0704``), so a blanket
+        # exclusion silently drops the very row the caller named. The
+        # exact-match gate scopes the carve-out to rows the caller clearly
+        # asked for; the scorer's status_penalty keeps a surfaced exact-match
+        # conflicted row un-demoted, and load_and_serialize still injects its
+        # supersedes successor so both sides are visible. ``outdated`` stays
+        # fully excluded.
+        row_filters.append(
+            (
+                "status_superseded",
+                or_(
+                    Memory.status.notin_(("outdated", "conflicted")),
+                    and_(Memory.status == "conflicted", fts_guard),
+                ),
+            )
+        )
+    if valid_at:
+        # Hard filter on the START side, compared at DAY granularity.
+        # Future-dated memories can't answer past questions — but strict
+        # timestamp comparison also excludes same-day memories written a
+        # few hours after the query was asked, which is too aggressive
+        # for workflows where the question + its evidence share a day.
+        # Both sides are UTC days, so same-day-later memories pass.
+        row_filters.append(("temporal_valid_at", _started_by(valid_at)))
+        # NOTE: the END side (`ts_valid_end >= valid_at`) is NO LONGER
+        # a hard filter.  A past ts_valid_end now triggers the soft
+        # ``currency_factor`` in ``memory_scored_search`` (default 0.5x) — so
+        # an over-eager enrichment date can't silently hide a semantically
+        # strong memory from historical-question queries.
+    return row_filters
+
+
 def _encode_embedding_f32(embedding: Any) -> str | None:
     """A pgvector value as base64 little-endian float32, or None.
 
@@ -4098,8 +4253,7 @@ class PostgresService:
         # projects is what the derived layer reads for the status-penalty gate
         # and the FTS-reserve filter — the exact-lexical-match signal and the
         # fts-match signal are the same expression, so one column serves both.
-        _fts_guard = Memory.search_vector.op("@@")(ts_query) if query and query.strip() else false()
-        _exact_lexical_match = _fts_guard
+        _fts_guard = _fts_guard_clause(query, ts_query)
         fts_match = _fts_guard.label("fts_match")
 
         # Row-level filters, built once and applied to BOTH the ingredients
@@ -4111,105 +4265,22 @@ class PostgresService:
         # lockstep; drift here is the same cross-tenant leak risk the
         # ENTITY_LOOKUP short-circuit documents.
         row_filters: list[Any] = [
-            # Multi-tenant read predicate: when ``readable_tenant_ids``
-            # is provided (cross-tenant agent key), reads widen across
-            # the full set; otherwise we stay single-tenant for the
-            # common case. Result rows still carry ``Memory.tenant_id``
-            # so the caller can attribute each row to its source tenant.
-            (
-                Memory.tenant_id.in_(readable_tenant_ids)
-                if readable_tenant_ids
-                else Memory.tenant_id == tenant_id
-            ),
-            Memory.deleted_at.is_(None),
-            Memory.status != QUARANTINED_MEMORY_STATUS,
-            # CAURA-594: NULL-embedding rows are admitted only if they also
-            # match the FTS query — otherwise they'd rank on `Memory.weight *
-            # freshness * ...` alone and could fill top_k slots with rows
-            # that have no relationship to the query. This is NOT only a
-            # backfill window: the embed backfill is gated off by default and
-            # has never run (oss-0924-m-05, measured 2026-09-26), so for an
-            # un-embedded row this guard is the only relevance test it ever
-            # faces. `search_vector @@ ts_query` is GIN-indexed, so the
-            # extra predicate is free for rows that already had to scan
-            # the tenant/fleet slice.
-            # Other paths (find_semantic_duplicate, find_similar_candidates,
-            # find_near_duplicate_pairs, compute_health_stats) keep their
-            # NULL guards — vector-pure operations where a NULL operand has
-            # no comparable semantics.
-            #
-            # THIS PREDICATE IS LOAD-BEARING FOR THE OTHER SERVICE, which is not
-            # visible from here: core-api's ``passes_relevance_filter`` returns
-            # True unconditionally for a NULL-embedding row, because the floor it
-            # applies compares against ``vec_sim`` and these rows only carry the
-            # 0.0 sentinel above. The guard below is therefore the ONLY relevance
-            # test such a row ever faces end to end — drop it and nothing
-            # downstream can judge what it admits. See that function's docstring
-            # and tests/test_oss_0923_unembedded_relevance_floor.py.
-            or_(
-                Memory.embedding.is_not(None),
-                _fts_guard,
-            ),
-        ]
-
-        if fleet_ids:
-            row_filters.append(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
-
-        row_filters.append(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
-
-        if filter_agent_id:
-            row_filters.append(Memory.agent_id == filter_agent_id)
-        if memory_type_filter:
-            row_filters.append(Memory.memory_type == memory_type_filter)
-        if status_filter:
-            row_filters.append(Memory.status == status_filter)
-        elif history_query:
-            # A63 — a history question ("what was…", "did I switch…",
-            # "how long have I been…") needs the superseded value: the
-            # older side of an update is EXACTLY what the caller asked
-            # for, so neither the exclusion below nor the status_penalty
-            # applies. Ranking is pure relevance; present-state queries
-            # keep both protections.
-            pass
-        else:
-            # Exclude superseded memories from default search results. The
-            # contradiction detector marks the older row ``outdated`` (RDF
-            # path) or ``conflicted`` (semantic path) and points the newer
-            # one at it via ``supersedes_id``. Surfacing both would dilute
-            # ranking with stale claims agents shouldn't act on. Callers
-            # that need to inspect superseded rows pass an explicit
-            # ``status_filter`` to override.
-            #
-            # Carve-out: a ``conflicted`` row that is an EXACT lexical match
-            # for the query is kept. ``conflicted`` (unlike ``outdated``) means
-            # "a competing claim exists", not "definitively retracted" — and the
-            # semantic contradiction path mismarks near-duplicate-but-distinct
-            # entities (e.g. ``Wayne #0000`` vs ``Wayne #0704``), so a blanket
-            # exclusion silently drops the very row the caller named. The
-            # exact-match gate scopes the carve-out to rows the caller clearly
-            # asked for; status_penalty above keeps a surfaced exact-match
-            # conflicted row un-demoted, and load_and_serialize still injects its
-            # supersedes successor so both sides are visible. ``outdated`` stays
-            # fully excluded.
-            row_filters.append(
-                or_(
-                    Memory.status.notin_(("outdated", "conflicted")),
-                    and_(Memory.status == "conflicted", _exact_lexical_match),
-                )
+            predicate
+            for _, predicate in _scored_search_row_filters(
+                tenant_id=tenant_id,
+                readable_tenant_ids=readable_tenant_ids,
+                fts_guard=_fts_guard,
+                fleet_ids=fleet_ids,
+                strict_fleet_scoping=strict_fleet_scoping,
+                caller_agent_id=caller_agent_id,
+                caller_tenant_id=caller_tenant_id,
+                filter_agent_id=filter_agent_id,
+                memory_type_filter=memory_type_filter,
+                status_filter=status_filter,
+                history_query=history_query,
+                valid_at=valid_at,
             )
-        if valid_at:
-            # Hard filter on the START side, compared at DAY granularity.
-            # Future-dated memories can't answer past questions — but strict
-            # timestamp comparison also excludes same-day memories written a
-            # few hours after the query was asked, which is too aggressive
-            # for workflows where the question + its evidence share a day.
-            # Both sides are UTC days, so same-day-later memories pass.
-            row_filters.append(_started_by(valid_at))
-            # NOTE: the END side (`ts_valid_end >= valid_at`) is NO LONGER
-            # a hard filter.  A past ts_valid_end now triggers the soft
-            # ``currency_factor`` below (default 0.5x) — so an over-eager
-            # enrichment date can't silently hide a semantically strong
-            # memory from historical-question queries.
+        ]
 
         # NOTE: date_range_start/end no longer produces a hard WHERE filter;
         # the multiplier ``date_range_boost`` below handles it softly.
@@ -4874,6 +4945,96 @@ class PostgresService:
                 tenant_id,
             )
         return list(grouped.values())
+
+    # ------------------------------------------------------------------
+    # C-1b) Explain which scored-search filter removes one memory (EC-06)
+    # ------------------------------------------------------------------
+
+    async def memory_explain_filters(
+        self,
+        memory_id: UUID,
+        tenant_id: str,
+        query: str,
+        *,
+        fleet_ids: list[str] | None = None,
+        caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
+        filter_agent_id: str | None = None,
+        memory_type_filter: str | None = None,
+        status_filter: str | None = None,
+        valid_at: datetime | None = None,
+        readable_tenant_ids: list[str] | None = None,
+        history_query: bool = False,
+        strict_fleet_scoping: bool = False,
+    ) -> dict[str, Any]:
+        """Evaluate every scored-search row filter against ONE memory.
+
+        Takes the same filter arguments ``memory_scored_search`` does and builds
+        its predicates with the same ``_scored_search_row_filters``, then
+        projects each predicate as a boolean column over the single row instead
+        of AND-ing them into a WHERE. The answer is therefore what the search
+        itself would have decided for this row, filter by filter, in the order
+        the search applies them.
+
+        The row is looked up by id ALONE, deliberately: the tenant predicate is
+        one of the checks being explained. Callers outside the admin surface
+        must not repeat a cross-tenant row's fields back (core-api collapses a
+        failed ``tenant_scope`` into "not found").
+
+        ``COALESCE(..., false)`` because a predicate can be NULL (``fleet_id IN
+        (...)`` on a NULL fleet), and a WHERE drops NULL exactly as it drops
+        false, so false is what the search saw.
+        """
+        if valid_at is not None and valid_at.tzinfo is None:
+            valid_at = valid_at.replace(tzinfo=UTC)
+        ts_query = func.plainto_tsquery("english", query)
+        named = _scored_search_row_filters(
+            tenant_id=tenant_id,
+            readable_tenant_ids=readable_tenant_ids,
+            fts_guard=_fts_guard_clause(query, ts_query),
+            fleet_ids=fleet_ids,
+            strict_fleet_scoping=strict_fleet_scoping,
+            caller_agent_id=caller_agent_id,
+            caller_tenant_id=caller_tenant_id,
+            filter_agent_id=filter_agent_id,
+            memory_type_filter=memory_type_filter,
+            status_filter=status_filter,
+            history_query=history_query,
+            valid_at=valid_at,
+        )
+        check_cols = [func.coalesce(pred, false()).label(f"chk_{i}") for i, (_, pred) in enumerate(named)]
+        stmt = select(
+            Memory.tenant_id,
+            Memory.fleet_id,
+            Memory.agent_id,
+            Memory.visibility,
+            Memory.status,
+            Memory.memory_type,
+            Memory.deleted_at,
+            Memory.ts_valid_start,
+            Memory.embedding.is_not(None).label("has_embedding"),
+            *check_cols,
+        ).where(Memory.id == memory_id)
+        async with get_read_session() as session:
+            row = (await session.execute(stmt)).first()
+        if row is None:
+            return {"exists": False, "checks": []}
+        m = row._mapping
+        return {
+            "exists": True,
+            "checks": [{"filter": name, "passed": bool(m[f"chk_{i}"])} for i, (name, _) in enumerate(named)],
+            "memory": {
+                "tenant_id": m["tenant_id"],
+                "fleet_id": m["fleet_id"],
+                "agent_id": m["agent_id"],
+                "visibility": m["visibility"],
+                "status": m["status"],
+                "memory_type": m["memory_type"],
+                "deleted": m["deleted_at"] is not None,
+                "ts_valid_start": m["ts_valid_start"].isoformat() if m["ts_valid_start"] else None,
+                "has_embedding": bool(m["has_embedding"]),
+            },
+        }
 
     # ------------------------------------------------------------------
     # C-2) Load specific memories by ID (ENTITY_LOOKUP short-circuit)

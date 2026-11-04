@@ -78,6 +78,7 @@ from core_api.routes.plugin import plugin_bootstrap_router
 from core_api.routes.plugin import router as plugin_router
 from core_api.routes.reports import router as reports_router
 from core_api.routes.scheduler_lease import router as scheduler_lease_router
+from core_api.routes.search_explain import router as search_explain_router
 from core_api.routes.settings import router as settings_router
 from core_api.routes.skills_inbox import router as skills_inbox_router
 from core_api.routes.stats import router as stats_router
@@ -1239,6 +1240,7 @@ async def upstream_http_error_handler(request: Request, exc: httpx.HTTPStatusErr
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(memories_router, prefix="/api/v1")
 app.include_router(admin_memories_router, prefix="/api/v1")
+app.include_router(search_explain_router, prefix="/api/v1")
 app.include_router(entities_router, prefix="/api/v1")
 app.include_router(audit_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
