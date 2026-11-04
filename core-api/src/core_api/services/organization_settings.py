@@ -246,7 +246,8 @@ DEFAULT_SETTINGS: dict = {
         # Opt-in (default off). When on, each agent-chosen ``caura_recall``
         # call is logged (query + scope + candidate scores + below-floor
         # near-misses) to ``recall_event`` / ``recall_candidate`` for "why
-        # aren't good memories recalled?" analysis.
+        # aren't good memories recalled?" analysis. The query is stored with PII
+        # masked, and events go after ``lifecycle.memory_retention_days``.
         "recall_logging_enabled": None,
         # Opt-in (default off). When on, the plugin's automatic ``/search``
         # path is ALSO logged — but in a lighter form: returned candidates

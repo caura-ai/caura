@@ -759,6 +759,39 @@ def _tenant_suppressed(tenant_id: Any) -> ColumnElement[bool]:
     )
 
 
+# Rows per transaction when the purge sweeps the recall log and spent replays
+# (``memory_purge_soft_deleted``). A recall event's candidates go with it, so a
+# batch of events deletes several times this many rows in all.
+_RETENTION_SWEEP_BATCH = 1_000
+
+# Purge discovery's tenants with a recall event older than ``:days`` days.
+# ``recall_event``'s only index is ``(tenant_id, ts)``, so a filter on ``ts``
+# alone would read every event. This walks the index instead: each step reads
+# the tenant id after the last one, and that tenant's ``min(ts)`` is one more
+# probe. A scalar subquery rather than ``EXISTS``, which the planner may turn
+# into a join that reads the whole table.
+_TENANTS_WITH_RECALL_EVENTS_BEFORE = text(
+    """
+    WITH RECURSIVE walk(tenant_id) AS (
+        (SELECT tenant_id FROM recall_event ORDER BY tenant_id LIMIT 1)
+        UNION ALL
+        SELECT (
+            SELECT e.tenant_id FROM recall_event e
+            WHERE e.tenant_id > walk.tenant_id
+            ORDER BY e.tenant_id
+            LIMIT 1
+        )
+        FROM walk
+        WHERE walk.tenant_id IS NOT NULL
+    )
+    SELECT walk.tenant_id FROM walk
+    WHERE walk.tenant_id IS NOT NULL
+      AND (SELECT min(e.ts) FROM recall_event e WHERE e.tenant_id = walk.tenant_id)
+          < now() - make_interval(days => CAST(:days AS integer))
+    """
+)
+
+
 async def _clear_ingest_summaries(
     session: AsyncSession, tenant_id: str, run_ids: Iterable[str | None]
 ) -> None:
@@ -5875,8 +5908,7 @@ class PostgresService:
         addressable for a grace period before they're physically removed,
         so a misclick or buggy client can be undone for ``retention_days``
         days. After that window the row is gone for good — including its
-        embedding, entity links, and idempotency response cache lines
-        (cascaded by their FKs to ``memories.id``).
+        embedding, and its entity links (cascaded by their FK to ``memories.id``).
 
         The graph mined from the batch goes with it, in the same transaction
         and BEFORE the rows: relations whose evidence is a purged memory, and
@@ -5890,7 +5922,20 @@ class PostgresService:
         author's peers exactly because the memory was deleted. Entities have no
         FK to memories at all and would simply stay listed. Done at hard-delete
         time, not at soft delete, so the undo window keeps the graph intact.
+
+        The tenant's recall log and spent replays go too, tenant-wide whatever
+        ``fleet_id`` says, and whether or not a memory is due: recall events
+        older than ``retention_days`` (their candidates cascade), whose query
+        text would otherwise outlive the memories it found, and idempotency
+        responses past ``expires_at``, which replay already treats as absent
+        (``idempotency_get``). They go after the memories commit, at most
+        ``_RETENTION_SWEEP_BATCH`` events or responses per transaction, until a
+        batch comes back short: a large backlog (the first run, or a tenant that
+        logs every search) is cleared in small commits that keep their progress,
+        and a failure there cannot undo the memory purge. The count returned is
+        of memories only.
         """
+        purged = 0
         async with get_session() as session:
             stmt = (
                 select(Memory.id)
@@ -5904,19 +5949,51 @@ class PostgresService:
             if fleet_id:
                 stmt = stmt.where(Memory.fleet_id == fleet_id)
             ids = list((await session.execute(stmt)).scalars().all())
-            if not ids:
-                return 0
-            await self._delete_entity_artifacts(
-                tenant_id,
-                ids,
-                eligibility=Memory.deleted_at.is_not(None),
-                session=session,
-                memories_going=True,
-            )
-            result = await session.execute(
-                delete(Memory).where(Memory.tenant_id == tenant_id, Memory.id.in_(ids)).returning(Memory.id)
-            )
-            return len(result.all())
+            if ids:
+                await self._delete_entity_artifacts(
+                    tenant_id,
+                    ids,
+                    eligibility=Memory.deleted_at.is_not(None),
+                    session=session,
+                    memories_going=True,
+                )
+                result = await session.execute(
+                    delete(Memory)
+                    .where(Memory.tenant_id == tenant_id, Memory.id.in_(ids))
+                    .returning(Memory.id)
+                )
+                purged = len(result.all())
+        # The key picks a batch, and the DELETE repeats the predicate, so a row
+        # changed meanwhile (a replay key reclaimed) is checked again, not taken.
+        sweeps: tuple[tuple[Any, Any, ColumnElement[bool]], ...] = (
+            (
+                RecallEvent,
+                RecallEvent.id,
+                and_(
+                    RecallEvent.tenant_id == tenant_id,
+                    RecallEvent.ts < func.now() - timedelta(days=retention_days),
+                ),
+            ),
+            (
+                IdempotencyResponse,
+                IdempotencyResponse.idempotency_key,
+                and_(
+                    IdempotencyResponse.tenant_id == tenant_id, IdempotencyResponse.expires_at <= func.now()
+                ),
+            ),
+        )
+        for table, key, expired in sweeps:
+            swept = _RETENTION_SWEEP_BATCH
+            while swept == _RETENTION_SWEEP_BATCH:
+                batch = select(key).where(expired).limit(_RETENTION_SWEEP_BATCH)
+                async with get_session() as session:
+                    deleted = await session.execute(
+                        delete(table)
+                        .where(expired, key.in_(batch))
+                        .execution_options(synchronize_session=False)
+                    )
+                swept = deleted.rowcount or 0  # type: ignore[attr-defined]
+        return purged
 
     async def purge_tenant_data(self, tenant_id: str) -> dict[str, int]:
         """Permanently delete EVERY row scoped to ``tenant_id`` across the
@@ -16375,16 +16452,27 @@ class PostgresService:
         the scan bounded. Suppressed tenants stay listed: purging is deletion.
         ``func.now()`` (DB clock) matches the purge primitive's cutoff and
         avoids client-clock drift.
+
+        The purge also sweeps the recall log and spent replays, so a tenant
+        with a recall event older than the same cutoff
+        (``_TENANTS_WITH_RECALL_EVENTS_BEFORE``), or an expired idempotency
+        response, is listed too, deleted memories or not.
         """
         cutoff = func.now() - timedelta(days=MEMORY_RETENTION_MIN_DAYS)
         async with get_read_session() as session:
             result = await session.execute(
                 select(Memory.tenant_id)
-                .where(Memory.deleted_at.is_not(None))
-                .where(Memory.deleted_at < cutoff)
-                .distinct()
+                .where(Memory.deleted_at.is_not(None), Memory.deleted_at < cutoff)
+                .union(
+                    select(IdempotencyResponse.tenant_id).where(IdempotencyResponse.expires_at <= func.now())
+                )
             )
-            return sorted(row[0] for row in result.all())
+            tenants = {row[0] for row in result.all()}
+            result = await session.execute(
+                _TENANTS_WITH_RECALL_EVENTS_BEFORE, {"days": MEMORY_RETENTION_MIN_DAYS}
+            )
+            tenants.update(row[0] for row in result.all())
+        return sorted(tenants)
 
     async def tenants_list_skills_factory_enabled(self) -> list[str]:
         """``org_id`` values whose ``skills_factory.enabled`` JSONB flag is True,
@@ -16892,8 +16980,8 @@ class PostgresService:
         """Return the stored idempotency row if live, else None.
 
         Expired rows are treated as absent so callers transparently
-        re-run the request after TTL. A separate cleanup job prunes
-        them from storage.
+        re-run the request after TTL. The daily purge deletes them
+        (``memory_purge_soft_deleted``).
         """
         async with get_session() as session:
             stmt = select(IdempotencyResponse).where(
@@ -16924,7 +17012,7 @@ class PostgresService:
         clause an expired-but-not-yet-pruned row would block fresh
         claims indefinitely — ``idempotency_get`` filters expired rows
         out, so the middleware would loop forever between "no cache"
-        and "claim conflicts" until the cleanup job pruned the row.
+        and "claim conflicts" until the daily purge deleted the row.
 
         The claim row carries ``is_pending=True`` and an empty
         ``response_body``. :meth:`idempotency_record` flips
@@ -17038,7 +17126,7 @@ class PostgresService:
             )
             row = existing.scalar_one_or_none()
             if row is None:
-                # The cleanup job pruned the conflicting row between our
+                # The daily purge pruned the conflicting row between our
                 # INSERT (which got DO NOTHING because the row existed)
                 # and this SELECT. Vanishingly rare; raising explicitly
                 # gives a 500 with an actionable log line instead of a
@@ -17046,7 +17134,7 @@ class PostgresService:
                 raise RuntimeError(
                     f"idempotency row ({tenant_id!r}, {idempotency_key!r}) "
                     "vanished between INSERT conflict and SELECT — "
-                    "likely pruned by the cleanup job mid-request"
+                    "likely pruned by the daily purge mid-request"
                 )
             if row.is_pending:
                 # Expiry-reclaim race: our (slow) handler's pending row

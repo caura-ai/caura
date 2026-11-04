@@ -6,8 +6,8 @@ being reused with a different body (which the client treats as a
 conflict) — that's the contract every idempotency-key standard
 (IETF draft, Stripe) agrees on.
 
-A short TTL keeps the table bounded; opportunistic cleanup or a
-periodic job (tracked separately) prunes expired rows.
+A short TTL keeps the table bounded: the daily purge
+(``memory_purge_soft_deleted``) deletes expired rows.
 """
 
 from datetime import datetime
@@ -33,7 +33,7 @@ class IdempotencyResponse(Base):
         PrimaryKeyConstraint(
             "tenant_id", "idempotency_key", name="pk_idempotency_responses"
         ),
-        # TTL cleanup job scans by expires_at.
+        # Purge discovery scans by expires_at.
         Index("ix_idempotency_responses_expires_at", "expires_at"),
     )
 

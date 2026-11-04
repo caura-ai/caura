@@ -216,6 +216,25 @@ async def test_search_keeps_near_misses_when_sampled(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_the_logged_query_has_pii_masked(monkeypatch):
+    """The log keeps the query's text, so it keeps it masked; the search
+    itself still sees the query as asked."""
+    captured = _capture(monkeypatch)
+    returned = [_row(0.60, 0.58)]
+    ctx = _ctx("mcp_recall", _cfg(recall=True), returned, returned)
+    query = "when is dana.levi@example.com back from leave"
+    ctx.data["query"] = query
+
+    await LogRecallEvent().execute(ctx)
+
+    logged = captured[0][0]["query_text"]
+    assert "dana.levi@example.com" not in logged
+    assert logged.startswith("when is ")
+    assert logged.endswith(" back from leave")
+    assert ctx.data["query"] == query
+
+
+@pytest.mark.asyncio
 async def test_persist_routes_to_storage_client():
     """``_persist`` posts the event + candidates through the storage client
     (no direct DB session) and swallows failures."""
