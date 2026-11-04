@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.3.5...collaboration-clients-v0.4.0) (2026-11-04)
+
+
+### Features
+
+* **evidence:** clients send real evidence on writes (EC-15) ([#2311](https://github.com/caura-ai/caura/issues/2311)) ([3786c21](https://github.com/caura-ai/caura/commit/3786c21bea5ebc51373be0aa35d6cc29d0375b29))
+
 ## [0.3.5](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.3.4...collaboration-clients-v0.3.5) (2026-10-28)
 
 

@@ -4,6 +4,16 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.26.0](https://github.com/caura-ai/caura/compare/plugin-v2.25.9...plugin-v2.26.0) (2026-11-04)
+
+
+### Features
+
+* **evidence:** clients send real evidence on writes (EC-15) ([#2311](https://github.com/caura-ai/caura/issues/2311)) ([3786c21](https://github.com/caura-ai/caura/commit/3786c21bea5ebc51373be0aa35d6cc29d0375b29))
+* **memory:** automatic verification states and the verify operation ([#2312](https://github.com/caura-ai/caura/issues/2312)) ([1aff27d](https://github.com/caura-ai/caura/commit/1aff27d3f2bb95d4de116702ada643e7f9c19fc1))
+* **memory:** evidence fields and server-stamped trace_id ([#2307](https://github.com/caura-ai/caura/issues/2307)) ([cc263af](https://github.com/caura-ai/caura/commit/cc263affb2993c30df3abe1ea61f1c3d3818db27))
+* **recall:** evidence object, verified_only filter and why phrase on every hit ([#2310](https://github.com/caura-ai/caura/issues/2310)) ([c272e36](https://github.com/caura-ai/caura/commit/c272e368478362d9e06a580a3903e09f5883332d))
+
 ## [2.25.9](https://github.com/caura-ai/caura/compare/plugin-v2.25.8...plugin-v2.25.9) (2026-11-03)
 
 
