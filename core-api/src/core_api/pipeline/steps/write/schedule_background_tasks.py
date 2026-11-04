@@ -373,6 +373,7 @@ class ScheduleBackgroundTasks:
                         parent_expires_at=memory.get("expires_at"),
                         parent_run_id=memory.get("run_id"),
                         parent_source_uri=memory.get("source_uri"),
+                        parent_evidence=memory,
                     ),
                     "atomic_fact_fanout",
                     memory_id,

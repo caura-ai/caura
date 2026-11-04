@@ -81,6 +81,13 @@ MEMORY_FIELDS: list[str] = [
     "weight",
     "source_uri",
     "run_id",
+    # Evidence contract v1 (migration 071).
+    "observed_at",
+    "trace_id",
+    "tool_call_id",
+    "verification_status",
+    "verified_by",
+    "verified_at",
     "metadata_",
     "created_at",
     "title",

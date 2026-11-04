@@ -56,8 +56,9 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # exactly when stamping 070 skips no work, as with 068. It reads ``documents``
 # and ``organization_settings`` (001 and 014), so boot runs the probe only where
 # the stamp branch can use it, after 019's sentinel; an empty database has
-# neither table.
-_HEAD_FINGERPRINT_REVISION = "070"
+# neither table. 071 adds the evidence columns and builds
+# ``ix_memories_verification`` last, so that index, valid, joins the probe.
+_HEAD_FINGERPRINT_REVISION = "071"
 _HEAD_FINGERPRINT_SQL: str | None = (
     "SELECT (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -79,7 +80,10 @@ _HEAD_FINGERPRINT_SQL: str | None = (
     "AND table_name = 'organization_settings_audit' AND column_name = 'actor_credential_id') "
     "AND NOT EXISTS (SELECT 1 FROM documents WHERE collection = 'skills' "
     "AND ((data::jsonb) ->> 'status') IS NULL AND tenant_id NOT IN ("
-    "SELECT org_id FROM organization_settings WHERE (settings -> 'skills_factory' ->> 'enabled') = 'true'))"
+    "SELECT org_id FROM organization_settings WHERE (settings -> 'skills_factory' ->> 'enabled') = 'true')) "
+    "AND EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+    "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' "
+    "AND c.relname = 'ix_memories_verification' AND i.indisvalid)"
 )
 
 _engine: AsyncEngine | None = None

@@ -16,6 +16,11 @@ Where it comes from:
   keeps over this (``memory_service``).
 
 A label is attribution, not authority: it scopes nothing and grants nothing.
+
+Evidence contract v1 also stamps a memory's ``trace_id`` from here when the
+writer sent none (``server_trace_id``): the session, or failing that an id
+issued for the one request, so a REST write with no session header still says
+which request it came from.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ _session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("caura_
 _session_source: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "caura_session_source", default=None
 )
+_request_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("caura_request_id", default=None)
 
 
 def current_session_id() -> str | None:
@@ -45,6 +51,26 @@ def current_session_id() -> str | None:
 def current_session_source() -> str | None:
     """``mcp`` or ``rest``; None outside a session."""
     return _session_source.get()
+
+
+def current_request_id() -> str | None:
+    """The id ``SessionHeaderMiddleware`` issued for this HTTP request; None outside one."""
+    return _request_id.get()
+
+
+def set_request_id(request_id: str | None) -> None:
+    _request_id.set(request_id)
+
+
+def server_trace_id() -> str | None:
+    """The ``trace_id`` a write gets when its caller sent none.
+
+    The session when there is one (always, on MCP: ``run_with_mcp_session``
+    issues one), else the request's own id. None outside an HTTP request — a
+    background writer has no request to name, and an id made up for it would
+    look like provenance it does not have.
+    """
+    return current_session_id() or current_request_id()
 
 
 def valid_session_id(value: str | None) -> str | None:
@@ -88,7 +114,9 @@ class SessionHeaderMiddleware:
     """REST: take the session from ``X-Caura-Session-Id``, and clear it otherwise.
 
     Cleared on every request, like the MCP identity vars, so a reused task
-    cannot carry a previous request's session into this one.
+    cannot carry a previous request's session into this one. Also issues the
+    request's own id (``current_request_id``), for MCP requests as well: this
+    runs outside the ``/mcp`` mount.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -99,4 +127,5 @@ class SessionHeaderMiddleware:
             headers = dict(scope.get("headers", []))
             session = valid_session_id(headers.get(REST_SESSION_HEADER, b"").decode(errors="ignore"))
             set_session(session, "rest")
+            set_request_id(f"req-{uuid.uuid4().hex}")
         await self.app(scope, receive, send)

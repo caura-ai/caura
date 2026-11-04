@@ -195,6 +195,19 @@
             ],
             "title": "Object Value"
           },
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the fact was observed, if earlier than the write (e.g. when a tool returned it). Leave unset when unknown; created_at is the write time.",
+            "title": "Observed At"
+          },
           "predicate": {
             "anyOf": [
               {
@@ -262,6 +275,30 @@
               }
             ],
             "title": "Subject Entity Id"
+          },
+          "tool_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Id of the tool call whose result this memory records.",
+            "title": "Tool Call Id"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Session or trace this write belongs to. Omit it and the server stamps the MCP session id, the X-Caura-Session-Id header, or an id for this request. Distinct from run_id.",
+            "title": "Trace Id"
           },
           "ts_valid_end": {
             "anyOf": [
@@ -852,6 +889,17 @@
             ],
             "title": "Object Value"
           },
+          "observed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
           "predicate": {
             "anyOf": [
               {
@@ -942,6 +990,28 @@
             ],
             "title": "Title"
           },
+          "tool_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Call Id"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          },
           "ts_valid_end": {
             "anyOf": [
               {
@@ -963,6 +1033,33 @@
               }
             ],
             "title": "Ts Valid Start"
+          },
+          "verification_status": {
+            "default": "unverified",
+            "title": "Verification Status",
+            "type": "string"
+          },
+          "verified_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified At"
+          },
+          "verified_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified By"
           },
           "visibility": {
             "title": "Visibility",
@@ -1126,6 +1223,18 @@
             ],
             "title": "Object Value"
           },
+          "observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
           "predicate": {
             "anyOf": [
               {
@@ -1278,6 +1387,28 @@
             ],
             "title": "Title"
           },
+          "tool_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Call Id"
+          },
+          "trace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trace Id"
+          },
           "ts_valid_end": {
             "anyOf": [
               {
@@ -1311,6 +1442,34 @@
                 "type": "null"
               }
             ]
+          },
+          "verification_status": {
+            "default": "unverified",
+            "title": "Verification Status",
+            "type": "string"
+          },
+          "verified_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified At"
+          },
+          "verified_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified By"
           },
           "visibility": {
             "default": "scope_team",

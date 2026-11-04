@@ -1282,6 +1282,45 @@
           "description": "Single only.",
           "title": "Run Id"
         },
+        "observed_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ISO time (single only).",
+          "title": "Observed At"
+        },
+        "trace_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Single only; default: session.",
+          "title": "Trace Id"
+        },
+        "tool_call_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Single only.",
+          "title": "Tool Call Id"
+        },
         "metadata": {
           "anyOf": [
             {

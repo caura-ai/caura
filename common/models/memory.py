@@ -4,6 +4,7 @@ from datetime import datetime
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -67,6 +68,19 @@ STRANDED_EMBEDDING_SQL = (
     f"({PENDING_EMBEDDING_SQL} AND created_at < now() - interval '1 hour')"
 )
 
+#: Evidence contract v1 (``docs/plans/evidence-contract-v1.md``). Who checked a
+#: memory, as the SERVER records it: no write body may set these. ``unverified``
+#: is every row's default; ``corroborated`` is reserved and set by nothing in v1.
+#: Migration 071's CHECK holds the column to this tuple.
+VERIFICATION_STATUSES = (
+    "unverified",
+    "tool_observed",
+    "corroborated",
+    "human_verified",
+    "disputed",
+)
+DEFAULT_VERIFICATION_STATUS = "unverified"
+
 
 class Memory(Base):
     __tablename__ = "memories"
@@ -88,6 +102,21 @@ class Memory(Base):
     )
     source_uri: Mapped[str | None] = mapped_column(Text)
     run_id: Mapped[str | None] = mapped_column(Text)
+    # Evidence contract v1 (migration 071). ``observed_at``: when the fact was
+    # observed, as the writer reports it (NULL when it did not say;
+    # ``created_at`` is the write time). ``trace_id``: the session or request the
+    # write came from: the client's own if it sent one, else stamped by core-api
+    # (``session_context.server_trace_id``). Not ``run_id``, which stays the
+    # client's. ``tool_call_id``: the tool call whose result this records.
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    trace_id: Mapped[str | None] = mapped_column(Text)
+    tool_call_id: Mapped[str | None] = mapped_column(Text)
+    # Server-owned, see ``VERIFICATION_STATUSES``.
+    verification_status: Mapped[str] = mapped_column(
+        Text, server_default=text("'unverified'"), nullable=False
+    )
+    verified_by: Mapped[str | None] = mapped_column(Text)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # ``json``, not JSONB: migration 001 creates it that way (CAURA-595), and
     # ``test_models_match_the_migrated_schema`` holds the model to the schema.
     metadata_: Mapped[dict | None] = mapped_column("metadata", JSON)
@@ -301,6 +330,21 @@ class Memory(Base):
             "ix_memories_pending_work",
             "tenant_id",
             postgresql_where=text(f"deleted_at IS NULL AND {PENDING_WORK_SQL}"),
+        ),
+        # Backs the planned ``verified_only`` recall filter. Partial, so it holds
+        # only rows that left ``unverified``. Created CONCURRENTLY in migration
+        # 071 with the same key and predicate.
+        Index(
+            "ix_memories_verification",
+            "tenant_id",
+            "verification_status",
+            postgresql_where=text("verification_status <> 'unverified'"),
+        ),
+        CheckConstraint(
+            "verification_status IN ("
+            + ", ".join(f"'{v}'" for v in VERIFICATION_STATUSES)
+            + ")",
+            name="ck_memories_verification_status",
         ),
     )
 

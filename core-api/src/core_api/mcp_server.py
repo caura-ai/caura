@@ -1809,6 +1809,12 @@ async def caura_write(
     # Net -3 tokens against the pre-change surface (5317 -> 5314).
     source_uri: Annotated[str | None, Field(description="Single only.")] = None,
     run_id: Annotated[str | None, Field(description="Single only.")] = None,
+    # Evidence contract v1. Single only, like source_uri/run_id: a batch item
+    # carries its own (``BulkMemoryItem``). An omitted trace_id is stamped with
+    # this MCP session's id.
+    observed_at: Annotated[str | None, Field(description="ISO time (single only).")] = None,
+    trace_id: Annotated[str | None, Field(description="Single only; default: session.")] = None,
+    tool_call_id: Annotated[str | None, Field(description="Single only.")] = None,
     metadata: Annotated[
         dict | None,
         # oss-0814-l-08: say that these keys are the caller's. "LLM fills gaps;
@@ -1982,6 +1988,17 @@ async def caura_write(
                         status=status,
                         visibility=visibility,
                         write_mode=write_mode,
+                        # Only when set, so a call without them hashes as it did
+                        # before these parameters existed.
+                        **{
+                            k: v
+                            for k, v in (
+                                ("observed_at", observed_at),
+                                ("trace_id", trace_id),
+                                ("tool_call_id", tool_call_id),
+                            )
+                            if v is not None
+                        },
                     ),
                     agent_id=agent_id,
                     source="mcp",
@@ -2002,6 +2019,9 @@ async def caura_write(
                             weight=weight,
                             source_uri=source_uri,
                             run_id=run_id,
+                            observed_at=observed_at,  # type: ignore[arg-type]
+                            trace_id=trace_id,
+                            tool_call_id=tool_call_id,
                             metadata=metadata,
                             status=status,
                             visibility=visibility,

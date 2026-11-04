@@ -152,6 +152,18 @@ EXPIRES_AT_DESCRIPTION = (
     "expressing retention."
 )
 
+# Evidence contract v1 (docs/plans/evidence-contract-v1.md): where a memory came
+# from, on every write surface that accepts it.
+OBSERVED_AT_DESCRIPTION = (
+    "When the fact was observed, if earlier than the write (e.g. when a tool returned it). "
+    "Leave unset when unknown; created_at is the write time."
+)
+TRACE_ID_DESCRIPTION = (
+    "Session or trace this write belongs to. Omit it and the server stamps the MCP session "
+    "id, the X-Caura-Session-Id header, or an id for this request. Distinct from run_id."
+)
+TOOL_CALL_ID_DESCRIPTION = "Id of the tool call whose result this memory records."
+
 # oss-0814-l-08. The C25 caller/platform metadata boundary, stated on the surface
 # a caller actually reads.
 #

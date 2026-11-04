@@ -1412,6 +1412,13 @@ async def get_memory(
         "weight": float(memory["weight"]) if memory["weight"] is not None else None,
         "source_uri": memory["source_uri"],
         "run_id": memory["run_id"],
+        # Evidence contract v1 (migration 071).
+        "observed_at": memory.get("observed_at"),
+        "trace_id": memory.get("trace_id"),
+        "tool_call_id": memory.get("tool_call_id"),
+        "verification_status": memory.get("verification_status") or "unverified",
+        "verified_by": memory.get("verified_by"),
+        "verified_at": memory.get("verified_at"),
         # Storage serialises the JSONB column under ``metadata_``; the API
         # response exposes it as ``metadata``.
         "metadata": memory.get("metadata_"),
