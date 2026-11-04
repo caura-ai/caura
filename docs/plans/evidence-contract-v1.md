@@ -113,9 +113,12 @@ The payload must not grow noticeably: keys with no value are dropped.
 
 1. **Provenance**: at least 95% of recalled memories carry agent, written-at
    and a server-stamped `trace_id`.
-2. **External evidence**: the share of recalled memories with `source_uri` or
-   `tool_call_id` present. The baseline is measured first; the target is set
-   from it.
+2. **External evidence**: at least 30% of returned recall candidates carry a
+   real `source_uri` or `tool_call_id`, measured over 30 days (stretch: 50%).
+   "Real" excludes `source_uri = 'text-input'` (ingest's placeholder) and
+   benchmark schemes such as `longmemeval:`. Baseline from a staging sample:
+   organic agent writes carry ~0% `source_uri`/`run_id`. The full per-tenant
+   baseline comes from the EC-16 report.
 
 ## Not in v1
 
