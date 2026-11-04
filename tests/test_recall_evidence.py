@@ -69,7 +69,7 @@ def _memory(**over):
         "agent_display_name": None,
         "memory_type": "fact",
         "title": "Deploy target",
-        "content": "The staging deploy target is memclaw.dev.",
+        "content": "The staging deploy target is caura.dev.",
         "weight": 0.5,
         "source_uri": None,
         "run_id": None,
@@ -440,16 +440,16 @@ async def test_verified_only_filters_without_reordering(
     monkeypatch.setattr(memory_service, "_USE_PIPELINE_SEARCH", use_pipeline)
     ids = {
         status: await _insert(
-            tenant_id, f"deploy target note {status} memclaw staging", status
+            tenant_id, f"deploy target note {status} caura staging", status
         )
         for status in ("unverified", "tool_observed", "human_verified", "disputed")
     }
 
     everything = await memory_service.search_memories(
-        tenant_id, "deploy target memclaw staging", top_k=10
+        tenant_id, "deploy target caura staging", top_k=10
     )
     verified = await memory_service.search_memories(
-        tenant_id, "deploy target memclaw staging", top_k=10, verified_only=True
+        tenant_id, "deploy target caura staging", top_k=10, verified_only=True
     )
 
     all_ids = [str(h.id) for h in everything]
