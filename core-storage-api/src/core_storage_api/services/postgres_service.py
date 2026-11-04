@@ -38,6 +38,7 @@ from sqlalchemy import (
     cast,
     delete,
     distinct,
+    exists,
     false,
     func,
     literal,
@@ -49,6 +50,8 @@ from sqlalchemy import (
     true,
     tuple_,
 )
+from sqlalchemy import column as sql_column
+from sqlalchemy import table as sql_table
 from sqlalchemy import update as sql_update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -95,7 +98,7 @@ from common.entity_naming import (
     normalize_entity_name,
     same_identifier_signature,
 )
-from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
+from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS, MEMORY_RETENTION_MIN_DAYS
 from common.models import (
     Agent,
     AgentActivityDigest,
@@ -733,6 +736,25 @@ def _verified_clause() -> ColumnElement[bool]:
     ``ix_memories_verification`` (partial on ``<> 'unverified'``).
     """
     return Memory.verification_status.in_(VERIFIED_STATUSES)
+
+
+# ``tenant_suppression`` is created in raw SQL (migration 019) and has no ORM
+# model; these two columns are all the scheduled-job lists read.
+_TENANT_SUPPRESSION = sql_table(
+    "tenant_suppression", sql_column("tenant_id"), sql_column("suppressed_at"), schema="public"
+)
+
+
+def _tenant_suppressed(tenant_id: Any) -> ColumnElement[bool]:
+    """The tenant's org is deleted and waiting out its grace period (CAURA-694).
+
+    Its requests are refused, so the scheduled jobs that read its content skip
+    it too. Jobs that delete (purge, job retention) still run for it.
+    """
+    return exists().where(
+        _TENANT_SUPPRESSION.c.tenant_id == tenant_id,
+        _TENANT_SUPPRESSION.c.suppressed_at.is_not(None),
+    )
 
 
 def _document_fleet_clause(collection: str | None, fleet_id: str) -> ColumnElement[bool]:
@@ -16246,24 +16268,32 @@ class PostgresService:
         """Distinct ``tenant_id`` from non-soft-deleted memories, sorted.
 
         Archive/lifecycle fanout target: an org with no live memories has
-        nothing to archive. Read-only (reader replica).
+        nothing to archive. A suppressed tenant is left out, so no scheduled
+        job sends its content to a model. Read-only (reader replica).
         """
         async with get_read_session() as session:
             result = await session.execute(
-                select(Memory.tenant_id).where(Memory.deleted_at.is_(None)).distinct()
+                select(Memory.tenant_id)
+                .where(Memory.deleted_at.is_(None), ~_tenant_suppressed(Memory.tenant_id))
+                .distinct()
             )
             return sorted(row[0] for row in result.all())
 
     async def tenants_list_purgeable(self) -> list[str]:
-        """Distinct ``tenant_id`` from soft-deleted memories older than the max
-        retention window (``MEMORY_RETENTION_MAX_DAYS``), sorted.
+        """Distinct ``tenant_id`` from soft-deleted memories older than the
+        shortest retention window an org can set (``MEMORY_RETENTION_MIN_DAYS``),
+        sorted.
 
-        Orgs whose soft-deleted rows are all newer than the max window are
-        guaranteed no-ops on the purge primitive, so excluding them keeps the
-        discovery scan bounded as ``memories`` grows. ``func.now()`` (DB clock)
-        matches the purge primitive's cutoff and avoids client-clock drift.
+        The purge primitive applies each org's own window
+        (``lifecycle.memory_retention_days``), so an org whose rows are all
+        inside its window gets a no-op purge. Discovering at the 30-day maximum
+        left an org on a shorter window unpurged until its oldest row reached 30
+        days. Orgs with no row older than a day are still left out, which keeps
+        the scan bounded. Suppressed tenants stay listed: purging is deletion.
+        ``func.now()`` (DB clock) matches the purge primitive's cutoff and
+        avoids client-clock drift.
         """
-        cutoff = func.now() - timedelta(days=MEMORY_RETENTION_MAX_DAYS)
+        cutoff = func.now() - timedelta(days=MEMORY_RETENTION_MIN_DAYS)
         async with get_read_session() as session:
             result = await session.execute(
                 select(Memory.tenant_id)
@@ -16279,12 +16309,14 @@ class PostgresService:
 
         The forge-distill lifecycle fanout uses this so a tenant that hasn't
         opted in pays ZERO per-tick cost. Orgs with no settings row are excluded
-        (the ``DEFAULT_SETTINGS`` default of ``enabled=False`` applies).
+        (the ``DEFAULT_SETTINGS`` default of ``enabled=False`` applies), and so
+        are suppressed ones.
         """
         async with get_read_session() as session:
             result = await session.execute(
                 select(OrganizationSettings.org_id).where(
-                    OrganizationSettings.settings["skills_factory"]["enabled"].as_boolean().is_(True)
+                    OrganizationSettings.settings["skills_factory"]["enabled"].as_boolean().is_(True),
+                    ~_tenant_suppressed(OrganizationSettings.org_id),
                 )
             )
             return sorted(row[0] for row in result.all())
@@ -16292,11 +16324,13 @@ class PostgresService:
     async def tenants_list_agent_digest_enabled(self) -> list[str]:
         """``org_id`` values whose ``agent_digest.enabled`` JSONB flag is True,
         sorted. The nightly digest fanout uses this so a tenant that hasn't opted
-        in pays zero cost. Orgs with no settings row are excluded (default off)."""
+        in pays zero cost. Orgs with no settings row are excluded (default off),
+        and so are suppressed ones."""
         async with get_read_session() as session:
             result = await session.execute(
                 select(OrganizationSettings.org_id).where(
-                    OrganizationSettings.settings["agent_digest"]["enabled"].as_boolean().is_(True)
+                    OrganizationSettings.settings["agent_digest"]["enabled"].as_boolean().is_(True),
+                    ~_tenant_suppressed(OrganizationSettings.org_id),
                 )
             )
             return sorted(row[0] for row in result.all())
@@ -16310,12 +16344,14 @@ class PostgresService:
         ``enabled=False`` lists the orgs that carry an ``interviewer`` block that
         is not enabled instead: the sweep purges their finished jobs past
         retention, so turning the interviewer off keeps none. A tenant that never
-        had the block has no jobs."""
+        had the block has no jobs. A suppressed org counts as off: it runs no
+        interviews, and its finished jobs still age out."""
         flag = OrganizationSettings.settings["interviewer"]["enabled"].as_boolean()
+        suppressed = _tenant_suppressed(OrganizationSettings.org_id)
         where = (
-            [flag.is_(True)]
+            [flag.is_(True), ~suppressed]
             if enabled
-            else [OrganizationSettings.settings.has_key("interviewer"), flag.is_not(True)]
+            else [OrganizationSettings.settings.has_key("interviewer"), or_(flag.is_not(True), suppressed)]
         )
         async with get_read_session() as session:
             result = await session.execute(select(OrganizationSettings.org_id).where(*where))

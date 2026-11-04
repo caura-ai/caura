@@ -17,6 +17,7 @@ async def list_active_tenant_ids(db: AsyncSession | None = None) -> list[str]:
     """Distinct ``tenant_id`` from non-soft-deleted memories, sorted.
 
     Use for archive ops — orgs with no live memories have nothing to archive.
+    Suppressed tenants (org deleted, in its grace period) are left out.
     CAURA-656 purge needs the broader variant below. ``db`` is ignored (reads
     via core-storage-api).
     """
@@ -28,10 +29,10 @@ async def list_tenants_with_purgeable_memories(db: AsyncSession | None = None) -
     eligible for hard-deletion under any org's retention window (CAURA-656 purge
     fanout target), sorted.
 
-    Orgs whose soft-deleted rows are all newer than ``MEMORY_RETENTION_MAX_DAYS``
-    are guaranteed purge no-ops, so the storage query excludes them to keep the
-    discovery scan bounded as ``memories`` grows (cutoff uses the DB clock).
-    ``db`` is ignored (reads via core-storage-api).
+    The cutoff is the shortest window an org can set
+    (``MEMORY_RETENTION_MIN_DAYS``); the purge applies each org's own window.
+    Suppressed tenants stay listed. ``db`` is ignored (reads via
+    core-storage-api).
     """
     return await get_storage_client().list_purgeable_tenants()
 
