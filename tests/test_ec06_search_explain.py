@@ -250,12 +250,13 @@ async def test_below_min_similarity(client):
 
 async def test_beyond_top_k_in_candidate_window(client):
     tenant, headers = get_test_auth(_tenant())
-    tag = _uid()
-    q = f"sanderling surf line {tag}"
+    # Fixed text, no random word: a random word moves the fake embedding, and
+    # in about 1 run in 15 it took the second memory's similarity below the
+    # 0.0 floor, so it was dropped for that instead. The tenant is already
+    # unique. This text scores 0.22.
+    q = "sanderling surf line"
     await _write(client, tenant, headers, q)
-    mid = await _write(
-        client, tenant, headers, f"sanderling winter plumage notes {tag}y"
-    )
+    mid = await _write(client, tenant, headers, "sanderling winter plumage notes")
     body = {"tenant_id": tenant, "query": q, "top_k": 1, "min_similarity": 0.0}
     assert mid not in await _search_ids(client, headers, body)
     ex = await _explain(client, headers, body, mid)
@@ -267,13 +268,12 @@ async def test_beyond_top_k_in_candidate_window(client):
 async def test_beyond_top_k_past_the_candidate_window(client):
     """Ranked past ``top_k * overfetch``: the widened probe finds the rank."""
     tenant, headers = get_test_auth(_tenant())
-    tag = _uid()
-    q = f"turnstone pebble beach tideline {tag}"
+    # Fixed text, as in the test above: the target scores 0.41 and every note
+    # at least 0.84, so it ranks fifth.
+    q = "turnstone pebble beach tideline"
     for i in range(4):
-        await _write(
-            client, tenant, headers, f"turnstone pebble beach tideline {tag} note{i}"
-        )
-    mid = await _write(client, tenant, headers, f"turnstone unrelated memo {tag}z")
+        await _write(client, tenant, headers, f"{q} note{i}")
+    mid = await _write(client, tenant, headers, "turnstone unrelated memo")
     body = {"tenant_id": tenant, "query": q, "top_k": 1, "min_similarity": 0.0}
     assert mid not in await _search_ids(client, headers, body)
     ex = await _explain(client, headers, body, mid)
