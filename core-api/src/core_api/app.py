@@ -62,6 +62,7 @@ from core_api.routes.conflicts import router as conflicts_router
 from core_api.routes.crystallizer import router as crystallizer_router
 from core_api.routes.documents import router as documents_router
 from core_api.routes.entities import router as entities_router
+from core_api.routes.evidence_coverage import router as evidence_coverage_router
 from core_api.routes.evolve import router as evolve_router
 from core_api.routes.fleet import router as fleet_router
 from core_api.routes.health import router as health_router
@@ -1276,6 +1277,7 @@ app.include_router(scheduler_lease_router, prefix="/api/v1")
 app.include_router(org_deletion_router, prefix="/api/v1")
 app.include_router(usage_router, prefix="/api/v1")
 app.include_router(value_router, prefix="/api/v1")
+app.include_router(evidence_coverage_router, prefix="/api/v1")
 
 # Test-only endpoints (time-warp, etc.) — only registered when TESTING=1
 if _os.getenv("TESTING") == "1":

@@ -1936,6 +1936,16 @@ class CoreStorageClient:
         )
         return result or {}  # type: ignore[return-value]
 
+    async def evidence_coverage(self, tenant_id: str, body: dict) -> dict:
+        """One tenant's evidence coverage counts (``{"start", "end"}``)."""
+        result = await self._post(
+            f"/value/evidence-coverage?tenant_id={quote(tenant_id, safe='')}",
+            body,
+            read=True,
+            idempotent=True,
+        )
+        return result or {}  # type: ignore[return-value]
+
     async def increment_tenant_usage(self, rows: list[dict]) -> int:
         """ADD to per-tenant, per-period counters in ``tenant_usage_counters``.
 
