@@ -196,8 +196,14 @@ const cauraPlugin = {
     // Register tools from the SoT (plugin/tools.json), in the order
     // declared by CAURA_TOOLS. The factory pulls name/description from
     // tools.json; drift between the two sets throws at import time.
+    // As factories, so each tool is built for the run that calls it and a
+    // write carries that run's session (the trace its memory belongs to).
     for (const name of CAURA_TOOLS) {
-      api.registerTool(createToolFromSpec(name), { names: [name] });
+      api.registerTool(
+        (ctx: { sessionKey?: string; sessionId?: string }) =>
+          createToolFromSpec(name, { sessionKey: ctx?.sessionKey, sessionId: ctx?.sessionId }),
+        { names: [name] },
+      );
     }
 
     // --- Gateway methods ---

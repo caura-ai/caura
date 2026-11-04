@@ -95,7 +95,7 @@ from core_api.errors import (
     AUTH_KEPT_PRIVATE_BY_POLICY,
     coded_detail,
 )
-from core_api.request_bounds import validate_write_fields
+from core_api.request_bounds import TEXT_FIELD_CAPS, validate_write_fields
 from core_api.schemas import (
     SERVER_OWNED_MEMORY_FIELDS,
     BulkItemResult,
@@ -1602,6 +1602,30 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
     return _memory_out_with_created_links(ctx, memory)
 
 
+# The broker's own metadata keys for the session and the tool call a capture
+# came from (caura-daemon ``FormatMemoryMetadata``, PostToolUse hook).
+_BROKER_SESSION_KEY = "session_id"
+_BROKER_TOOL_CALL_KEY = "tool_use_id"
+
+
+def _adopt_broker_evidence(item: BulkMemoryItem) -> None:
+    """Fill a broker item's ``trace_id`` / ``tool_call_id`` from its metadata.
+
+    Only where the item sent none, and only a value the column would take:
+    an item is never refused over evidence the broker did not send as such.
+    """
+    from core_api.session_context import valid_session_id
+
+    metadata = item.metadata or {}
+    if item.trace_id is None:
+        session = metadata.get(_BROKER_SESSION_KEY)
+        item.trace_id = valid_session_id(session) if isinstance(session, str) else None
+    if item.tool_call_id is None:
+        tool_call = metadata.get(_BROKER_TOOL_CALL_KEY)
+        if isinstance(tool_call, str) and 0 < len(tool_call.strip()) <= TEXT_FIELD_CAPS["tool_call_id"]:
+            item.tool_call_id = tool_call.strip()
+
+
 @scoped(
     "write",
     tenant=lambda a: a["data"].tenant_id,
@@ -1712,6 +1736,13 @@ async def create_memories_bulk(
             item.metadata = item.metadata or {}
             for key, value in values.items():
                 set_system_value(item.metadata, key, value)
+    # Evidence contract v1 (EC-15): the broker already names the session and
+    # the tool call each capture came from, in metadata. Those are what
+    # ``trace_id`` / ``tool_call_id`` mean, so a broker item that does not send
+    # them takes them from there instead of the per-request batch id.
+    if from_broker:
+        for item in items:
+            _adopt_broker_evidence(item)
 
     # -- Per-item validation. Short content used to raise a 422 for the
     # whole batch; now it's a per-item "error" result. Indices in this

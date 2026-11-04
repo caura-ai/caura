@@ -268,6 +268,9 @@ fi
 CAURA_URL="${CAURA_API_URL:-${MEMCLAW_API_URL:-https://caura.ai}}"  # legacy-name-ok: rule 3 dual-read alias
 CR_FLEET="${CODE_REVIEW_FLEET_ID:-code-review}"
 SAVED=0
+PR_URL="https://github.com/${REPO}/pull/${PR_NUMBER}"
+# The session id alphabet is [A-Za-z0-9._:-], so the repo's slash becomes a dot.
+CAPTURE_SESSION="github:${REPO//\//.}:pr-${PR_NUMBER}"
 while IFS= read -r NOTE; do
   NOTE=${NOTE:0:$MAX_NOTE_CHARS}
   # Never write a bare "[… · repo#N] " prefix for a blank note.
@@ -282,13 +285,17 @@ while IFS= read -r NOTE; do
   # character, since bash slices BYTES in a C locale (verified: `${S:0:2}` on "a—b" yields a
   # half em-dash), but jq accepts that byte sequence and exits 0 (verified too). A promise the
   # code cannot keep is worth closing whether or not today's jq is the thing that breaks it.
-  REQ=$(jq -n --arg c "$CONTENT" --arg fleet "$CR_FLEET" \
-    '{jsonrpc:"2.0",method:"tools/call",id:1,params:{name:"caura_write",arguments:{content:$c,agent_id:"caura-code-review",fleet_id:$fleet,visibility:"scope_team"}}}') || {
+  # Evidence contract v1: source_uri is the pull request the note was read from (a field every
+  # server has), and Mcp-Session-Id below names this capture run, which the server records as
+  # the memory's trace_id. A header, so a server without the evidence fields ignores it.
+  REQ=$(jq -n --arg c "$CONTENT" --arg fleet "$CR_FLEET" --arg src "$PR_URL" \
+    '{jsonrpc:"2.0",method:"tools/call",id:1,params:{name:"caura_write",arguments:{content:$c,agent_id:"caura-code-review",fleet_id:$fleet,visibility:"scope_team",source_uri:$src}}}') || {
     echo "::warning::could not build the write request for a note — skipping it"
     continue
   }
   RESP=$(curl -sS --max-time 20 "${CAURA_URL%/}/mcp" \
     -H "X-API-Key: ${AGENTS_KEY}" \
+    -H "Mcp-Session-Id: ${CAPTURE_SESSION}" \
     -H "Content-Type: application/json" -H "Accept: application/json" \
     -d "$REQ") || { echo "::warning::Caura unreachable — note dropped"; continue; }
   if printf '%s' "$RESP" | jq -e 'has("result") and (.error | not)' >/dev/null 2>&1; then
