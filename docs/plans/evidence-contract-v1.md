@@ -120,6 +120,13 @@ The payload must not grow noticeably: keys with no value are dropped.
    organic agent writes carry ~0% `source_uri`/`run_id`. The full per-tenant
    baseline comes from the EC-16 report.
 
+Both numbers, per tenant: `GET /api/v1/reports/evidence-coverage?window_days=30`
+(tenant or admin credential). It measures the candidates recall returned in the
+window when recall logging recorded any (`observability.recall_logging_enabled`
+or `search_recall_logging_enabled`), and the tenant's live memories otherwise;
+`denominator` says which. The excluded agent ids and `source_uri` values are
+`PLACEHOLDER_AGENT_IDS` and `NON_EVIDENCE_SOURCE_URIS` in `common/constants.py`.
+
 ## Not in v1
 
 - No ranking change: `verified_only` is a filter. A boost for verified rows

@@ -73,6 +73,8 @@ from common.constants import (
     HOLD_KEY,
     LIVE_MEMORY_STATUSES,
     NODE_PRINCIPAL_TENANT,
+    NON_EVIDENCE_SOURCE_URIS,
+    PLACEHOLDER_AGENT_IDS,
     QUARANTINE_EXITS,
     QUARANTINE_REJECT_ACTION,
     QUARANTINE_REJECTED,
@@ -117,6 +119,7 @@ from common.models import (
 from common.models.capability_usage import CapabilityUsage
 from common.models.entity import LINK_SOURCE_CALLER, LINK_SOURCE_EXTRACTION
 from common.models.memory import (
+    DEFAULT_VERIFICATION_STATUS,
     PENDING_EMBEDDING_SQL,
     PENDING_ENRICHMENT_SQL,
     PENDING_FANOUT_SQL,
@@ -7197,6 +7200,113 @@ class PostgresService:
                 "outdated_kept_out": int(superseded or 0),
                 "conflicts_waiting": int(pending or 0),
             },
+        }
+
+    async def evidence_coverage(self, tenant_id: str, *, start: datetime, end: datetime) -> dict:
+        """The evidence contract's two done-when numbers for one tenant, as counts.
+
+        Over the returned candidates of recalls logged in ``[start, end)``, and
+        over the tenant's live memories (all of them, and those written in the
+        window). Aggregates only: one pass over the tenant's memories, one over
+        its recall log in the window. ``verification`` reads the partial index
+        ``ix_memories_verification`` for every status but the default, which is
+        the remainder.
+        """
+        agent = Memory.agent_id.is_not(None) & func.btrim(Memory.agent_id).not_in(PLACEHOLDER_AGENT_IDS)
+        written = Memory.created_at.is_not(None)
+        trace = func.coalesce(func.btrim(Memory.trace_id), "") != ""
+        tool_call = func.coalesce(func.btrim(Memory.tool_call_id), "") != ""
+        uri = func.lower(func.btrim(func.coalesce(Memory.source_uri, "")))
+        placeholder_uri = or_(
+            uri.in_([v for v in NON_EVIDENCE_SOURCE_URIS if not v.endswith(":")]),
+            *(uri.startswith(v) for v in NON_EVIDENCE_SOURCE_URIS if v.endswith(":")),
+        )
+        real_uri = (uri != "") & ~placeholder_uri
+        counts = [
+            func.count(Memory.id).label("rows"),
+            func.count().filter(agent).label("with_agent"),
+            func.count().filter(written).label("with_written_at"),
+            func.count().filter(trace).label("with_trace_id"),
+            func.count().filter(agent & written & trace).label("provenance"),
+            func.count().filter(tool_call).label("with_tool_call_id"),
+            func.count().filter(real_uri).label("with_real_source_uri"),
+            func.count().filter(placeholder_uri).label("non_evidence_source_uri"),
+            func.count().filter(tool_call | real_uri).label("external_evidence"),
+        ]
+        in_window = func.coalesce((Memory.created_at >= start) & (Memory.created_at < end), False)
+        live = (Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None))
+        async with get_read_session() as session:
+            by_window = (
+                (
+                    await session.execute(
+                        select(in_window.label("in_window"), *counts)
+                        .where(*live)
+                        # By output name: the window bounds bind as fresh
+                        # parameters, so a repeated expression would not match.
+                        .group_by(literal_column("in_window"))
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            # Outer join: a candidate whose memory row is gone is counted in
+            # ``returned`` but carries nothing, so it lands in ``memory_gone``.
+            returned = (
+                (
+                    await session.execute(
+                        select(
+                            func.count().label("returned"),
+                            func.count(func.distinct(RecallEvent.id)).label("events_with_results"),
+                            *counts,
+                        )
+                        .select_from(RecallCandidate)
+                        .join(RecallEvent, RecallEvent.id == RecallCandidate.recall_event_id)
+                        .outerjoin(
+                            Memory, (Memory.id == RecallCandidate.memory_id) & (Memory.tenant_id == tenant_id)
+                        )
+                        .where(
+                            RecallEvent.tenant_id == tenant_id,
+                            RecallEvent.ts >= start,
+                            RecallEvent.ts < end,
+                            RecallCandidate.returned.is_(True),
+                        )
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            events = await session.scalar(
+                select(func.count())
+                .select_from(RecallEvent)
+                .where(RecallEvent.tenant_id == tenant_id, RecallEvent.ts >= start, RecallEvent.ts < end)
+            )
+            checked = (
+                await session.execute(
+                    select(Memory.verification_status, func.count())
+                    .where(*live, Memory.verification_status != DEFAULT_VERIFICATION_STATUS)
+                    .group_by(Memory.verification_status)
+                )
+            ).all()
+
+        def as_counts(row: Any) -> dict:
+            return {c.name: int((row or {}).get(c.name) or 0) for c in counts}
+
+        windowed = next((r for r in by_window if r["in_window"]), None)
+        all_rows = {c.name: sum(int(r[c.name] or 0) for r in by_window) for c in counts}
+        verification = {status: int(n) for status, n in checked}
+        verification[DEFAULT_VERIFICATION_STATUS] = all_rows["rows"] - sum(verification.values())
+        candidates = as_counts(returned)
+        return {
+            "memories": all_rows,
+            "memories_in_window": as_counts(windowed),
+            "recall": {
+                "events": int(events or 0),
+                "events_with_results": int(returned["events_with_results"] or 0),
+                "returned": int(returned["returned"] or 0),
+                "memory_gone": int(returned["returned"] or 0) - candidates["rows"],
+                **candidates,
+            },
+            "verification": verification,
         }
 
     async def tenant_usage_query(
