@@ -37,7 +37,7 @@ from core_api.errors import (
 )
 from core_api.schemas import ConflictListResponse, ConflictOut, ConflictResolveRequest
 from core_api.services.audit_service import log_action
-from core_api.services.contradiction_detector import _pick_older, revert_unheld_loser
+from core_api.services.contradiction_detector import _pick_older, revert_unheld_loser, verdict_applied
 from core_api.services.trust_service import require_trust as _require_trust
 
 logger = logging.getLogger(__name__)
@@ -116,13 +116,15 @@ async def _undo_dismissed_verdict(sc, conflict: dict) -> str:
     A pair no edge joins goes to ``_revert_unlinked_loser``.
 
     Returns ``"undone"``; ``"not_applied"`` when there was nothing to undo (a
-    memory is gone, the CAS found the chain moved, or an unlinked loser is still
-    held); or ``"partial"`` when the edge was cleared but the loser could not be
+    dispute, which detection never applied; a memory is gone, the CAS found the
+    chain moved, or an unlinked loser is still held); or ``"partial"`` when the edge was cleared but the loser could not be
     reverted. A dismissed conflict cannot be filed again, so a partial undo is
     left to a person, who can set the loser's status through
     ``PATCH /memories/{id}``. Any other storage error, at or before the edge write,
     is raised: the caller records that as ``"failed"``.
     """
+    if not verdict_applied(conflict):
+        return "not_applied"
     tenant_id = str(conflict["tenant_id"])
     new_id, old_id = str(conflict["new_memory_id"]), str(conflict["old_memory_id"])
     new = await sc.get_memory(new_id, tenant_id, read=False)
