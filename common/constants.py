@@ -828,6 +828,31 @@ SEARCH_KNOBS: dict[str, SearchKnob] = {
     # retargeted: "recently recalled" is a system-time fact, not an event-time
     # one, and stays on ``now()`` under either setting.
     "freshness_reference": SearchKnob(int, (0, 1), sql=True),
+    # Evidence contract v1, EC-19: rank checked memories a little higher. 0 =
+    # off: the scoring SQL never reads ``verification_status`` and the compiled
+    # statement is byte-identical to a build without this knob. 1 = multiply the
+    # score by the row's factor below (``unverified`` stays 1.0). Per TENANT via
+    # ``search.default_profile``, not agent-tunable, and held at 0 until the
+    # EC-18 regression-bench A/B shows it does not cost recall: a ranking change
+    # has lost 13 points in one category before (A50).
+    "verified_boost": SearchKnob(int, (0, 1), sql=True),
+    # The factors, read only while ``verified_boost`` is 1. Bounded so a tenant
+    # can tune the size of the nudge but not let it outweigh relevance: a boost
+    # tops out at 1.5, a demotion at 0.5 (the ``outdated`` status penalty).
+    "verified_boost_human": SearchKnob(float, (1.0, 1.5), sql=True),
+    "verified_boost_tool": SearchKnob(float, (1.0, 1.5), sql=True),
+    "verified_boost_corroborated": SearchKnob(float, (1.0, 1.5), sql=True),
+    "verified_boost_disputed": SearchKnob(float, (0.5, 1.0), sql=True),
+}
+
+# EC-19 factor defaults, here rather than in ``core_api.constants`` because
+# storage needs them too: a payload that turns the boost on without naming a
+# factor gets these, not a KeyError. ``unverified`` has no entry; it is 1.0.
+VERIFIED_BOOST_DEFAULT_FACTORS: dict[str, float] = {
+    "verified_boost_human": 1.10,
+    "verified_boost_tool": 1.05,
+    "verified_boost_corroborated": 1.05,
+    "verified_boost_disputed": 0.90,
 }
 
 # The wire contract, derived. Core-api's two search-path builders project

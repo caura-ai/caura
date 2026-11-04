@@ -25,6 +25,7 @@ from common.constants import (  # noqa: F401
     SQL_SCORING_PARAM_KEYS,
     TYPE_DECAY_DAYS,
     VECTOR_DIM,
+    VERIFIED_BOOST_DEFAULT_FACTORS,
 )
 
 # The embedding concurrency-gate timeout, which the bulk strong-embed budget
@@ -454,6 +455,11 @@ ANN_POOL_SHADOW = 0
 # every row the same age, so the time signal is uniform noise and "last month"
 # resolves against the ingest date rather than the question's.
 FRESHNESS_REFERENCE = 0
+# EC-19 verified-memory ranking boost (``common.constants.SEARCH_KNOBS
+# ["verified_boost"]``). Off by default; enable per tenant via
+# ``default_search_profile.verified_boost`` once the EC-18 A/B clears it. The
+# factor defaults live in ``common.constants.VERIFIED_BOOST_DEFAULT_FACTORS``.
+VERIFIED_BOOST = 0
 FRESHNESS_DECAY_DAYS = 90
 FRESHNESS_FLOOR = 0.7
 ENTITY_TOKEN_MIN_LENGTH = 2  # A7: was 3; lowered to retain 2-char acronym

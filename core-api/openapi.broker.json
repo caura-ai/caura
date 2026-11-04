@@ -2015,6 +2015,17 @@
               }
             ],
             "title": "Vec Sim"
+          },
+          "verification_boost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verification Boost"
           }
         },
         "title": "ScoreParts",

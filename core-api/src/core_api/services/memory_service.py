@@ -89,6 +89,8 @@ from core_api.constants import (
     SEARCH_OVERFETCH_FACTOR,
     SIMILARITY_BLEND,
     SQL_SCORING_PARAM_KEYS,
+    VERIFIED_BOOST,
+    VERIFIED_BOOST_DEFAULT_FACTORS,
 )
 from core_api.errors import (
     AUTH_FLEET_SCOPE_FORBIDDEN,
@@ -5588,6 +5590,10 @@ def resolve_search_params(
         "ann_pool_size": resolved.get("ann_pool_size", ANN_POOL_SIZE),
         "ann_pool_shadow": resolved.get("ann_pool_shadow", ANN_POOL_SHADOW),
         "freshness_reference": resolved.get("freshness_reference", FRESHNESS_REFERENCE),
+        # EC-19: off unless the tenant opts in; the factors travel either way
+        # and storage reads them only while the switch is 1.
+        "verified_boost": resolved.get("verified_boost", VERIFIED_BOOST),
+        **{k: resolved.get(k, v) for k, v in VERIFIED_BOOST_DEFAULT_FACTORS.items()},
     }
 
 

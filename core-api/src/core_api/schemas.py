@@ -579,6 +579,9 @@ class ScoreParts(BaseModel):
     recall_boost: float | None = None
     temporal_boost: float | None = None
     status_penalty: float | None = None
+    # EC-19 — the verified-memory factor; null unless the tenant turned the
+    # ``verified_boost`` search knob on (then 1.0 for an unverified row).
+    verification_boost: float | None = None
     rerank: float | None = None
 
 

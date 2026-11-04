@@ -328,7 +328,7 @@ def test_caura_tune_signature_matches_the_knob_table():
 def test_the_ab_knobs_are_not_agent_tunable():
     """``fts_rank_scale`` / ``candidate_pool_size`` / ``score_formula`` /
     ``ann_pool_size`` / ``ann_pool_shadow`` / ``freshness_reference`` /
-    ``recall_boost_source`` stay off the agent ingress.
+    ``recall_boost_source`` / ``verified_boost*`` stay off the agent ingress.
 
     They are the A/B, rollout and data-shape knobs — held at their global
     defaults until the offline comparison validates them, and flipped per
@@ -337,9 +337,11 @@ def test_the_ab_knobs_are_not_agent_tunable():
     time or a validity-window start is a property of the tenant's data, not of
     any one agent. ``recall_boost_source`` (A41) reshuffles ranking for every
     caller in the tenant, exactly like ``score_formula``, and is held at 0
-    until the returned-vs-used measurement validates the flip. The 9-of-16
-    split is deliberate; this records which seven and why, so a future reader
-    does not "fix" the omission.
+    until the returned-vs-used measurement validates the flip. ``verified_boost``
+    and its four factors (EC-19) are the same kind of tenant-wide ranking
+    switch, held off until the EC-18 A/B. The 9-of-21 split is deliberate; this
+    records which twelve and why, so a future reader does not "fix" the
+    omission.
     """
     from common.constants import SEARCH_KNOBS
     from core_api.schemas import SearchProfileUpdate
@@ -352,6 +354,11 @@ def test_the_ab_knobs_are_not_agent_tunable():
         "ann_pool_shadow",
         "freshness_reference",
         "recall_boost_source",
+        "verified_boost",
+        "verified_boost_human",
+        "verified_boost_tool",
+        "verified_boost_corroborated",
+        "verified_boost_disputed",
     }
 
 

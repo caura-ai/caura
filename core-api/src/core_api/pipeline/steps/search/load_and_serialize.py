@@ -53,6 +53,8 @@ _SCORE_FACTORS = (
     "recall_boost",
     "temporal_boost",
     "status_penalty",
+    # EC-19, only while the tenant's verified boost is on.
+    "verification_boost",
     # Set by RerankResults on the rows it reordered (L-115).
     "rerank",
 )
