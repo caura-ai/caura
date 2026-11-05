@@ -67,6 +67,7 @@ from core_api.middleware.per_tenant_concurrency import per_tenant_slot
 from core_api.middleware.rate_limit import search_limit, write_bulk_limit, write_limit
 from core_api.pagination import cursor_sortable, decode_cursor, encode_cursor
 from core_api.schemas import (
+    BatonNotice,
     BulkMemoryCreate,
     BulkMemoryItem,
     BulkMemoryResponse,
@@ -92,6 +93,7 @@ from core_api.schemas import (
     STMWriteResponse,
     UsageSummary,
 )
+from core_api.services import baton_notices
 from core_api.services.agent_identity import reserved_write_refusal
 from core_api.services.agent_scope import explain_agent_scope
 from core_api.services.agent_service import (
@@ -3132,6 +3134,8 @@ async def _search_inner(
     # CP-13 — corrections this agent has not confirmed, looked up beside the
     # search: the same identity exposure records as the reader.
     notices_task = start_notices(body.tenant_id, eff_agent_id, surface="rest")
+    # HB-09 — handoff batons waiting on this agent, the same way.
+    batons_task = baton_notices.start_notices(body.tenant_id, eff_agent_id, surface="rest")
     try:
         config = await resolve_config(body.tenant_id)
         # Widen the read predicate when the caller authenticated with
@@ -3256,6 +3260,7 @@ async def _search_inner(
     warn_out = [SearchWarning(**w) for w in search_warnings] or None
     hint_out = EmptyRecallHint(**empty_hint_ctx["hint"]) if "hint" in empty_hint_ctx else None
     notices_out = [CorrectionNotice(**n) for n in await finish_notices(notices_task)] or None
+    batons_out = [BatonNotice(**n) for n in await baton_notices.finish_notices(batons_task)] or None
     if not body.diagnostic:
         return SearchResponse(
             items=results,
@@ -3263,6 +3268,7 @@ async def _search_inner(
             warnings=warn_out,
             empty_hint=hint_out,
             correction_notices=notices_out,
+            baton_notices=batons_out,
         )
     counts = diagnostic_ctx.get("counts", {}) or {}
     return SearchResponse(
@@ -3271,6 +3277,7 @@ async def _search_inner(
         warnings=warn_out,
         empty_hint=hint_out,
         correction_notices=notices_out,
+        baton_notices=batons_out,
         diagnostic=SearchDiagnostic(
             retrieval_strategy=diagnostic_ctx.get("retrieval_strategy"),
             top_k_requested=diagnostic_ctx.get("diagnostic_original_top_k"),
@@ -3601,6 +3608,8 @@ async def recall_endpoint(
 
     # CP-13 — same lookup /search runs beside its search.
     notices_task = start_notices(body.tenant_id, eff_agent_id, surface="rest")
+    # HB-09 — likewise for handoff batons.
+    batons_task = baton_notices.start_notices(body.tenant_id, eff_agent_id, surface="rest")
 
     # ── Phase 1: DB-bound — config + search ──────────────────────
     config = await resolve_config(body.tenant_id)
@@ -3719,6 +3728,9 @@ async def recall_endpoint(
     # CP-13 — added only when present, for the same plain-dict reason as above.
     if notices := await finish_notices(notices_task):
         brief["correction_notices"] = notices
+    # HB-09 — likewise.
+    if batons := await baton_notices.finish_notices(batons_task):
+        brief["baton_notices"] = batons
     return brief
 
 

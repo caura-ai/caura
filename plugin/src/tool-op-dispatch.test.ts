@@ -208,6 +208,8 @@ const ROUTES: {
     expect: `PATCH /api/v1/memories/${MEMORY_ID}` },
   { tool: "caura_manage", op: "confirm_correction", params: { correction_id: MEMORY_ID },
     expect: `POST /api/v1/corrections/${MEMORY_ID}/confirm` },
+  { tool: "caura_manage", op: "accept_baton", params: { baton_id: MEMORY_ID },
+    expect: `POST /api/v1/batons/${MEMORY_ID}/accept` },
   // caura_doc
   { tool: "caura_doc", op: "write", params: { collection: "c-1", doc_id: "doc-1", data: { a: 1 } },
     expect: "POST /api/v1/documents" },
@@ -237,7 +239,8 @@ function resourceCalls(): string[] {
       (c) =>
         c.url.pathname.includes("/memories") ||
         c.url.pathname.includes("/documents") ||
-        c.url.pathname.includes("/corrections"),
+        c.url.pathname.includes("/corrections") ||
+        c.url.pathname.includes("/batons"),
     )
     .map((c) => `${c.method} ${c.url.pathname}`);
 }

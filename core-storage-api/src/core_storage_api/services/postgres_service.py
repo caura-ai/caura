@@ -110,6 +110,7 @@ from common.models import (
     AuditLog,
     BackgroundTaskLog,
     Base,
+    BatonRecipient,
     CrystallizationReport,
     Document,
     Entity,
@@ -1891,6 +1892,8 @@ _PURGE_TENANT_TABLES: tuple[str, ...] = (
     # both ahead of ``memories``, for the same reasoning.
     "memory_correction_recipient",
     "memory_correction",
+    # Handoff batons (migration 076): their own tenant_id and no parent here.
+    "baton_recipient",
     "memories",
     "entities",
     "agents",
@@ -8040,6 +8043,130 @@ class PostgresService:
                     r.notice_state.in_(("pending", "sent", "unreachable")),
                 )
                 .values(notice_state="delivered", notified_at=func.now())
+            )
+            return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def baton_recipients_record(
+        self,
+        tenant_id: str,
+        baton_id: str,
+        *,
+        from_agent: str,
+        goal: str,
+        created_at: datetime,
+        recipients: list[dict],
+    ) -> int:
+        """The bus sent a baton: one ``delivered`` row per receiver; the rows written.
+
+        Handoff batons, D4. Idempotent: a retried send (same baton, same
+        receiver) keeps the row it wrote first, and its state.
+        """
+        if not recipients:
+            return 0
+        bid = UUID(baton_id)
+        async with get_session() as session:
+            result = await session.execute(
+                pg_insert(BatonRecipient)
+                .values(
+                    [
+                        {
+                            "tenant_id": tenant_id,
+                            "baton_id": bid,
+                            "agent_id": r["agent_id"],
+                            "from_agent": from_agent,
+                            "goal": goal,
+                            "created_at": created_at,
+                            "message_id": r.get("message_id"),
+                        }
+                        for r in recipients
+                    ]
+                )
+                .on_conflict_do_nothing(index_elements=["tenant_id", "baton_id", "agent_id"])
+            )
+            return int(result.rowcount or 0)  # type: ignore[attr-defined]
+
+    async def baton_notices_for_agent(
+        self, tenant_id: str, agent_id: str, *, limit: int = 2, max_age_days: int = 7
+    ) -> list[dict]:
+        """Batons still waiting on this agent, newest first: the recall fallback (D4).
+
+        ``delivered`` rows younger than ``max_age_days``. One probe of the
+        partial ``ix_baton_recipient_waiting`` (migration 076). On the replica
+        like every recall read: a baton accepted a moment ago can show once
+        more under lag.
+        """
+        r = BatonRecipient
+        async with get_read_session() as session:
+            rows = await session.execute(
+                select(r.baton_id, r.from_agent, r.goal, r.created_at, r.message_id, r.bus_checked_at)
+                .where(
+                    r.tenant_id == tenant_id,
+                    r.agent_id == agent_id,
+                    r.state == "delivered",
+                    r.created_at > func.now() - timedelta(days=max_age_days),
+                )
+                .order_by(r.created_at.desc(), r.baton_id)
+                .limit(limit)
+            )
+            return [
+                {
+                    "baton_id": str(row.baton_id),
+                    "from_agent": row.from_agent,
+                    "goal": row.goal,
+                    "created_at": row.created_at.isoformat(),
+                    "message_id": row.message_id,
+                    "bus_checked_at": _iso(row.bus_checked_at),
+                }
+                for row in rows.all()
+            ]
+
+    async def baton_accept(
+        self, tenant_id: str, baton_id: str, agent_id: str, *, via: str, state: str = "accepted"
+    ) -> dict | None:
+        """``agent_id`` took the baton up; its row. ``None`` when it is not a receiver.
+
+        Only a ``delivered`` row moves (to ``accepted`` or ``replied``), so a
+        repeat keeps the first ``accepted_at`` and ``accepted_via``.
+        """
+        r = BatonRecipient
+        bid = UUID(baton_id)
+        mine = (r.tenant_id == tenant_id, r.baton_id == bid, r.agent_id == agent_id)
+        async with get_session() as session:
+            await session.execute(
+                sql_update(r)
+                .where(*mine, r.state == "delivered")
+                .values(state=state, accepted_at=func.now(), accepted_via=via)
+            )
+            row = (
+                await session.execute(
+                    select(r.baton_id, r.agent_id, r.from_agent, r.state, r.accepted_at, r.message_id).where(
+                        *mine
+                    )
+                )
+            ).one_or_none()
+            if row is None:
+                return None
+            return {
+                "baton_id": str(row.baton_id),
+                "agent_id": row.agent_id,
+                "from_agent": row.from_agent,
+                "state": row.state,
+                "accepted_at": _iso(row.accepted_at),
+                "message_id": row.message_id,
+            }
+
+    async def baton_bus_checked(self, tenant_id: str, agent_id: str, baton_ids: list[str]) -> int:
+        """core-api read the bus state of these rows just now; the rows changed."""
+        r = BatonRecipient
+        async with get_session() as session:
+            result = await session.execute(
+                sql_update(r)
+                .where(
+                    r.tenant_id == tenant_id,
+                    r.agent_id == agent_id,
+                    r.baton_id.in_([UUID(b) for b in baton_ids]),
+                )
+                .values(bus_checked_at=func.now())
             )
             return int(result.rowcount or 0)  # type: ignore[attr-defined]
 

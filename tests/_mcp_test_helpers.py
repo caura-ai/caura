@@ -132,6 +132,10 @@ def stub_storage_client(monkeypatch, **method_returns):
     monkeypatch.setattr(
         "core_api.services.correction_notices.get_storage_client", _factory
     )
+    # Likewise its handoff baton notices (HB-09).
+    if "list_baton_notices" not in method_returns:
+        sc.list_baton_notices = AsyncMock(return_value=[])
+    monkeypatch.setattr("core_api.services.baton_notices.get_storage_client", _factory)
     return sc
 
 
@@ -246,6 +250,10 @@ def mcp_env(monkeypatch):
     # replaces the client whole, so a test that wants notices sets them there.
     monkeypatch.setattr(
         "core_api.clients.storage_client.CoreStorageClient.list_correction_notices",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "core_api.clients.storage_client.CoreStorageClient.list_baton_notices",
         AsyncMock(return_value=[]),
     )
 

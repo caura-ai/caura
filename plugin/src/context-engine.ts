@@ -48,6 +48,12 @@ import { getTenantPrefix, getSessionKey } from "./context-engine.internal.js";
 import { logError, logErrorCritical } from "./logger.js";
 import { fetchKeystonesBlock, sanitizePromptField } from "./keystones.js";
 import { formatCorrectionBlock, parseCorrectionNotices } from "./correction-notices.js";
+import {
+  type BatonDetail,
+  formatBatonBlock,
+  parseBatonDetail,
+  parseBatonNotices,
+} from "./baton-notices.js";
 import { getOpenClawSdk } from "./openclaw-sdk-bridge.js";
 import { conversationOf, recordTurn, sessionHeader, takeOrigin } from "./origin-usage.js";
 
@@ -1123,6 +1129,9 @@ export class CauraContextEngine {
     // Correction notices (CP-16) ride on a fresh search only and are never
     // cached: once the agent confirms one, the next search no longer has it.
     let correctionBlock = "";
+    // Handoff baton notices (HB-09) likewise: the block keeps showing until the
+    // agent accepts the baton.
+    let batonBlock = "";
 
     if (cached && Date.now() - cached.ts < RECALL_CACHE_TTL_MS) {
       recallBlock = cached.text;
@@ -1169,6 +1178,32 @@ export class CauraContextEngine {
           recallableInConversation(parseSearchItems(sr), conversation).slice(0, RECALL_INJECT_K),
         );
         correctionBlock = formatCorrectionBlock(parseCorrectionNotices(sr));
+        const batons = parseBatonNotices(sr);
+        if (batons.length > 0) {
+          // The notice carries the goal; the baton itself (decisions, failed
+          // approaches, the links this agent may read) is one read each, at
+          // most two. A failed read still shows the goal and how to accept.
+          const details = new Map<string, BatonDetail>();
+          await Promise.all(
+            batons.map(async (b) => {
+              try {
+                const detail = parseBatonDetail(
+                  await apiCall(
+                    "GET",
+                    `/batons/${encodeURIComponent(b.baton_id)}`,
+                    undefined,
+                    { tenant_id: tid, agent_id: agentId },
+                    controller.signal,
+                  ),
+                );
+                if (detail) details.set(b.baton_id, detail);
+              } catch (e: unknown) {
+                logError("baton read failed", e);
+              }
+            }),
+          );
+          batonBlock = formatBatonBlock(batons, details);
+        }
         if (recallBlock) {
           if (recallCache.size >= RECALL_CACHE_MAX_ENTRIES) {
             const oldest = recallCache.keys().next().value;
@@ -1197,7 +1232,7 @@ export class CauraContextEngine {
       }
     }
 
-    const systemPromptAddition = staticSection + correctionBlock + recallBlock;
+    const systemPromptAddition = staticSection + batonBlock + correctionBlock + recallBlock;
     const estimatedTokens = estimateTokens(systemPromptAddition);
 
     // Always return AssembleResult-shaped payload, even when only the
