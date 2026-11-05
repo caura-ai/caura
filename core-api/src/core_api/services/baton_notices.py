@@ -226,8 +226,8 @@ async def accept_as_agent(tenant_id: str, baton_id: str, agent_id: str) -> dict:
     }
 
 
-async def read_as_agent(tenant_id: str, baton_id: str, agent_id: str) -> dict:
-    """The baton as ``agent_id`` got it (a receiver) or cited it (the sender); 404 for anyone else.
+async def read_as_agent(tenant_id: str, baton_id: str, agent: AgentIdentity) -> dict:
+    """The baton as ``agent`` got it (a receiver) or cited it (the sender); 404 for anyone else.
 
     Shared by REST ``GET /batons/{id}`` and MCP ``caura_manage op=read_baton``,
     for a receiver with no bus credential. A receiver sees only the links
@@ -238,13 +238,13 @@ async def read_as_agent(tenant_id: str, baton_id: str, agent_id: str) -> dict:
     sc = get_storage_client()
     doc = await sc.get_document(tenant_id, BATON_COLLECTION, baton_id)
     data = (doc or {}).get("data") or {}
-    mine = next((r for r in data.get("recipients") or () if r.get("agent_id") == agent_id), None)
-    if mine is None and data.get("from_agent") != agent_id:
+    mine = next((r for r in data.get("recipients") or () if r.get("agent_id") == str(agent)), None)
+    if mine is None and data.get("from_agent") != str(agent):
         raise HTTPException(status_code=404, detail="Baton not found")
     baton = {k: v for k, v in data.items() if k not in {"key_hash", "recipients"}}
     ids = [str(m) for m in (mine.get("memory_ids") if mine is not None else data.get("memory_ids")) or ()]
     rows = [r for r in await sc.bulk_get_memories(ids, tenant_id) if r] if ids else []
-    can_read = await memory_reader(tenant_id, AgentIdentity(agent_id), caller_tenant_id=tenant_id)
+    can_read = await memory_reader(tenant_id, agent, caller_tenant_id=tenant_id)
     readable = {str(r["id"]): r for r in rows if can_read(r)}
     baton["memory_ids"] = [m for m in ids if m in readable]
     baton["linked"] = [

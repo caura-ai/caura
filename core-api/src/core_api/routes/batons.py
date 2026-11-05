@@ -22,6 +22,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core_api import openapi_responses as _oar
+from core_api.agent_ids import AgentIdentity
 from core_api.auth import AuthContext, get_auth_context
 from core_api.errors import AUTH_AGENT_CREDENTIAL_FORBIDDEN, AUTH_AGENT_IDENTITY_MISMATCH, coded_detail
 from core_api.services.baton_notices import accept_as_agent, read_as_agent
@@ -29,7 +30,7 @@ from core_api.services.baton_notices import accept_as_agent, read_as_agent
 router = APIRouter(tags=["Handoff batons"])
 
 
-def _receiver(auth: AuthContext, agent_id: str | None, action: str) -> str:
+def _receiver(auth: AuthContext, agent_id: str | None, action: str) -> AgentIdentity:
     agent = auth.effective_agent_id(agent_id)
     if auth.is_person or not agent:
         raise HTTPException(
@@ -40,7 +41,7 @@ def _receiver(auth: AuthContext, agent_id: str | None, action: str) -> str:
                 "when the credential names none.",
             ),
         )
-    return str(agent)
+    return agent
 
 
 @router.get("/batons/{baton_id}", responses={200: {"model": _oar.BatonOut}})
@@ -76,4 +77,4 @@ async def accept_baton(
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
     agent = _receiver(auth, agent_id, "accept")
-    return await accept_as_agent(tenant_id, str(baton_id), agent)
+    return await accept_as_agent(tenant_id, str(baton_id), str(agent))

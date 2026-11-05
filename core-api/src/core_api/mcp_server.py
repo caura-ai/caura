@@ -2493,7 +2493,12 @@ async def caura_manage(
             # The baton's own agent, by the confirm_correction rule above.
             if op == "read_baton":
                 return _with_latency(
-                    _dumps(await baton_notices.read_as_agent(tenant_id, baton_id, agent_id)), t0
+                    _dumps(
+                        await baton_notices.read_as_agent(
+                            tenant_id, baton_id, effective_read_agent_id(caller_agent_id, agent_id)
+                        )
+                    ),
+                    t0,
                 )
             if op == "accept_baton":
                 return _with_latency(
