@@ -479,14 +479,32 @@ async def test_send_then_confirm_without_a_bus(
     assert (
         await client.post(f"/api/v1/corrections/{cid}/confirm?tenant_id={tenant_id}")
     ).status_code == 404
+    # An agent credential keeps its own identity: naming a recipient does not
+    # confirm for it.
+    assert (
+        await client.post(
+            f"/api/v1/corrections/{cid}/confirm?tenant_id={tenant_id}&agent_id=reader-b"
+        )
+    ).status_code == 404
 
+    # The plugin's shape: a tenant (here admin) key names the agent with agent_id.
     as_agent(tenant_id, None)
+    url = f"/api/v1/corrections/{cid}/confirm?tenant_id={tenant_id}"
+    assert (await client.post(url, headers=get_admin_headers())).status_code == 403
+    assert (
+        await client.post(f"{url}&agent_id=stranger", headers=get_admin_headers())
+    ).status_code == 404
+    b = await client.post(f"{url}&agent_id=reader-b", headers=get_admin_headers())
+    assert b.status_code == 200, b.text
+    assert (b.json()["agent_id"], b.json()["notice_state"]) == ("reader-b", "confirmed")
+
     view = await client.get(
         f"/api/v1/corrections/{cid}?tenant_id={tenant_id}", headers=get_admin_headers()
     )
     assert view.status_code == 200, view.text
-    counts = view.json()["counts"]
-    assert (counts["recipients"], counts["confirmed"], counts["pending"]) == (2, 1, 1)
+    body = view.json()
+    assert (body["counts"]["recipients"], body["counts"]["confirmed"]) == (2, 2)
+    assert body["status"] == "closed"
 
 
 @pytest.mark.integration
