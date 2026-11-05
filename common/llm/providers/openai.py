@@ -131,11 +131,13 @@ class OpenAILLMProvider:
         base_url: str = OPENAI_CHAT_BASE_URL,
         provider_name: str = "openai",
         request_timeout_seconds: float = OPENAI_REQUEST_TIMEOUT_SECONDS,
+        send_temperature: bool = True,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._base_url = base_url
         self._provider_name = provider_name
+        self._send_temperature = send_temperature
         # Explicit per-call timeout — without this the SDK rides httpx's
         # default and a single hung upstream call would eat the whole
         # enrichment budget silently.
@@ -272,12 +274,13 @@ class OpenAILLMProvider:
             "model": self._model,
             "messages": [{"role": "user", "content": prompt}],
             "response_format": response_format,
-            "temperature": temperature,
             # Runaway guard — same failure mode as the Gemini-backed
             # providers: an uncapped looping generation comes back as
             # truncated JSON (finish_reason="length").
             "max_completion_tokens": LLM_JSON_MAX_OUTPUT_TOKENS,
         }
+        if self._send_temperature:
+            create_kwargs["temperature"] = temperature
         if seed is not None:
             create_kwargs["seed"] = seed
         if reasoning_effort is not None:
@@ -335,12 +338,14 @@ class OpenAILLMProvider:
     ) -> str:
         """Send a prompt and return the raw text content."""
         t0 = time.perf_counter()
-        response = await self._client.chat.completions.create(
-            model=self._model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-            max_completion_tokens=max_tokens,
-        )
+        create_kwargs: dict = {
+            "model": self._model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_completion_tokens": max_tokens,
+        }
+        if self._send_temperature:
+            create_kwargs["temperature"] = temperature
+        response = await self._client.chat.completions.create(**create_kwargs)
         llm_ms = int((time.perf_counter() - t0) * 1000)
         tokens_in, tokens_out, tokens_reasoning = _usage_tokens(response)
         # Billed once the response is back, before any shape check can reject it.

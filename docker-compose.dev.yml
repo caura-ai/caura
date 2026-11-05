@@ -145,6 +145,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       # Pass through provider keys from host
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_CHAT_SEND_TEMPERATURE: "${OPENAI_CHAT_SEND_TEMPERATURE:-true}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       # Embedder experiment (A.5) — local TEI sidecar overrides
