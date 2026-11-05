@@ -6247,6 +6247,10 @@ async def search_memories(
     from core_api.pipeline.steps.search.record_recall_value import schedule_recall_value
 
     schedule_recall_value(legacy_results, tenant_id=tenant_id, caller_agent_id=caller_agent_id, source=source)
+    # Likewise the pipeline's RecordExposure: correction propagation needs every read.
+    from core_api.services.memory_exposure import schedule_exposure
+
+    schedule_exposure(legacy_results, agent_id=caller_agent_id, tenant_id=tenant_id)
     return legacy_results
 
 

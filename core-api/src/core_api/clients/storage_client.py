@@ -1954,6 +1954,21 @@ class CoreStorageClient:
         )
         return result or {}  # type: ignore[return-value]
 
+    async def record_exposure(self, tenant_id: str, body: dict) -> int:
+        """One read by one agent of some memories (migration 072); returns the rows written.
+
+        ``body`` is ``{agent_id, memory_ids, seen_at, trace_id}``, JSON-safe.
+        Not idempotent: each call adds a read to the counts, so it is not
+        retried after an ambiguous failure.
+        """
+        result = await self._post(f"/memory-exposure?tenant_id={quote(tenant_id, safe='')}", body)
+        return (result or {}).get("recorded", 0)  # type: ignore[union-attr]
+
+    async def get_memory_exposure(self, tenant_id: str, memory_id: str) -> list[dict]:
+        """The agents ``memory_id`` was handed to in this tenant, latest read first."""
+        result = await self._get(f"/memory-exposure/{memory_id}", tenant_id=tenant_id)
+        return (result or {}).get("agents", [])
+
     async def increment_tenant_usage(self, rows: list[dict]) -> int:
         """ADD to per-tenant, per-period counters in ``tenant_usage_counters``.
 

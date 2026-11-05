@@ -124,6 +124,7 @@ from core_api.services.ingest_service import (
     ingest_preview,
 )
 from core_api.services.memory_corrections import on_status_corrected
+from core_api.services.memory_exposure import schedule_exposure
 from core_api.services.memory_field import (
     FIELD_DEFAULT_LIMIT,
     FIELD_MAX_LIMIT,
@@ -1383,6 +1384,9 @@ async def get_memory(
             raise HTTPException(status_code=404, detail="Memory not found")
 
         hit = True
+        # Correction propagation: this agent now holds the memory (or, for a
+        # chunk, its parent). Skipped for a person or a credential naming no agent.
+        schedule_exposure([memory], agent_id=auth.agent_id, tenant_id=tenant_id)
     except HTTPException:
         # 404 (and any other HTTPException) is an expected outcome — not an
         # observability-level error. `hit=False` already signals the miss.
@@ -1445,6 +1449,40 @@ async def get_memory(
         "entity_links": detail["entity_links"],
         "embedding_preview": detail["embedding_preview"],
         "embedding_stats": detail["embedding_stats"],
+    }
+
+
+@router.get("/memories/{memory_id}/exposure", responses={200: {"model": _oar.MemoryExposureResponse}})
+async def get_memory_exposure(
+    memory_id: UUID,
+    tenant_id: str = Query(...),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Which agents this memory was handed to: every read that returned it, or a chunk of it, to an agent.
+
+    Correction propagation (``docs/plans/correction-propagation.md``): the
+    agents to tell when the memory is corrected. The same access rule as
+    ``GET /memories/{id}``; a memory the caller cannot read is a 404.
+    """
+    auth.enforce_readable_tenant(tenant_id)
+    sc = get_storage_client()
+    memory = await sc.get_memory(str(memory_id), tenant_id, include_held=auth.is_person)
+    if memory is None or not await authorize_memory_access(
+        tenant_id,
+        auth.agent_id,
+        visibility=memory.get("visibility"),
+        owner_agent_id=memory.get("agent_id"),
+        fleet_id=memory.get("fleet_id"),
+        caller_tenant_id=auth.tenant_id,
+        is_install_credential=auth.is_install_credential,
+        install_uuid=auth.install_uuid,
+    ):
+        raise HTTPException(status_code=404, detail="Memory not found")
+    agents = await sc.get_memory_exposure(tenant_id, str(memory_id))
+    return {
+        "memory_id": str(memory_id),
+        "agents": agents,
+        "total_reads": sum(int(a.get("count") or 0) for a in agents),
     }
 
 

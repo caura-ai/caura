@@ -191,6 +191,22 @@ class MemoryContradictionsResponse(BaseModel):
     contradictions: list[ContradictionEntry]
 
 
+class MemoryExposureAgent(BaseModel):
+    agent_id: str
+    count: int = Field(description="Reads that returned this memory (or a chunk of it) to the agent.")
+    first_seen: str
+    last_seen: str
+    last_trace_id: str | None = Field(description="The server trace of the latest such read.")
+
+
+class MemoryExposureResponse(BaseModel):
+    memory_id: str
+    agents: list[MemoryExposureAgent] = Field(
+        description="Every agent the memory was handed to, latest read first."
+    )
+    total_reads: int
+
+
 class MemoryStatusPatchResponse(BaseModel):
     memory_id: str
     old_status: str | None
