@@ -5216,9 +5216,14 @@ async def update_memory(
     if patch or derived:
         body = {**patch, "derived": derived} if derived else patch
         landed = await sc.update_memory(str(memory_id), tenant_id, body)
-        # The children storage deleted, and only those: none when the row went
-        # before the write (``None``) or a concurrent request took them first.
-        deleted_children = (landed or {}).get("derived_deleted") or []
+        if landed is None:
+            # Storage found no live row: a DELETE landed between the existence
+            # check above and this write. Nothing changed, so answer as that
+            # check would have, before anything is audited or scheduled.
+            raise HTTPException(status_code=404, detail="Memory not found")
+        # The children storage deleted, and only those: none when a concurrent
+        # request took them first.
+        deleted_children = landed.get("derived_deleted") or []
 
     # Audit log — only fire when something actually changed. The
     # ``elif data.metadata`` guard above already prevents falsy
@@ -5262,8 +5267,8 @@ async def update_memory(
                 logger.warning("Audit hook failed (non-critical)", exc_info=True)
 
     # CP-08: a person's (or trusted agent's) edit of the text, or a status it
-    # set that retires the row, is a correction. ``landed`` is None when the
-    # row went before the write: nothing was corrected then.
+    # set that retires the row, is a correction. ``landed`` is None when this
+    # request wrote nothing: nothing was corrected then.
     if landed is not None:
         if content_changed:
             on_memory_corrected(
@@ -5290,6 +5295,10 @@ async def update_memory(
     # a successful edit — a response that does not merely lag but actively
     # contradicts the write it is confirming.
     updated = await sc.get_memory(str(memory_id), tenant_id, read=False)
+    if updated is None:
+        # Deleted after this write landed. The edit stands, and is audited
+        # above, but there is no row left to answer with or to re-enrich.
+        raise HTTPException(status_code=404, detail="Memory not found")
 
     # Post-commit async tasks for content changes
     if content_changed:
