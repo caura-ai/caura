@@ -4,6 +4,15 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.27.0](https://github.com/caura-ai/caura/compare/plugin-v2.26.0...plugin-v2.27.0) (2026-11-05)
+
+
+### Features
+
+* **clients:** show memory correction notices to agents and let them confirm ([#2336](https://github.com/caura-ai/caura/issues/2336)) ([ec82502](https://github.com/caura-ai/caura/commit/ec82502f2c4ebe0bf906a0e4c419bcd599067462))
+* **memory:** baton_id read filter on list, search and recall ([#2339](https://github.com/caura-ai/caura/issues/2339)) ([cf0bf30](https://github.com/caura-ai/caura/commit/cf0bf30933d0328e4e1f01b318d6f3476a8c3d31))
+* **memory:** send a correction's notices and show who confirmed ([#2338](https://github.com/caura-ai/caura/issues/2338)) ([614a9c7](https://github.com/caura-ai/caura/commit/614a9c7c058d55ac6c952a335b410a821dcfa9aa))
+
 ## [2.26.0](https://github.com/caura-ai/caura/compare/plugin-v2.25.9...plugin-v2.26.0) (2026-11-04)
 
 
