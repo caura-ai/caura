@@ -165,7 +165,7 @@ export const STATUSES = [
 // so they cannot drift. Deliberately NOT `tools.json`'s `ops[]`, which is
 // what the MCP handler ACCEPTS and legitimately differs — see MCP_ONLY_OPS
 // in tool-definitions.test.ts.
-const MANAGE_OPS = ["read", "update", "transition", "delete"] as const;
+const MANAGE_OPS = ["read", "update", "transition", "delete", "confirm_correction"] as const;
 const DOC_OPS = [
   "write", "read", "query", "delete", "search", "list_collections",
 ] as const;
@@ -257,10 +257,16 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
 
   caura_manage: {
     type: "object",
-    required: ["op", "memory_id"],
+    required: ["op"],
     properties: {
       op: { type: "string", enum: [...MANAGE_OPS] },
-      memory_id: { type: "string", description: "UUID of memory to act on" },
+      memory_id: { type: "string", description: "UUID of memory to act on. Required except for op=confirm_correction" },
+      correction_id: {
+        type: "string",
+        description:
+          "For op=confirm_correction: the id from a Memory Corrections notice. " +
+          "Confirm only after checking the work that used the old version.",
+      },
       status: { type: "string", enum: [...STATUSES], description: "Required for op=transition" },
       content: { type: "string", description: "For op=update" },
       memory_type: WRITABLE_MEMORY_TYPE_SCHEMA,
@@ -468,7 +474,12 @@ function searchBody(params: Record<string, unknown>): Record<string, unknown> {
 }
 
 // Fields of a /search or /recall response that ride along with the rows.
-const RECALL_PASSTHROUGH_FIELDS = ["recall_tracked", "warnings", "diagnostic", "_latency_ms", "_server_ms"];
+const RECALL_PASSTHROUGH_FIELDS = [
+  "recall_tracked", "warnings", "diagnostic", "_latency_ms", "_server_ms",
+  // CP-16: corrections to memories this agent read; it confirms each with
+  // caura_manage op=confirm_correction.
+  "correction_notices",
+];
 
 /**
  * ``caura_recall``'s result: the rows once, as ``results``, with ``count``
@@ -599,9 +610,23 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     // op=update sends ``agent_id`` as a query param; the other ops ignore it.
     const enriched = await enrichBody(params, { resolveIdentity: true });
     const op = enriched.op as ManageOp;
+    const tenant_id = enriched.tenant_id as string;
+    if (op === "confirm_correction") {
+      // CP-16: the agent itself confirms it checked its work against a
+      // correction notice. ``agent_id`` selects its agent-scoped credential;
+      // the server accepts only a recipient of the correction.
+      const correction_id = enriched.correction_id;
+      assertSafePathSegment(correction_id, "correction_id");
+      return apiCall(
+        "POST",
+        `/corrections/${encodeURIComponent(correction_id)}/confirm`,
+        undefined,
+        { tenant_id, agent_id: enriched.agent_id as string },
+        signal,
+      );
+    }
     const memory_id = enriched.memory_id as string;
     assertSafePathSegment(memory_id, "memory_id");
-    const tenant_id = enriched.tenant_id as string;
     const id = encodeURIComponent(memory_id);
     if (op === "read") {
       return apiCall("GET", `/memories/${id}`, undefined, { tenant_id }, signal);

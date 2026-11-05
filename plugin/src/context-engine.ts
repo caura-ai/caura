@@ -47,6 +47,7 @@ import { resolveAgentId, resolveAgentIdQuiet } from "./resolve-agent.js";
 import { getTenantPrefix, getSessionKey } from "./context-engine.internal.js";
 import { logError, logErrorCritical } from "./logger.js";
 import { fetchKeystonesBlock, sanitizePromptField } from "./keystones.js";
+import { formatCorrectionBlock, parseCorrectionNotices } from "./correction-notices.js";
 import { getOpenClawSdk } from "./openclaw-sdk-bridge.js";
 import { conversationOf, recordTurn, sessionHeader, takeOrigin } from "./origin-usage.js";
 
@@ -1119,6 +1120,9 @@ export class CauraContextEngine {
     const cacheKey = `${tenantPrefix}:${agentId}:${conversation ?? "-"}:${searchQuery}`;
     const cached = recallCache.get(cacheKey);
     let recallBlock = "";
+    // Correction notices (CP-16) ride on a fresh search only and are never
+    // cached: once the agent confirms one, the next search no longer has it.
+    let correctionBlock = "";
 
     if (cached && Date.now() - cached.ts < RECALL_CACHE_TTL_MS) {
       recallBlock = cached.text;
@@ -1164,6 +1168,7 @@ export class CauraContextEngine {
         recallBlock = formatRecallBlock(
           recallableInConversation(parseSearchItems(sr), conversation).slice(0, RECALL_INJECT_K),
         );
+        correctionBlock = formatCorrectionBlock(parseCorrectionNotices(sr));
         if (recallBlock) {
           if (recallCache.size >= RECALL_CACHE_MAX_ENTRIES) {
             const oldest = recallCache.keys().next().value;
@@ -1192,7 +1197,7 @@ export class CauraContextEngine {
       }
     }
 
-    const systemPromptAddition = staticSection + recallBlock;
+    const systemPromptAddition = staticSection + correctionBlock + recallBlock;
     const estimatedTokens = estimateTokens(systemPromptAddition);
 
     // Always return AssembleResult-shaped payload, even when only the

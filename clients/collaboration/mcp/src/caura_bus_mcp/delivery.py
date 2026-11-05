@@ -12,6 +12,8 @@ from caura_bus_core.bus import PlatformError
 from caura_bus_core.consult import PresentedResponses
 from caura_bus_core.protocol import Claim, WaitRequest
 
+from .corrections import CONFIRM_NOTE, correction_notice
+
 log = logging.getLogger(__name__)
 
 # wait sends no lease length, so Caura grants its request default.
@@ -88,6 +90,11 @@ class DeliverySession:
                     delivery["note"] = ALREADY_PRESENTED
                 elif not delivery["correlation"]["matches_sent_request"]:
                     delivery["note"] = UNMATCHED_RESPONSE
+            elif claim and (notice := correction_notice(claim.envelope)):
+                # A person corrected a memory this agent read: one line, and how to
+                # confirm once the agent has checked its work (reply or ack).
+                delivery["correction"] = notice
+                delivery["note"] = CONFIRM_NOTE
             return {"delivery": delivery, "notices": notices}
 
     async def _settle_presented(self, claim):

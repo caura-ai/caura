@@ -131,10 +131,13 @@ describe("createToolFromSpec factory", () => {
 
   test("op-dispatched tools declare op + required path params", () => {
     const manage = createToolFromSpec("caura_manage").parameters as any;
-    assert.deepEqual(manage.required, ["op", "memory_id"]);
+    // memory_id is required by every op but confirm_correction, which names
+    // a correction instead; the dispatcher checks it per op.
+    assert.deepEqual(manage.required, ["op"]);
     assert.deepEqual(manage.properties.op.enum, [
-      "read", "update", "transition", "delete",
+      "read", "update", "transition", "delete", "confirm_correction",
     ]);
+    assert.ok(manage.properties.correction_id);
 
     const doc = createToolFromSpec("caura_doc").parameters as any;
     // ``collection`` is required for write/read/query/delete but optional
