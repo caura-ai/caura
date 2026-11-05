@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.4.1...collaboration-clients-v0.5.0) (2026-11-05)
+
+
+### Features
+
+* **clients:** show memory correction notices to agents and let them confirm ([#2336](https://github.com/caura-ai/caura/issues/2336)) ([ec82502](https://github.com/caura-ai/caura/commit/ec82502f2c4ebe0bf906a0e4c419bcd599067462))
+
 ## [0.4.1](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.4.0...collaboration-clients-v0.4.1) (2026-11-04)
 
 

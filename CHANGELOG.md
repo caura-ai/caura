@@ -10,6 +10,33 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.40.0](https://github.com/caura-ai/caura/compare/backend-v3.39.3...backend-v3.40.0) (2026-11-05)
+
+
+### Features
+
+* **clients:** show memory correction notices to agents and let them confirm ([#2336](https://github.com/caura-ai/caura/issues/2336)) ([ec82502](https://github.com/caura-ai/caura/commit/ec82502f2c4ebe0bf906a0e4c419bcd599067462))
+* **core-api:** publish caura.memory.corrected when a person corrects a memory ([#2331](https://github.com/caura-ai/caura/issues/2331)) ([c07de1c](https://github.com/caura-ai/caura/commit/c07de1c4b0fe8df6d48c3ca7b253c30638928a68))
+* **documents:** handoff batons spec; batons collection is system-managed ([#2341](https://github.com/caura-ai/caura/issues/2341)) ([4193f86](https://github.com/caura-ai/caura/commit/4193f86c937632c5231d17a156287d6fab4785f9))
+* **memory:** baton_id read filter on list, search and recall ([#2339](https://github.com/caura-ai/caura/issues/2339)) ([cf0bf30](https://github.com/caura-ai/caura/commit/cf0bf30933d0328e4e1f01b318d6f3476a8c3d31))
+* **memory:** record which agents read each memory (memory_exposure) ([#2332](https://github.com/caura-ai/caura/issues/2332)) ([0f6a0e0](https://github.com/caura-ai/caura/commit/0f6a0e00504425c4beb3dfb66e0b413825f5c2a3))
+* **memory:** record who to tell when a person corrects a memory ([#2335](https://github.com/caura-ai/caura/issues/2335)) ([61f7905](https://github.com/caura-ai/caura/commit/61f7905c21d653c33d2507bbfc6ca328b97e1d0d))
+* **memory:** send a correction's notices and show who confirmed ([#2338](https://github.com/caura-ai/caura/issues/2338)) ([614a9c7](https://github.com/caura-ai/caura/commit/614a9c7c058d55ac6c952a335b410a821dcfa9aa))
+* **memory:** tell an agent about a correction on its next recall ([#2337](https://github.com/caura-ai/caura/issues/2337)) ([cf7fddb](https://github.com/caura-ai/caura/commit/cf7fddb29ae45ebd21fdc5a0b8990da7d935efd4))
+* **observability:** turn MCP recall logging on by default ([#2329](https://github.com/caura-ai/caura/issues/2329)) ([98b113c](https://github.com/caura-ai/caura/commit/98b113cc8e7223c130032df136f19073e301e857))
+
+
+### Bug Fixes
+
+* **core-api:** a PATCH that loses a race with a DELETE answers 404 ([#2334](https://github.com/caura-ai/caura/issues/2334)) ([275e30c](https://github.com/caura-ai/caura/commit/275e30cee438739b8d102595f34dac271b15decc))
+* **core-api:** let a packaged install find plugin/ and static/ ([#2333](https://github.com/caura-ai/caura/issues/2333)) ([7de46d4](https://github.com/caura-ai/caura/commit/7de46d4491019f995c6cd8a0a18935db983266f5))
+* **memory:** record when a recall hands an agent its correction notice ([#2340](https://github.com/caura-ai/caura/issues/2340)) ([d6e0114](https://github.com/caura-ai/caura/commit/d6e0114be62a1d4a18acdd78d535fedcbb6cc19a))
+
+
+### Documentation
+
+* **deletion:** a matrix of where a memory's text is kept ([#2328](https://github.com/caura-ai/caura/issues/2328)) ([69ca121](https://github.com/caura-ai/caura/commit/69ca121eca20ba58f577912e59dae08d320efd89))
+
 ## [3.39.3](https://github.com/caura-ai/caura/compare/backend-v3.39.2...backend-v3.39.3) (2026-11-04)
 
 
