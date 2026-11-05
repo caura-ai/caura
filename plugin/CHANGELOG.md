@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.28.0](https://github.com/caura-ai/caura/compare/plugin-v2.27.0...plugin-v2.28.0) (2026-11-05)
+
+
+### Features
+
+* **memory:** tell a baton receiver on its next recall, and let it accept (HB-09) ([#2345](https://github.com/caura-ai/caura/issues/2345)) ([2235fe1](https://github.com/caura-ai/caura/commit/2235fe148ccabd63a23d101db3861bede96e726d))
+
 ## [2.27.0](https://github.com/caura-ai/caura/compare/plugin-v2.26.0...plugin-v2.27.0) (2026-11-05)
 
 
