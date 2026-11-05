@@ -12,7 +12,7 @@ from caura_bus_core.bus import PlatformError
 from caura_bus_core.consult import PresentedResponses
 from caura_bus_core.protocol import Claim, WaitRequest
 
-from .batons import BATON_NOTE, baton_block, linked_titles, received_baton
+from .batons import BATON_NOTE, baton_block, received_baton
 from .corrections import CONFIRM_NOTE, correction_notice
 
 log = logging.getLogger(__name__)
@@ -99,22 +99,19 @@ class DeliverySession:
                 # confirm once the agent has checked its work (reply or ack).
                 delivery["correction"] = notice
                 delivery["note"] = CONFIRM_NOTE
-            baton = received_baton(claim.envelope) if claim and not delivery.get("note") else None
-            if baton:
+            elif claim and (baton := received_baton(claim.envelope)):
+                # A peer handed work over: one framed block, titles from the body
+                # (no memory reads, so showing it is not reading the links).
                 self.baton_threads[claim.envelope.thread_id] = baton["baton_id"]
-        if baton:
-            # Outside the lock: the titles are read with this agent's own credential
-            # while lease renewal carries on.
-            titles = await linked_titles(self.bus, baton["memory_ids"])
-            delivery["baton"] = {
-                "baton_id": baton["baton_id"],
-                "from_agent": baton["from_agent"],
-                "memory_ids": list(titles),
-                "untrusted": True,
-                "block": baton_block(baton, titles),
-            }
-            delivery["note"] = BATON_NOTE
-        return {"delivery": delivery, "notices": notices}
+                delivery["baton"] = {
+                    "baton_id": baton["baton_id"],
+                    "from_agent": baton["from_agent"],
+                    "memory_ids": baton["memory_ids"],
+                    "untrusted": True,
+                    "block": baton_block(baton),
+                }
+                delivery["note"] = BATON_NOTE
+            return {"delivery": delivery, "notices": notices}
 
     def baton_context(self, context: dict) -> dict:
         """``memory_context`` for a received baton's thread, with its ``baton_id`` added."""

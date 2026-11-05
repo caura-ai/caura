@@ -361,20 +361,6 @@ class Bus:
         params = MemoryContextRequest(message_id=message_id, delivery_id=delivery_id)
         return await self.request("GET", "memory-context", params=params.model_dump(exclude_none=True))
 
-    async def memory(self, memory_id: str) -> dict:
-        """One memory by ID through Caura's memory API, with this agent's own credential.
-
-        Caura applies the agent's read scope: a memory it may not read is a 404.
-        """
-        response = await self._http.get(
-            f"{self.config.api_url}/api/v1/memories/{_path_segment(memory_id)}",
-            params={"tenant_id": self.config.agent.tenant_id},
-            timeout=httpx.Timeout(5, connect=5),
-        )
-        if not response.is_success:
-            raise PlatformError(response.status_code, _rejection_detail(response))
-        return _json_body(response)
-
     async def advertise(self, profile: Presence):
         # Unset optional fields (host, runtime) stay off the wire: servers that
         # predate them reject unknown keys.

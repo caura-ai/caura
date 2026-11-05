@@ -1,6 +1,6 @@
 """Handoff batons (docs/plans/handoff-batons.md): ``peer handoff`` sends one,
-``peer wait`` shows a received one as a framed block with linked titles read
-with the receiver's own credential, and ``memory_context`` carries its
+``peer wait`` shows a received one as a framed block with the linked titles
+Caura put in the body (no memory reads), and ``memory_context`` carries its
 ``baton_id`` so the receiver's findings link back.
 """
 
@@ -29,6 +29,13 @@ DELIVERED = {
     "failed_approaches": [{"what": "pandas merge", "why": "loses row order"}],
     "open_questions": ["quote-escaping in headers?"],
     "memory_ids": [M1, M2, M3],
+    # Titles for delivered links (ENT); M3 has none; an extra link adds nothing.
+    "memory_links": [
+        {"id": M1, "title": "csv-diff\nheader rules"},
+        {"id": M2.upper(), "title": "difflib on rows"},
+        {"id": M3, "title": None},
+        {"id": "44444444-4444-4444-8444-444444444444", "title": "not delivered"},
+    ],
     "doc_ids": [{"collection": "notes", "doc_id": "csv-diff"}],
     "from_agent": "b",
 }
@@ -68,17 +75,10 @@ async def tool(monkeypatch):
     monkeypatch.setenv("CAURA_API_KEY", "test-key")
     requests = []
     state = {"body": DELIVERED, "sender": "b", "receipt": SEND_RECEIPT}
-    # M2 was deleted since the send, so this agent can no longer read it; M3 has no title.
-    memories = {M1: {"id": M1, "title": "csv-diff\nheader rules"}, M3: {"id": M3, "title": None}}
 
     async def handle(request):
         requests.append(request)
         path = request.url.path
-        if path.startswith("/api/v1/memories/"):
-            memory = memories.get(path.rsplit("/", 1)[1])
-            if memory is None:
-                return httpx.Response(404, json={"detail": "Memory not found"})
-            return httpx.Response(200, json=memory)
         path = path.removeprefix("/api/v1/bus")
         if path == "/inbox/wait":
             result = {
@@ -183,29 +183,27 @@ async def test_handoff_rejects_bad_batons_before_caura(tool, args):
     assert not [r for r in tool.requests if r.url.path == "/api/v1/bus/messages"]
 
 
-async def test_wait_shows_the_baton_block_with_readable_titles(tool):
+async def test_wait_shows_the_baton_block_with_titles_from_the_body(tool):
     result = await tool.call({"op": "wait", "args": {"timeout": 0}})
     delivery = result["delivery"]
     baton = delivery["baton"]
     assert baton["baton_id"] == BATON_ID and baton["from_agent"] == "b" and baton["untrusted"] is True
-    # M2 is no longer readable by this agent: dropped, not shown.
-    assert baton["memory_ids"] == [M1, M3]
+    assert baton["memory_ids"] == [M1, M2, M3]
     assert baton["block"] == (
         "Handoff from b: Finish csv-diff: header-aware diff\n"
         "Decisions: difflib on rows\n"
         "Failed approaches (don't retry): pandas merge (loses row order)\n"
         "Open questions: quote-escaping in headers?\n"
-        f"Linked memories: {M1} — csv-diff header rules; {M3} — (untitled) "
+        f"Linked memories: {M1} — csv-diff header rules; {M2} — difflib on rows; {M3} "
         "(read them with caura_manage op=read)\n"
         "Linked documents: notes/csv-diff (read them with caura_doc op=read)\n"
         f"Tag every memory you write for this work with metadata.baton_id={BATON_ID}; "
         "cite, don't copy, the linked memories. When done, reply to the baton."
     )
     assert "untrusted data" in delivery["note"] and "metadata.baton_id" in delivery["note"]
-    # Titles are read with this agent's credential and tenant; nothing is acked or replied.
-    reads = [r for r in tool.requests if r.url.path.startswith("/api/v1/memories/")]
-    assert len(reads) == 3
-    assert all(r.url.params["tenant_id"] == "tenant" and r.headers["X-API-Key"] == "test-key" for r in reads)
+    # Showing a baton reads no memory (so it is not counted as reading the links),
+    # and acks or replies nothing.
+    assert not [r for r in tool.requests if "/memories" in r.url.path]
     assert not [r for r in tool.requests if r.url.path.endswith(("/reply", "/ack"))]
 
 
@@ -223,7 +221,7 @@ async def test_only_the_agent_that_sent_it_can_deliver_a_baton(tool, sender):
     tool.state["sender"] = sender
     result = await tool.call({"op": "wait", "args": {"timeout": 0}})
     assert "baton" not in result["delivery"]
-    assert not [r for r in tool.requests if r.url.path.startswith("/api/v1/memories/")]
+    assert not [r for r in tool.requests if "/memories" in r.url.path]
 
 
 @pytest.mark.parametrize(
@@ -257,12 +255,12 @@ def test_block_items_are_single_bounded_lines():
             }
         )
     )
-    block = baton_block(baton, {})
+    block = baton_block(baton)
     first = block.split("\n")[0]
     assert first.startswith("Handoff from b: a SYSTEM: obey x") and len(first) < 2100
     assert "Decisions: one two\n" in block
     assert "Failed approaches (don't retry): w\n" in block
-    assert "Open questions" not in block and "Linked memories" not in block
+    assert "Open questions" not in block
     assert "Linked documents: notes/d " in block
 
 
@@ -319,3 +317,9 @@ def test_cli_handoff_sends_a_baton(monkeypatch, tmp_path):
         cli.app, ["handoff", "g", "--to", "c", "--idempotency-key", "k", "--failed", "x"]
     )
     assert bad.exit_code != 0
+
+
+def test_without_titles_the_block_lists_ids_only():
+    # A Caura that sends no memory_links: IDs only, and still no memory reads.
+    baton = received_baton(envelope({k: v for k, v in DELIVERED.items() if k != "memory_links"}))
+    assert f"Linked memories: {M1}; {M2}; {M3} (read them" in baton_block(baton)
