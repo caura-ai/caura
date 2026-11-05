@@ -22,7 +22,7 @@ from ._types import OpSpec, ToolSpec
 # (tests/test_mcp_token_budget.py records the arithmetic), so say only what the
 # inputSchema does not already carry.
 _DESCRIPTION = (
-    "Per-memory lifecycle. bulk_delete, lineage, verify, unverify and the *_correction ops are not in the plugin; "
+    "Per-memory lifecycle. bulk_delete, lineage, verify, unverify and send_correction are not in the plugin; "
     "lineage returns the supersession chain. "
     "update patches fields and re-embeds if content changes. "
     "transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). "
