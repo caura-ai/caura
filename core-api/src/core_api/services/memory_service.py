@@ -135,6 +135,7 @@ from core_api.services.governance_gate import (
     pii_audit_detail,
 )
 from core_api.services.hooks import get_hooks
+from core_api.services.memory_corrections import on_memory_corrected, on_status_corrected
 from core_api.services.organization_settings import ResolvedConfig, validate_search_profile
 from core_api.services.rules_receipt import RULES_RECEIPT_KEY, rules_receipt_from
 from core_api.services.system_metadata import (
@@ -4448,7 +4449,7 @@ async def _enrich_memory_background(
     return governed_row
 
 
-async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> None:
+async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> dict:
     """Soft-delete one memory and every row derived from it.
 
     Auto-chunk and atomic-fact children carry the parent's own text, so a
@@ -4464,6 +4465,8 @@ async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> None:
     markers existed have none, and their children survived (B25). The set
     deletes take derived rows inside storage; this one-row path looks them up
     itself so each gets its own audit entry.
+
+    Returns the row as it was before the delete.
     """
     sc = get_storage_client()
     mem = await sc.get_memory(str(memory_id), tenant_id)
@@ -4490,6 +4493,7 @@ async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> None:
                 )
             except Exception:
                 logger.warning("Audit hook failed (non-critical)", exc_info=True)
+    return mem
 
 
 async def _revert_superseded_row(sc, tenant_id: str, superseded_id: str, editor_id: str) -> None:
@@ -5208,6 +5212,7 @@ async def update_memory(
     # Apply the patch via storage client. ``derived`` stays out of ``patch``,
     # which also decides below whether this request changed the row itself.
     deleted_children: list[dict] = []
+    landed: dict | None = None
     if patch or derived:
         body = {**patch, "derived": derived} if derived else patch
         landed = await sc.update_memory(str(memory_id), tenant_id, body)
@@ -5255,6 +5260,28 @@ async def update_memory(
                 )
             except Exception:
                 logger.warning("Audit hook failed (non-critical)", exc_info=True)
+
+    # CP-08: a person's (or trusted agent's) edit of the text, or a status it
+    # set that retires the row, is a correction. ``landed`` is None when the
+    # row went before the write: nothing was corrected then.
+    if landed is not None:
+        if content_changed:
+            on_memory_corrected(
+                tenant_id=tenant_id,
+                memory=mem,
+                kind="content_edit",
+                agent_id=agent_id,
+                old_summary=mem.get("content"),
+                new_summary=data.content,
+            )
+        elif "status" in patch:
+            on_status_corrected(
+                tenant_id=tenant_id,
+                memory=mem,
+                old_status=mem.get("status"),
+                new_status=patch["status"],
+                agent_id=agent_id,
+            )
 
     # Re-fetch updated memory
     # ``read=False`` for the same reason, one step further: this is the row the

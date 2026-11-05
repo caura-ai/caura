@@ -123,6 +123,7 @@ from core_api.services.ingest_service import (
     ingest_commit,
     ingest_preview,
 )
+from core_api.services.memory_corrections import on_status_corrected
 from core_api.services.memory_field import (
     FIELD_DEFAULT_LIMIT,
     FIELD_MAX_LIMIT,
@@ -2321,7 +2322,7 @@ async def delete_memory(
                 )
     # ``soft_delete_memory`` already routes the fetch + delete through the
     # storage client (and logs its own ``soft_delete`` audit row).
-    await soft_delete_memory(memory_id, tenant_id)
+    deleted = await soft_delete_memory(memory_id, tenant_id)
     await log_action(
         tenant_id=tenant_id,
         # Attribute to the effective identity (gateway X-Agent-ID wins over
@@ -2333,6 +2334,15 @@ async def delete_memory(
         resource_id=memory_id,
         detail=auth.audit_actor(),
     )
+    # CP-08: a delete is the status ``deleted`` by another verb.
+    if deleted:
+        on_status_corrected(
+            tenant_id=tenant_id,
+            memory=deleted,
+            old_status=deleted.get("status"),
+            new_status="deleted",
+            agent_id=attribution_agent_id,
+        )
 
 
 @router.patch(
@@ -2452,6 +2462,16 @@ async def update_memory_status(
             **(auth.audit_actor() if held else {}),
         },
     )
+    if not held:
+        # CP-08. A held row was never served to an agent, so rejecting it
+        # corrects nothing anyone read.
+        on_status_corrected(
+            tenant_id=tenant_id,
+            memory=memory,
+            old_status=old_status,
+            new_status=status,
+            agent_id=auth.agent_id,
+        )
     if held and status == "active":
         # g2.8 — the work the held write skipped (enrichment, governance, its
         # atomic facts, the near-duplicate merge, entities, contradictions)

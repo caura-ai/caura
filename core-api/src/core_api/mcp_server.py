@@ -112,6 +112,7 @@ from core_api.services.interview_service import (
     refuse_system_read,
     without_system_rows,
 )
+from core_api.services.memory_corrections import on_status_corrected
 from core_api.services.memory_service import (
     _memory_to_out,
     create_memories_bulk,
@@ -2587,6 +2588,13 @@ async def caura_manage(
                         "owner_agent_id": memory.get("agent_id"),
                     },
                 )
+                on_status_corrected(
+                    tenant_id=tenant_id,
+                    memory=memory,
+                    old_status=old_status,
+                    new_status=status,
+                    agent_id=agent_id,
+                )
                 # Structured, not prose. ``op=read``/``op=update`` return
                 # serialized objects and every refusal returns a JSON error
                 # envelope, so a prose sentence here left one tool with three
@@ -2699,7 +2707,7 @@ async def caura_manage(
                     )
             if charges_write_quota("delete"):
                 await check_and_increment(tenant_id, "write")
-            await soft_delete_memory(uid, tenant_id)
+            deleted = await soft_delete_memory(uid, tenant_id)
             # The caller's row, as REST DELETE writes one. The ``soft_delete``
             # rows above name each row's owner, not who deleted it.
             await log_action(
@@ -2710,6 +2718,14 @@ async def caura_manage(
                 resource_id=uid,
                 detail={"via": "mcp", **_audit_actor()},
             )
+            if deleted:
+                on_status_corrected(
+                    tenant_id=tenant_id,
+                    memory=deleted,
+                    old_status=deleted.get("status"),
+                    new_status="deleted",
+                    agent_id=agent_id,
+                )
             # Structured for the same reason as ``op=transition`` above. REST
             # DELETE returns 204 with no body, so there is no shape to copy
             # here; ``memory_id`` matches the transition key rather than the

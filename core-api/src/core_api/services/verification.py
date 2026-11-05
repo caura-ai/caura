@@ -20,6 +20,7 @@ from typing import Any
 
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.audit_service import log_action
+from core_api.services.memory_corrections import on_memory_corrected
 
 VERIFY_ACTION = "memory_verify"
 UNVERIFY_ACTION = "memory_unverify"
@@ -81,4 +82,19 @@ async def change_verification(
             **audit_detail,
         },
     )
+    if not verify and old_status == "human_verified":
+        # CP-08: withdrawing a person's check tells every reader it no longer
+        # stands. Unverifying a row nobody had verified corrects nothing.
+        on_memory_corrected(
+            tenant_id=tenant_id,
+            memory=memory,
+            kind="unverify",
+            agent_id=audit_agent_id,
+            old_summary=old_status,
+            new_summary=result["verification_status"],
+            detail={
+                "old_verification_status": old_status,
+                "new_verification_status": result["verification_status"],
+            },
+        )
     return result
