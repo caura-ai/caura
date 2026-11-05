@@ -196,6 +196,8 @@ on by default, logs MCP `caura_recall`; `search_recall_logging_enabled`, opt-in,
 adds the plugin's automatic `/search`), and the tenant's live memories otherwise;
 `denominator` says which. The excluded agent ids and `source_uri` values are
 `PLACEHOLDER_AGENT_IDS` and `NON_EVIDENCE_SOURCE_URIS` in `common/constants.py`.
+Number 2 is measured on MCP recalls by default; plugin auto-search logging is
+opt-in.
 
 ## Not in v1
 

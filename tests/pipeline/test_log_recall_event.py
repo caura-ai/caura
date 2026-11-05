@@ -282,3 +282,14 @@ async def test_a_fresh_tenant_logs_mcp_recall_only(monkeypatch):
         )
 
     assert [ev["source"] for ev, _ in captured] == ["mcp_recall"]
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_search_opt_in_still_logs_search(monkeypatch):
+    from core_api.services.organization_settings import ResolvedConfig
+
+    captured = _capture(monkeypatch)
+    cfg = ResolvedConfig({"observability": {"search_recall_logging_enabled": True}})
+    await LogRecallEvent().execute(_ctx("search", cfg, [_row(0.6, 0.55)], [_row(0.6, 0.55)]))
+
+    assert [ev["source"] for ev, _ in captured] == ["search"]
