@@ -159,7 +159,10 @@ that can read the memory. `core_api.services.correction_sender` moves the
 record `preview` → `sending` and posts the recipients, at most 200 per call, to
 the bus's system sender (`POST {COLLABORATION_API_URL}/api/v1/bus/system/corrections`,
 header `X-Caura-System-Secret` = `COLLABORATION_SYSTEM_SEND_SECRET`, else
-`CORE_STORAGE_SHARED_SECRET`; `Idempotency-Key` = the correction id). Per
+`CORE_STORAGE_SHARED_SECRET`; `Idempotency-Key` = the correction id; on Cloud
+Run, where the collaboration service refuses unauthenticated callers, also a
+Google ID token for that URL in `X-Serverless-Authorization`, so core-api's
+service account must be an invoker of it). Per
 recipient:
 
 | Bus answer | `notice_state` | `channel` |

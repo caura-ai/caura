@@ -23,6 +23,12 @@ still waiting after that is retried by the next send or status read. With no
 ``COLLABORATION_API_URL`` (standalone OSS) every recipient goes to the
 ``recall`` channel, still ``pending``.
 
+On Cloud Run the collaboration service refuses unauthenticated callers, so an
+``https`` ``COLLABORATION_API_URL`` also gets a Google ID token for that URL
+in ``X-Serverless-Authorization`` (Cloud Run checks it and leaves
+``Authorization`` to the app). Off Cloud Run there is none and the header is
+left out; the system secret is the app's own check either way.
+
 The correction is ``sending`` while any recipient waits on the bus, then
 ``sent``, and ``closed`` once every recipient confirmed or failed. A status
 read refreshes bus outcomes at most every :data:`STATUS_CACHE_S` seconds. The
@@ -40,6 +46,7 @@ from typing import Any
 import httpx
 from fastapi import HTTPException
 
+from core_api.clients.identity_token import fetch_auth_header
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.tasks import track_task
@@ -87,6 +94,17 @@ def bus_configured() -> bool:
 def _bus_secret() -> str:
     own = settings.collaboration_system_send_secret.get_secret_value()
     return own or settings.core_storage_shared_secret.get_secret_value()
+
+
+async def _bus_headers() -> dict[str, str]:
+    """The system secret, and a Cloud Run ID token for the bus when one is available."""
+    headers = {"X-Caura-System-Secret": _bus_secret()}
+    base = settings.collaboration_api_url.strip().rstrip("/")
+    if base.startswith("https://"):
+        token = (await fetch_auth_header(base)).get("Authorization")
+        if token:
+            headers["X-Serverless-Authorization"] = token
+    return headers
 
 
 def _now() -> datetime:
@@ -173,7 +191,7 @@ async def _post_bus(tenant_id: str, correction: dict, batch: list[dict]) -> dict
         },
         "recipients": [{"agent_id": r["agent_id"], "first_seen_by_you": r["first_seen"]} for r in batch],
     }
-    headers = {"X-Caura-System-Secret": _bus_secret(), "Idempotency-Key": correction["id"]}
+    headers = {**await _bus_headers(), "Idempotency-Key": correction["id"]}
     try:
         async with httpx.AsyncClient(timeout=BUS_TIMEOUT_S) as client:
             resp = await client.post(url, json=body, headers=headers)
@@ -361,9 +379,7 @@ async def send_correction(tenant_id: str, correction_id: str, *, sent_by: str) -
 async def _bus_status(tenant_id: str, correction_id: str) -> dict | None:
     url = f"{settings.collaboration_api_url.rstrip('/')}/api/v1/bus/system/corrections/{correction_id}"
     async with httpx.AsyncClient(timeout=BUS_TIMEOUT_S) as client:
-        resp = await client.get(
-            url, params={"tenant_id": tenant_id}, headers={"X-Caura-System-Secret": _bus_secret()}
-        )
+        resp = await client.get(url, params={"tenant_id": tenant_id}, headers=await _bus_headers())
     if resp.status_code == 404:
         return None
     resp.raise_for_status()
