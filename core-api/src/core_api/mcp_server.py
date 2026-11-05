@@ -107,6 +107,7 @@ from core_api.services.agent_service import (
 from core_api.services.agent_service import resolve_read_fleet_gate as _resolve_read_fleet_gate
 from core_api.services.audit_service import log_action, log_cross_tenant_read
 from core_api.services.capability_usage import record_usage
+from core_api.services.correction_notices import finish_notices, start_notices
 from core_api.services.correction_sender import compact as compact_correction
 from core_api.services.correction_sender import confirm_as_agent, send_correction
 from core_api.services.entity_service import get_entity
@@ -1670,6 +1671,8 @@ async def caura_recall(
         retrieval_ctx: dict = {}
         # EC-05 — the closest below-cut-off memory, filled only on an empty result.
         empty_hint_ctx: dict = {}
+        # CP-13 — corrections this agent has not confirmed, looked up beside the search.
+        notices_task = start_notices(tenant_id, agent_id, surface="mcp")
         results = await search_memories(
             tenant_id=tenant_id,
             query=query,
@@ -1749,6 +1752,9 @@ async def caura_recall(
         # the ordinary recall.
         if "hint" in empty_hint_ctx:
             payload["empty_hint"] = empty_hint_ctx["hint"]
+        # CP-13 — same: absent unless this agent owes a confirmation.
+        if notices := await finish_notices(notices_task):
+            payload["correction_notices"] = notices
         if diagnostic:
             counts = diagnostic_ctx.get("counts", {}) or {}
             payload["diagnostic"] = {

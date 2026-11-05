@@ -26,7 +26,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from core_api.schemas import EmptyRecallHint, SearchHitOut, SearchWarning
+from core_api.schemas import CorrectionNotice, EmptyRecallHint, SearchHitOut, SearchWarning
 
 # --------------------------------------------------------------------------
 # memories / recall / health / version
@@ -393,6 +393,15 @@ class RecallResponse(BaseModel):
         description=(
             "Only when no memory was recalled: the closest memory that scored below "
             "the similarity cut-off, so an empty recall is not mistaken for 'nothing saved'."
+        ),
+    )
+    # CP-13 — absent unless this agent has an unconfirmed correction; same
+    # objects /search sends.
+    correction_notices: list[CorrectionNotice] | None = Field(
+        default=None,
+        description=(
+            "Only when a memory this agent read was corrected and the agent has not "
+            "confirmed it: at most 3, newest first."
         ),
     )
 

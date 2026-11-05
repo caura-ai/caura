@@ -466,6 +466,63 @@
         "title": "ContradictionInfo",
         "type": "object"
       },
+      "CorrectionNotice": {
+        "description": "CP-13 — a correction to a memory this agent read, owed on its next recall.\n\nPresent until the agent confirms it or it is 7 days old; at most three,\nnewest first. ``core_api.services.correction_notices`` has the rules.",
+        "properties": {
+          "ask": {
+            "description": "What the agent is asked to do, including how to confirm.",
+            "title": "Ask",
+            "type": "string"
+          },
+          "corrected_at": {
+            "title": "Corrected At",
+            "type": "string"
+          },
+          "correction_id": {
+            "title": "Correction Id",
+            "type": "string"
+          },
+          "memory_id": {
+            "description": "The corrected memory.",
+            "title": "Memory Id",
+            "type": "string"
+          },
+          "new_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What it says now; null when it was retracted.",
+            "title": "New Summary"
+          },
+          "old_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What it said when this agent read it.",
+            "title": "Old Summary"
+          }
+        },
+        "required": [
+          "correction_id",
+          "memory_id",
+          "old_summary",
+          "new_summary",
+          "corrected_at",
+          "ask"
+        ],
+        "title": "CorrectionNotice",
+        "type": "object"
+      },
       "EmptyRecallHint": {
         "description": "EC-05 — the closest result of an EMPTY search, and the cut-off it missed.\n\nPresent only when a search returned no items but a memory the caller can\nread scored below the similarity cut-off. That memory passed every other\nfilter (tenant, fleet, visibility, agent, type, status, dates) — the cut-off\nis the only reason it was not returned.",
         "properties": {
@@ -2648,6 +2705,21 @@
       "SearchResponse": {
         "description": "Envelope for search results — matches PaginatedMemoryResponse shape.",
         "properties": {
+          "correction_notices": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/CorrectionNotice"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only when a memory this agent read was corrected and the agent has not confirmed it: at most 3, newest first. Absent otherwise.",
+            "title": "Correction Notices"
+          },
           "diagnostic": {
             "anyOf": [
               {

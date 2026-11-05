@@ -7946,6 +7946,50 @@ class PostgresService:
                 return None
             return await self._correction_in_session(session, tenant_id, cid)
 
+    async def correction_notices_for_agent(
+        self, tenant_id: str, agent_id: str, *, limit: int = 3, max_age_days: int = 7
+    ) -> list[dict]:
+        """Corrections this agent still has to hear about on its next recall, newest first.
+
+        The recall fallback (CP-13): the agent is a recipient of a correction
+        that has been sent (any status past ``preview``: ``sending`` while a
+        peer still waits on the bus, ``closed`` once every peer confirmed or
+        failed, and a failed one is exactly who this is for) younger than
+        ``max_age_days``, its notice is not ``confirmed``, and the bus is not
+        carrying it (``channel`` is ``recall``, or the bus gave up:
+        ``failed`` / ``unreachable``). One
+        probe of ``ix_memory_correction_recipient_agent`` (migration 074), at
+        most 50 rows per correction. On the replica like every recall read:
+        a notice confirmed a moment ago can show once more under lag.
+        """
+        r, c = MemoryCorrectionRecipient, MemoryCorrection
+        async with get_read_session() as session:
+            rows = await session.execute(
+                select(c.id, c.memory_id, c.old_summary, c.new_summary, c.corrected_at)
+                .select_from(r)
+                .join(c, c.id == r.correction_id)
+                .where(
+                    r.tenant_id == tenant_id,
+                    r.agent_id == agent_id,
+                    r.notice_state != "confirmed",
+                    or_(r.channel == "recall", r.notice_state.in_(("failed", "unreachable"))),
+                    c.status != "preview",
+                    c.corrected_at > func.now() - timedelta(days=max_age_days),
+                )
+                .order_by(c.corrected_at.desc(), c.id)
+                .limit(limit)
+            )
+            return [
+                {
+                    "correction_id": str(row.id),
+                    "memory_id": str(row.memory_id),
+                    "old_summary": row.old_summary,
+                    "new_summary": row.new_summary,
+                    "corrected_at": row.corrected_at.isoformat(),
+                }
+                for row in rows.all()
+            ]
+
     async def value_query(self, tenant_id: str, *, start: datetime, end: datetime, top: int = 8) -> dict:
         """One tenant's value figures in ``[start, end)``."""
         in_window = (MemoryReuse.first_recalled_at >= start, MemoryReuse.first_recalled_at < end)

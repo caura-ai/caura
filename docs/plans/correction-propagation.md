@@ -212,8 +212,14 @@ body:
   Reply "ack" once you have dropped or updated what you took from it.
 ```
 
-An agent without a bus registration gets the same text as a pending notice at
-the top of its next recall response, once, and acknowledges it there.
+An agent the bus cannot tell (no bus registration, the bus disabled, or a bus
+delivery that `failed`) gets it on recall instead (CP-13): every MCP
+`caura_recall` and REST `/search` / `/recall` response for that agent, on any
+query, carries `correction_notices: [{correction_id, memory_id, old_summary,
+new_summary, corrected_at, ask}]`, at most 3, newest first, until the agent
+confirms (`caura_manage op=confirm_correction`, `POST
+/api/v1/corrections/{id}/confirm`) or the correction is 7 days old. The key is
+absent when there is nothing to tell, so an ordinary recall is unchanged.
 
 ## Done when
 

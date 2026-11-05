@@ -2031,6 +2031,13 @@ class CoreStorageClient:
             retry=with_retry,
         )
 
+    async def list_correction_notices(self, tenant_id: str, agent_id: str, *, limit: int = 3) -> list[dict]:
+        """Corrections ``agent_id`` still has to hear about on its next recall (CP-13), newest first."""
+        result = await self._get(
+            "/memory-corrections/notices", tenant_id=tenant_id, agent_id=agent_id, limit=limit
+        )
+        return (result or {}).get("notices", [])
+
     async def increment_tenant_usage(self, rows: list[dict]) -> int:
         """ADD to per-tenant, per-period counters in ``tenant_usage_counters``.
 
