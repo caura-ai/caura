@@ -16,6 +16,7 @@ from common.models.lifecycle_audit import LifecycleAudit
 from common.models.memory import Memory
 from common.models.memory_conflict import MemoryConflict
 from common.models.memory_derivation import MemoryDerivation
+from common.models.memory_exposure import MemoryExposure
 from common.models.organization_settings import (
     OrganizationSettings,
     OrganizationSettingsAudit,
@@ -54,6 +55,7 @@ __all__ = [
     "MemoryConflict",
     "MemoryDerivation",
     "MemoryEntityLink",
+    "MemoryExposure",
     "MemoryOrigin",
     "MemoryReuse",
     "OrganizationSettings",

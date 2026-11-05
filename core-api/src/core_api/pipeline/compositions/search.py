@@ -11,6 +11,7 @@ from core_api.pipeline.steps.search import (
     LogRecallEvent,
     ParallelEmbedAndEntityBoost,
     PostFilterResults,
+    RecordExposure,
     RecordRecallValue,
     RerankResults,
     ResolveSearchProfile,
@@ -33,6 +34,7 @@ def build_search_pipeline() -> Pipeline:
             InjectSTMContext(),
             TrackRecalls(),
             LogRecallEvent(),
+            RecordExposure(),
             RecordRecallValue(),
         ],
     )
@@ -45,7 +47,7 @@ def build_search_explain_pipeline() -> Pipeline:
     ``ExplainMemoryFilters`` after the scored search. Left out: the steps that
     only act on a finished result (STM context injection, which adds rather
     than removes) or record it (recall tracking, recall-event logging,
-    recall-value metering) — an explanation is not a recall and must not
+    recall-value metering, exposure) — an explanation is not a recall and must not
     count as one.
     """
     return Pipeline(

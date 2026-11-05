@@ -357,7 +357,10 @@ def test_the_writer_session_population_is_pinned() -> None:
     # on purpose; see its ``_MUST_STAY_ON_THE_WRITER`` entry.
     # 141 -> 142 (pure unchanged at 61): ``memory_drop`` is new. It locks one
     # row ``with_for_update`` and clears its text with ``sql_update``, a write.
-    assert len(methods) == 142, f"{len(methods)} methods open a writer session"
+    # 142 -> 143 (pure unchanged at 61): ``exposure_record`` (migration 072)
+    # upserts the memory-exposure rows; ``exposure_for_memory`` reads on the
+    # replica.
+    assert len(methods) == 143, f"{len(methods)} methods open a writer session"
     assert len(pure) == 61, f"{len(pure)} of them show no write marker"
 
 

@@ -116,6 +116,12 @@ def stub_storage_client(monkeypatch, **method_returns):
     # too, or a ``get_agent`` stub set here is silently ignored by the gate and
     # the pin/level assertions read the real (ASGI-bridged) storage instead.
     monkeypatch.setattr("core_api.services.agent_service.get_storage_client", _factory)
+    # A by-id read records the caller's exposure (correction propagation) in
+    # the background through this module's alias; the stub takes it too, so a
+    # unit test's read does not reach the real (ASGI-bridged) storage.
+    monkeypatch.setattr(
+        "core_api.services.memory_exposure.get_storage_client", _factory
+    )
     return sc
 
 

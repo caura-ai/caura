@@ -11,6 +11,7 @@ from core_api.pipeline.steps.search.parallel_embed_entity_boost import (
     ParallelEmbedAndEntityBoost,
 )
 from core_api.pipeline.steps.search.post_filter_results import PostFilterResults
+from core_api.pipeline.steps.search.record_exposure import RecordExposure
 from core_api.pipeline.steps.search.record_recall_value import RecordRecallValue
 from core_api.pipeline.steps.search.rerank_results import RerankResults
 from core_api.pipeline.steps.search.resolve_search_profile import ResolveSearchProfile
@@ -28,6 +29,7 @@ __all__ = [
     "InjectSTMContext",
     "LoadAndSerialize",
     "LogRecallEvent",
+    "RecordExposure",
     "RecordRecallValue",
     "ParallelEmbedAndEntityBoost",
     "PostFilterResults",

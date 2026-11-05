@@ -113,6 +113,7 @@ from core_api.services.interview_service import (
     without_system_rows,
 )
 from core_api.services.memory_corrections import on_status_corrected
+from core_api.services.memory_exposure import schedule_exposure
 from core_api.services.memory_service import (
     _memory_to_out,
     create_memories_bulk,
@@ -2499,6 +2500,8 @@ async def caura_manage(
                     install_uuid=install_uuid,
                 ):
                     return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
+                # Correction propagation: the same identity caura_recall records.
+                schedule_exposure([memory], agent_id=agent_id, tenant_id=tenant_id)
                 return _with_latency(
                     _dumps(
                         {

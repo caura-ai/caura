@@ -25,12 +25,14 @@ from typing import Any, NamedTuple
 from uuid import UUID
 
 from sqlalchemy import (
+    BigInteger,
     ColumnElement,
     Date,
     DateTime,
     Integer,
     String,
     Table,
+    Text,
     and_,
     any_,
     bindparam,
@@ -133,6 +135,7 @@ from common.models.memory import (
     VERIFIED_STATUSES,
     is_real_source_uri,
 )
+from common.models.memory_exposure import MemoryExposure
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.models.recall_log import RecallCandidate, RecallEvent
 from common.models.tenant_usage_counter import TenantUsageCounter
@@ -1857,6 +1860,8 @@ _PURGE_TENANT_TABLES: tuple[str, ...] = (
     # ``memories`` rather than left to its cascade, and reported by the purge.
     "memory_origins",
     "memory_reuse",
+    # Correction propagation (migration 072): same reasoning as the two above.
+    "memory_exposure",
     "memories",
     "entities",
     "agents",
@@ -7532,6 +7537,84 @@ class PostgresService:
                 .returning(MemoryReuse.memory_id)
             )
             return len(marked.all())
+
+    # ------------------------------------------------------------------
+    # Memory exposure (migration 072): which agents a memory was handed to
+    # ------------------------------------------------------------------
+
+    async def exposure_record(
+        self,
+        tenant_id: str,
+        *,
+        agent_id: str,
+        memory_ids: list[str],
+        seen_at: datetime,
+        trace_id: str | None,
+    ) -> int:
+        """Count one read of each memory by ``agent_id``: insert, or bump the row.
+
+        One statement. The rows come from ``memories`` itself, filtered to this
+        tenant, so an id that names no memory of the tenant (deleted since,
+        another tenant's, made up) writes nothing rather than failing the batch
+        on the foreign key. Ids are sorted so two concurrent reads of the same
+        memories take the row locks in one order. ``first_seen`` keeps the
+        earliest read, ``last_seen`` the latest, ``last_trace_id`` the latest
+        that carried one. Returns the rows written.
+        """
+        ids = sorted({UUID(m) for m in memory_ids})
+        if not ids:
+            return 0
+        source = select(
+            Memory.tenant_id,
+            Memory.id,
+            literal(agent_id, Text),
+            literal(seen_at, DateTime(timezone=True)),
+            literal(seen_at, DateTime(timezone=True)),
+            literal(1, BigInteger),
+            literal(trace_id, Text),
+        ).where(Memory.tenant_id == tenant_id, Memory.id.in_(ids))
+        insert = pg_insert(MemoryExposure).from_select(
+            ["tenant_id", "memory_id", "agent_id", "first_seen", "last_seen", "count", "last_trace_id"],
+            source,
+        )
+        upsert = insert.on_conflict_do_update(
+            index_elements=[MemoryExposure.tenant_id, MemoryExposure.memory_id, MemoryExposure.agent_id],
+            set_={
+                "first_seen": func.least(MemoryExposure.first_seen, insert.excluded.first_seen),
+                "last_seen": func.greatest(MemoryExposure.last_seen, insert.excluded.last_seen),
+                "count": MemoryExposure.count + 1,
+                "last_trace_id": func.coalesce(insert.excluded.last_trace_id, MemoryExposure.last_trace_id),
+            },
+        ).returning(MemoryExposure.memory_id)
+        async with get_session() as session:
+            written = await session.execute(upsert)
+            return len(written.all())
+
+    async def exposure_for_memory(self, tenant_id: str, memory_id: str) -> list[dict]:
+        """Every agent ``memory_id`` was handed to in this tenant, latest read first."""
+        async with get_read_session() as session:
+            rows = await session.execute(
+                select(
+                    MemoryExposure.agent_id,
+                    # Labelled: ``Row.count`` is the tuple method.
+                    MemoryExposure.count.label("reads"),
+                    MemoryExposure.first_seen,
+                    MemoryExposure.last_seen,
+                    MemoryExposure.last_trace_id,
+                )
+                .where(MemoryExposure.tenant_id == tenant_id, MemoryExposure.memory_id == UUID(memory_id))
+                .order_by(MemoryExposure.last_seen.desc(), MemoryExposure.agent_id)
+            )
+            return [
+                {
+                    "agent_id": r.agent_id,
+                    "count": int(r.reads),
+                    "first_seen": r.first_seen.isoformat(),
+                    "last_seen": r.last_seen.isoformat(),
+                    "last_trace_id": r.last_trace_id,
+                }
+                for r in rows.all()
+            ]
 
     async def value_query(self, tenant_id: str, *, start: datetime, end: datetime, top: int = 8) -> dict:
         """One tenant's value figures in ``[start, end)``."""

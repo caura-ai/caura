@@ -53,6 +53,7 @@ from core_storage_api.routers import (
     documents_router,
     entities_router,
     evolve_router,
+    exposure_router,
     fleet_router,
     health_router,
     idempotency_router,
@@ -425,6 +426,9 @@ def create_app() -> FastAPI:
     # Value metering (migration 067): sessions, memory origins and reuse.
     # Every route is bound to one tenant.
     app.include_router(value_router, prefix=prefix)
+    # Memory exposure (migration 072): which agents a memory was handed to.
+    # Every route is bound to one tenant.
+    app.include_router(exposure_router, prefix=prefix)
 
     return app
 
