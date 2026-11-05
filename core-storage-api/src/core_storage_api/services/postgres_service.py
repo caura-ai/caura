@@ -7951,10 +7951,13 @@ class PostgresService:
     ) -> list[dict]:
         """Corrections this agent still has to hear about on its next recall, newest first.
 
-        The recall fallback (CP-13): the agent is a recipient of a ``sent``
-        correction younger than ``max_age_days``, its notice is not
-        ``confirmed``, and the bus is not carrying it (``channel`` is
-        ``recall``, or the bus gave up: ``failed`` / ``unreachable``). One
+        The recall fallback (CP-13): the agent is a recipient of a correction
+        that has been sent (any status past ``preview``: ``sending`` while a
+        peer still waits on the bus, ``closed`` once every peer confirmed or
+        failed, and a failed one is exactly who this is for) younger than
+        ``max_age_days``, its notice is not ``confirmed``, and the bus is not
+        carrying it (``channel`` is ``recall``, or the bus gave up:
+        ``failed`` / ``unreachable``). One
         probe of ``ix_memory_correction_recipient_agent`` (migration 074), at
         most 50 rows per correction. On the replica like every recall read:
         a notice confirmed a moment ago can show once more under lag.
@@ -7970,7 +7973,7 @@ class PostgresService:
                     r.agent_id == agent_id,
                     r.notice_state != "confirmed",
                     or_(r.channel == "recall", r.notice_state.in_(("failed", "unreachable"))),
-                    c.status == "sent",
+                    c.status != "preview",
                     c.corrected_at > func.now() - timedelta(days=max_age_days),
                 )
                 .order_by(c.corrected_at.desc(), c.id)

@@ -1,7 +1,7 @@
 """Correction notices on recall (CP-13), the storage half, against a live PostgreSQL.
 
 ``GET /memory-corrections/notices`` lists what one agent still has to hear
-about: it is a recipient of a ``sent`` correction younger than 7 days, has not
+about: it is a recipient of a sent correction (past ``preview``) younger than 7 days, has not
 confirmed, and the bus is not carrying the notice (``channel=recall``, or the
 bus state is ``failed`` / ``unreachable``). Newest first, at most ``limit``,
 bound to the tenant. Sending (CP-11) is another PR, so the rows are set here
@@ -169,3 +169,15 @@ async def test_the_lookup_uses_the_agent_index(client: AsyncClient):
             )
         ).scalar_one()
     assert "(tenant_id, agent_id)" in indexdef
+
+
+async def test_a_correction_still_sending_or_closed_still_owes_its_recall_notices(client: AsyncClient):
+    """``sending``: a peer is throttled on the bus, the recall channel is already set.
+    ``closed``: every recipient confirmed or failed, and a failed one is owed this."""
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    sending = await _correction(client, tenant, ["a"], ago=timedelta(hours=2))
+    await _set(sending, status="sending", channel="recall", notice_state="pending")
+    closed = await _correction(client, tenant, ["a"], ago=timedelta(hours=1))
+    await _set(closed, status="closed", channel="bus", notice_state="failed")
+
+    assert [n["correction_id"] for n in await _notices(client, tenant, "a")] == [closed, sending]
