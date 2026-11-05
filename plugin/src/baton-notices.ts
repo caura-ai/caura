@@ -107,7 +107,7 @@ export function formatBaton(n: BatonNotice, detail?: BatonDetail): string {
       const linked = detail.linked
         .slice(0, MAX_ITEMS)
         .map((l) => `${l.memory_id} — ${clean(l.title)}`);
-      parts.push(`Linked memories: ${linked.join("; ")} (read them with caura_manage op=read).`);
+      parts.push(`Linked memories: ${linked.join("; ")} (read them with caura_manage op=read memory_id=<id>).`);
     }
   }
   parts.push(

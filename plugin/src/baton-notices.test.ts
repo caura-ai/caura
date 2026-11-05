@@ -103,7 +103,7 @@ test("a baton on the search response is shown whole, before the recalled memorie
       "Decisions: Use the stdlib csv module. " +
       "Failed approaches (don't retry): regex split (quoted newlines). " +
       "Open questions: Do we sort output?. " +
-      `Linked memories: ${MEMORY_ID} — Parser chokes on quoted newlines (read them with caura_manage op=read). ` +
+      `Linked memories: ${MEMORY_ID} — Parser chokes on quoted newlines (read them with caura_manage op=read memory_id=<id>). ` +
       `Tag every memory you write for this work with metadata.baton_id=${BATON_ID}; ` +
       "cite, don't copy, the linked memories. " +
       `Once you take it up, accept it: caura_manage op=accept_baton baton_id=${BATON_ID}`,

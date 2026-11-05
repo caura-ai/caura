@@ -195,7 +195,7 @@ and shows it before the recalled memories, framed as data:
 <handoff_baton>
 - Handoff from <from_agent>: <goal>. Decisions: … Failed approaches (don't
   retry): … Open questions: … Linked memories: <id — title> (read them with
-  caura_manage op=read). Tag every memory you write for this work with
+  caura_manage op=read memory_id=<id>). Tag every memory you write for this work with
   metadata.baton_id=<id>; cite, don't copy, the linked memories. Once you take
   it up, accept it: caura_manage op=accept_baton baton_id=<id>
 </handoff_baton>
