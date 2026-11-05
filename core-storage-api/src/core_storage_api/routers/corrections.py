@@ -73,6 +73,21 @@ async def list_corrections(tenant_id: str, memory_id: UUID, limit: int = Query(2
     return {"corrections": await _svc.corrections_for_memory(tenant_id, str(memory_id), limit=limit)}
 
 
+@router.get("/notices")
+async def list_notices(
+    tenant_id: str,
+    agent_id: str = Query(..., min_length=1, max_length=200),
+    limit: int = Query(3, ge=1, le=10),
+) -> dict:
+    """Corrections the agent still has to hear about on its next recall (CP-13), newest first.
+
+    ``{"notices": [{correction_id, memory_id, old_summary, new_summary, corrected_at}]}``.
+    Declared before ``/{correction_id}``, which would otherwise take the path.
+    """
+    _require_tenant(tenant_id)
+    return {"notices": await _svc.correction_notices_for_agent(tenant_id, agent_id, limit=limit)}
+
+
 @router.get("/{correction_id}")
 async def get_correction(tenant_id: str, correction_id: UUID) -> dict:
     """One correction with its recipients; 404 when it is not the tenant's."""

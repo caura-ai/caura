@@ -70,6 +70,7 @@ from core_api.schemas import (
     BulkMemoryCreate,
     BulkMemoryItem,
     BulkMemoryResponse,
+    CorrectionNotice,
     EmptyRecallHint,
     HeldMemoryPage,
     IngestCommitRequest,
@@ -112,6 +113,7 @@ from core_api.services.agent_service import (
 )
 from core_api.services.audit_service import log_action, log_cross_tenant_read
 from core_api.services.caller_identity import enforce_named_agent_ownership, missing_agent_id_error
+from core_api.services.correction_notices import finish_notices, start_notices
 from core_api.services.ingest_service import (
     ALLOWED_INGEST_MIME_TYPES,
     BINARY_INGEST_MIME_TYPES,
@@ -3117,6 +3119,9 @@ async def _search_inner(
     search_warnings: list = _unknown_param_warnings(body, route="memory-search")
     # EC-05 — the closest below-cut-off memory, filled only on an empty result.
     empty_hint_ctx: dict = {}
+    # CP-13 — corrections this agent has not confirmed, looked up beside the
+    # search: the same identity exposure records as the reader.
+    notices_task = start_notices(body.tenant_id, eff_agent_id, surface="rest")
     try:
         config = await resolve_config(body.tenant_id)
         # Widen the read predicate when the caller authenticated with
@@ -3239,9 +3244,14 @@ async def _search_inner(
     # A28 — null when empty (matches ``diagnostic``); purely additive.
     warn_out = [SearchWarning(**w) for w in search_warnings] or None
     hint_out = EmptyRecallHint(**empty_hint_ctx["hint"]) if "hint" in empty_hint_ctx else None
+    notices_out = [CorrectionNotice(**n) for n in await finish_notices(notices_task)] or None
     if not body.diagnostic:
         return SearchResponse(
-            items=results, recall_tracked=recall_tracked, warnings=warn_out, empty_hint=hint_out
+            items=results,
+            recall_tracked=recall_tracked,
+            warnings=warn_out,
+            empty_hint=hint_out,
+            correction_notices=notices_out,
         )
     counts = diagnostic_ctx.get("counts", {}) or {}
     return SearchResponse(
@@ -3249,6 +3259,7 @@ async def _search_inner(
         recall_tracked=recall_tracked,
         warnings=warn_out,
         empty_hint=hint_out,
+        correction_notices=notices_out,
         diagnostic=SearchDiagnostic(
             retrieval_strategy=diagnostic_ctx.get("retrieval_strategy"),
             top_k_requested=diagnostic_ctx.get("diagnostic_original_top_k"),
@@ -3577,6 +3588,9 @@ async def recall_endpoint(
     # EC-05 — same channel /search uses; filled only on an empty recall.
     empty_hint_ctx: dict = {}
 
+    # CP-13 — same lookup /search runs beside its search.
+    notices_task = start_notices(body.tenant_id, eff_agent_id, surface="rest")
+
     # ── Phase 1: DB-bound — config + search ──────────────────────
     config = await resolve_config(body.tenant_id)
     memories = await search_memories(
@@ -3690,6 +3704,9 @@ async def recall_endpoint(
     # EC-05 — added only when present, for the same plain-dict reason as above.
     if "hint" in empty_hint_ctx:
         brief["empty_hint"] = empty_hint_ctx["hint"]
+    # CP-13 — added only when present, for the same plain-dict reason as above.
+    if notices := await finish_notices(notices_task):
+        brief["correction_notices"] = notices
     return brief
 
 

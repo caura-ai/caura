@@ -122,6 +122,13 @@ def stub_storage_client(monkeypatch, **method_returns):
     monkeypatch.setattr(
         "core_api.services.memory_exposure.get_storage_client", _factory
     )
+    # A recall looks up the caller's correction notices (CP-13) through this
+    # module's alias; none unless the test asks for some.
+    if "list_correction_notices" not in method_returns:
+        sc.list_correction_notices = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        "core_api.services.correction_notices.get_storage_client", _factory
+    )
     return sc
 
 
@@ -230,6 +237,14 @@ def mcp_env(monkeypatch):
         )
 
     monkeypatch.setattr(mcp_server, "resolve_config", _stub_resolve_config)
+
+    # ``caura_recall`` looks up the caller's correction notices (CP-13) on
+    # the real client; no unit test owes any. ``stub_storage_client``
+    # replaces the client whole, so a test that wants notices sets them there.
+    monkeypatch.setattr(
+        "core_api.clients.storage_client.CoreStorageClient.list_correction_notices",
+        AsyncMock(return_value=[]),
+    )
 
     service_mocks: dict[str, AsyncMock] = {}
 

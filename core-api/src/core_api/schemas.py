@@ -1074,6 +1074,21 @@ class EmptyRecallHint(BaseModel):
     message: str = Field(description="One-line human-readable summary of the above.")
 
 
+class CorrectionNotice(BaseModel):
+    """CP-13 — a correction to a memory this agent read, owed on its next recall.
+
+    Present until the agent confirms it or it is 7 days old; at most three,
+    newest first. ``core_api.services.correction_notices`` has the rules.
+    """
+
+    correction_id: str
+    memory_id: str = Field(description="The corrected memory.")
+    old_summary: str | None = Field(description="What it said when this agent read it.")
+    new_summary: str | None = Field(description="What it says now; null when it was retracted.")
+    corrected_at: str
+    ask: str = Field(description="What the agent is asked to do, including how to confirm.")
+
+
 class SearchResponse(BaseModel):
     """Envelope for search results — matches PaginatedMemoryResponse shape."""
 
@@ -1113,6 +1128,17 @@ class SearchResponse(BaseModel):
         description=(
             "Only when items is empty: the closest memory that scored below the "
             "similarity cut-off, so an empty result is not mistaken for 'nothing saved'."
+        ),
+    )
+    # CP-13 — unlike the nullable fields above, OMITTED when empty: it is
+    # computed on every agent search, and an always-present
+    # ``"correction_notices": null`` would be new bytes on every response.
+    correction_notices: list[CorrectionNotice] | None = Field(
+        default=None,
+        exclude_if=lambda v: not v,
+        description=(
+            "Only when a memory this agent read was corrected and the agent has not "
+            "confirmed it: at most 3, newest first. Absent otherwise."
         ),
     )
 
