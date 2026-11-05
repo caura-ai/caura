@@ -27,6 +27,8 @@ from common.llm.constants import (
     OPENAI_CHAT_BASE_URL,
     OPENROUTER_CHAT_BASE_URL,
     OPENROUTER_DEFAULT_MODEL,
+    RUNCRATE_CHAT_BASE_URL,
+    RUNCRATE_DEFAULT_MODEL,
 )
 from common.provider_names import ProviderName
 
@@ -43,6 +45,8 @@ def _env_key(provider: str) -> str:
         return os.environ.get("OPENROUTER_API_KEY", "")
     if provider == ProviderName.ATLASCLOUD:
         return os.environ.get("ATLASCLOUD_API_KEY", "")
+    if provider == ProviderName.RUNCRATE:
+        return os.environ.get("RUNCRATE_API_KEY", "")
     if provider == ProviderName.GEMINI:
         return os.environ.get("GEMINI_API_KEY", "")
     return ""
@@ -245,6 +249,24 @@ def resolve_openai_compatible(
             provider, tenant_config, model_attr, ATLASCLOUD_DEFAULT_MODEL
         )
         return key, ATLASCLOUD_CHAT_BASE_URL, model
+
+    if provider == ProviderName.RUNCRATE:
+        key = (
+            (
+                getattr(tenant_config, "runcrate_api_key", None)
+                if tenant_config is not None
+                else None
+            )
+            or _env_key(ProviderName.RUNCRATE)
+            or ""
+        )
+        # Runcrate serves open-weight models only, so an OpenAI / Anthropic /
+        # Gemini id (such as the default ENTITY_EXTRACTION_MODEL) falls back to
+        # the Runcrate default, while ``org/model`` ids pass through untouched.
+        model = _model_for_provider(
+            provider, tenant_config, model_attr, RUNCRATE_DEFAULT_MODEL
+        )
+        return key, RUNCRATE_CHAT_BASE_URL, model
 
     return "", "", ""
 

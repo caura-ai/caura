@@ -1267,6 +1267,7 @@ class ResolvedConfig:
             (ProviderName.GEMINI.value, self.gemini_api_key),
             (ProviderName.OPENROUTER.value, self.openrouter_api_key),
             (ProviderName.ATLASCLOUD.value, self.atlascloud_api_key),
+            (ProviderName.RUNCRATE.value, self.runcrate_api_key),
         ]
         for prov, key in candidates:
             if prov != primary and key:
@@ -1300,6 +1301,13 @@ class ResolvedConfig:
         return (
             decrypt_api_key(self._ts.get("api_keys", {}).get("atlascloud_api_key"))
             or global_settings.atlascloud_api_key
+        )
+
+    @property
+    def runcrate_api_key(self) -> str | None:
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("runcrate_api_key"))
+            or global_settings.runcrate_api_key
         )
 
     @property
@@ -1910,7 +1918,7 @@ async def get_settings_for_display(tenant_id: str) -> dict:
 def _settings_display_with_status(raw: dict) -> dict:
     displayed = _settings_display_view(_deep_merge(DEFAULT_SETTINGS, _without_retired(raw)))
     sources = {}
-    for name in (*PROVIDER_KEY_FIELDS, "atlascloud_api_key"):
+    for name in (*PROVIDER_KEY_FIELDS, "atlascloud_api_key", "runcrate_api_key"):
         value = raw.get("api_keys", {}).get(name)
         try:
             source = "tenant" if value and decrypt_api_key(value) else "server"

@@ -40,6 +40,10 @@ ATLASCLOUD_CHAT_BASE_URL = "https://api.atlascloud.ai/v1"
 ATLASCLOUD_DEFAULT_MODEL = os.environ.get(
     "ATLASCLOUD_DEFAULT_MODEL", "openai/gpt-4.1-mini"
 )
+RUNCRATE_CHAT_BASE_URL = "https://api.runcrate.ai/v1"
+RUNCRATE_DEFAULT_MODEL = os.environ.get(
+    "RUNCRATE_DEFAULT_MODEL", "deepseek-ai/DeepSeek-V4.1-Flash"
+)
 
 # ── Retry policy ─────────────────────────────────────────────────────
 
