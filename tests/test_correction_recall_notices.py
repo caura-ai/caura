@@ -11,6 +11,7 @@ and a failed lookup reads as none. Storage's half (who is owed a notice) is
 from __future__ import annotations
 
 import json
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -19,8 +20,10 @@ from fastapi.testclient import TestClient
 
 from core_api import mcp_server
 from core_api.audit_actor import audit_principal
+from core_api.config import settings
 from core_api.schemas import CorrectionNotice, SearchResponse
 from core_api.services import correction_notices as cn
+from tests._legacy_contracts import LEGACY_API_KEY_FIELD
 from tests._mcp_test_helpers import parse_envelope, stub_storage_client
 
 
@@ -170,3 +173,99 @@ async def test_mcp_recall_omits_notices_when_none(mcp_env, monkeypatch):
 
     payload = parse_envelope(await mcp_server.caura_recall(query="anything"))
     assert "correction_notices" not in payload
+
+
+# ---------------------------------------------------------------------------
+# REST, whose agent: the OpenClaw plugin searches on the TENANT key
+# ---------------------------------------------------------------------------
+#
+# The plugin's automatic /search names its agent in the body, not with an agent
+# key. The notices follow the same identity the search runs as and exposure
+# records: an agent key, else caller_agent_id, else filter_agent_id.
+
+
+GATEWAY_SECRET = "test-gateway-secret"
+
+
+@pytest.fixture
+def owed(monkeypatch):
+    # The gateway-header path, as on SaaS: the tenant key arrives as X-Tenant-ID
+    # and an agent key adds X-Agent-ID.
+    monkeypatch.setattr(settings, "is_standalone", False)
+    monkeypatch.setattr(settings, LEGACY_API_KEY_FIELD, "")
+    monkeypatch.setattr(settings, "gateway_shared_secret", GATEWAY_SECRET)
+    sc = MagicMock(name="storage_client")
+    sc.list_correction_notices = AsyncMock(return_value=[_row(1)])
+    monkeypatch.setattr(cn, "get_storage_client", lambda: sc)
+    return sc
+
+
+def _tenant_key(tenant_id: str) -> dict:
+    # The gateway's tenant-key path: X-Tenant-ID, no X-Agent-ID.
+    return {"X-Gateway-Secret": GATEWAY_SECRET, "X-Tenant-ID": tenant_id}
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("route", ["/api/v1/search", "/api/v1/recall"])
+async def test_tenant_key_with_filter_agent_id_gets_that_agents_notices(
+    client, owed, route
+):
+    tenant_id = f"t-cp13-{uuid.uuid4().hex[:8]}"
+    resp = await client.post(
+        route,
+        headers=_tenant_key(tenant_id),
+        json={
+            "tenant_id": tenant_id,
+            "query": "anything",
+            "filter_agent_id": "plugin-agent",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert [n["correction_id"] for n in resp.json()["correction_notices"]] == ["c-1"]
+    owed.list_correction_notices.assert_awaited_once_with(
+        tenant_id, "plugin-agent", limit=3
+    )
+
+
+@pytest.mark.integration
+async def test_tenant_key_caller_agent_id_wins_over_filter(client, owed):
+    tenant_id = f"t-cp13-{uuid.uuid4().hex[:8]}"
+    resp = await client.post(
+        "/api/v1/search",
+        headers=_tenant_key(tenant_id),
+        json={
+            "tenant_id": tenant_id,
+            "query": "anything",
+            "caller_agent_id": "reader",
+            "filter_agent_id": "author",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    owed.list_correction_notices.assert_awaited_once_with(tenant_id, "reader", limit=3)
+
+
+@pytest.mark.integration
+async def test_agent_key_is_the_identity_whatever_the_body_filters(client, owed):
+    tenant_id = f"t-cp13-{uuid.uuid4().hex[:8]}"
+    resp = await client.post(
+        "/api/v1/search",
+        headers={**_tenant_key(tenant_id), "X-Agent-ID": "keyed-agent"},
+        json={"tenant_id": tenant_id, "query": "anything", "filter_agent_id": "author"},
+    )
+    assert resp.status_code == 200, resp.text
+    owed.list_correction_notices.assert_awaited_once_with(
+        tenant_id, "keyed-agent", limit=3
+    )
+
+
+@pytest.mark.integration
+async def test_tenant_key_naming_no_agent_looks_nothing_up(client, owed):
+    tenant_id = f"t-cp13-{uuid.uuid4().hex[:8]}"
+    resp = await client.post(
+        "/api/v1/search",
+        headers=_tenant_key(tenant_id),
+        json={"tenant_id": tenant_id, "query": "anything"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert "correction_notices" not in resp.json()
+    owed.list_correction_notices.assert_not_awaited()
