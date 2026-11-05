@@ -17,6 +17,7 @@ import copy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 
 from core_api.services import correction_sender as cs
@@ -550,3 +551,91 @@ async def test_send_over_a_bus(client, tenant_id, as_agent, bus, monkeypatch) ->
     assert body["counts"]["confirmed"] == 1 and body["counts"]["pending"] == 1
     assert body["counts"]["unreachable"] == 0
     assert body["status"] == "sent"
+
+
+# ── Cloud Run: an ID token for a private collaboration service ─────────────
+
+
+async def test_bus_calls_carry_a_cloud_run_id_token_for_an_https_bus(
+    monkeypatch,
+) -> None:
+    audiences: list[str] = []
+
+    async def _token(audience: str) -> dict[str, str]:
+        audiences.append(audience)
+        return {"Authorization": "Bearer id-token"}
+
+    monkeypatch.setattr(cs, "fetch_auth_header", _token)
+    monkeypatch.setattr(cs, "_bus_secret", lambda: "s3cret")
+    monkeypatch.setattr(
+        cs.settings,
+        "collaboration_api_url",
+        "https://staging-caura-collaboration-x.a.run.app/",
+    )
+    assert await cs._bus_headers() == {
+        "X-Caura-System-Secret": "s3cret",
+        "X-Serverless-Authorization": "Bearer id-token",
+    }
+    assert audiences == ["https://staging-caura-collaboration-x.a.run.app"]
+
+
+async def test_no_id_token_off_cloud_run_or_over_plain_http(monkeypatch) -> None:
+    async def _none(audience: str) -> dict[str, str]:
+        return {}
+
+    async def _never(audience: str) -> dict[str, str]:
+        raise AssertionError("no token is fetched for an http bus")
+
+    monkeypatch.setattr(cs, "_bus_secret", lambda: "s3cret")
+    monkeypatch.setattr(cs.settings, "collaboration_api_url", "https://bus.example")
+    monkeypatch.setattr(cs, "fetch_auth_header", _none)
+    assert await cs._bus_headers() == {"X-Caura-System-Secret": "s3cret"}
+    monkeypatch.setattr(
+        cs.settings, "collaboration_api_url", "http://collaboration:8000"
+    )
+    monkeypatch.setattr(cs, "fetch_auth_header", _never)
+    assert await cs._bus_headers() == {"X-Caura-System-Secret": "s3cret"}
+
+
+async def test_a_send_posts_the_id_token_to_the_bus(monkeypatch) -> None:
+    seen: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "recipients": [
+                    {"agent_id": "a", "status": "accepted", "message_id": "m1"}
+                ]
+            },
+        )
+
+    real_client = httpx.AsyncClient
+
+    def _client(**kwargs):
+        return real_client(transport=httpx.MockTransport(_handler), **kwargs)
+
+    async def _token(audience: str) -> dict[str, str]:
+        return {"Authorization": "Bearer id-token"}
+
+    monkeypatch.setattr(cs.httpx, "AsyncClient", _client)
+    monkeypatch.setattr(cs, "fetch_auth_header", _token)
+    monkeypatch.setattr(cs, "_bus_secret", lambda: "s3cret")
+    monkeypatch.setattr(cs.settings, "collaboration_api_url", "https://bus.example")
+    correction = {
+        "id": "c1",
+        "memory_id": "m",
+        "kind": "content_edit",
+        "corrected_at": "2026-11-05T12:00:00Z",
+        "actor": {"kind": "user", "id": "u"},
+    }
+    answer = await cs._post_bus(
+        "t1", correction, [{"agent_id": "a", "first_seen": "2026-11-05T11:00:00Z"}]
+    )
+
+    assert answer["recipients"][0]["status"] == "accepted"
+    (req,) = seen
+    assert req.headers["X-Serverless-Authorization"] == "Bearer id-token"
+    assert req.headers["X-Caura-System-Secret"] == "s3cret"
+    assert "Authorization" not in req.headers
