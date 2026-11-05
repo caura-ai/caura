@@ -1992,6 +1992,45 @@ class CoreStorageClient:
         )
         return (result or {}).get("corrections", [])
 
+    async def begin_correction_send(self, tenant_id: str, correction_id: str, *, sent_by: str) -> dict | None:
+        """Move a ``preview`` correction to ``sending`` (migration 074); the record, ``None`` when not the tenant's.
+
+        Idempotent: a correction past ``preview`` comes back unchanged.
+        """
+        return await self._post_optional(
+            f"/memory-corrections/{correction_id}/send?tenant_id={quote(tenant_id, safe='')}",
+            {"sent_by": sent_by},
+            retry=with_retry,
+        )
+
+    async def apply_correction_states(
+        self,
+        tenant_id: str,
+        correction_id: str,
+        *,
+        recipients: list[dict],
+        status: str | None = None,
+        bus_checked_at: str | None = None,
+    ) -> dict | None:
+        """Write each recipient's delivery state and the correction's status; the record.
+
+        Each write sets the recipient's whole state, so a retry writes the same
+        thing again.
+        """
+        return await self._post_optional(
+            f"/memory-corrections/{correction_id}/states?tenant_id={quote(tenant_id, safe='')}",
+            {"recipients": recipients, "status": status, "bus_checked_at": bus_checked_at},
+            retry=with_retry,
+        )
+
+    async def confirm_correction(self, tenant_id: str, correction_id: str, *, agent_id: str) -> dict | None:
+        """``agent_id`` confirms its notice; the record, ``None`` when it is not a recipient."""
+        return await self._post_optional(
+            f"/memory-corrections/{correction_id}/confirm?tenant_id={quote(tenant_id, safe='')}",
+            {"agent_id": agent_id},
+            retry=with_retry,
+        )
+
     async def increment_tenant_usage(self, rows: list[dict]) -> int:
         """ADD to per-tenant, per-period counters in ``tenant_usage_counters``.
 

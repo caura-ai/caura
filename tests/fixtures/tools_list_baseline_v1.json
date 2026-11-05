@@ -651,17 +651,17 @@
   {
     "name": "caura_manage",
     "title": null,
-    "description": "Per-memory lifecycle. bulk_delete, lineage, verify and unverify are not in the plugin; lineage returns the supersession chain. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete and bulk_delete are soft (prefer transition to outdated). verify sets human_verified (trust 3), unverify clears it.",
+    "description": "Per-memory lifecycle. bulk_delete, lineage, verify, unverify and the *_correction ops are not in the plugin; lineage returns the supersession chain. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete and bulk_delete are soft (prefer transition to outdated). verify sets human_verified (trust 3), unverify clears it. send_correction notifies the agents that read a corrected memory (trust 3); confirm_correction acks a notice sent to you.",
     "inputSchema": {
       "properties": {
         "op": {
-          "description": "read|update|transition|delete|bulk_delete|lineage|verify|unverify.",
+          "description": "read|update|transition|delete|bulk_delete|lineage|verify|unverify|send_correction|confirm_correction.",
           "title": "Op",
           "type": "string"
         },
         "memory_id": {
           "default": "",
-          "description": "UUID. Required except for op=bulk_delete.",
+          "description": "UUID. Required except for op=bulk_delete and the *_correction ops.",
           "title": "Memory Id",
           "type": "string"
         },
@@ -772,6 +772,12 @@
           "default": null,
           "description": "op=update.",
           "title": "Source Uri"
+        },
+        "correction_id": {
+          "default": "",
+          "description": "op=send_correction|confirm_correction.",
+          "title": "Correction Id",
+          "type": "string"
         },
         "agent_id": {
           "default": "mcp-agent",

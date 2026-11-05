@@ -276,7 +276,11 @@ def _status_writers(tree: ast.AST) -> list[tuple[int, bool]]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "values":
             keys = {kw.arg for kw in node.keywords}
-            if "Memory" in ast.unparse(node.func.value) and "status" in keys:
+            # ``Memory`` as a word: ``MemoryCorrection`` has a status of its own.
+            if (
+                re.search(r"\bMemory\b", ast.unparse(node.func.value))
+                and "status" in keys
+            ):
                 found.append((node.lineno, "status_changed_at" in keys))
         elif isinstance(node, ast.Dict):
             keys = {k.value for k in node.keys if isinstance(k, ast.Constant)}

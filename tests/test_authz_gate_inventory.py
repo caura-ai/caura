@@ -346,6 +346,9 @@ NON_ADMIN_PLANE_ROUTERS: dict[str, str] = {
     # dismissal is the only record that detection was wrong — so the resolve route
     # gates on require_trust(min_level=2), the keystone-author bar.
     "conflicts": "trust-plane: human review of detector output, gated by require_trust",
+    # Correction propagation: a person (or a trust-3 agent, enforce_send_correction)
+    # sends a correction's notices; the recipient agent confirms its own.
+    "corrections": "trust-plane send (enforce_send_correction); agent-plane confirm of its own notice",
 }
 
 # Routers that exist ONLY under an explicit env flag, and so are not part of

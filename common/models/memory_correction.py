@@ -9,8 +9,10 @@ correcting agent excluded, most recent readers first, at most
 :data:`MAX_RECIPIENTS`; ``truncated`` counts the readers past the cap.
 
 A correction starts as ``preview``: the person sees the list before anything is
-sent. Sending (CP-11) moves it to ``sent`` and each recipient's
-``notice_state`` on from ``pending``.
+sent. Sending (CP-11, migration 074) moves it to ``sending`` and, once no
+recipient waits on the bus, ``sent``; ``closed`` when every recipient confirmed
+or failed. Each recipient gets a ``channel`` (``bus``, or ``recall`` when the
+bus cannot reach it) and its ``notice_state`` moves on from ``pending``.
 
 ``event_id`` is unique, so a redelivered event finds the record it already
 wrote instead of writing a second. Both tables reference their parent ON
@@ -43,7 +45,12 @@ from common.models.base import Base
 MAX_RECIPIENTS = 50
 
 CORRECTION_KINDS = ("content_edit", "status", "unverify", "conflict_resolve")
-CORRECTION_STATUSES = ("preview", "sent")
+CORRECTION_STATUSES = ("preview", "sending", "sent", "closed")
+#: ``pending`` until sent; then the bus outcome (``sent``, ``delivered``,
+#: ``confirmed``, ``late``, ``failed``), or ``unreachable`` for an agent the bus
+#: does not know (it is told on its next recall instead).
+NOTICE_STATES = ("pending", "sent", "delivered", "confirmed", "late", "failed", "unreachable")
+NOTICE_CHANNELS = ("bus", "recall")
 
 
 def _in(column: str, values: tuple[str, ...]) -> str:
@@ -89,6 +96,12 @@ class MemoryCorrection(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
     )
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Who sent it: ``user:<id>``, ``agent:<id>`` or the credential kind.
+    sent_by: Mapped[str | None] = mapped_column(Text)
+    #: When the bus delivery states were last read (a status read refreshes them
+    #: at most every 30 s).
+    bus_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         CheckConstraint(
@@ -122,13 +135,34 @@ class MemoryCorrectionRecipient(Base):
     )
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_trace_id: Mapped[str | None] = mapped_column(Text)
-    #: ``pending`` until the notice goes out. No CHECK: sending (CP-11) owns
-    #: the states that follow.
+    #: :data:`NOTICE_STATES`.
     notice_state: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'pending'")
     )
+    #: :data:`NOTICE_CHANNELS`; null until sent.
+    channel: Mapped[str | None] = mapped_column(Text)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: When the bus accepted the notice.
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: A throttled send waits until then.
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    bus_message_id: Mapped[str | None] = mapped_column(Text)
+    bus_delivery_id: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (
+        CheckConstraint(
+            _in("notice_state", NOTICE_STATES),
+            name="ck_memory_correction_recipient_notice_state",
+        ),
+        CheckConstraint(
+            _in("channel", NOTICE_CHANNELS),
+            name="ck_memory_correction_recipient_channel",
+        ),
         # The tenant purge deletes by tenant.
         Index("ix_memory_correction_recipient_tenant", "tenant_id"),
+        # "Notices for agent X": the recall fallback (CP-13).
+        Index("ix_memory_correction_recipient_agent", "tenant_id", "agent_id"),
     )

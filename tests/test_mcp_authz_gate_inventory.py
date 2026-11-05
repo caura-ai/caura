@@ -152,6 +152,10 @@ MUTATING_OPS = frozenset(
         "redistribute",
         "verify",
         "unverify",
+        # Correction propagation: send moves the correction and each recipient's
+        # notice state; confirm sets the caller's own.
+        "send_correction",
+        "confirm_correction",
     }
 )
 READING_OPS = frozenset({"read", "query", "search", "list_collections", "lineage"})
@@ -229,9 +233,21 @@ SELF_BIND_ALLOWLIST: dict[str, str] = {
     ),
 }
 
-# Invariant 6. Empty: every op that changes or retires memory rows reaches a
-# row gate. Keys are ``tool.op``, or the bare tool name for a tool with no ops.
-ROW_GATE_ALLOWLIST: dict[str, str] = {}
+# Invariant 6. Every op that changes or retires memory rows reaches a row gate.
+# Keys are ``tool.op``, or the bare tool name for a tool with no ops. The two
+# correction ops write no memory row at all: they change a correction's notice
+# states (migration 074), and are mutating only in that sense.
+ROW_GATE_ALLOWLIST: dict[str, str] = {
+    "caura_manage.send_correction": (
+        "writes memory_correction rows, not memories. The bar is "
+        "enforce_send_correction (trust >= 3 for an agent credential), then a "
+        "read check on the corrected memory (authorize_memory_access)"
+    ),
+    "caura_manage.confirm_correction": (
+        "writes the caller's own memory_correction_recipient row, not a memory; "
+        "storage refuses an agent that is not on the recipient list"
+    ),
+}
 
 
 # Invariant 5. One entry, for a name the call never acts or reads as. The
@@ -1123,6 +1139,8 @@ def test_the_op_scan_reads_both_spellings() -> None:
             "lineage",
             "verify",
             "unverify",
+            "send_correction",
+            "confirm_correction",
         },
         "caura_doc": {"write", "read", "query", "delete", "list_collections", "search"},
         "caura_keystones_set": {"set", "delete"},

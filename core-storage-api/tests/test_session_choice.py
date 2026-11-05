@@ -363,7 +363,10 @@ def test_the_writer_session_population_is_pinned() -> None:
     # 143 -> 144 (pure unchanged at 61): ``correction_record`` (migration 073)
     # inserts the correction and its recipients; ``correction_get`` and
     # ``corrections_for_memory`` read on the replica.
-    assert len(methods) == 144, f"{len(methods)} methods open a writer session"
+    # 144 -> 147 (pure unchanged at 61): ``correction_begin_send``,
+    # ``correction_apply_states`` and ``correction_confirm`` (migration 074)
+    # update the correction and read it back in the same transaction.
+    assert len(methods) == 147, f"{len(methods)} methods open a writer session"
     assert len(pure) == 61, f"{len(pure)} of them show no write marker"
 
 

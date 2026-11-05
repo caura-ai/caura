@@ -213,7 +213,16 @@ class MemoryCorrectionRecipientOut(BaseModel):
     first_seen: str
     last_seen: str
     last_trace_id: str | None
-    notice_state: str = Field(description="``pending`` until the notice is sent.")
+    channel: str | None = Field(
+        default=None, description="``bus``, or ``recall`` (told on its next recall); null until sent."
+    )
+    notice_state: str = Field(
+        description="pending | sent | delivered | confirmed | late | failed | unreachable."
+    )
+    confirmed_at: str | None = None
+    notified_at: str | None = Field(default=None, description="When the bus accepted the notice.")
+    next_attempt_at: str | None = Field(default=None, description="A throttled send waits until then.")
+    attempts: int = 0
 
 
 class MemoryCorrectionActorOut(BaseModel):
@@ -226,6 +235,12 @@ class MemoryCorrectionCounts(BaseModel):
     truncated: int = Field(description="Readers of the old version past the cap, not listed.")
     readers: int = Field(description="recipients + truncated.")
     pending: int
+    sent: int = 0
+    delivered: int = 0
+    confirmed: int = 0
+    late: int = 0
+    failed: int = 0
+    unreachable: int = 0
 
 
 class MemoryCorrectionOut(BaseModel):
@@ -241,12 +256,25 @@ class MemoryCorrectionOut(BaseModel):
     )
     new_summary: str | None
     detail: dict
-    status: str = Field(description="``preview`` until the notices are sent, then ``sent``.")
+    status: str = Field(
+        description="``preview`` until sent; ``sending`` while the bus throttles a recipient; ``sent``; "
+        "``closed`` once every recipient confirmed or failed."
+    )
     created_at: str
+    sent_at: str | None = None
+    sent_by: str | None = None
     recipients: list[MemoryCorrectionRecipientOut] = Field(
         description="Agents that read the memory before the correction, latest read first; the corrector excluded."
     )
     counts: MemoryCorrectionCounts
+
+
+class CorrectionConfirmResponse(BaseModel):
+    correction_id: str
+    memory_id: str
+    agent_id: str
+    notice_state: str | None = Field(description="``confirmed``.")
+    confirmed_at: str | None
 
 
 class MemoryCorrectionListResponse(BaseModel):

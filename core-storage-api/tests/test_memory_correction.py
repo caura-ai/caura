@@ -1,4 +1,4 @@
-"""Memory corrections' storage half (migration 073), against a live PostgreSQL.
+"""Memory corrections' storage half (migrations 073 and 074), against a live PostgreSQL.
 
 A correction lists the agents that read the memory before it was corrected
 (``memory_exposure.first_seen < corrected_at``), less the correcting agent,
@@ -84,6 +84,11 @@ async def _record(client: AsyncClient, tenant: str, body: dict) -> dict:
     return r.json()
 
 
+def _states(**counts: int) -> dict:
+    states = ("pending", "sent", "delivered", "confirmed", "late", "failed", "unreachable")
+    return {s: counts.get(s, 0) for s in states}
+
+
 async def _get(client: AsyncClient, tenant: str, correction_id: str):
     return await client.get(f"{PREFIX}/memory-corrections/{correction_id}", params={"tenant_id": tenant})
 
@@ -113,7 +118,7 @@ async def test_readers_before_the_correction_are_listed_less_the_editor(client: 
     assert [x["agent_id"] for x in c["recipients"]] == ["reader-b", "reader-a"]
     b = c["recipients"][0]
     assert (b["reads"], b["notice_state"], b["last_trace_id"]) == (2, "pending", "tr-reader-b")
-    assert c["counts"] == {"recipients": 2, "truncated": 0, "readers": 2, "pending": 2}
+    assert c["counts"] == {"recipients": 2, "truncated": 0, "readers": 2, **_states(pending=2)}
 
 
 async def test_a_person_correcting_excludes_no_agent(client: AsyncClient):
@@ -152,7 +157,7 @@ async def test_at_most_fifty_recipients_and_the_rest_are_counted(client: AsyncCl
     # The three earliest readers are the ones past the cap.
     assert "agent-02" not in {x["agent_id"] for x in c["recipients"]}
     assert c["recipients"][0]["agent_id"] == "agent-52"
-    assert c["counts"] == {"recipients": 50, "truncated": 3, "readers": 53, "pending": 50}
+    assert c["counts"] == {"recipients": 50, "truncated": 3, "readers": 53, **_states(pending=50)}
 
 
 async def test_a_correction_is_bound_to_its_tenant(client: AsyncClient):
@@ -202,3 +207,101 @@ async def test_the_body_is_validated(client: AsyncClient):
         await client.post(url, params={"tenant_id": tenant}, json={**ok, "old_summary": "x" * 281})
     ).status_code == 422
     assert (await client.post(url, params={"tenant_id": ""}, json=ok)).status_code == 422
+
+
+# --- Sending (migration 074) ---------------------------------------------------
+
+
+async def _two_readers(client: AsyncClient) -> tuple[str, str]:
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    m = await _memory(client, tenant)
+    await _read(client, tenant, "reader-a", m, T0)
+    await _read(client, tenant, "reader-b", m, T0 + timedelta(minutes=10))
+    return tenant, (await _record(client, tenant, _body(m)))["id"]
+
+
+async def test_send_claims_a_preview_once(client: AsyncClient):
+    tenant, cid = await _two_readers(client)
+    url = f"{PREFIX}/memory-corrections/{cid}/send"
+    r = await client.post(url, params={"tenant_id": tenant}, json={"sent_by": "user:u1"})
+    assert r.status_code == 200, r.text
+    first = r.json()
+    assert (first["status"], first["sent_by"]) == ("sending", "user:u1")
+    assert first["sent_at"] is not None
+    # A second claim returns the record as it is, with the first sender.
+    again = (await client.post(url, params={"tenant_id": tenant}, json={"sent_by": "user:u2"})).json()
+    assert (again["status"], again["sent_by"], again["sent_at"]) == ("sending", "user:u1", first["sent_at"])
+    other = await client.post(url, params={"tenant_id": "t-other"}, json={"sent_by": "user:u1"})
+    assert other.status_code == 404
+
+
+async def test_states_are_written_and_a_confirm_is_never_undone(client: AsyncClient):
+    tenant, cid = await _two_readers(client)
+    await client.post(
+        f"{PREFIX}/memory-corrections/{cid}/send", params={"tenant_id": tenant}, json={"sent_by": "k"}
+    )
+    url = f"{PREFIX}/memory-corrections/{cid}/states"
+    r = await client.post(
+        url,
+        params={"tenant_id": tenant},
+        json={
+            "recipients": [
+                {
+                    "agent_id": "reader-a",
+                    "notice_state": "sent",
+                    "channel": "bus",
+                    "attempts": 1,
+                    "bus_message_id": "msg_1",
+                    "bus_delivery_id": "dlv_1",
+                    "notified_at": T0.isoformat(),
+                },
+                {"agent_id": "reader-b", "notice_state": "unreachable", "channel": "recall", "attempts": 1},
+            ],
+            "status": "sent",
+        },
+    )
+    assert r.status_code == 200, r.text
+    c = r.json()
+    assert c["status"] == "sent"
+    by = {x["agent_id"]: x for x in c["recipients"]}
+    assert (by["reader-a"]["channel"], by["reader-a"]["notice_state"], by["reader-a"]["bus_delivery_id"]) == (
+        "bus",
+        "sent",
+        "dlv_1",
+    )
+    assert (by["reader-b"]["channel"], by["reader-b"]["notice_state"]) == ("recall", "unreachable")
+    assert c["counts"] == {"recipients": 2, "truncated": 0, "readers": 2, **_states(sent=1, unreachable=1)}
+
+    confirm = f"{PREFIX}/memory-corrections/{cid}/confirm"
+    r = await client.post(confirm, params={"tenant_id": tenant}, json={"agent_id": "reader-b"})
+    assert r.status_code == 200, r.text
+    confirmed_at = {x["agent_id"]: x for x in r.json()["recipients"]}["reader-b"]["confirmed_at"]
+    assert confirmed_at is not None
+    # A stale write from a status refresh does not undo the confirm.
+    await client.post(
+        url,
+        params={"tenant_id": tenant},
+        json={"recipients": [{"agent_id": "reader-b", "notice_state": "unreachable", "channel": "recall"}]},
+    )
+    again = (await client.post(confirm, params={"tenant_id": tenant}, json={"agent_id": "reader-b"})).json()
+    b = {x["agent_id"]: x for x in again["recipients"]}["reader-b"]
+    assert (b["notice_state"], b["confirmed_at"]) == ("confirmed", confirmed_at)
+
+    # Not a recipient, or another tenant: 404.
+    r = await client.post(confirm, params={"tenant_id": tenant}, json={"agent_id": "stranger"})
+    assert r.status_code == 404
+    r = await client.post(confirm, params={"tenant_id": "t-other"}, json={"agent_id": "reader-a"})
+    assert r.status_code == 404
+
+
+async def test_states_reject_unknown_values_and_keep_a_preview(client: AsyncClient):
+    tenant, cid = await _two_readers(client)
+    url = f"{PREFIX}/memory-corrections/{cid}/states"
+    bad = {"recipients": [{"agent_id": "reader-a", "notice_state": "read"}]}
+    assert (await client.post(url, params={"tenant_id": tenant}, json=bad)).status_code == 422
+    assert (
+        await client.post(url, params={"tenant_id": tenant}, json={"status": "preview"})
+    ).status_code == 422
+    # ``status`` never moves a correction that was not claimed for sending.
+    r = await client.post(url, params={"tenant_id": tenant}, json={"status": "sent"})
+    assert r.json()["status"] == "preview"

@@ -513,6 +513,12 @@ class Settings(BaseSettings):
     # built (the A58 spike could not be scored because its verdicts only went
     # to logs). Default off.
     type_ii_materializer_shadow: bool = False
+    # Correction propagation (CP-11): the Caura bus's system sender, on the
+    # enterprise collaboration service. Empty (standalone OSS) → no bus: every
+    # correction notice is shown on the agent's next recall instead. The secret
+    # falls back to ``core_storage_shared_secret``, as the bus's own does.
+    collaboration_api_url: str = ""
+    collaboration_system_send_secret: SecretStr = Field(default=SecretStr(""), repr=False, exclude=True)
     core_storage_api_url: str = "http://localhost:8002"
     core_storage_shared_secret: SecretStr = Field(default=SecretStr(""), repr=False, exclude=True)
     core_storage_shared_secret_file: str = ""
