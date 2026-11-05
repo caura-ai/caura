@@ -360,7 +360,10 @@ def test_the_writer_session_population_is_pinned() -> None:
     # 142 -> 143 (pure unchanged at 61): ``exposure_record`` (migration 072)
     # upserts the memory-exposure rows; ``exposure_for_memory`` reads on the
     # replica.
-    assert len(methods) == 143, f"{len(methods)} methods open a writer session"
+    # 143 -> 144 (pure unchanged at 61): ``correction_record`` (migration 073)
+    # inserts the correction and its recipients; ``correction_get`` and
+    # ``corrections_for_memory`` read on the replica.
+    assert len(methods) == 144, f"{len(methods)} methods open a writer session"
     assert len(pure) == 61, f"{len(pure)} of them show no write marker"
 
 

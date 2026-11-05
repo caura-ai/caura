@@ -207,6 +207,53 @@ class MemoryExposureResponse(BaseModel):
     total_reads: int
 
 
+class MemoryCorrectionRecipientOut(BaseModel):
+    agent_id: str
+    reads: int = Field(description="Reads of the memory by this agent when the correction was recorded.")
+    first_seen: str
+    last_seen: str
+    last_trace_id: str | None
+    notice_state: str = Field(description="``pending`` until the notice is sent.")
+
+
+class MemoryCorrectionActorOut(BaseModel):
+    kind: str = Field(description="``user``, ``agent``, or the credential kind.")
+    id: str | None
+
+
+class MemoryCorrectionCounts(BaseModel):
+    recipients: int = Field(description="Agents listed (at most 50).")
+    truncated: int = Field(description="Readers of the old version past the cap, not listed.")
+    readers: int = Field(description="recipients + truncated.")
+    pending: int
+
+
+class MemoryCorrectionOut(BaseModel):
+    id: str
+    tenant_id: str
+    memory_id: str
+    event_id: str
+    kind: str = Field(description="content_edit | status | unverify | conflict_resolve")
+    actor: MemoryCorrectionActorOut
+    corrected_at: str
+    old_summary: str | None = Field(
+        description="The text before the correction; null for an agent that did not read it."
+    )
+    new_summary: str | None
+    detail: dict
+    status: str = Field(description="``preview`` until the notices are sent, then ``sent``.")
+    created_at: str
+    recipients: list[MemoryCorrectionRecipientOut] = Field(
+        description="Agents that read the memory before the correction, latest read first; the corrector excluded."
+    )
+    counts: MemoryCorrectionCounts
+
+
+class MemoryCorrectionListResponse(BaseModel):
+    memory_id: str
+    corrections: list[MemoryCorrectionOut] = Field(description="Newest first.")
+
+
 class MemoryStatusPatchResponse(BaseModel):
     memory_id: str
     old_status: str | None

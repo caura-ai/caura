@@ -2,8 +2,9 @@
 
 Status: in progress. Done: CP-04 (this spec), CP-05 (`memory_exposure`,
 migration 072), CP-06 (exposure recorded on every agent read), CP-07
-(`GET /memories/{id}/exposure`). Next: the `caura.memory.corrected` event, the
-notice fan-out, and the person's view of who confirmed.
+(`GET /memories/{id}/exposure`), CP-10 (the recipient list: `memory_correction`,
+migration 073, and the preview routes). Next: sending the notices (CP-11) and
+the person's view of who confirmed.
 
 ## Problem
 
@@ -120,6 +121,34 @@ Fan-out runs in core-worker, off the request path.
 "Read the old version" is `memory_exposure.last_seen < corrected_at` (or
 `first_seen`, when the agent has read the corrected version since): an agent
 whose only reads are after the correction is not told.
+
+## Recipients (CP-10)
+
+A consumer of `caura.memory.corrected` (`common/events/correction_handlers.py`;
+core-worker on SaaS, core-api on the in-process bus) posts each event to
+core-storage-api, which in one transaction writes a `memory_correction` row
+(id, tenant, memory, kind, actor, corrected_at, old/new summary, detail,
+status `preview`) and one `memory_correction_recipient` row per agent to tell
+(agent_id, reads, first_seen, last_seen, last_trace_id, notice_state
+`pending`). Migration 073.
+
+- Recipients: the memory's `memory_exposure` rows with
+  `first_seen < corrected_at`, less the correcting agent (when the actor is an
+  agent), latest read first, at most 50. `truncated` counts the readers past
+  the cap.
+- One record per event: `event_id` is unique, so a redelivery returns the first
+  record and writes nothing. A memory no longer in the tenant records nothing.
+- Both tables cascade from their parent, and go with a tenant purge.
+
+Preview, before anything is sent, with the same access rule as
+`GET /memories/{id}` (another tenant's correction is a 404):
+
+- `GET /api/v1/corrections/{id}?tenant_id=` → the record, `recipients`, and
+  `counts {recipients, truncated, readers, pending}`;
+- `GET /api/v1/memories/{id}/corrections?tenant_id=` → the memory's
+  corrections, newest first.
+
+An agent that is not on the recipient list gets `old_summary: null`.
 
 ## Notice format
 

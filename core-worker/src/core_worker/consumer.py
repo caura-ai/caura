@@ -11,6 +11,9 @@ Subscribes to:
   reconstructs the tenant config from the payload, runs
   :func:`common.enrichment.enrich_memory` (3-tier provider fallback),
   and PATCHes the resulting fields back onto the memory row.
+* ``Topics.Memory.CORRECTED`` (correction propagation, CP-10), through
+  :mod:`common.events.correction_handlers` — records the correction and the
+  agents that read the memory before it (no LLM call, nothing sent).
 
 Embed-request flow (existing):
 
@@ -56,6 +59,7 @@ from pydantic import ValidationError
 from common.embedding import call_embedding_gated, get_platform_embedding
 from common.enrichment import EnrichmentResult, enrich_memory
 from common.events.base import Event
+from common.events.correction_handlers import CorrectionStorageAdapter, register_correction_consumer
 from common.events.factory import get_event_bus
 from common.events.lifecycle_archive_request import LifecycleArchiveRequest
 from common.events.lifecycle_handlers import claim_audit_row, release_cancelled_claim, write_success
@@ -73,6 +77,7 @@ from core_worker.backfill import run_embedding_backfill
 from core_worker.clients.storage_client import (
     find_embedding_by_content_hash,
     get_storage_client,
+    record_memory_correction,
     update_lifecycle_audit_row,
     update_memory_embedding,
     update_memory_enrichment,
@@ -854,6 +859,18 @@ class _SuppressionAdapter(SuppressionStorageAdapter):
         )
 
 
+class _CorrectionAdapter(CorrectionStorageAdapter):
+    """Wires :func:`record_memory_correction` into the shared
+    :class:`CorrectionStorageAdapter` contract (correction propagation, CP-10),
+    bound to ``configure`` like :class:`_SuppressionAdapter`.
+    """
+
+    async def record_correction(self, *, tenant_id: str, body: dict) -> dict:
+        if _storage_client_factory is None:
+            raise RuntimeError("consumer.configure() must run before register_consumers()")
+        return await record_memory_correction(_storage_client_factory(), tenant_id=tenant_id, body=body)
+
+
 @scoped(
     "embed",
     tenant=lambda a: (a["event"].payload or {}).get("tenant_id"),
@@ -1036,3 +1053,5 @@ def register_consumers() -> None:
     # here keeps the registration order single-file rather than scattered
     # across multiple ``register_*`` entry points.
     register_suppression_consumer(_SuppressionAdapter())
+    # Correction propagation (CP-10): who read a corrected memory.
+    register_correction_consumer(_CorrectionAdapter())

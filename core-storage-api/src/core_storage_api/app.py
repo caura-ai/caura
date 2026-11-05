@@ -49,6 +49,7 @@ from core_storage_api.routers import (
     agents_router,
     audit_router,
     capability_usage_router,
+    corrections_router,
     debug_router,
     documents_router,
     entities_router,
@@ -429,6 +430,9 @@ def create_app() -> FastAPI:
     # Memory exposure (migration 072): which agents a memory was handed to.
     # Every route is bound to one tenant.
     app.include_router(exposure_router, prefix=prefix)
+    # Memory corrections (migration 073): who to tell about a correction.
+    # Every route is bound to one tenant.
+    app.include_router(corrections_router, prefix=prefix)
 
     return app
 

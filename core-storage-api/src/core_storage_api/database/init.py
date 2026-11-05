@@ -59,8 +59,10 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # neither table. 071 adds the evidence columns and builds
 # ``ix_memories_verification`` last, so that index, valid, joins the probe. 072
 # creates ``memory_exposure`` and its index in one transaction, so the table
-# joins the probe.
-_HEAD_FINGERPRINT_REVISION = "072"
+# joins the probe. 073 creates ``memory_correction`` and then
+# ``memory_correction_recipient`` in one transaction, so the second joins the
+# probe.
+_HEAD_FINGERPRINT_REVISION = "073"
 _HEAD_FINGERPRINT_SQL: str | None = (
     "SELECT (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -87,7 +89,9 @@ _HEAD_FINGERPRINT_SQL: str | None = (
     "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' "
     "AND c.relname = 'ix_memories_verification' AND i.indisvalid) "
     "AND EXISTS (SELECT 1 FROM information_schema.tables "
-    "WHERE table_schema = 'public' AND table_name = 'memory_exposure')"
+    "WHERE table_schema = 'public' AND table_name = 'memory_exposure') "
+    "AND EXISTS (SELECT 1 FROM information_schema.tables "
+    "WHERE table_schema = 'public' AND table_name = 'memory_correction_recipient')"
 )
 
 _engine: AsyncEngine | None = None

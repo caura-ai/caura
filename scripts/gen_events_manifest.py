@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from common.events import lifecycle_handlers, suppression_handlers
+from common.events import correction_handlers, lifecycle_handlers, suppression_handlers
 from common.events.topics import Topics, renamed
 
 MANIFEST_PATH = (
@@ -85,6 +85,7 @@ _SHARED_REGISTRARS: dict[str, list[Callable[[Any], None]]] = {
     "core-worker": [
         lifecycle_handlers.register_archive_consumers,
         suppression_handlers.register_suppression_consumer,
+        correction_handlers.register_correction_consumer,
     ],
 }
 
