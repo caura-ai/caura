@@ -243,11 +243,12 @@ DEFAULT_SETTINGS: dict = {
         "auto_insights_enabled": None,
     },
     "observability": {
-        # Opt-in (default off). When on, each agent-chosen ``caura_recall``
+        # On by default (opt out with False). Each agent-chosen ``caura_recall``
         # call is logged (query + scope + candidate scores + below-floor
         # near-misses) to ``recall_event`` / ``recall_candidate`` for "why
-        # aren't good memories recalled?" analysis. The query is stored with PII
-        # masked, and events go after ``lifecycle.memory_retention_days``.
+        # aren't good memories recalled?" analysis and the evidence-coverage
+        # report. The query is stored with PII masked, and events go after
+        # ``lifecycle.memory_retention_days``.
         "recall_logging_enabled": None,
         # Opt-in (default off). When on, the plugin's automatic ``/search``
         # path is ALSO logged — but in a lighter form: returned candidates
@@ -1514,12 +1515,12 @@ class ResolvedConfig:
         val = self._ts.get("insights", {}).get("auto_insights_enabled")
         return val if val is not None else False
 
-    # Recall logging — opt-in (default False). When on, agent-chosen
+    # Recall logging — on by default (an explicit False opts out). Agent-chosen
     # ``caura_recall`` calls are logged to recall_event / recall_candidate.
     @property
     def recall_logging_enabled(self) -> bool:
         val = self._ts.get("observability", {}).get("recall_logging_enabled")
-        return val if val is not None else False
+        return val if val is not None else True
 
     # Usage metering — on by default (see the defaults above).
     @property

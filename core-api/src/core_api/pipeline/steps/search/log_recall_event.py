@@ -1,4 +1,4 @@
-"""LogRecallEvent — opt-in diagnostic logging of agent-chosen recalls.
+"""LogRecallEvent — diagnostic logging of agent-chosen recalls.
 
 Writes one ``recall_event`` + a handful of ``recall_candidate`` rows (the
 returned top-k *and* a few near-misses below the similarity floor) so we can
@@ -6,6 +6,7 @@ answer "why aren't good memories recalled?" — distinguishing *nobody asked*
 from *just missed the cutoff* from *outranked*.
 
 Gating (cheap, evaluated before any DB work) — two independent modes:
+(``mcp_recall`` on by default, ``search`` opt-in; an explicit False opts out)
   * ``source == "mcp_recall"`` + ``tenant_config.recall_logging_enabled``
     → FULL log: returned candidates + a few below-floor near-misses.
   * ``source == "search"`` (the plugin's automatic path) +
@@ -68,11 +69,11 @@ class LogRecallEvent:
         try:
             source = ctx.data.get("source")
             cfg = ctx.tenant_config
-            # Two independent, per-tenant opt-in modes. ``mcp_recall`` (the
+            # Two independent, per-tenant modes (mcp_recall default on, search opt-in). ``mcp_recall`` (the
             # agent-chosen tool) logs the full picture incl. near-misses;
             # ``search`` (the high-volume automatic path) logs returned-only.
             if source == "mcp_recall":
-                if not getattr(cfg, "recall_logging_enabled", False):
+                if not getattr(cfg, "recall_logging_enabled", True):
                     return None
                 include_near_misses = True
             elif source == "search":
