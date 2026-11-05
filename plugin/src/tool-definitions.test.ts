@@ -152,9 +152,18 @@ describe("createToolFromSpec factory", () => {
   // Listing them keeps the divergence a recorded decision instead of a drift.
   // ``verify``/``unverify`` (evidence contract v1, EC-14) do have REST
   // endpoints; the plugin does not offer them yet, which caura_manage's
-  // description says.
+  // description says. So do ``send_correction``/``confirm_correction``
+  // (correction propagation, CP-11): POST /corrections/{id}/send and /confirm;
+  // the plugin's recall-fallback confirm is its own change (CP-13).
   const MCP_ONLY_OPS: Record<string, readonly string[]> = {
-    caura_manage: ["bulk_delete", "lineage", "verify", "unverify"],
+    caura_manage: [
+      "bulk_delete",
+      "lineage",
+      "verify",
+      "unverify",
+      "send_correction",
+      "confirm_correction",
+    ],
   };
 
   test("every declared op is offered, or recorded as MCP-only", () => {
