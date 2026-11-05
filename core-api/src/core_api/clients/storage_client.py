@@ -2074,6 +2074,11 @@ class CoreStorageClient:
         )
         return (result or {}).get("recorded", 0)  # type: ignore[union-attr]
 
+    async def list_baton_recipients(self, tenant_id: str, baton_id: str) -> list[dict]:
+        """One baton's receiver rows (``agent_id, state, accepted_at, accepted_via``), for the bus's status read."""
+        result = await self._get(f"/batons/{baton_id}/recipients", tenant_id=tenant_id)
+        return (result or {}).get("recipients", [])
+
     async def list_baton_notices(self, tenant_id: str, agent_id: str, *, limit: int = 2) -> list[dict]:
         """Handoff batons still waiting on ``agent_id`` (not accepted, < 7 days), newest first."""
         result = await self._get("/batons/notices", tenant_id=tenant_id, agent_id=agent_id, limit=limit)

@@ -4,7 +4,8 @@ The bus records a baton's receivers (``POST /batons/{id}/recipients``); a
 recall lists the ones still waiting on an agent (``GET /batons/notices``):
 ``delivered``, younger than 7 days, newest first, at most ``limit``, bound to
 the tenant. ``/accept`` takes one up (from the receiver or the bus), and
-``/notices/checked`` records when core-api last read the bus.
+``/notices/checked`` records when core-api last read the bus, and the bus's
+status read lists a baton's rows.
 """
 
 from __future__ import annotations
@@ -191,3 +192,20 @@ async def test_the_lookup_can_use_the_waiting_index(client: AsyncClient):
             )
         ).scalar_one()
     assert "WHERE (state = 'delivered'::text)" in indexdef
+
+
+async def test_the_bus_status_lists_a_batons_rows(client: AsyncClient):
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    baton_id = await _baton(client, tenant, ["b", "a"])
+    await _accept(client, tenant, baton_id, "a")
+
+    r = await client.get(f"{PREFIX}/batons/{baton_id}/recipients", params={"tenant_id": tenant})
+    assert r.status_code == 200, r.text
+    rows = r.json()["recipients"]
+    assert [(x["agent_id"], x["state"], x["accepted_via"]) for x in rows] == [
+        ("a", "accepted", "recall"),
+        ("b", "delivered", None),
+    ]
+    assert rows[0]["accepted_at"] and rows[1]["accepted_at"] is None
+    other = await client.get(f"{PREFIX}/batons/{baton_id}/recipients", params={"tenant_id": f"o-{tenant}"})
+    assert other.json() == {"recipients": []}

@@ -26,9 +26,10 @@ The rules, all here so the call sites stay two lines, as for correction notices
   state into ``baton_recipient``, so the notice stops. Standalone OSS has no
   bus, and nothing writes the rows a recall reads: the lookup finds nothing.
 
-Accepting marks the row ``accepted`` and, when a bus is configured, asks the
-bus to ack the receiver's delivery, so the sender sees ``accepted`` in the
-baton status. No LLM calls.
+Accepting marks the row ``accepted``. The bus delivery is left as it is (an ack
+there needs the receiver's own lease); the bus's baton status reads these rows
+back (``list_baton_recipients``), so the sender still sees ``accepted``. No LLM
+calls.
 """
 
 from __future__ import annotations
@@ -127,8 +128,8 @@ async def _bus_headers() -> dict[str, str]:
     return headers
 
 
-def _bus_url(baton_id: str, suffix: str = "") -> str:
-    return f"{settings.collaboration_api_url.strip().rstrip('/')}/api/v1/bus/system/batons/{baton_id}{suffix}"
+def _bus_url(baton_id: str) -> str:
+    return f"{settings.collaboration_api_url.strip().rstrip('/')}/api/v1/bus/system/batons/{baton_id}"
 
 
 async def _bus_state(tenant_id: str, agent_id: str, baton_id: str) -> str | None:
@@ -206,33 +207,16 @@ async def finish_notices(started: NoticesTask | None) -> list[dict]:
     return notices
 
 
-async def _bus_accept(tenant_id: str, agent_id: str, baton_id: str) -> None:
-    try:
-        async with httpx.AsyncClient(timeout=BUS_TIMEOUT_S) as client:
-            resp = await client.post(
-                _bus_url(baton_id, "/accept"),
-                json={"tenant_id": tenant_id, "agent_id": agent_id},
-                headers=await _bus_headers(),
-            )
-        if resp.status_code != 404:
-            resp.raise_for_status()
-    except Exception:
-        logger.warning("baton accept not acked on the bus", exc_info=True)
-
-
 async def accept_as_agent(tenant_id: str, baton_id: str, agent_id: str) -> dict:
     """``agent_id`` accepts a baton handed to it; its receiver state. 404 when it is not a receiver.
 
     Shared by REST ``POST /batons/{id}/accept`` and MCP ``caura_manage
     op=accept_baton``. Idempotent: a second accept keeps the first
-    ``accepted_at``. With a bus configured, the receiver's delivery is acked
-    there too (after the response; a failure is logged, the accept stands).
+    ``accepted_at``.
     """
     row = await get_storage_client().accept_baton(tenant_id, baton_id, agent_id=agent_id, via="recall")
     if row is None:
         raise HTTPException(status_code=404, detail="Not a receiver of this baton")
-    if row.get("message_id") and bus_configured():
-        track_task(_bus_accept(tenant_id, agent_id, row["baton_id"]))
     return {
         "baton_id": row["baton_id"],
         "agent_id": agent_id,

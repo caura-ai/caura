@@ -237,9 +237,8 @@ async def test_bus_state_reads_the_receivers_own_row(a_bus, monkeypatch):
 
 
 @pytest.mark.unit
-async def test_accept_acks_the_bus_delivery_when_a_bus_is_configured(
-    storage, scheduled, a_bus, monkeypatch
-):
+async def test_accept_marks_the_row_and_leaves_the_bus_alone(storage, scheduled, a_bus):
+    """An ack on the bus takes the receiver's own lease; the bus status reads the row instead."""
     storage.accept_baton.return_value = {
         "baton_id": "b-1",
         "agent_id": "a",
@@ -248,12 +247,6 @@ async def test_accept_acks_the_bus_delivery_when_a_bus_is_configured(
         "accepted_at": "2026-11-05T10:00:00+00:00",
         "message_id": "msg-1",
     }
-    acked: list[tuple] = []
-
-    async def bus_accept(*args):
-        acked.append(args)
-
-    monkeypatch.setattr(bn, "_bus_accept", bus_accept)
     out = await bn.accept_as_agent("t-1", "b-1", "a")
     assert out == {
         "baton_id": "b-1",
@@ -265,22 +258,6 @@ async def test_accept_acks_the_bus_delivery_when_a_bus_is_configured(
     storage.accept_baton.assert_awaited_once_with(
         "t-1", "b-1", agent_id="a", via="recall"
     )
-    (coro,) = scheduled
-    await coro
-    assert acked == [("t-1", "a", "b-1")]
-
-
-@pytest.mark.unit
-async def test_accept_without_a_bus_only_marks_the_row(storage, scheduled, no_bus):
-    storage.accept_baton.return_value = {
-        "baton_id": "b-1",
-        "agent_id": "a",
-        "from_agent": "sender",
-        "state": "accepted",
-        "accepted_at": "x",
-        "message_id": "msg-1",
-    }
-    await bn.accept_as_agent("t-1", "b-1", "a")
     assert scheduled == []
 
 

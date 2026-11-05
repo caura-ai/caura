@@ -8085,6 +8085,25 @@ class PostgresService:
             )
             return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
+    async def baton_recipients_for_baton(self, tenant_id: str, baton_id: str) -> list[dict]:
+        """Every receiver row of one baton, by agent: what the bus's status read merges in."""
+        r = BatonRecipient
+        async with get_read_session() as session:
+            rows = await session.execute(
+                select(r.agent_id, r.state, r.accepted_at, r.accepted_via)
+                .where(r.tenant_id == tenant_id, r.baton_id == UUID(baton_id))
+                .order_by(r.agent_id)
+            )
+            return [
+                {
+                    "agent_id": row.agent_id,
+                    "state": row.state,
+                    "accepted_at": _iso(row.accepted_at),
+                    "accepted_via": row.accepted_via,
+                }
+                for row in rows.all()
+            ]
+
     async def baton_notices_for_agent(
         self, tenant_id: str, agent_id: str, *, limit: int = 2, max_age_days: int = 7
     ) -> list[dict]:

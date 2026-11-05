@@ -6,7 +6,8 @@ tenant, a required ``tenant_id`` query parameter, as the correction routes are.
 The bus records the receivers when it sends a baton (``POST
 /batons/{id}/recipients``); core-api reads the waiting ones on recall
 (``/notices``), records an accept (``/accept``, from the receiver or the bus)
-and when it last read the bus (``/notices/checked``).
+and when it last read the bus (``/notices/checked``); the bus's status read
+lists a baton's rows (``GET /batons/{id}/recipients``).
 """
 
 from __future__ import annotations
@@ -55,6 +56,13 @@ async def record_recipients(tenant_id: str, baton_id: UUID, body: RecipientsIn) 
         recipients=[r.model_dump() for r in body.recipients],
     )
     return {"recorded": n}
+
+
+@router.get("/{baton_id}/recipients")
+async def list_recipients(tenant_id: str, baton_id: UUID) -> dict:
+    """The baton's receiver rows: ``{"recipients": [{agent_id, state, accepted_at, accepted_via}]}``."""
+    _require_tenant(tenant_id)
+    return {"recipients": await _svc.baton_recipients_for_baton(tenant_id, str(baton_id))}
 
 
 @router.get("/notices")

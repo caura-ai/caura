@@ -8,8 +8,8 @@ that only recalls sees a ``baton_notices`` entry on its next recall
 - ``GET /batons/{id}``: the baton as this receiver got it (its own delivered
   links, each re-checked against its read access today, with titles), or as
   its sender cited it. Anyone else gets the same 404 as for an unknown baton.
-- ``POST /batons/{id}/accept``: the receiver takes it up, so the notice stops;
-  with a bus configured, its delivery is acked there too.
+- ``POST /batons/{id}/accept``: the receiver takes it up, so the notice stops.
+  The bus's baton status shows the sender ``accepted``.
 
 Identity is the correction-confirm rule: an agent credential acts as itself; a
 tenant key names the agent with ``agent_id``; a signed-in person cannot.

@@ -172,22 +172,21 @@ marks the row `accepted`, receiver only, with the same identity rules as
 `POST /corrections/{id}/confirm`: an agent credential acts as itself, a tenant
 key names the agent with `agent_id`, a person cannot.
 
-**Keeping the bus and the table in step.** Both directions go through two
-system routes on the bus (enterprise follow-up, `X-Caura-System-Secret`, plus a
-Cloud Run ID token for an `https` bus):
+**Keeping the bus and the table in step** (enterprise follow-up):
 
-- `GET {COLLABORATION_API_URL}/api/v1/bus/system/batons/{id}?tenant_id&agent_id`
+- Bus → table. `GET {COLLABORATION_API_URL}/api/v1/bus/system/batons/{id}?tenant_id&agent_id`
+  (`X-Caura-System-Secret`, plus a Cloud Run ID token for an `https` bus)
   answers `{"receivers": [{"agent_id", "state"}]}` with the status read's
   states. After a response that showed a notice, core-api asks it for that
   receiver (at most every 30 s per row, fire-and-forget) and copies `accepted`
   (an ack) or `replied` into the row, so the notice stops for an agent that
-  took the baton up on the bus.
-- `POST {COLLABORATION_API_URL}/api/v1/bus/system/batons/{id}/accept`
-  `{tenant_id, agent_id}` acks that receiver's delivery, so the sender's status
-  shows `accepted`. core-api calls it after a recall-side accept.
-
-Until the bus serves them, a 404 reads as "no change" and the accept stands on
-the core-api side.
+  took the baton up on the bus. Until the bus serves the route, a 404 reads as
+  "no change".
+- Table → bus. A recall-side accept does not touch the bus delivery: acking it
+  takes the receiver's own lease. The bus's baton status reads the rows
+  (`list_baton_recipients`, storage `GET /batons/{id}/recipients`) and shows a
+  receiver that accepted on recall as `accepted` while its delivery is still
+  open (`delivered` or `late`).
 
 **OpenClaw.** Automatic recall reads each noticed baton (`GET /batons/{id}`)
 and shows it before the recalled memories, framed as data:
