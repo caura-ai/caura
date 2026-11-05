@@ -260,6 +260,7 @@ async def scored_search(request: Request) -> list[dict]:
                 history_query=bool(body.get("history_query", False)),
                 # Evidence contract v1 — a filter, not a ranking input.
                 verified_only=bool(body.get("verified_only", False)),
+                baton_id=body.get("baton_id") or None,
             )
         for r in results:
             # MEMORY_LIST_FIELDS, not MEMORY_FIELDS (audit oss-0814-m-39): this
@@ -379,6 +380,7 @@ async def scored_search_explain(request: Request) -> dict:
         history_query=bool(body.get("history_query", False)),
         strict_fleet_scoping=body.get("strict_fleet_scoping", False),
         verified_only=bool(body.get("verified_only", False)),
+        baton_id=body.get("baton_id") or None,
     )
 
 
@@ -440,6 +442,7 @@ async def load_by_ids(request: Request) -> list[dict]:
                 readable_tenant_ids=body.get("readable_tenant_ids") or None,
                 strict_fleet_scoping=body.get("strict_fleet_scoping", False),
                 verified_only=bool(body.get("verified_only", False)),
+                baton_id=body.get("baton_id") or None,
             )
         # No vectors (L-188): ClassifyQuery builds result rows from these, and
         # a result carries no vector.
@@ -620,6 +623,7 @@ async def find_successors(request: Request) -> list[dict]:
         # there too (L-43); absent reads the home tenant, as before.
         readable_tenant_ids=body.get("readable_tenant_ids") or None,
         verified_only=bool(body.get("verified_only", False)),
+        baton_id=body.get("baton_id") or None,
     )
     # ``successor_of`` names the row each one replaced: its ``supersedes_id``,
     # or for a contradiction's further loser the one its record names (M-34).
@@ -1756,7 +1760,7 @@ async def list_by_filters(request: Request) -> list[dict]:
     """Non-admin memory list WITH visibility scoping (MCP ``caura_list``).
 
     Body: ``{tenant_id, caller_agent_id?, caller_tenant_id?, fleet_id?,
-    written_by?, memory_type?, status?, run_id?, weight_min?, weight_max?,
+    written_by?, memory_type?, status?, run_id?, baton_id?, weight_min?, weight_max?,
     created_after?, created_before?, include_deleted, sort, order, limit, offset,
     cursor_ts?, cursor_id?, readable_tenant_ids?, visibility?,
     include_scope_agent?}``.
@@ -1818,6 +1822,7 @@ async def list_by_filters(request: Request) -> list[dict]:
         exclude_memory_types=exclude_memory_types,
         status=body.get("status"),
         run_id=body.get("run_id"),
+        baton_id=body.get("baton_id") or None,
         weight_min=body.get("weight_min"),
         weight_max=body.get("weight_max"),
         created_after=created_after,

@@ -1509,6 +1509,7 @@ async def caura_recall(
         bool,
         Field(description="Only tool-observed or human-verified rows."),
     ] = False,
+    baton_id: Annotated[str | None, Field(description="Only rows linked to this handoff baton.")] = None,
 ) -> ToolReply:
     """Hybrid semantic+keyword recall, with optional LLM brief."""
     t0 = time.perf_counter()
@@ -1699,6 +1700,7 @@ async def caura_recall(
             retrieval_ctx=retrieval_ctx,
             empty_hint_ctx=empty_hint_ctx,
             verified_only=verified_only,
+            baton_id=baton_id,
         )
         # Cross-tenant read audit (F2): emit one event per source tenant when
         # the credential widened beyond home. Async queue — non-blocking.
@@ -3894,6 +3896,7 @@ async def caura_list(
     limit: Annotated[int, Field(description="1-50.")] = 25,
     cursor: Annotated[str | None, Field(description="Pagination cursor.")] = None,
     include_deleted: Annotated[bool, Field(description="Trust-3 only.")] = False,
+    baton_id: Annotated[str | None, Field(description="Only rows linked to this handoff baton.")] = None,
 ) -> ToolReply:
     """Non-semantic memory enumeration: filter, sort, paginate by metadata.
     scope='agent' (default) requires trust ≥ 1. scope='fleet' reads cross-agent
@@ -4042,6 +4045,7 @@ async def caura_list(
                 "written_by": effective_written_by,
                 "memory_type": memory_type,
                 "status": status,
+                "baton_id": baton_id,
                 "weight_min": weight_min,
                 "weight_max": weight_max,
                 "created_after": ts_after.isoformat() if ts_after else None,

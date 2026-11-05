@@ -2540,6 +2540,19 @@
       "SearchRequest": {
         "additionalProperties": true,
         "properties": {
+          "baton_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Return only memories linked to this handoff baton (metadata.baton_id). Narrows what the caller can already read; a filter only.",
+            "title": "Baton Id"
+          },
           "caller_agent_id": {
             "anyOf": [
               {
@@ -3283,6 +3296,25 @@
                 }
               ],
               "title": "Run Id"
+            }
+          },
+          {
+            "description": "Only memories linked to this handoff baton (`metadata.baton_id`). Narrows the caller's visibility; never widens it.",
+            "in": "query",
+            "name": "baton_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only memories linked to this handoff baton (`metadata.baton_id`). Narrows the caller's visibility; never widens it.",
+              "title": "Baton Id"
             }
           },
           {

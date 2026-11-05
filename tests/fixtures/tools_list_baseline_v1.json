@@ -637,6 +637,19 @@
           "description": "Trust-3 only.",
           "title": "Include Deleted",
           "type": "boolean"
+        },
+        "baton_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Only rows linked to this handoff baton.",
+          "title": "Baton Id"
         }
       },
       "title": "caura_listArguments",
@@ -926,6 +939,19 @@
           "description": "Only tool-observed or human-verified rows.",
           "title": "Verified Only",
           "type": "boolean"
+        },
+        "baton_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Only rows linked to this handoff baton.",
+          "title": "Baton Id"
         }
       },
       "required": [

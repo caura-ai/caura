@@ -165,6 +165,7 @@ async def search_explain(
             # EC-11 — the same filter /search applies, so a verified-only
             # search is explained as the search it is.
             verified_only=body.verified_only,
+            baton_id=body.baton_id,
             explain_ctx=explain_ctx,
         )
 

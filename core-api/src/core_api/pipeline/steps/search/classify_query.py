@@ -270,6 +270,7 @@ class ClassifyQuery:
                         strict_fleet_scoping=strict_fleet_scoping,
                         include_derived=ctx.data.get("include_derived", True),
                         verified_only=bool(ctx.data.get("verified_only")),
+                        baton_id=ctx.data.get("baton_id"),
                         pool_report=ctx.data,
                     )
 
@@ -588,6 +589,7 @@ class ClassifyQuery:
         strict_fleet_scoping: bool = False,
         include_derived: bool = True,
         verified_only: bool = False,
+        baton_id: str | None = None,
     ) -> list[types.SimpleNamespace]:
         """Load memories linked to graph-expanded entities, scored by hop distance."""
         all_entity_ids = list(entity_hops.keys())
@@ -704,6 +706,7 @@ class ClassifyQuery:
             # EC-11 — same filter as the scored path, or the short-circuit
             # would answer a verified-only query with unverified rows.
             "verified_only": verified_only,
+            "baton_id": baton_id,
             # C27 — the ENTITY_LOOKUP short-circuit bypasses scored search
             # entirely, so it needs the scope flag in its own right; inheriting
             # it only on the scored path would leave this route permissive.
