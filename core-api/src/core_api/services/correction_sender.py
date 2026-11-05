@@ -14,8 +14,9 @@ system sender (enterprise ``platform-collaboration-api``,
 
 Per recipient: ``accepted`` / ``already_sent`` → ``sent`` on the ``bus``
 channel; ``unknown_agent`` (and a bus that refuses the notice) → ``pending`` on
-the ``recall`` channel: the agent is told on its next recall (CP-13), which
-marks it ``delivered``. ``unreachable`` is no longer written, since the recall
+the ``recall`` channel. Every recipient that has not confirmed, on either
+channel, is also told on its next recall (CP-13), which marks a ``pending`` or
+``sent`` notice ``delivered``; a status read never moves it back to ``sent``. ``unreachable`` is no longer written, since the recall
 channel always reaches the agent; old rows may still carry it. ``throttled`` / ``backlog_full`` →
 stays ``pending`` with ``next_attempt_at``. A throttled batch is retried inline
 when the bus asks for a short wait, then from a background task; anything
@@ -431,6 +432,9 @@ async def refresh_correction(tenant_id: str, correction: dict) -> dict:
                 continue
             outcome = seen.get("outcome")
             if outcome not in _OUTCOMES or outcome == r.get("notice_state"):
+                continue
+            if outcome == "sent" and r.get("notice_state") == "delivered":
+                # A recall handed it the notice before the bus saw a claim.
                 continue
             confirmed_at = seen.get("replied_at") or seen.get("acked_at") if outcome == "confirmed" else None
             updates.append(

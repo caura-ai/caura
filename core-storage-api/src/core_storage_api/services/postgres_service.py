@@ -7979,28 +7979,37 @@ class PostgresService:
     ) -> list[dict]:
         """Corrections this agent still has to hear about on its next recall, newest first.
 
-        The recall fallback (CP-13): the agent is a recipient of a correction
+        The guaranteed path (CP-13): the agent is a recipient of a correction
         that has been sent (any status past ``preview``: ``sending`` while a
         peer still waits on the bus, ``closed`` once every peer confirmed or
         failed, and a failed one is exactly who this is for) younger than
-        ``max_age_days``, its notice is not ``confirmed``, and the bus is not
-        carrying it (``channel`` is ``recall``, or the bus gave up:
-        ``failed`` / ``unreachable``). One
-        probe of ``ix_memory_correction_recipient_agent`` (migration 074), at
-        most 50 rows per correction. On the replica like every recall read:
-        a notice confirmed a moment ago can show once more under lag.
+        ``max_age_days``, and its notice is not ``confirmed``, whatever the
+        channel. A bus message is only the fast path: the bus accepts a notice
+        for any agent in the agents table, and a row there (e.g. written by a
+        tenant-key search naming ``caller_agent_id``) does not mean anyone
+        listens on the bus for it. One probe of
+        ``ix_memory_correction_recipient_agent`` (migration 074), at most 50
+        rows per correction. On the replica like every recall read: a notice
+        confirmed a moment ago can show once more under lag.
         """
         r, c = MemoryCorrectionRecipient, MemoryCorrection
         async with get_read_session() as session:
             rows = await session.execute(
-                select(c.id, c.memory_id, c.old_summary, c.new_summary, c.corrected_at, r.notified_at)
+                select(
+                    c.id,
+                    c.memory_id,
+                    c.old_summary,
+                    c.new_summary,
+                    c.corrected_at,
+                    r.notice_state,
+                    r.notified_at,
+                )
                 .select_from(r)
                 .join(c, c.id == r.correction_id)
                 .where(
                     r.tenant_id == tenant_id,
                     r.agent_id == agent_id,
                     r.notice_state != "confirmed",
-                    or_(r.channel == "recall", r.notice_state.in_(("failed", "unreachable"))),
                     c.status != "preview",
                     c.corrected_at > func.now() - timedelta(days=max_age_days),
                 )
@@ -8014,6 +8023,7 @@ class PostgresService:
                     "old_summary": row.old_summary,
                     "new_summary": row.new_summary,
                     "corrected_at": row.corrected_at.isoformat(),
+                    "notice_state": row.notice_state,
                     "notified_at": _iso(row.notified_at),
                 }
                 for row in rows.all()
@@ -8025,11 +8035,12 @@ class PostgresService:
         """A recall just handed ``agent_id`` these notices: mark each ``delivered``; the rows changed.
 
         The recall channel's "the agent has seen it", as a bus claim is for the
-        bus. Only the first recall counts (``notified_at`` is still null), and
-        only a notice not yet past delivery moves (``pending`` / ``sent`` /
-        ``unreachable``, the last for rows written before ``unreachable`` was
-        retired); a ``confirmed`` one never goes back. Idempotent: a repeat
-        matches nothing.
+        bus. Only a notice not yet past delivery moves (``pending`` / ``sent``
+        / ``unreachable``, the last for rows written before ``unreachable`` was
+        retired), on either channel: a bus ``sent`` the agent never claimed is
+        seen once a recall shows it. ``confirmed``, ``late`` and ``failed``
+        never move. ``notified_at`` keeps the first time (a bus send already
+        set it). Idempotent: a repeat matches nothing.
         """
         r = MemoryCorrectionRecipient
         async with get_session() as session:
@@ -8039,10 +8050,9 @@ class PostgresService:
                     r.tenant_id == tenant_id,
                     r.agent_id == agent_id,
                     r.correction_id.in_([UUID(c) for c in correction_ids]),
-                    r.notified_at.is_(None),
                     r.notice_state.in_(("pending", "sent", "unreachable")),
                 )
-                .values(notice_state="delivered", notified_at=func.now())
+                .values(notice_state="delivered", notified_at=func.coalesce(r.notified_at, func.now()))
             )
             return int(result.rowcount or 0)  # type: ignore[attr-defined]
 

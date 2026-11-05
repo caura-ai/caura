@@ -375,6 +375,42 @@ async def test_a_status_read_never_undoes_a_recall_confirm(wire) -> None:
     assert bus.status_reads == 0
 
 
+async def test_a_status_read_never_moves_a_recall_delivery_back_to_sent(wire) -> None:
+    """A recall handed a bus recipient its notice before the bus saw it claimed."""
+    storage = _FakeStorage(["a", "b"])
+    bus = _FakeBus(_accept)
+    wire(storage, bus)
+    await cs.send_correction("t1", storage.record["id"], sent_by="k")
+    storage.state("a").update(notice_state="delivered")
+    bus.status = {
+        "recipients": [
+            {"agent_id": "a", "outcome": "sent"},
+            {"agent_id": "b", "outcome": "delivered"},
+        ]
+    }
+    out = await cs.refresh_correction(
+        "t1", await storage.get_memory_correction("t1", "x")
+    )
+    states = {r["agent_id"]: r["notice_state"] for r in out["recipients"]}
+    assert states == {"a": "delivered", "b": "delivered"}
+    assert bus.status_reads == 1
+    # A later bus outcome past delivery still lands.
+    bus.status = {
+        "recipients": [
+            {
+                "agent_id": "a",
+                "outcome": "confirmed",
+                "replied_at": "2026-11-05T12:00:00Z",
+            }
+        ]
+    }
+    storage.record["bus_checked_at"] = None
+    out = await cs.refresh_correction(
+        "t1", await storage.get_memory_correction("t1", "x")
+    )
+    assert out["recipients"][0]["notice_state"] == "confirmed"
+
+
 async def test_a_read_closes_a_correction_every_recipient_confirmed(wire) -> None:
     storage = _FakeStorage(["a", "b"])
     wire(storage, None)

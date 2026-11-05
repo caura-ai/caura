@@ -55,8 +55,12 @@ tenant (an agent of another fleet may have read the memory: cross-fleet recall
 is allowed where cross-fleet sends are not).
 
 **D4. The notice.** A bus message with `kind=request` and a 7-day reply
-window, so the person sees per agent whether it acknowledged. An agent that is
-not on the bus gets the notice as a pending notice on its next recall instead.
+window, so the person sees per agent whether it acknowledged. The bus is the
+fast path; recall is the guaranteed one: every recipient that has not
+confirmed, on either channel, also gets the notice on its next recall. (The bus
+accepts a notice for any agent in the agents table, and rows land there
+implicitly, e.g. from a tenant-key search with `caller_agent_id`, so `sent` on
+the bus does not mean anyone is listening.)
 At most 50 agents per correction, most recent readers first. The person sees a
 preview (the list of agents) before anything is sent.
 
@@ -175,11 +179,14 @@ recipient:
 | no `COLLABORATION_API_URL` (standalone OSS) | `pending` | `recall` |
 
 A `recall` recipient is not unreachable: it is told on its next recall, so it
-stays `pending` until then. The first recall or search response that hands it
-the notice sets `notified_at` and moves it to `delivered` (fire-and-forget
-after the response, one `UPDATE … WHERE notified_at IS NULL`, so it happens
-once; a `confirmed` notice never moves back). Its own confirm then makes it
-`confirmed`. `unreachable` is no longer written; rows written before keep it
+stays `pending` until then. Every recipient, on either channel, gets the
+notice on recall until it confirms. The first recall or search response that
+hands it the notice moves a `pending` or `sent` notice to `delivered` and sets
+`notified_at` if a bus send has not already (fire-and-forget after the
+response, one `UPDATE … WHERE notice_state IN (pending, sent, unreachable)`, so
+it happens once; `delivered`, `confirmed`, `late` and `failed` never move, and
+a bus status read never moves a `delivered` notice back to `sent`). Its own
+confirm, or the bus reply, then makes it `confirmed`. `unreachable` is no longer written; rows written before keep it
 and are shown like a `pending` recall notice (Prism: "Waiting for next
 recall"; `delivered` on recall: "Seen on recall").
 
@@ -229,8 +236,9 @@ body:
   Reply "ack" once you have dropped or updated what you took from it.
 ```
 
-An agent the bus cannot tell (no bus registration, the bus disabled, or a bus
-delivery that `failed`) gets it on recall instead (CP-13): every MCP
+Every recipient also gets it on recall (CP-13), whether or not the bus
+carried it (no bus registration, the bus disabled, a bus delivery that
+`failed`, or a bus message nobody is listening for): every MCP
 `caura_recall` and REST `/search` / `/recall` response for that agent, on any
 query, carries `correction_notices: [{correction_id, memory_id, old_summary,
 new_summary, corrected_at, ask}]`, at most 3, newest first, until the agent
