@@ -75,7 +75,7 @@ cron_ticks:
 # ``<brand>.<domain>.<verb>`` — the brand segment flips per family; see FLIPPED_FAMILIES.
 event_topic_families:
   - name: Memory
-    topics: 4   # embed-requested, embedded, enrich-requested, enriched
+    topics: 5   # embed-requested, embedded, enrich-requested, enriched, corrected
   - name: Audit
     topics: 1   # event-recorded
   - name: Org

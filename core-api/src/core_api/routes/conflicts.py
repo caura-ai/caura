@@ -38,6 +38,7 @@ from core_api.errors import (
 from core_api.schemas import ConflictListResponse, ConflictOut, ConflictResolveRequest
 from core_api.services.audit_service import log_action
 from core_api.services.contradiction_detector import _pick_older, revert_unheld_loser, verdict_applied
+from core_api.services.memory_corrections import on_conflict_resolved
 from core_api.services.trust_service import require_trust as _require_trust
 
 logger = logging.getLogger(__name__)
@@ -325,5 +326,13 @@ async def resolve_conflict(
             "undo": undo,
             **auth.audit_actor(),
         },
+    )
+    # CP-08: a reviewer settling what detection concluded about the pair.
+    on_conflict_resolved(
+        tenant_id=body.tenant_id,
+        conflict=row,
+        review_status=body.review_status,
+        resolution_action=body.resolution_action,
+        agent_id=auth.agent_id,
     )
     return ConflictOut(**row)
