@@ -12,6 +12,7 @@ from caura_bus_core.bus import PlatformError
 from caura_bus_core.consult import PresentedResponses
 from caura_bus_core.protocol import Claim, WaitRequest
 
+from .batons import BATON_NOTE, baton_block, linked_titles, received_baton
 from .corrections import CONFIRM_NOTE, correction_notice
 
 log = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ class DeliverySession:
         self.surfaced: set[str] = set()
         # Request message IDs this session sent; correlates responses returned by wait.
         self.sent_requests: set[str] = set()
+        # Thread ID -> baton ID of handoff batons this session received; memory_context
+        # for that thread adds baton_id, so the receiver's findings link back to it.
+        self.baton_threads: dict[str, str] = {}
 
     @staticmethod
     def public(claim):
@@ -95,7 +99,27 @@ class DeliverySession:
                 # confirm once the agent has checked its work (reply or ack).
                 delivery["correction"] = notice
                 delivery["note"] = CONFIRM_NOTE
-            return {"delivery": delivery, "notices": notices}
+            baton = received_baton(claim.envelope) if claim and not delivery.get("note") else None
+            if baton:
+                self.baton_threads[claim.envelope.thread_id] = baton["baton_id"]
+        if baton:
+            # Outside the lock: the titles are read with this agent's own credential
+            # while lease renewal carries on.
+            titles = await linked_titles(self.bus, baton["memory_ids"])
+            delivery["baton"] = {
+                "baton_id": baton["baton_id"],
+                "from_agent": baton["from_agent"],
+                "memory_ids": list(titles),
+                "untrusted": True,
+                "block": baton_block(baton, titles),
+            }
+            delivery["note"] = BATON_NOTE
+        return {"delivery": delivery, "notices": notices}
+
+    def baton_context(self, context: dict) -> dict:
+        """``memory_context`` for a received baton's thread, with its ``baton_id`` added."""
+        baton_id = self.baton_threads.get(context.get("thread_id")) if isinstance(context, dict) else None
+        return {**context, "baton_id": baton_id} if baton_id else context
 
     async def _settle_presented(self, claim):
         """ACK a claimed response this session already presented, so the inbox drains.

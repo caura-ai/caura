@@ -2,11 +2,12 @@
 
 import argparse
 import os
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from importlib.metadata import version as package_version
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from caura_bus_core import AgentConfig, Bus, Kind, SendMessage, load_config
 from caura_bus_core.bus import HumanRequired, PlatformError
@@ -24,6 +25,7 @@ from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import ConfigDict, Field, field_validator
 
+from .batons import baton_body, baton_receipt
 from .delivery import DeliverySession
 from .presence import PRESENCE_ENV_VAR, PresenceHeartbeat, presence_enabled, presence_profile, waiting_file
 
@@ -90,6 +92,7 @@ Opcode = Literal[
     "progress",
     "checkpoint",
     "memory_context",
+    "handoff",
 ]
 
 
@@ -135,6 +138,66 @@ class Send(Arguments):
     ack: bool | None = None
     expect_reply_within_seconds: int | None = Field(default=None, ge=60, le=604800)
     capability: str | None = Field(default=None, min_length=1, max_length=80)
+
+
+BatonItem = Annotated[str, Field(min_length=1, max_length=500)]
+
+
+class FailedApproach(Arguments):
+    what: BatonItem
+    why: BatonItem
+
+
+class DocRef(Arguments):
+    collection: str = Field(min_length=1, max_length=256)
+    doc_id: str = Field(min_length=1, max_length=512)
+
+
+class Handoff(Arguments):
+    """A handoff baton (schema v1); Caura checks it again and fills baton_id/from_agent."""
+
+    to: list[str] = Field(min_length=1, max_length=100)
+    goal: str = Field(min_length=1, max_length=2000)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    decisions: list[BatonItem] = Field(default_factory=list, max_length=20)
+    failed_approaches: list[FailedApproach] = Field(default_factory=list, max_length=20)
+    open_questions: list[BatonItem] = Field(default_factory=list, max_length=20)
+    memory_ids: list[str] = Field(default_factory=list, max_length=50)
+    doc_ids: list[DocRef] = Field(default_factory=list, max_length=20)
+    thread_id: str | None = Field(default=None, max_length=80)
+    expect_reply_within_seconds: int | None = Field(default=None, ge=60, le=604800)
+
+    @field_validator("memory_ids")
+    @classmethod
+    def memory_uuids(cls, value):
+        try:
+            return list(dict.fromkeys(str(uuid.UUID(m)) for m in value))
+        except ValueError:
+            raise ValueError("memory_ids must be memory UUIDs") from None
+
+    @field_validator("to")
+    @classmethod
+    def no_broadcast(cls, value):
+        if "*" in value:
+            raise ValueError("hand off to named agents; a baton is never broadcast")
+        return value
+
+    def send(self) -> dict:
+        return {
+            "to": self.to,
+            "kind": "request",
+            "idempotency_key": self.idempotency_key,
+            "thread_id": self.thread_id,
+            "expect_reply_within_seconds": self.expect_reply_within_seconds,
+            "body": baton_body(
+                goal=self.goal,
+                decisions=self.decisions,
+                failed_approaches=[f.model_dump() for f in self.failed_approaches],
+                open_questions=self.open_questions,
+                memory_ids=self.memory_ids,
+                doc_ids=[d.model_dump() for d in self.doc_ids],
+            ),
+        }
 
 
 class Wait(Arguments):
@@ -220,6 +283,7 @@ OPERATIONS: dict[str, type[Arguments]] = {
     "progress": Progress,
     "checkpoint": Checkpoint,
     "memory_context": MemoryContext,
+    "handoff": Handoff,
 }
 
 
@@ -275,6 +339,12 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
     requests: state=awaiting|overdue|unanswered, limit=20. Lists sent requests and retires listed notices.
     memory_context: exactly one of delivery_id or message_id. Read-only provenance for an
       explicit Caura memory write; no bodies, keys or memory writes. Sent fanout needs delivery_id.
+      For a received handoff baton it also carries baton_id.
+    handoff: to*, goal*, idempotency_key*, decisions=[], failed_approaches=[{what, why}],
+      open_questions=[], memory_ids=[] (UUIDs, max 50), doc_ids=[{collection, doc_id}],
+      thread_id, expect_reply_within_seconds (default 7 days). Hands work over as a baton
+      (kind=request). Returns baton_id and, per receiver, links_withheld: linked memories that
+      receiver may not read are not delivered (a count only; nothing is granted).
     human: delivery_id*, reason*. Pauses your delivery; stop work until a human decision.
     wait: timeout=50 (0-50 seconds, below host timeout). Returns delivery (possibly null) and durable notices. Read notices even when delivery is null.
       On a wake hint, handle deliveries and repeat wait until delivery is null; drain notices too.
@@ -324,6 +394,7 @@ REMOTE_OPERATIONS = frozenset(
         "requests",
         "human",
         "memory_context",
+        "handoff",
     }
 )
 
@@ -335,7 +406,8 @@ async def dispatch(
     if not leased and op not in REMOTE_OPERATIONS:
         raise ValueError(f"peer {op} requires the caura-bus-mcp stdio transport")
     params = OPERATIONS[op].model_validate(args if args is not None else {})
-    if leased and not isinstance(params, (Wait, MemoryContext)):
+    # A handoff is fenced by the send it becomes.
+    if leased and not isinstance(params, (Wait, MemoryContext, Handoff)):
         target = getattr(params, "delivery_id", None)
         if isinstance(params, Send) and params.reply_to in app.delivery.reply_deliveries:
             target = app.delivery.reply_deliveries[params.reply_to][0]
@@ -345,8 +417,11 @@ async def dispatch(
             replay = (target, params.idempotency_key) in app.delivery.reply_attempts
         await app.delivery.guard(target, replay)
     match params:
+        case Handoff():
+            # A baton is an ordinary request: same allow-list and consultation bounds.
+            return baton_receipt(await dispatch(app, "send", params.send(), leased=leased))
         case MemoryContext():
-            return await app.bus.memory_context(**params.model_dump())
+            return app.delivery.baton_context(await app.bus.memory_context(**params.model_dump()))
         case Wait():
             return await app.delivery.wait(params.timeout)
         case Reply():
@@ -435,7 +510,7 @@ async def dispatch(
             receipt = await app.bus.send(message, idempotency_key=params.idempotency_key)
             if message.kind == "request":
                 app.delivery.sent_requests.add(receipt.message_id)
-            return receipt.model_dump()
+            return receipt.model_dump(exclude_none=True)
         case Recent():
             result = await app.bus.recent(
                 thread_id=params.thread_id,
