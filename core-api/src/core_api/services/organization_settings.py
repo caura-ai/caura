@@ -243,18 +243,18 @@ DEFAULT_SETTINGS: dict = {
         "auto_insights_enabled": None,
     },
     "observability": {
-        # Opt-in (default off). When on, each agent-chosen ``caura_recall``
+        # On by default (opt out with False). Each agent-chosen ``caura_recall``
         # call is logged (query + scope + candidate scores + below-floor
         # near-misses) to ``recall_event`` / ``recall_candidate`` for "why
-        # aren't good memories recalled?" analysis. The query is stored with PII
-        # masked, and events go after ``lifecycle.memory_retention_days``.
+        # aren't good memories recalled?" analysis and the evidence-coverage
+        # report. The query is stored with PII masked, and events go after
+        # ``lifecycle.memory_retention_days``.
         "recall_logging_enabled": None,
-        # Opt-in (default off). When on, the plugin's automatic ``/search``
-        # path is ALSO logged — but in a lighter form: returned candidates
-        # only (id + scores), no below-floor near-misses, since ``/search``
-        # is high-volume. Independent of ``recall_logging_enabled`` so it can
-        # be enabled for a short diagnostic window on a couple of tenants and
-        # then turned back off.
+        # On by default (opt out with False). The plugin's automatic
+        # ``/search`` path is ALSO logged — but in a lighter form: returned
+        # candidates only (id + scores), no below-floor near-misses, since
+        # ``/search`` is high-volume. Independent of ``recall_logging_enabled``
+        # so a tenant can turn the bulk path off and keep agent recalls.
         "search_recall_logging_enabled": None,
         # Fraction (0.0-1.0) of ``/search`` events for which below-floor
         # near-misses ARE recorded (only relevant when
@@ -1514,12 +1514,12 @@ class ResolvedConfig:
         val = self._ts.get("insights", {}).get("auto_insights_enabled")
         return val if val is not None else False
 
-    # Recall logging — opt-in (default False). When on, agent-chosen
+    # Recall logging — on by default (an explicit False opts out). Agent-chosen
     # ``caura_recall`` calls are logged to recall_event / recall_candidate.
     @property
     def recall_logging_enabled(self) -> bool:
         val = self._ts.get("observability", {}).get("recall_logging_enabled")
-        return val if val is not None else False
+        return val if val is not None else True
 
     # Usage metering — on by default (see the defaults above).
     @property
@@ -1527,13 +1527,13 @@ class ResolvedConfig:
         val = self._ts.get("observability", {}).get("usage_metering_enabled")
         return val if val is not None else True
 
-    # Search-path recall logging — opt-in (default False). When on, the
-    # automatic ``/search`` path is logged too (lighter: returned-only, no
+    # Search-path recall logging — on by default (an explicit False opts out).
+    # The automatic ``/search`` path is logged too (lighter: returned-only, no
     # near-misses). Independent of ``recall_logging_enabled``.
     @property
     def search_recall_logging_enabled(self) -> bool:
         val = self._ts.get("observability", {}).get("search_recall_logging_enabled")
-        return val if val is not None else False
+        return val if val is not None else True
 
     # Fraction of ``/search`` events that keep below-floor near-misses
     # (default 0.0). Clamped to [0.0, 1.0]. Only consulted when
