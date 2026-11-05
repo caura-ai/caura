@@ -41,6 +41,7 @@ def _row(i: int) -> dict:
 def storage(monkeypatch):
     sc = MagicMock(name="storage_client")
     sc.list_correction_notices = AsyncMock(return_value=[])
+    sc.mark_correction_notices_delivered = AsyncMock(return_value=0)
     monkeypatch.setattr(cn, "get_storage_client", lambda: sc)
     return sc
 
@@ -89,6 +90,73 @@ async def test_a_failed_lookup_is_no_notices(storage):
     storage.list_correction_notices.side_effect = RuntimeError("storage down")
     task = cn.start_notices("t-1", "agent-a", surface="rest")
     assert await cn.finish_notices(task) == []
+    storage.mark_correction_notices_delivered.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Delivery: the first response that hands a notice over marks it delivered
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def scheduled(monkeypatch):
+    """Background coroutines :func:`finish_notices` schedules, run by the test."""
+    coros: list = []
+    monkeypatch.setattr(cn, "track_task", coros.append)
+    return coros
+
+
+@pytest.mark.unit
+async def test_handing_notices_over_marks_the_unseen_ones_delivered(storage, scheduled):
+    seen = {**_row(1), "notified_at": "2026-11-05T09:00:00+00:00"}
+    storage.list_correction_notices.return_value = [seen, _row(2)]
+    out = await cn.finish_notices(cn.start_notices("t-1", "agent-a", surface="rest"))
+
+    assert [n["correction_id"] for n in out] == ["c-1", "c-2"]
+    assert "notified_at" not in out[0]
+    (coro,) = scheduled
+    await coro
+    # Only the one no recall showed before; c-1 was already marked.
+    storage.mark_correction_notices_delivered.assert_awaited_once_with(
+        "t-1", "agent-a", ["c-2"]
+    )
+
+
+@pytest.mark.unit
+async def test_nothing_new_to_hand_over_writes_nothing(storage, scheduled):
+    storage.list_correction_notices.return_value = [
+        {**_row(1), "notified_at": "2026-11-05T09:00:00+00:00"}
+    ]
+    assert (
+        len(await cn.finish_notices(cn.start_notices("t-1", "a", surface="mcp"))) == 1
+    )
+    storage.list_correction_notices.return_value = []
+    assert await cn.finish_notices(cn.start_notices("t-1", "a", surface="mcp")) == []
+    assert scheduled == []
+
+
+@pytest.mark.unit
+async def test_a_lookup_alone_marks_nothing(storage, scheduled):
+    """Only :func:`finish_notices`, run while the response is built, counts as handing over."""
+    storage.list_correction_notices.return_value = [_row(1)]
+    assert len(await cn.correction_notices("t-1", "a", surface="rest")) == 1
+    task = cn.start_notices("t-1", "a", surface="rest")
+    await task.task  # a search that failed would stop here
+    assert scheduled == []
+
+
+@pytest.mark.unit
+async def test_a_failed_delivery_mark_is_logged_not_raised(storage, scheduled, caplog):
+    storage.list_correction_notices.return_value = [_row(1)]
+    storage.mark_correction_notices_delivered = AsyncMock(
+        side_effect=RuntimeError("storage down")
+    )
+    assert (
+        len(await cn.finish_notices(cn.start_notices("t-1", "a", surface="rest"))) == 1
+    )
+    (coro,) = scheduled
+    await coro
+    assert "correction notice delivery not recorded" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +264,7 @@ def owed(monkeypatch):
     monkeypatch.setattr(settings, "gateway_shared_secret", GATEWAY_SECRET)
     sc = MagicMock(name="storage_client")
     sc.list_correction_notices = AsyncMock(return_value=[_row(1)])
+    sc.mark_correction_notices_delivered = AsyncMock(return_value=1)
     monkeypatch.setattr(cn, "get_storage_client", lambda: sc)
     return sc
 

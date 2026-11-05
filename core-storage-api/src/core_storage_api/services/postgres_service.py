@@ -7990,7 +7990,7 @@ class PostgresService:
         r, c = MemoryCorrectionRecipient, MemoryCorrection
         async with get_read_session() as session:
             rows = await session.execute(
-                select(c.id, c.memory_id, c.old_summary, c.new_summary, c.corrected_at)
+                select(c.id, c.memory_id, c.old_summary, c.new_summary, c.corrected_at, r.notified_at)
                 .select_from(r)
                 .join(c, c.id == r.correction_id)
                 .where(
@@ -8011,9 +8011,37 @@ class PostgresService:
                     "old_summary": row.old_summary,
                     "new_summary": row.new_summary,
                     "corrected_at": row.corrected_at.isoformat(),
+                    "notified_at": _iso(row.notified_at),
                 }
                 for row in rows.all()
             ]
+
+    async def correction_notices_delivered(
+        self, tenant_id: str, agent_id: str, correction_ids: list[str]
+    ) -> int:
+        """A recall just handed ``agent_id`` these notices: mark each ``delivered``; the rows changed.
+
+        The recall channel's "the agent has seen it", as a bus claim is for the
+        bus. Only the first recall counts (``notified_at`` is still null), and
+        only a notice not yet past delivery moves (``pending`` / ``sent`` /
+        ``unreachable``, the last for rows written before ``unreachable`` was
+        retired); a ``confirmed`` one never goes back. Idempotent: a repeat
+        matches nothing.
+        """
+        r = MemoryCorrectionRecipient
+        async with get_session() as session:
+            result = await session.execute(
+                sql_update(r)
+                .where(
+                    r.tenant_id == tenant_id,
+                    r.agent_id == agent_id,
+                    r.correction_id.in_([UUID(c) for c in correction_ids]),
+                    r.notified_at.is_(None),
+                    r.notice_state.in_(("pending", "sent", "unreachable")),
+                )
+                .values(notice_state="delivered", notified_at=func.now())
+            )
+            return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
     async def value_query(self, tenant_id: str, *, start: datetime, end: datetime, top: int = 8) -> dict:
         """One tenant's value figures in ``[start, end)``."""

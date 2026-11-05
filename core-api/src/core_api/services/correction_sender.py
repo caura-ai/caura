@@ -13,8 +13,10 @@ system sender (enterprise ``platform-collaboration-api``,
   (``sent|delivered|confirmed|late|failed``).
 
 Per recipient: ``accepted`` / ``already_sent`` → ``sent`` on the ``bus``
-channel; ``unknown_agent`` → ``unreachable`` on the ``recall`` channel (the
-agent is told on its next recall, CP-13); ``throttled`` / ``backlog_full`` →
+channel; ``unknown_agent`` (and a bus that refuses the notice) → ``pending`` on
+the ``recall`` channel: the agent is told on its next recall (CP-13), which
+marks it ``delivered``. ``unreachable`` is no longer written, since the recall
+channel always reaches the agent; old rows may still carry it. ``throttled`` / ``backlog_full`` →
 stays ``pending`` with ``next_attempt_at``. A throttled batch is retried inline
 when the bus asks for a short wait, then from a background task; anything
 still waiting after that is retried by the next send or status read. With no
@@ -235,7 +237,7 @@ async def _send_due(tenant_id: str, correction: dict) -> tuple[dict, float | Non
                 retry_in = wait if retry_in is None else min(retry_in, wait)
                 continue
             if "refused" in answer:
-                updates += [_state(r, channel="recall", notice_state="unreachable") for r in batch]
+                updates += [_state(r, channel="recall", notice_state="pending") for r in batch]
                 continue
             by_agent = {a.get("agent_id"): a for a in answer.get("recipients") or ()}
             after = float(answer.get("retry_after_seconds") or DEFAULT_RETRY_AFTER_S)
@@ -257,11 +259,13 @@ async def _send_due(tenant_id: str, correction: dict) -> tuple[dict, float | Non
                         )
                     )
                 elif status == "unknown_agent":
+                    # Not on the bus: it hears on its next recall, so it is
+                    # waiting, not unreachable.
                     updates.append(
                         _state(
                             r,
                             channel="recall",
-                            notice_state="unreachable",
+                            notice_state="pending",
                             attempts=attempts,
                             next_attempt_at=None,
                         )

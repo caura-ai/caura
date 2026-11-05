@@ -366,7 +366,10 @@ def test_the_writer_session_population_is_pinned() -> None:
     # 144 -> 147 (pure unchanged at 61): ``correction_begin_send``,
     # ``correction_apply_states`` and ``correction_confirm`` (migration 074)
     # update the correction and read it back in the same transaction.
-    assert len(methods) == 147, f"{len(methods)} methods open a writer session"
+    # 147 -> 148 (pure unchanged at 61): ``correction_notices_delivered``
+    # marks the notices a recall handed over ``delivered``; the lookup itself
+    # (``correction_notices_for_agent``) reads on the replica.
+    assert len(methods) == 148, f"{len(methods)} methods open a writer session"
     assert len(pure) == 61, f"{len(pure)} of them show no write marker"
 
 

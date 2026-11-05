@@ -47,8 +47,10 @@ MAX_RECIPIENTS = 50
 CORRECTION_KINDS = ("content_edit", "status", "unverify", "conflict_resolve")
 CORRECTION_STATUSES = ("preview", "sending", "sent", "closed")
 #: ``pending`` until sent; then the bus outcome (``sent``, ``delivered``,
-#: ``confirmed``, ``late``, ``failed``), or ``unreachable`` for an agent the bus
-#: does not know (it is told on its next recall instead).
+#: ``confirmed``, ``late``, ``failed``). On the ``recall`` channel (an agent the
+#: bus does not know, or no bus) it stays ``pending`` until a recall hands it
+#: the notice (``delivered``), then ``confirmed``. ``unreachable`` is no longer
+#: written; rows from before keep it and read like ``pending`` on recall.
 NOTICE_STATES = ("pending", "sent", "delivered", "confirmed", "late", "failed", "unreachable")
 NOTICE_CHANNELS = ("bus", "recall")
 

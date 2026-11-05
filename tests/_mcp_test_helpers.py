@@ -126,6 +126,9 @@ def stub_storage_client(monkeypatch, **method_returns):
     # module's alias; none unless the test asks for some.
     if "list_correction_notices" not in method_returns:
         sc.list_correction_notices = AsyncMock(return_value=[])
+    # Handing a notice over marks it delivered, after the response.
+    if "mark_correction_notices_delivered" not in method_returns:
+        sc.mark_correction_notices_delivered = AsyncMock(return_value=0)
     monkeypatch.setattr(
         "core_api.services.correction_notices.get_storage_client", _factory
     )

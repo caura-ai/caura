@@ -2038,6 +2038,20 @@ class CoreStorageClient:
         )
         return (result or {}).get("notices", [])
 
+    async def mark_correction_notices_delivered(
+        self, tenant_id: str, agent_id: str, correction_ids: list[str]
+    ) -> int:
+        """A recall handed ``agent_id`` these notices: ``delivered`` once (CP-13); the rows changed.
+
+        Idempotent (only rows not yet notified move), so a retry is safe.
+        """
+        result = await self._post(
+            f"/memory-corrections/notices/delivered?tenant_id={quote(tenant_id, safe='')}",
+            {"agent_id": agent_id, "correction_ids": correction_ids},
+            idempotent=True,
+        )
+        return (result or {}).get("delivered", 0)  # type: ignore[union-attr]
+
     async def increment_tenant_usage(self, rows: list[dict]) -> int:
         """ADD to per-tenant, per-period counters in ``tenant_usage_counters``.
 

@@ -5,7 +5,8 @@ Every route is bound to one tenant, a required ``tenant_id`` query parameter,
 as the exposure routes are. The consumer of ``caura.memory.corrected`` posts
 the event here; core-api reads the preview back, and sends (CP-11, migration
 074): ``/send`` claims the record, ``/states`` writes what the bus answered,
-``/confirm`` is a recipient's own confirmation.
+``/confirm`` is a recipient's own confirmation, ``/notices/delivered`` records
+that a recall handed an agent its notice.
 """
 
 from __future__ import annotations
@@ -86,6 +87,21 @@ async def list_notices(
     """
     _require_tenant(tenant_id)
     return {"notices": await _svc.correction_notices_for_agent(tenant_id, agent_id, limit=limit)}
+
+
+class DeliveredIn(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=300)
+    correction_ids: list[UUID] = Field(min_length=1, max_length=10)
+
+
+@router.post("/notices/delivered")
+async def notices_delivered(tenant_id: str, body: DeliveredIn) -> dict:
+    """A recall handed the agent these notices: mark them ``delivered`` once; ``{"delivered": n}``."""
+    _require_tenant(tenant_id)
+    n = await _svc.correction_notices_delivered(
+        tenant_id, body.agent_id, [str(c) for c in body.correction_ids]
+    )
+    return {"delivered": n}
 
 
 @router.get("/{correction_id}")

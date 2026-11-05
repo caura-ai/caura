@@ -165,11 +165,20 @@ recipient:
 | Bus answer | `notice_state` | `channel` |
 |---|---|---|
 | `accepted`, `already_sent` | `sent` | `bus` |
-| `unknown_agent` | `unreachable` | `recall` |
+| `unknown_agent` (not on the bus) | `pending` | `recall` |
 | `throttled`, `backlog_full` | `pending`, with `next_attempt_at` | `bus` |
-| the call is refused (401/403/404/409/413/422) | `unreachable` | `recall` |
+| the call is refused (401/403/404/409/413/422) | `pending` | `recall` |
 | no answer (network, 429, 5xx) | `pending`, retried after 30 s | `bus` |
 | no `COLLABORATION_API_URL` (standalone OSS) | `pending` | `recall` |
+
+A `recall` recipient is not unreachable: it is told on its next recall, so it
+stays `pending` until then. The first recall or search response that hands it
+the notice sets `notified_at` and moves it to `delivered` (fire-and-forget
+after the response, one `UPDATE … WHERE notified_at IS NULL`, so it happens
+once; a `confirmed` notice never moves back). Its own confirm then makes it
+`confirmed`. `unreachable` is no longer written; rows written before keep it
+and are shown like a `pending` recall notice (Prism: "Waiting for next
+recall"; `delivered` on recall: "Seen on recall").
 
 A throttled recipient is retried inline when the bus asks for at most 5 s (twice
 at most), then by a background task in core-api (six tries, each waiting what
@@ -178,7 +187,12 @@ the next send or status read. The record is `sending` while any recipient
 waits on the bus, then `sent`. Sending is idempotent: a `sent` record comes
 back as it is.
 
-`GET /api/v1/corrections/{id}` refreshes the bus outcomes
+`GET /api/v1/corrections/{id}` returns `{id, memory_id, kind, actor: {kind,
+id}, corrected_at, old_summary, new_summary, detail, status, sent_at, sent_by,
+counts, recipients: [{agent_id, reads, first_seen, last_seen, channel,
+notice_state, confirmed_at, notified_at, …}]}`; who corrected it is `actor`
+(there is no `corrected_by` field: that name is only in the bus notice body),
+and who sent it is `sent_by`. It refreshes the bus outcomes
 (`GET .../bus/system/corrections/{id}`) at most every 30 s (`bus_checked_at`):
 the bus's `outcome` (`sent|delivered|confirmed|late|failed`) becomes the
 recipient's `notice_state`, and `confirmed_at` its reply or ack time. A
@@ -186,7 +200,7 @@ recipient confirmed through `POST /api/v1/corrections/{id}/confirm` (MCP
 `caura_manage op=confirm_correction`, the recall fallback's path) keeps that
 state. The record is `closed` once every recipient is `confirmed` or `failed`.
 The counts are `{recipients, truncated, readers, pending, sent, delivered,
-confirmed, late, failed, unreachable}`.
+confirmed, late, failed, unreachable}` (`unreachable` counts legacy rows only).
 
 Migration 074 adds the record's `sent_at`, `sent_by`, `bus_checked_at`, the
 recipient's `channel`, `confirmed_at`, `notified_at`, `next_attempt_at`,
@@ -219,7 +233,9 @@ query, carries `correction_notices: [{correction_id, memory_id, old_summary,
 new_summary, corrected_at, ask}]`, at most 3, newest first, until the agent
 confirms (`caura_manage op=confirm_correction`, `POST
 /api/v1/corrections/{id}/confirm`) or the correction is 7 days old. The key is
-absent when there is nothing to tell, so an ordinary recall is unchanged.
+absent when there is nothing to tell, so an ordinary recall is unchanged. The
+first response that carries a notice marks that recipient `delivered` (see
+Sending).
 
 ## Done when
 

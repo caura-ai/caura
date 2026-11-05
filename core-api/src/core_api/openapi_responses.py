@@ -217,10 +217,17 @@ class MemoryCorrectionRecipientOut(BaseModel):
         default=None, description="``bus``, or ``recall`` (told on its next recall); null until sent."
     )
     notice_state: str = Field(
-        description="pending | sent | delivered | confirmed | late | failed | unreachable."
+        description=(
+            "pending | sent | delivered | confirmed | late | failed | unreachable (legacy, read as"
+            " pending on the recall channel). On ``recall``: pending until a recall hands the agent"
+            " the notice, then delivered."
+        )
     )
     confirmed_at: str | None = None
-    notified_at: str | None = Field(default=None, description="When the bus accepted the notice.")
+    notified_at: str | None = Field(
+        default=None,
+        description="When the bus accepted the notice, or (recall channel) when a recall first handed it over.",
+    )
     next_attempt_at: str | None = Field(default=None, description="A throttled send waits until then.")
     attempts: int = 0
 
@@ -240,7 +247,7 @@ class MemoryCorrectionCounts(BaseModel):
     confirmed: int = 0
     late: int = 0
     failed: int = 0
-    unreachable: int = 0
+    unreachable: int = Field(default=0, description="Legacy rows only; no longer written.")
 
 
 class MemoryCorrectionOut(BaseModel):

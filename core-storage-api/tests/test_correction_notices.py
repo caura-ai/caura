@@ -117,7 +117,15 @@ async def test_a_recall_channel_recipient_sees_its_notice_and_no_one_else_does(c
         (n,) = await _notices(client, tenant, agent)
         assert n["correction_id"] == cid
         assert (n["old_summary"], n["new_summary"]) == ("deploys on Tuesday", "deploys on Thursday")
-        assert set(n) == {"correction_id", "memory_id", "old_summary", "new_summary", "corrected_at"}
+        assert set(n) == {
+            "correction_id",
+            "memory_id",
+            "old_summary",
+            "new_summary",
+            "corrected_at",
+            "notified_at",
+        }
+        assert n["notified_at"] is None
     assert await _notices(client, tenant, "not-a-reader") == []
     # Another tenant's agent of the same name sees nothing.
     assert await _notices(client, f"t-{uuid.uuid4().hex[:8]}", "a") == []
@@ -181,3 +189,63 @@ async def test_a_correction_still_sending_or_closed_still_owes_its_recall_notice
     await _set(closed, status="closed", channel="bus", notice_state="failed")
 
     assert [n["correction_id"] for n in await _notices(client, tenant, "a")] == [closed, sending]
+
+
+async def _delivered(client: AsyncClient, tenant: str, agent: str, ids: list[str]) -> int:
+    r = await client.post(
+        f"{PREFIX}/memory-corrections/notices/delivered",
+        params={"tenant_id": tenant},
+        json={"agent_id": agent, "correction_ids": ids},
+    )
+    assert r.status_code == 200, r.text
+    return r.json()["delivered"]
+
+
+async def _recipient(cid: str, agent: str) -> tuple[str, object]:
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT notice_state, notified_at FROM memory_correction_recipient"
+                    " WHERE correction_id = :id AND agent_id = :a"
+                ),
+                {"id": cid, "a": agent},
+            )
+        ).one()
+    return row.notice_state, row.notified_at
+
+
+async def test_the_first_recall_that_hands_a_notice_over_marks_it_delivered_once(client: AsyncClient):
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    cid = await _correction(client, tenant, ["a", "b"])
+    await _set(cid, channel="recall", notice_state="pending")
+
+    assert await _delivered(client, tenant, "a", [cid]) == 1
+    state, notified_at = await _recipient(cid, "a")
+    assert state == "delivered" and notified_at is not None
+    # Still owed until it confirms, now marked as seen.
+    (n,) = await _notices(client, tenant, "a")
+    assert n["notified_at"] is not None
+    # A repeat changes nothing and keeps the first time.
+    assert await _delivered(client, tenant, "a", [cid]) == 0
+    assert (await _recipient(cid, "a"))[1] == notified_at
+    # The other recipient, and another tenant's agent of the same name, are untouched.
+    assert await _recipient(cid, "b") == ("pending", None)
+    assert await _delivered(client, f"t-{uuid.uuid4().hex[:8]}", "a", [cid]) == 0
+
+
+async def test_a_legacy_unreachable_notice_is_delivered_and_a_confirmed_one_never_goes_back(
+    client: AsyncClient,
+):
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    legacy = await _correction(client, tenant, ["a"])
+    await _set(legacy, channel="recall", notice_state="unreachable")
+    confirmed = await _correction(client, tenant, ["a"])
+    await _set(confirmed, channel="recall", notice_state="confirmed")
+    failed = await _correction(client, tenant, ["a"])
+    await _set(failed, channel="bus", notice_state="failed")
+
+    assert await _delivered(client, tenant, "a", [legacy, confirmed, failed]) == 1
+    assert (await _recipient(legacy, "a"))[0] == "delivered"
+    assert await _recipient(confirmed, "a") == ("confirmed", None)
+    assert (await _recipient(failed, "a"))[0] == "failed"

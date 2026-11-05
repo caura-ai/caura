@@ -209,7 +209,8 @@ async def test_bus_answers_map_to_states_and_channels(wire) -> None:
         1,
     )
     assert a["notified_at"] is not None
-    assert (ghost["channel"], ghost["notice_state"]) == ("recall", "unreachable")
+    # Not on the bus: waiting for its next recall, not unreachable.
+    assert (ghost["channel"], ghost["notice_state"]) == ("recall", "pending")
     assert bus.bodies[0] == {"kind": "status_outdated", "by": "user:u1"}
 
 
@@ -279,7 +280,7 @@ async def test_a_bus_that_refuses_falls_back_to_recall(wire) -> None:
     assert out is not None and out["status"] == "sent"
     assert (storage.state("a")["channel"], storage.state("a")["notice_state"]) == (
         "recall",
-        "unreachable",
+        "pending",
     )
 
 
@@ -529,7 +530,7 @@ async def test_send_over_a_bus(client, tenant_id, as_agent, bus, monkeypatch) ->
     )
     assert (by["reader-b"]["channel"], by["reader-b"]["notice_state"]) == (
         "recall",
-        "unreachable",
+        "pending",
     )
 
     fake.status = {
@@ -546,5 +547,6 @@ async def test_send_over_a_bus(client, tenant_id, as_agent, bus, monkeypatch) ->
     )
     assert view.status_code == 200, view.text
     body = view.json()
-    assert body["counts"]["confirmed"] == 1 and body["counts"]["unreachable"] == 1
+    assert body["counts"]["confirmed"] == 1 and body["counts"]["pending"] == 1
+    assert body["counts"]["unreachable"] == 0
     assert body["status"] == "sent"
