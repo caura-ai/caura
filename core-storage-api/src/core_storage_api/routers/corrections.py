@@ -3,7 +3,9 @@
 Correction propagation, CP-10 (``docs/plans/correction-propagation.md``).
 Every route is bound to one tenant, a required ``tenant_id`` query parameter,
 as the exposure routes are. The consumer of ``caura.memory.corrected`` posts
-the event here; core-api reads the preview back.
+the event here; core-api reads the preview back, and sends (CP-11, migration
+074): ``/send`` claims the record, ``/states`` writes what the bus answered,
+``/confirm`` is a recipient's own confirmation.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from common.events.memory_corrected import SUMMARY_MAX_CHARS
+from common.models.memory_correction import CORRECTION_STATUSES, NOTICE_CHANNELS, NOTICE_STATES
 from core_storage_api.services.postgres_service import PostgresService
 
 router = APIRouter(prefix="/memory-corrections", tags=["Memory corrections"])
@@ -77,4 +80,73 @@ async def get_correction(tenant_id: str, correction_id: UUID) -> dict:
     found = await _svc.correction_get(tenant_id, str(correction_id))
     if found is None:
         raise HTTPException(status_code=404, detail="Correction not found")
+    return found
+
+
+class SendIn(BaseModel):
+    sent_by: str = Field(min_length=1, max_length=300)
+
+
+class RecipientStateIn(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=300)
+    notice_state: str
+    channel: str | None = None
+    confirmed_at: datetime | None = None
+    notified_at: datetime | None = None
+    next_attempt_at: datetime | None = None
+    attempts: int = Field(default=0, ge=0)
+    bus_message_id: str | None = Field(default=None, max_length=200)
+    bus_delivery_id: str | None = Field(default=None, max_length=200)
+
+
+class StatesIn(BaseModel):
+    recipients: list[RecipientStateIn] = Field(default_factory=list, max_length=200)
+    status: str | None = None
+    bus_checked_at: datetime | None = None
+
+
+class ConfirmIn(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=300)
+
+
+@router.post("/{correction_id}/send")
+async def begin_send(tenant_id: str, correction_id: UUID, body: SendIn) -> dict:
+    """Move a ``preview`` correction to ``sending``; the record. Idempotent; 404 when not the tenant's."""
+    _require_tenant(tenant_id)
+    found = await _svc.correction_begin_send(tenant_id, str(correction_id), sent_by=body.sent_by)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Correction not found")
+    return found
+
+
+@router.post("/{correction_id}/states")
+async def apply_states(tenant_id: str, correction_id: UUID, body: StatesIn) -> dict:
+    """Write each recipient's delivery state and the record's status; the record. 404 when not the tenant's."""
+    _require_tenant(tenant_id)
+    for r in body.recipients:
+        if r.notice_state not in NOTICE_STATES or (
+            r.channel is not None and r.channel not in NOTICE_CHANNELS
+        ):
+            raise HTTPException(status_code=422, detail=f"invalid state for recipient '{r.agent_id}'")
+    if body.status is not None and body.status not in CORRECTION_STATUSES[1:]:
+        raise HTTPException(status_code=422, detail=f"invalid status '{body.status}'")
+    found = await _svc.correction_apply_states(
+        tenant_id,
+        str(correction_id),
+        recipients=[r.model_dump() for r in body.recipients],
+        status=body.status,
+        bus_checked_at=body.bus_checked_at,
+    )
+    if found is None:
+        raise HTTPException(status_code=404, detail="Correction not found")
+    return found
+
+
+@router.post("/{correction_id}/confirm")
+async def confirm(tenant_id: str, correction_id: UUID, body: ConfirmIn) -> dict:
+    """A recipient confirms its notice; the record. 404 when not the tenant's or not a recipient."""
+    _require_tenant(tenant_id)
+    found = await _svc.correction_confirm(tenant_id, str(correction_id), agent_id=body.agent_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Not a recipient of this correction")
     return found

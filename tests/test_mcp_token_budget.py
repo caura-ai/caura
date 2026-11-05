@@ -162,7 +162,14 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # than a new tool: two words in the ``op`` roll-call, one clause naming the
 # trust bar, and the plugin-gap clause naming them, since the plugin dispatches
 # neither. Ceiling 5720 -> 5743, raised by exactly the delta, leaving 0.
-CEILING_TOKENS = 5743
+#
+# 2026-11-05 (correction propagation, CP-11): 5811 cl100k (+68), measured with
+# tiktoken from the fixture. ``caura_manage`` gained ``send_correction`` and
+# ``confirm_correction`` as ops rather than a new tool, and one ``correction_id``
+# parameter: the two names in the ``op`` roll-call, one sentence on what each
+# does (send's trust bar included), and the plugin-gap clause, since the plugin
+# dispatches neither. Ceiling 5743 -> 5811, raised by exactly the delta, leaving 0.
+CEILING_TOKENS = 5811
 
 
 def _count(path: Path) -> int:

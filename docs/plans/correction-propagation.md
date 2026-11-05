@@ -3,8 +3,9 @@
 Status: in progress. Done: CP-04 (this spec), CP-05 (`memory_exposure`,
 migration 072), CP-06 (exposure recorded on every agent read), CP-07
 (`GET /memories/{id}/exposure`), CP-10 (the recipient list: `memory_correction`,
-migration 073, and the preview routes). Next: sending the notices (CP-11) and
-the person's view of who confirmed.
+migration 073, and the preview routes), CP-11 and CP-15 (sending the notices and
+the person's view of who confirmed, migration 074). Next: the recall fallback
+(CP-13).
 
 ## Problem
 
@@ -149,6 +150,49 @@ Preview, before anything is sent, with the same access rule as
   corrections, newest first.
 
 An agent that is not on the recipient list gets `old_summary: null`.
+
+## Sending (CP-11) and who confirmed (CP-15)
+
+`POST /api/v1/corrections/{id}/send` (MCP `caura_manage op=send_correction`):
+a signed-in person, an admin or tenant key, or an agent at trust_level >= 3
+that can read the memory. `core_api.services.correction_sender` moves the
+record `preview` → `sending` and posts the recipients, at most 200 per call, to
+the bus's system sender (`POST {COLLABORATION_API_URL}/api/v1/bus/system/corrections`,
+header `X-Caura-System-Secret` = `COLLABORATION_SYSTEM_SEND_SECRET`, else
+`CORE_STORAGE_SHARED_SECRET`; `Idempotency-Key` = the correction id). Per
+recipient:
+
+| Bus answer | `notice_state` | `channel` |
+|---|---|---|
+| `accepted`, `already_sent` | `sent` | `bus` |
+| `unknown_agent` | `unreachable` | `recall` |
+| `throttled`, `backlog_full` | `pending`, with `next_attempt_at` | `bus` |
+| the call is refused (401/403/404/409/413/422) | `unreachable` | `recall` |
+| no answer (network, 429, 5xx) | `pending`, retried after 30 s | `bus` |
+| no `COLLABORATION_API_URL` (standalone OSS) | `pending` | `recall` |
+
+A throttled recipient is retried inline when the bus asks for at most 5 s (twice
+at most), then by a background task in core-api (six tries, each waiting what
+the bus asked, 5 s to 5 min). What is still waiting after that is retried by
+the next send or status read. The record is `sending` while any recipient
+waits on the bus, then `sent`. Sending is idempotent: a `sent` record comes
+back as it is.
+
+`GET /api/v1/corrections/{id}` refreshes the bus outcomes
+(`GET .../bus/system/corrections/{id}`) at most every 30 s (`bus_checked_at`):
+the bus's `outcome` (`sent|delivered|confirmed|late|failed`) becomes the
+recipient's `notice_state`, and `confirmed_at` its reply or ack time. A
+recipient confirmed through `POST /api/v1/corrections/{id}/confirm` (MCP
+`caura_manage op=confirm_correction`, the recall fallback's path) keeps that
+state. The record is `closed` once every recipient is `confirmed` or `failed`.
+The counts are `{recipients, truncated, readers, pending, sent, delivered,
+confirmed, late, failed, unreachable}`.
+
+Migration 074 adds the record's `sent_at`, `sent_by`, `bus_checked_at`, the
+recipient's `channel`, `confirmed_at`, `notified_at`, `next_attempt_at`,
+`attempts`, `bus_message_id`, `bus_delivery_id`, CHECKs on `status` and
+`notice_state`, and `ix_memory_correction_recipient_agent (tenant_id, agent_id)`
+for the recall fallback.
 
 ## Notice format
 

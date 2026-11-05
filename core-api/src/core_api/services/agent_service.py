@@ -979,6 +979,41 @@ async def enforce_verify(
         )
 
 
+#: Correction propagation (CP-11): the trust level an agent needs to send a
+#: correction's notices to the agents that read the memory.
+SEND_CORRECTION_MIN_TRUST = 3
+
+
+async def enforce_send_correction(tenant_id: str, agent_id: AgentIdentity) -> None:
+    """Gate an AGENT credential's send of a correction's notices (CP-11).
+
+    Sending tells every agent that read the memory to recheck its work, so it
+    takes the bar a person's correction takes from an agent: a registered agent
+    at ``trust_level >= 3``. Same contract as ``enforce_verify``: invoke only
+    for a credential that carries an authenticated agent identity.
+    """
+    agent = await lookup_agent(tenant_id, agent_id, read=False)
+    if not agent:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_AGENT_NOT_REGISTERED,
+                f"Agent '{agent_id}' is not registered and cannot send correction notices.",
+            ),
+        )
+    trust = agent.get("trust_level", 0)
+    if trust < SEND_CORRECTION_MIN_TRUST:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW,
+                f"Agent '{agent_id}' has trust level {trust}; sending correction notices needs "
+                f"trust level {SEND_CORRECTION_MIN_TRUST}. Ask a tenant admin to raise it, or send "
+                "from the dashboard.",
+            ),
+        )
+
+
 async def enforce_document_overwrite(
     tenant_id: str,
     agent_id: str,

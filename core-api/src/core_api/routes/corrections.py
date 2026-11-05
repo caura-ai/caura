@@ -1,4 +1,4 @@
-"""Correction preview: who will be told about a correction (correction propagation, CP-10).
+"""Corrections: who will be told (CP-10), sending the notices (CP-11), and who confirmed (CP-15).
 
 When a person corrects a memory, core-api publishes ``caura.memory.corrected``
 and its consumer records a ``memory_correction`` with the agents that read the
@@ -10,6 +10,11 @@ Tenant-scoped, and the same access rule as ``GET /memories/{id}`` on the
 corrected memory: another tenant's correction, or one on a memory the caller
 cannot read, is a 404. An agent that is not a recipient does not see
 ``old_summary`` (``services.correction_recipients.redact_for_caller``).
+
+``POST /corrections/{id}/send`` sends the notices (``services.correction_sender``):
+a person, an admin or tenant key, or an agent at trust_level >= 3. A status
+read refreshes the bus outcomes. ``POST /corrections/{id}/confirm`` is the
+recipient agent's own confirmation.
 
 See ``docs/plans/correction-propagation.md``.
 """
@@ -23,8 +28,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
-from core_api.services.agent_service import authorize_memory_access
+from core_api.errors import AUTH_AGENT_CREDENTIAL_FORBIDDEN, AUTH_AGENT_IDENTITY_MISMATCH, coded_detail
+from core_api.services.agent_service import authorize_memory_access, enforce_send_correction
 from core_api.services.correction_recipients import redact_for_caller
+from core_api.services.correction_sender import confirm_as_agent, refresh_correction, send_correction
+from core_api.services.verification import verifier_id
 
 router = APIRouter(tags=["Corrections"])
 
@@ -60,7 +68,73 @@ async def get_correction(
     correction = await get_storage_client().get_memory_correction(tenant_id, str(correction_id))
     if correction is None or not await _readable_memory(correction["memory_id"], tenant_id, auth):
         raise HTTPException(status_code=404, detail="Correction not found")
+    correction = await refresh_correction(tenant_id, correction)
     return redact_for_caller(correction, agent_id=auth.agent_id, is_person=auth.is_person)
+
+
+@router.post("/corrections/{correction_id}/send", responses={200: {"model": _oar.MemoryCorrectionOut}})
+async def send_correction_notices(
+    correction_id: UUID,
+    tenant_id: str = Query(...),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Send the correction's notices to the agents that read the old version.
+
+    Each recipient gets a Caura bus notice; an agent the bus does not know, or
+    every agent when no bus is configured, is told on its next recall instead
+    (``channel: recall``). Moves the correction ``preview`` → ``sending`` →
+    ``sent``. Idempotent: a second call returns the record, retrying only
+    recipients the bus throttled. Open to a signed-in person, an admin or
+    tenant key, and an agent at ``trust_level >= 3`` that can read the memory.
+    """
+    auth.enforce_read_only()
+    auth.enforce_tenant(tenant_id)
+    auth.enforce_tenant_admin_credential("send correction notices")
+    if auth.agent_id:
+        await enforce_send_correction(tenant_id, auth.agent_id)
+    correction = await get_storage_client().get_memory_correction(tenant_id, str(correction_id))
+    if correction is None or not await _readable_memory(correction["memory_id"], tenant_id, auth):
+        raise HTTPException(status_code=404, detail="Correction not found")
+    sent = await send_correction(
+        tenant_id,
+        str(correction_id),
+        sent_by=verifier_id(agent_id=auth.agent_id, user_id=auth.user_id, credential_kind=auth.actor_kind),
+    )
+    if sent is None:
+        raise HTTPException(status_code=404, detail="Correction not found")
+    return sent
+
+
+@router.post(
+    "/corrections/{correction_id}/confirm", responses={200: {"model": _oar.CorrectionConfirmResponse}}
+)
+async def confirm_correction(
+    correction_id: UUID,
+    tenant_id: str = Query(...),
+    agent_id: str | None = Query(
+        default=None,
+        description="The confirming agent, for a credential that names none (a tenant-key plugin).",
+    ),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """The recipient agent confirms it has seen the correction and rechecked its work.
+
+    The caller must be an agent on the correction's recipient list (404
+    otherwise). Idempotent: a second confirm keeps the first ``confirmed_at``.
+    """
+    auth.enforce_read_only()
+    auth.enforce_tenant(tenant_id)
+    agent = auth.effective_agent_id(agent_id)
+    if auth.is_person or not agent:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_AGENT_CREDENTIAL_FORBIDDEN if auth.is_person else AUTH_AGENT_IDENTITY_MISMATCH,
+                "Only the recipient agent can confirm a correction notice; name it with agent_id "
+                "when the credential names no agent.",
+            ),
+        )
+    return await confirm_as_agent(tenant_id, str(correction_id), str(agent))
 
 
 @router.get(

@@ -1,7 +1,7 @@
 """ToolSpec for caura_manage — per-memory lifecycle (op-dispatched).
 
 Ops: read (by id), update, transition, delete, bulk_delete, lineage, verify,
-unverify — the same eight the handler accepts.
+unverify, send_correction, confirm_correction — the same ten the handler accepts.
 """
 
 from core_api import mcp_server
@@ -22,12 +22,14 @@ from ._types import OpSpec, ToolSpec
 # (tests/test_mcp_token_budget.py records the arithmetic), so say only what the
 # inputSchema does not already carry.
 _DESCRIPTION = (
-    "Per-memory lifecycle. bulk_delete, lineage, verify and unverify are not in the plugin; "
+    "Per-memory lifecycle. bulk_delete, lineage, verify, unverify and the *_correction ops are not in the plugin; "
     "lineage returns the supersession chain. "
     "update patches fields and re-embeds if content changes. "
     "transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). "
     "delete and bulk_delete are soft (prefer transition to outdated). "
-    "verify sets human_verified (trust 3), unverify clears it."
+    "verify sets human_verified (trust 3), unverify clears it. "
+    "send_correction notifies the agents that read a corrected memory (trust 3); "
+    "confirm_correction acks a notice sent to you."
 )
 
 _SPEC = ToolSpec(
@@ -88,6 +90,18 @@ _SPEC = ToolSpec(
             description="Withdraw a memory's verification.",
             required_params=("memory_id",),
             trust_required=3,
+        ),
+        # CP-11. ``enforce_send_correction`` is the gate (>= 3, agent credentials only).
+        OpSpec(
+            name="send_correction",
+            description="Send a correction's notices to the agents that read the old version.",
+            required_params=("correction_id",),
+            trust_required=3,
+        ),
+        OpSpec(
+            name="confirm_correction",
+            description="Confirm a correction notice sent to you.",
+            required_params=("correction_id",),
         ),
     ),
     error_codes=(

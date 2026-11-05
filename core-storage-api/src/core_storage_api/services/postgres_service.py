@@ -135,7 +135,12 @@ from common.models.memory import (
     VERIFIED_STATUSES,
     is_real_source_uri,
 )
-from common.models.memory_correction import MAX_RECIPIENTS, MemoryCorrection, MemoryCorrectionRecipient
+from common.models.memory_correction import (
+    MAX_RECIPIENTS,
+    NOTICE_STATES,
+    MemoryCorrection,
+    MemoryCorrectionRecipient,
+)
 from common.models.memory_exposure import MemoryExposure
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.models.recall_log import RecallCandidate, RecallEvent
@@ -283,6 +288,10 @@ async def get_read_session() -> AsyncIterator[AsyncSession]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
 
 
 def _normalized_object_sql(column):
@@ -7751,6 +7760,9 @@ class PostgresService:
             "detail": c.detail or {},
             "status": c.status,
             "created_at": c.created_at.isoformat(),
+            "sent_at": _iso(c.sent_at),
+            "sent_by": c.sent_by,
+            "bus_checked_at": _iso(c.bus_checked_at),
             "recipients": [
                 {
                     "agent_id": r.agent_id,
@@ -7758,7 +7770,14 @@ class PostgresService:
                     "first_seen": r.first_seen.isoformat(),
                     "last_seen": r.last_seen.isoformat(),
                     "last_trace_id": r.last_trace_id,
+                    "channel": r.channel,
                     "notice_state": r.notice_state,
+                    "confirmed_at": _iso(r.confirmed_at),
+                    "notified_at": _iso(r.notified_at),
+                    "next_attempt_at": _iso(r.next_attempt_at),
+                    "attempts": int(r.attempts or 0),
+                    "bus_message_id": r.bus_message_id,
+                    "bus_delivery_id": r.bus_delivery_id,
                 }
                 for r in recipients
             ],
@@ -7766,7 +7785,7 @@ class PostgresService:
                 "recipients": len(recipients),
                 "truncated": int(c.truncated),
                 "readers": len(recipients) + int(c.truncated),
-                "pending": sum(1 for r in recipients if r.notice_state == "pending"),
+                **{state: sum(1 for r in recipients if r.notice_state == state) for state in NOTICE_STATES},
             },
         }
 
@@ -7808,6 +7827,124 @@ class PostgresService:
                 .limit(limit)
             )
             return await self._corrections_with_recipients(session, list(found.scalars().all()))
+
+    async def _correction_in_session(
+        self, session: AsyncSession, tenant_id: str, correction_id: UUID
+    ) -> dict | None:
+        found = await session.execute(
+            select(MemoryCorrection).where(
+                MemoryCorrection.tenant_id == tenant_id, MemoryCorrection.id == correction_id
+            )
+        )
+        correction = found.scalar_one_or_none()
+        if correction is None:
+            return None
+        return (await self._corrections_with_recipients(session, [correction]))[0]
+
+    async def correction_begin_send(self, tenant_id: str, correction_id: str, *, sent_by: str) -> dict | None:
+        """Move a ``preview`` correction to ``sending`` and return it; ``None`` when it is not the tenant's.
+
+        Idempotent: a correction already past ``preview`` is returned as it is,
+        with its first ``sent_at`` and ``sent_by``.
+        """
+        cid = UUID(correction_id)
+        async with get_session() as session:
+            await session.execute(
+                sql_update(MemoryCorrection)
+                .where(
+                    MemoryCorrection.tenant_id == tenant_id,
+                    MemoryCorrection.id == cid,
+                    MemoryCorrection.status == "preview",
+                )
+                .values(status="sending", sent_at=func.now(), sent_by=sent_by)
+            )
+            return await self._correction_in_session(session, tenant_id, cid)
+
+    async def correction_apply_states(
+        self,
+        tenant_id: str,
+        correction_id: str,
+        *,
+        recipients: list[dict],
+        status: str | None,
+        bus_checked_at: datetime | None,
+    ) -> dict | None:
+        """Write the send/bus outcome of each recipient and the record's status; return the record.
+
+        Each entry of ``recipients`` carries a recipient's whole delivery state
+        (``agent_id``, ``notice_state``, ``channel``, ``confirmed_at``,
+        ``notified_at``, ``next_attempt_at``, ``attempts``, ``bus_message_id``,
+        ``bus_delivery_id``). A recipient already ``confirmed`` keeps that state:
+        an agent's own confirm may land between the caller's read and this
+        write. ``status`` only moves forward from ``preview``; ``None`` keeps it.
+        ``None`` when the correction is not the tenant's.
+        """
+        cid = UUID(correction_id)
+        async with get_session() as session:
+            owned = await session.execute(
+                select(MemoryCorrection.id).where(
+                    MemoryCorrection.tenant_id == tenant_id, MemoryCorrection.id == cid
+                )
+            )
+            if owned.scalar_one_or_none() is None:
+                return None
+            for r in recipients:
+                state = r["notice_state"]
+                stmt = sql_update(MemoryCorrectionRecipient).where(
+                    MemoryCorrectionRecipient.tenant_id == tenant_id,
+                    MemoryCorrectionRecipient.correction_id == cid,
+                    MemoryCorrectionRecipient.agent_id == r["agent_id"],
+                )
+                if state != "confirmed":
+                    stmt = stmt.where(MemoryCorrectionRecipient.notice_state != "confirmed")
+                await session.execute(
+                    stmt.values(
+                        notice_state=state,
+                        channel=r.get("channel"),
+                        confirmed_at=r.get("confirmed_at"),
+                        notified_at=r.get("notified_at"),
+                        next_attempt_at=r.get("next_attempt_at"),
+                        attempts=int(r.get("attempts") or 0),
+                        bus_message_id=r.get("bus_message_id"),
+                        bus_delivery_id=r.get("bus_delivery_id"),
+                    )
+                )
+            if status is not None or bus_checked_at is not None:
+                stmt_c = sql_update(MemoryCorrection).where(
+                    MemoryCorrection.tenant_id == tenant_id, MemoryCorrection.id == cid
+                )
+                if status is not None:
+                    stmt_c = stmt_c.where(MemoryCorrection.status != "preview").values(status=status)
+                if bus_checked_at is not None:
+                    stmt_c = stmt_c.values(bus_checked_at=bus_checked_at)
+                await session.execute(stmt_c)
+            return await self._correction_in_session(session, tenant_id, cid)
+
+    async def correction_confirm(self, tenant_id: str, correction_id: str, *, agent_id: str) -> dict | None:
+        """Mark ``agent_id``'s notice ``confirmed`` and return the record.
+
+        ``None`` when the correction is not the tenant's or the agent is not a
+        recipient. Idempotent: a second confirm keeps the first ``confirmed_at``.
+        """
+        cid = UUID(correction_id)
+        async with get_session() as session:
+            confirmed = await session.execute(
+                sql_update(MemoryCorrectionRecipient)
+                .where(
+                    MemoryCorrectionRecipient.tenant_id == tenant_id,
+                    MemoryCorrectionRecipient.correction_id == cid,
+                    MemoryCorrectionRecipient.agent_id == agent_id,
+                )
+                .values(
+                    notice_state="confirmed",
+                    confirmed_at=func.coalesce(MemoryCorrectionRecipient.confirmed_at, func.now()),
+                    next_attempt_at=None,
+                )
+                .returning(MemoryCorrectionRecipient.agent_id)
+            )
+            if confirmed.scalar_one_or_none() is None:
+                return None
+            return await self._correction_in_session(session, tenant_id, cid)
 
     async def value_query(self, tenant_id: str, *, start: datetime, end: datetime, top: int = 8) -> dict:
         """One tenant's value figures in ``[start, end)``."""

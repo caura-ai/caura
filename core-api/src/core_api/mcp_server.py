@@ -89,6 +89,7 @@ from core_api.services.agent_service import (
     enforce_document_overwrite,
     enforce_fleet_read_many,
     enforce_fleet_write,
+    enforce_send_correction,
     enforce_transition,
     enforce_verify,
     enforce_visibility_write,
@@ -106,6 +107,8 @@ from core_api.services.agent_service import (
 from core_api.services.agent_service import resolve_read_fleet_gate as _resolve_read_fleet_gate
 from core_api.services.audit_service import log_action, log_cross_tenant_read
 from core_api.services.capability_usage import record_usage
+from core_api.services.correction_sender import compact as compact_correction
+from core_api.services.correction_sender import confirm_as_agent, send_correction
 from core_api.services.entity_service import get_entity
 from core_api.services.interview_service import (
     refuse_system_collection,
@@ -2262,11 +2265,62 @@ async def _manage_verification(
     return _with_latency(_dumps(result), t0)
 
 
+async def _manage_send_correction(
+    sc: Any,
+    tenant_id: str,
+    correction_id: str,
+    caller_agent_id: AgentIdentity | None,
+    is_install: bool,
+    install_uuid: str | None,
+    t0: float,
+) -> ToolReply:
+    """``caura_manage`` op=send_correction (CP-11), the REST ``POST /corrections/{id}/send`` rule.
+
+    An agent credential needs trust >= 3 (``enforce_send_correction``) and must
+    be able to read the corrected memory; a credential with no agent identity
+    is the tenant's own. Install and cross-tenant credentials were refused by
+    the handler before this runs.
+    """
+    if caller_agent_id:
+        await enforce_send_correction(tenant_id, caller_agent_id)
+    correction = await sc.get_memory_correction(tenant_id, correction_id)
+    memory = await sc.get_memory(correction["memory_id"], tenant_id) if correction else None
+    if not memory or not await authorize_memory_access(
+        tenant_id,
+        caller_agent_id,
+        visibility=memory.get("visibility"),
+        owner_agent_id=memory.get("agent_id"),
+        fleet_id=memory.get("fleet_id"),
+        is_install_credential=is_install,
+        install_uuid=install_uuid,
+    ):
+        return _with_latency(_error_response("NOT_FOUND", "Correction not found."), t0)
+    principal = audit_principal.get() or {}
+    sent = await send_correction(
+        tenant_id,
+        correction_id,
+        sent_by=verifier_id(
+            agent_id=caller_agent_id,
+            user_id=_user_id_var.get(None),
+            credential_kind=principal.get("credential_kind") or "tenant_key",
+        ),
+    )
+    if sent is None:
+        return _with_latency(_error_response("NOT_FOUND", "Correction not found."), t0)
+    return _with_latency(_dumps(compact_correction(sent)), t0)
+
+
 async def caura_manage(
     op: Annotated[
-        str, Field(description="read|update|transition|delete|bulk_delete|lineage|verify|unverify.")
+        str,
+        Field(
+            description="read|update|transition|delete|bulk_delete|lineage|verify|unverify|"
+            "send_correction|confirm_correction."
+        ),
     ],
-    memory_id: Annotated[str, Field(description="UUID. Required except for op=bulk_delete.")] = "",
+    memory_id: Annotated[
+        str, Field(description="UUID. Required except for op=bulk_delete and the *_correction ops.")
+    ] = "",
     memory_ids: Annotated[
         list[str] | None,
         Field(description="op=bulk_delete: list of memory UUIDs (max 1000)."),
@@ -2278,9 +2332,16 @@ async def caura_manage(
     title: Annotated[str | None, Field(description="op=update.")] = None,
     metadata: Annotated[dict | None, Field(description="op=update.")] = None,
     source_uri: Annotated[str | None, Field(description="op=update.")] = None,
+    correction_id: Annotated[str, Field(description="op=send_correction|confirm_correction.")] = "",
     agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
 ) -> ToolReply:
     """Per-memory lifecycle: read | update | transition | delete | bulk_delete | lineage | verify | unverify.
+
+    Corrections (correction propagation, CP-11): op=send_correction sends a
+    correction's notices to the agents that read the old version (REST
+    ``POST /corrections/{id}/send``; an agent needs trust_level >= 3);
+    op=confirm_correction is a recipient confirming its notice (REST
+    ``POST /corrections/{id}/confirm``).
 
     op=lineage walks the supersession chain for `memory_id` and returns
     {this, superseded_by, supersessors} — the older row this memory
@@ -2294,7 +2355,18 @@ async def caura_manage(
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
-    _valid_ops = {"read", "update", "transition", "delete", "bulk_delete", "lineage", "verify", "unverify"}
+    _valid_ops = {
+        "read",
+        "update",
+        "transition",
+        "delete",
+        "bulk_delete",
+        "lineage",
+        "verify",
+        "unverify",
+        "send_correction",
+        "confirm_correction",
+    }
     if op not in _valid_ops:
         return _with_latency(
             _dumps(
@@ -2310,9 +2382,16 @@ async def caura_manage(
         )
     # Mutating ops gated by the credential scope set; read/lineage stay open
     # to read-only keys.
-    if op in {"update", "transition", "delete", "bulk_delete", "verify", "unverify"} and (
-        err := _check_write_scope()
-    ):
+    if op in {
+        "update",
+        "transition",
+        "delete",
+        "bulk_delete",
+        "verify",
+        "unverify",
+        "send_correction",
+        "confirm_correction",
+    } and (err := _check_write_scope()):
         return err
     if op == "bulk_delete" and (refuse := _refuse_tenant_admin_op("bulk-delete memories")):
         return _with_latency(refuse, t0)
@@ -2320,10 +2399,22 @@ async def caura_manage(
         refuse := _refuse_tenant_admin_op(f"{op} memories", allow_member=True)
     ):
         return _with_latency(refuse, t0)
+    if op == "send_correction" and (
+        refuse := _refuse_tenant_admin_op("send correction notices", allow_member=True)
+    ):
+        return _with_latency(refuse, t0)
+    _correction_ops = {"send_correction", "confirm_correction"}
+    if op in _correction_ops:
+        try:
+            UUID(correction_id)
+        except ValueError:
+            return _with_latency(
+                _error_response("INVALID_ARGUMENTS", f"op={op} requires 'correction_id' (a UUID)."), t0
+            )
     # bulk_delete uses memory_ids (list); all other ops use memory_id (single UUID).
     # Validate accordingly so a missing memory_id on bulk_delete doesn't fail with
     # a misleading "Invalid UUID" error.
-    if op != "bulk_delete":
+    if op != "bulk_delete" and op not in _correction_ops:
         try:
             uid = UUID(memory_id)
         except ValueError:
@@ -2338,7 +2429,7 @@ async def caura_manage(
     # no agent context (OSS/standalone) ⇒ tenant-scoped, no agent isolation.
     caller_agent_id = _get_agent_id()
     agent_id = canonical_service_agent_id(caller_agent_id or agent_id)
-    if op in {"update", "transition", "delete", "bulk_delete", "verify", "unverify"} and (
+    if op in {"update", "transition", "delete", "bulk_delete", "verify", "unverify", *_correction_ops} and (
         refuse := _refuse_default_agent_on_gateway(agent_id) or await _refuse_unowned_agent(agent_id)
     ):
         return _with_latency(refuse, t0)
@@ -2357,6 +2448,14 @@ async def caura_manage(
     sc = get_storage_client()
     async with _no_db():
         try:
+            if op == "confirm_correction":
+                # The recipient itself: the authenticated agent, or the agent a
+                # tenant key names (exposure was recorded under that name).
+                return _with_latency(_dumps(await confirm_as_agent(tenant_id, correction_id, agent_id)), t0)
+            if op == "send_correction":
+                return await _manage_send_correction(
+                    sc, tenant_id, correction_id, caller_agent_id, is_install, install_uuid, t0
+                )
             if op == "bulk_delete":
                 if not memory_ids:
                     return _with_latency(
