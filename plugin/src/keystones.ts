@@ -148,13 +148,14 @@ export function invalidateKeystoneCache(): void {
   inflight.clear();
 }
 
-const FRAME_TAG_RE = /<\/?(?:keystone_rules|recalled_memories)[^>]*>/gi;
+const FRAME_TAG_RE = /<\/?(?:keystone_rules|recalled_memories|memory_corrections)[^>]*>/gi;
 
 /**
  * Make stored text safe to interpolate as ONE line of a system-prompt block.
  *
  * Strips any ``<keystone_rules…>`` / ``</keystone_rules…>`` and
- * ``<recalled_memories…>`` / ``</recalled_memories…>`` tag, then flattens
+ * ``<recalled_memories…>`` / ``</recalled_memories…>`` tag (and the
+ * ``<memory_corrections>`` frame, CP-16), then flattens
  * newlines to spaces. Without this, a field containing a closing tag (with
  * or without attributes, on any line) would close its wrapping block early
  * and let stored text appear OUTSIDE its frame in the model's system prompt
@@ -165,7 +166,8 @@ const FRAME_TAG_RE = /<\/?(?:keystone_rules|recalled_memories)[^>]*>/gi;
  * depend on. Case-insensitive — LLMs don't care about case.
  *
  * Used for keystone rule fields here and for recalled memory content in
- * ``context-engine.ts``; recalled memories include auto-ingested user
+ * ``context-engine.ts`` and correction summaries in ``correction-notices.ts``;
+ * recalled memories include auto-ingested user
  * messages, so they are text any chat participant can author.
  */
 export function sanitizePromptField(s: string): string {

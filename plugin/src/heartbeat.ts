@@ -863,6 +863,8 @@ async function processCommand(cmd: {
           // ``origin-usage.ts`` — statically imported by ``context-engine.ts``.
           "origin-usage.ts",
           "task-trail.ts",
+          // ``correction-notices.ts`` — statically imported by ``context-engine.ts``.
+          "correction-notices.ts",
         ];
         const FALLBACK_ROOT_FILES = [
           "openclaw.plugin.json", "tools.json", "skills/memclaw/SKILL.md", // legacy-name-floor: shipped skill path

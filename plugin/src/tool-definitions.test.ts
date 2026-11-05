@@ -131,10 +131,13 @@ describe("createToolFromSpec factory", () => {
 
   test("op-dispatched tools declare op + required path params", () => {
     const manage = createToolFromSpec("caura_manage").parameters as any;
-    assert.deepEqual(manage.required, ["op", "memory_id"]);
+    // memory_id is required by every op but confirm_correction, which names
+    // a correction instead; the dispatcher checks it per op.
+    assert.deepEqual(manage.required, ["op"]);
     assert.deepEqual(manage.properties.op.enum, [
-      "read", "update", "transition", "delete",
+      "read", "update", "transition", "delete", "confirm_correction",
     ]);
+    assert.ok(manage.properties.correction_id);
 
     const doc = createToolFromSpec("caura_doc").parameters as any;
     // ``collection`` is required for write/read/query/delete but optional
@@ -152,9 +155,10 @@ describe("createToolFromSpec factory", () => {
   // Listing them keeps the divergence a recorded decision instead of a drift.
   // ``verify``/``unverify`` (evidence contract v1, EC-14) do have REST
   // endpoints; the plugin does not offer them yet, which caura_manage's
-  // description says. So do ``send_correction``/``confirm_correction``
-  // (correction propagation, CP-11): POST /corrections/{id}/send and /confirm;
-  // the plugin's recall-fallback confirm is its own change (CP-13).
+  // description says. So does ``send_correction`` (correction propagation,
+  // CP-11: POST /corrections/{id}/send, a person's or trust-3 action). The
+  // plugin offers ``confirm_correction`` itself (CP-16), for the notices its
+  // automatic recall shows.
   const MCP_ONLY_OPS: Record<string, readonly string[]> = {
     caura_manage: [
       "bulk_delete",
@@ -162,7 +166,6 @@ describe("createToolFromSpec factory", () => {
       "verify",
       "unverify",
       "send_correction",
-      "confirm_correction",
     ],
   };
 
