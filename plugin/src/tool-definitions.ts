@@ -165,7 +165,9 @@ export const STATUSES = [
 // so they cannot drift. Deliberately NOT `tools.json`'s `ops[]`, which is
 // what the MCP handler ACCEPTS and legitimately differs — see MCP_ONLY_OPS
 // in tool-definitions.test.ts.
-const MANAGE_OPS = ["read", "update", "transition", "delete", "confirm_correction"] as const;
+const MANAGE_OPS = [
+  "read", "update", "transition", "delete", "confirm_correction", "accept_baton",
+] as const;
 const DOC_OPS = [
   "write", "read", "query", "delete", "search", "list_collections",
 ] as const;
@@ -260,12 +262,19 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     required: ["op"],
     properties: {
       op: { type: "string", enum: [...MANAGE_OPS] },
-      memory_id: { type: "string", description: "UUID of memory to act on. Required except for op=confirm_correction" },
+      memory_id: {
+        type: "string",
+        description: "UUID of memory to act on. Required except for op=confirm_correction and op=accept_baton",
+      },
       correction_id: {
         type: "string",
         description:
           "For op=confirm_correction: the id from a Memory Corrections notice. " +
           "Confirm only after checking the work that used the old version.",
+      },
+      baton_id: {
+        type: "string",
+        description: "For op=accept_baton: the id from a Handoff Batons notice. Accept once you take the work up.",
       },
       status: { type: "string", enum: [...STATUSES], description: "Required for op=transition" },
       content: { type: "string", description: "For op=update" },
@@ -479,6 +488,9 @@ const RECALL_PASSTHROUGH_FIELDS = [
   // CP-16: corrections to memories this agent read; it confirms each with
   // caura_manage op=confirm_correction.
   "correction_notices",
+  // HB-09: handoff batons waiting on this agent; it accepts each with
+  // caura_manage op=accept_baton.
+  "baton_notices",
 ];
 
 /**
@@ -620,6 +632,19 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
       return apiCall(
         "POST",
         `/corrections/${encodeURIComponent(correction_id)}/confirm`,
+        undefined,
+        { tenant_id, agent_id: enriched.agent_id as string },
+        signal,
+      );
+    }
+    if (op === "accept_baton") {
+      // HB-09: the agent itself takes up a baton handed to it, so its recall
+      // stops showing it. The server accepts only a receiver of the baton.
+      const baton_id = enriched.baton_id;
+      assertSafePathSegment(baton_id, "baton_id");
+      return apiCall(
+        "POST",
+        `/batons/${encodeURIComponent(baton_id)}/accept`,
         undefined,
         { tenant_id, agent_id: enriched.agent_id as string },
         signal,

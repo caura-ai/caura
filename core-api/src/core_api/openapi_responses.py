@@ -26,7 +26,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from core_api.schemas import CorrectionNotice, EmptyRecallHint, SearchHitOut, SearchWarning
+from core_api.schemas import BatonNotice, CorrectionNotice, EmptyRecallHint, SearchHitOut, SearchWarning
 
 # --------------------------------------------------------------------------
 # memories / recall / health / version
@@ -284,6 +284,40 @@ class CorrectionConfirmResponse(BaseModel):
     confirmed_at: str | None
 
 
+class BatonLink(BaseModel):
+    memory_id: str
+    title: str = Field(description="The memory's title, or the start of its content.")
+
+
+class BatonOut(BaseModel):
+    """``GET /batons/{id}`` (handoff batons, HB-09): the baton as this agent got or cited it."""
+
+    model_config = {"extra": "allow"}
+
+    type: str = Field(description="``handoff_baton``.")
+    v: int
+    baton_id: str
+    from_agent: str
+    goal: str
+    decisions: list[str] = []
+    failed_approaches: list[dict] = []
+    open_questions: list[str] = []
+    memory_ids: list[str] = Field(
+        description="The linked memories this agent may read today (a receiver: of those delivered to it)."
+    )
+    linked: list[BatonLink] = Field(description="The same memories, with titles.")
+    doc_ids: list[dict] = []
+    created_at: str | None = None
+
+
+class BatonAcceptResponse(BaseModel):
+    baton_id: str
+    agent_id: str
+    from_agent: str
+    state: str = Field(description="``accepted``, or ``replied`` when it was answered on the bus.")
+    accepted_at: str | None
+
+
 class MemoryCorrectionListResponse(BaseModel):
     memory_id: str
     corrections: list[MemoryCorrectionOut] = Field(description="Newest first.")
@@ -410,6 +444,12 @@ class RecallResponse(BaseModel):
             "Only when a memory this agent read was corrected and the agent has not "
             "confirmed it: at most 3, newest first."
         ),
+    )
+    # HB-09 — absent unless a handoff baton waits on this agent; same objects
+    # /search sends.
+    baton_notices: list[BatonNotice] | None = Field(
+        default=None,
+        description="Only when a handoff baton is waiting on this agent: at most 2, newest first.",
     )
 
 

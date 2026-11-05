@@ -81,6 +81,7 @@ from core_api.schemas import (
     MemoryUpdate,
     SearchProfileUpdate,
 )
+from core_api.services import baton_notices
 from core_api.services.agent_service import (
     authorize_memory_access,
     broker_owned_agent_id,
@@ -1674,6 +1675,8 @@ async def caura_recall(
         empty_hint_ctx: dict = {}
         # CP-13 — corrections this agent has not confirmed, looked up beside the search.
         notices_task = start_notices(tenant_id, agent_id, surface="mcp")
+        # HB-09 — handoff batons waiting on this agent, the same way.
+        batons_task = baton_notices.start_notices(tenant_id, agent_id, surface="mcp")
         results = await search_memories(
             tenant_id=tenant_id,
             query=query,
@@ -1757,6 +1760,9 @@ async def caura_recall(
         # CP-13 — same: absent unless this agent owes a confirmation.
         if notices := await finish_notices(notices_task):
             payload["correction_notices"] = notices
+        # HB-09 — same: absent unless a baton waits on this agent.
+        if batons := await baton_notices.finish_notices(batons_task):
+            payload["baton_notices"] = batons
         if diagnostic:
             counts = diagnostic_ctx.get("counts", {}) or {}
             payload["diagnostic"] = {
@@ -2323,11 +2329,11 @@ async def caura_manage(
         str,
         Field(
             description="read|update|transition|delete|bulk_delete|lineage|verify|unverify|"
-            "send_correction|confirm_correction."
+            "send_correction|confirm_correction|read_baton|accept_baton."
         ),
     ],
     memory_id: Annotated[
-        str, Field(description="UUID. Required except for op=bulk_delete and the *_correction ops.")
+        str, Field(description="UUID. Required except for op=bulk_delete and the *_correction, *_baton ops.")
     ] = "",
     memory_ids: Annotated[
         list[str] | None,
@@ -2341,6 +2347,7 @@ async def caura_manage(
     metadata: Annotated[dict | None, Field(description="op=update.")] = None,
     source_uri: Annotated[str | None, Field(description="op=update.")] = None,
     correction_id: Annotated[str, Field(description="op=send_correction|confirm_correction.")] = "",
+    baton_id: Annotated[str, Field(description="op=read_baton|accept_baton.")] = "",
     agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
 ) -> ToolReply:
     """Per-memory lifecycle: read | update | transition | delete | bulk_delete | lineage | verify | unverify.
@@ -2350,6 +2357,11 @@ async def caura_manage(
     ``POST /corrections/{id}/send``; an agent needs trust_level >= 3);
     op=confirm_correction is a recipient confirming its notice (REST
     ``POST /corrections/{id}/confirm``).
+
+    Handoff batons (HB-09), for a receiver told on recall (``baton_notices``):
+    op=read_baton reads one handed to you (REST ``GET /batons/{id}``),
+    op=accept_baton takes it up so the notice stops (REST
+    ``POST /batons/{id}/accept``).
 
     op=lineage walks the supersession chain for `memory_id` and returns
     {this, superseded_by, supersessors} — the older row this memory
@@ -2374,6 +2386,8 @@ async def caura_manage(
         "unverify",
         "send_correction",
         "confirm_correction",
+        "read_baton",
+        "accept_baton",
     }
     if op not in _valid_ops:
         return _with_latency(
@@ -2399,6 +2413,7 @@ async def caura_manage(
         "unverify",
         "send_correction",
         "confirm_correction",
+        "accept_baton",
     } and (err := _check_write_scope()):
         return err
     if op == "bulk_delete" and (refuse := _refuse_tenant_admin_op("bulk-delete memories")):
@@ -2419,10 +2434,18 @@ async def caura_manage(
             return _with_latency(
                 _error_response("INVALID_ARGUMENTS", f"op={op} requires 'correction_id' (a UUID)."), t0
             )
+    _baton_ops = {"read_baton", "accept_baton"}
+    if op in _baton_ops:
+        try:
+            baton_id = str(UUID(baton_id))
+        except ValueError:
+            return _with_latency(
+                _error_response("INVALID_ARGUMENTS", f"op={op} requires 'baton_id' (a UUID)."), t0
+            )
     # bulk_delete uses memory_ids (list); all other ops use memory_id (single UUID).
     # Validate accordingly so a missing memory_id on bulk_delete doesn't fail with
     # a misleading "Invalid UUID" error.
-    if op != "bulk_delete" and op not in _correction_ops:
+    if op != "bulk_delete" and op not in _correction_ops and op not in _baton_ops:
         try:
             uid = UUID(memory_id)
         except ValueError:
@@ -2437,9 +2460,16 @@ async def caura_manage(
     # no agent context (OSS/standalone) ⇒ tenant-scoped, no agent isolation.
     caller_agent_id = _get_agent_id()
     agent_id = canonical_service_agent_id(caller_agent_id or agent_id)
-    if op in {"update", "transition", "delete", "bulk_delete", "verify", "unverify", *_correction_ops} and (
-        refuse := _refuse_default_agent_on_gateway(agent_id) or await _refuse_unowned_agent(agent_id)
-    ):
+    if op in {
+        "update",
+        "transition",
+        "delete",
+        "bulk_delete",
+        "verify",
+        "unverify",
+        *_correction_ops,
+        *_baton_ops,
+    } and (refuse := _refuse_default_agent_on_gateway(agent_id) or await _refuse_unowned_agent(agent_id)):
         return _with_latency(refuse, t0)
     # An install credential authenticates no agent, so ``caller_agent_id`` is
     # None for it as for a tenant key, but another install's agents' private
@@ -2460,6 +2490,20 @@ async def caura_manage(
                 # The recipient itself: the authenticated agent, or the agent a
                 # tenant key names (exposure was recorded under that name).
                 return _with_latency(_dumps(await confirm_as_agent(tenant_id, correction_id, agent_id)), t0)
+            # The baton's own agent, by the confirm_correction rule above.
+            if op == "read_baton":
+                return _with_latency(
+                    _dumps(
+                        await baton_notices.read_as_agent(
+                            tenant_id, baton_id, effective_read_agent_id(caller_agent_id, agent_id)
+                        )
+                    ),
+                    t0,
+                )
+            if op == "accept_baton":
+                return _with_latency(
+                    _dumps(await baton_notices.accept_as_agent(tenant_id, baton_id, agent_id)), t0
+                )
             if op == "send_correction":
                 return await _manage_send_correction(
                     sc, tenant_id, correction_id, caller_agent_id, is_install, install_uuid, t0

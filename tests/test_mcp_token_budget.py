@@ -176,7 +176,15 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # all of it is the ``anyOf`` string|null boilerplate per optional parameter; the
 # description is seven words. Ceiling 5811 -> 5884, raised by exactly the
 # delta, leaving 0.
-CEILING_TOKENS = 5884
+#
+# 2026-11-05 (handoff batons, HB-09): 5945 cl100k (+61), measured with tiktoken
+# from the fixture. ``caura_manage`` gained ``read_baton`` and ``accept_baton``
+# as ops rather than a new tool, and one ``baton_id`` parameter: an agent told
+# about a baton on recall (``baton_notices``) and not on the bus has no other
+# way to read or accept it. Two names in the ``op`` roll-call, one sentence,
+# and the plugin-gap clause naming read_baton (the plugin renders the baton
+# itself). Ceiling 5884 -> 5945, raised by exactly the delta, leaving 0.
+CEILING_TOKENS = 5945
 
 
 def _count(path: Path) -> int:

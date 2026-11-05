@@ -131,13 +131,15 @@ describe("createToolFromSpec factory", () => {
 
   test("op-dispatched tools declare op + required path params", () => {
     const manage = createToolFromSpec("caura_manage").parameters as any;
-    // memory_id is required by every op but confirm_correction, which names
-    // a correction instead; the dispatcher checks it per op.
+    // memory_id is required by every op but confirm_correction and
+    // accept_baton, which name a correction or a baton instead; the
+    // dispatcher checks it per op.
     assert.deepEqual(manage.required, ["op"]);
     assert.deepEqual(manage.properties.op.enum, [
-      "read", "update", "transition", "delete", "confirm_correction",
+      "read", "update", "transition", "delete", "confirm_correction", "accept_baton",
     ]);
     assert.ok(manage.properties.correction_id);
+    assert.ok(manage.properties.baton_id);
 
     const doc = createToolFromSpec("caura_doc").parameters as any;
     // ``collection`` is required for write/read/query/delete but optional
@@ -166,6 +168,8 @@ describe("createToolFromSpec factory", () => {
       "verify",
       "unverify",
       "send_correction",
+      // HB-09: the plugin reads a baton itself in automatic recall.
+      "read_baton",
     ],
   };
 

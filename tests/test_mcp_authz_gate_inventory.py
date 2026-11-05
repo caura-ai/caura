@@ -156,9 +156,13 @@ MUTATING_OPS = frozenset(
         # notice state; confirm sets the caller's own.
         "send_correction",
         "confirm_correction",
+        # Handoff batons: accept sets the caller's own receiver state.
+        "accept_baton",
     }
 )
-READING_OPS = frozenset({"read", "query", "search", "list_collections", "lineage"})
+READING_OPS = frozenset(
+    {"read", "query", "search", "list_collections", "lineage", "read_baton"}
+)
 
 # Tools that declare NO ops, split the same way. ``caura_tune`` is the one worth
 # naming: it reads like a settings getter, and it writes.
@@ -246,6 +250,10 @@ ROW_GATE_ALLOWLIST: dict[str, str] = {
     "caura_manage.confirm_correction": (
         "writes the caller's own memory_correction_recipient row, not a memory; "
         "storage refuses an agent that is not on the recipient list"
+    ),
+    "caura_manage.accept_baton": (
+        "writes the caller's own baton_recipient row, not a memory; storage "
+        "refuses an agent that is not a receiver of the baton"
     ),
 }
 
@@ -1141,6 +1149,8 @@ def test_the_op_scan_reads_both_spellings() -> None:
             "unverify",
             "send_correction",
             "confirm_correction",
+            "read_baton",
+            "accept_baton",
         },
         "caura_doc": {"write", "read", "query", "delete", "list_collections", "search"},
         "caura_keystones_set": {"set", "delete"},

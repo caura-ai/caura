@@ -2052,6 +2052,57 @@ class CoreStorageClient:
         )
         return (result or {}).get("delivered", 0)  # type: ignore[union-attr]
 
+    async def record_baton_recipients(
+        self,
+        tenant_id: str,
+        baton_id: str,
+        *,
+        from_agent: str,
+        goal: str,
+        created_at: str,
+        recipients: list[dict],
+    ) -> int:
+        """The bus sent a handoff baton to ``recipients`` (``{agent_id, message_id}``); the new rows.
+
+        Called by the bus (enterprise, in the core-api process) after a baton
+        send. Idempotent: a retried send keeps the rows and states it wrote.
+        """
+        result = await self._post(
+            f"/batons/{baton_id}/recipients?tenant_id={quote(tenant_id, safe='')}",
+            {"from_agent": from_agent, "goal": goal, "created_at": created_at, "recipients": recipients},
+            idempotent=True,
+        )
+        return (result or {}).get("recorded", 0)  # type: ignore[union-attr]
+
+    async def list_baton_recipients(self, tenant_id: str, baton_id: str) -> list[dict]:
+        """One baton's receiver rows (``agent_id, state, accepted_at, accepted_via``), for the bus's status read."""
+        result = await self._get(f"/batons/{baton_id}/recipients", tenant_id=tenant_id)
+        return (result or {}).get("recipients", [])
+
+    async def list_baton_notices(self, tenant_id: str, agent_id: str, *, limit: int = 2) -> list[dict]:
+        """Handoff batons still waiting on ``agent_id`` (not accepted, < 7 days), newest first."""
+        result = await self._get("/batons/notices", tenant_id=tenant_id, agent_id=agent_id, limit=limit)
+        return (result or {}).get("notices", [])
+
+    async def accept_baton(
+        self, tenant_id: str, baton_id: str, *, agent_id: str, via: str = "recall", state: str = "accepted"
+    ) -> dict | None:
+        """``agent_id`` took the baton up; its row, ``None`` when it is not a receiver."""
+        return await self._post_optional(
+            f"/batons/{baton_id}/accept?tenant_id={quote(tenant_id, safe='')}",
+            {"agent_id": agent_id, "via": via, "state": state},
+            retry=with_retry,
+        )
+
+    async def mark_baton_notices_checked(self, tenant_id: str, agent_id: str, baton_ids: list[str]) -> int:
+        """core-api just read the bus state of these rows; the rows changed."""
+        result = await self._post(
+            f"/batons/notices/checked?tenant_id={quote(tenant_id, safe='')}",
+            {"agent_id": agent_id, "baton_ids": baton_ids},
+            idempotent=True,
+        )
+        return (result or {}).get("checked", 0)  # type: ignore[union-attr]
+
     async def increment_tenant_usage(self, rows: list[dict]) -> int:
         """ADD to per-tenant, per-period counters in ``tenant_usage_counters``.
 

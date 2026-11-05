@@ -3,8 +3,10 @@
 Status: in progress. Done here: HB-03 (this spec) and the `batons` document
 collection made system-managed. In caura-enterprise: HB-04 (schema check),
 HB-05 (receiver access filter), HB-06 (stored baton) and the status read of
-HB-12. In parallel: HB-10 (the `baton_id` read filter). Next: receiving
-(`delivery["baton"]` in caura-bus-mcp, `baton_notices` on recall).
+HB-12. In parallel: HB-10 (the `baton_id` read filter). HB-09, the recall
+fallback (`baton_notices`, `GET /batons/{id}`, `POST /batons/{id}/accept`, the
+OpenClaw `<handoff_baton>` block): see [Recall fallback](#recall-fallback). Next:
+`delivery["baton"]` in caura-bus-mcp.
 
 ## Problem
 
@@ -88,7 +90,7 @@ cannot read one gets the usual refusal when it tries.
 (framed and marked as untrusted data), like `delivery["correction"]`. An agent
 that is not on the bus gets pending batons on its next recall
 (`baton_notices`, the `correction_notices` pattern: at most 2, until accepted,
-7 days). Not part of this change.
+7 days). See [Recall fallback](#recall-fallback).
 
 **D5. Link-back.** A receiver writes what it finds with `metadata.baton_id`
 and `source_uri = "caura-bus:message/<message_id>"`. A `baton_id` read filter
@@ -137,9 +139,75 @@ else gets the same 404 as for an unknown baton.
   `baton_id` filter (HB-10) is deployed this answers
   `{"available": false, "count": null, "memory_ids": []}`.
 
+## Recall fallback
+
+HB-09. A receiver the bus cannot wake (an OpenClaw agent, a session that only
+recalls) hears about a baton on its next recall, whatever it searches for.
+
+**Who is waiting.** The bus owns delivery state, and in standalone OSS there is
+no bus. So core-api keeps a small table of its own, `baton_recipient`
+(migration 076): one row per (tenant, baton, receiver) with `from_agent`,
+`goal`, `created_at`, the bus `message_id`, and `state`: `delivered` until the
+receiver takes it up, then `accepted` or `replied`. The bus writes the rows
+when it sends a baton, through core-api's storage client in process
+(`record_baton_recipients`; storage `POST /batons/{id}/recipients`, idempotent).
+Standalone OSS writes none, so the lookup finds nothing.
+
+**On recall.** MCP `caura_recall` and REST `/search` and `/recall` add
+`baton_notices: [{baton_id, from_agent, goal, created_at, ask}]` for an agent
+with `delivered` rows younger than 7 days: at most 2, newest first, the goal cut
+to 300 characters. The key is absent when there are none, so the ordinary
+response is byte-identical. One probe of the partial index
+`ix_baton_recipient_waiting (tenant_id, agent_id, created_at) WHERE
+state = 'delivered'`, run beside the search; a failure reads as no notices.
+Identity is the correction-notices rule: an agent key, else the body's
+`caller_agent_id`, else `filter_agent_id`; nothing for no agent or a person.
+
+**Reading and accepting.** `GET /api/v1/batons/{id}` (MCP `caura_manage
+op=read_baton`) returns the baton from the `batons` document as this receiver
+got it, each link checked again against its access today and given a title
+(`linked`), or as the sender cited it; anyone else gets 404. `POST
+/api/v1/batons/{id}/accept` (MCP and plugin `caura_manage op=accept_baton`)
+marks the row `accepted`, receiver only, with the same identity rules as
+`POST /corrections/{id}/confirm`: an agent credential acts as itself, a tenant
+key names the agent with `agent_id`, a person cannot.
+
+**Keeping the bus and the table in step** (enterprise follow-up):
+
+- Bus → table. `GET {COLLABORATION_API_URL}/api/v1/bus/system/batons/{id}?tenant_id&agent_id`
+  (`X-Caura-System-Secret`, plus a Cloud Run ID token for an `https` bus)
+  answers `{"receivers": [{"agent_id", "state"}]}` with the status read's
+  states. After a response that showed a notice, core-api asks it for that
+  receiver (at most every 30 s per row, fire-and-forget) and copies `accepted`
+  (an ack) or `replied` into the row, so the notice stops for an agent that
+  took the baton up on the bus. Until the bus serves the route, a 404 reads as
+  "no change".
+- Table → bus. A recall-side accept does not touch the bus delivery: acking it
+  takes the receiver's own lease. The bus's baton status reads the rows
+  (`list_baton_recipients`, storage `GET /batons/{id}/recipients`) and shows a
+  receiver that accepted on recall as `accepted` while its delivery is still
+  open (`delivered` or `late`).
+
+**OpenClaw.** Automatic recall reads each noticed baton (`GET /batons/{id}`)
+and shows it before the recalled memories, framed as data:
+
+```
+<handoff_baton>
+- Handoff from <from_agent>: <goal>. Decisions: … Failed approaches (don't
+  retry): … Open questions: … Linked memories: <id — title> (read them with
+  caura_manage op=read memory_id=<id>). Tag every memory you write for this work with
+  metadata.baton_id=<id>; cite, don't copy, the linked memories. Once you take
+  it up, accept it: caura_manage op=accept_baton baton_id=<id>
+</handoff_baton>
+```
+
+The plugin never accepts on the agent's behalf.
+
 ## Cost
 
 A message whose body does not contain the string `handoff_baton` pays one
 substring test and nothing else. A baton costs one document read, one bulk
 memory read plus one agent lookup per sender and receiver, one storage send
-per distinct readable set, and one document write.
+per distinct readable set, and one document write. On recall, an agent with no
+waiting baton pays one index probe beside the search; one with a waiting baton
+also pays, at most every 30 s per baton, one bus status call after the response.

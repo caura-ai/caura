@@ -1,5 +1,6 @@
 from core_storage_api.routers.agents import router as agents_router
 from core_storage_api.routers.audit import router as audit_router
+from core_storage_api.routers.batons import router as batons_router
 from core_storage_api.routers.capability_usage import router as capability_usage_router
 from core_storage_api.routers.corrections import router as corrections_router
 from core_storage_api.routers.debug import router as debug_router
@@ -29,6 +30,7 @@ from core_storage_api.routers.value import router as value_router
 __all__ = [
     "agents_router",
     "audit_router",
+    "batons_router",
     "capability_usage_router",
     "tenant_usage_router",
     "debug_router",

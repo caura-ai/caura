@@ -1,4 +1,4 @@
-"""Unit tests for ``caura_manage`` (op: read | update | transition | delete | bulk_delete | lineage | verify | unverify | send_correction | confirm_correction).
+"""Unit tests for ``caura_manage`` (op: read | update | transition | delete | bulk_delete | lineage | verify | unverify | send_correction | confirm_correction | read_baton | accept_baton).
 
 Covers:
 - Unknown ``op`` → ``INVALID_ARGUMENTS`` envelope listing the expected ops.
@@ -70,11 +70,13 @@ async def test_manage_invalid_op_errors(mcp_env):
     assert "wat" in payload["error"]["message"]
     # sorted() in mcp_server emits the ops in lexicographic order
     assert payload["error"]["details"]["expected_ops"] == [
+        "accept_baton",
         "bulk_delete",
         "confirm_correction",
         "delete",
         "lineage",
         "read",
+        "read_baton",
         "send_correction",
         "transition",
         "unverify",

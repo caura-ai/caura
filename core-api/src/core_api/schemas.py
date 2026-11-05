@@ -1089,6 +1089,22 @@ class CorrectionNotice(BaseModel):
     ask: str = Field(description="What the agent is asked to do, including how to confirm.")
 
 
+class BatonNotice(BaseModel):
+    """HB-09 — a handoff baton waiting on this agent, owed on its next recall.
+
+    Present until the agent accepts it (or takes it up on the bus) or it is 7
+    days old; at most two, newest first. ``core_api.services.baton_notices``
+    has the rules. The goal is cut to 300 characters; ``GET /batons/{id}``
+    reads the whole baton.
+    """
+
+    baton_id: str
+    from_agent: str = Field(description="The agent that handed the work over.")
+    goal: str
+    created_at: str
+    ask: str = Field(description="What the agent is asked to do, including how to accept.")
+
+
 class SearchResponse(BaseModel):
     """Envelope for search results — matches PaginatedMemoryResponse shape."""
 
@@ -1139,6 +1155,15 @@ class SearchResponse(BaseModel):
         description=(
             "Only when a memory this agent read was corrected and the agent has not "
             "confirmed it: at most 3, newest first. Absent otherwise."
+        ),
+    )
+    # HB-09 — omitted when empty, for the same reason as ``correction_notices``.
+    baton_notices: list[BatonNotice] | None = Field(
+        default=None,
+        exclude_if=lambda v: not v,
+        description=(
+            "Only when a handoff baton is waiting on this agent and it has not accepted "
+            "it: at most 2, newest first. Absent otherwise."
         ),
     )
 

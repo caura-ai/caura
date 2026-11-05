@@ -1,6 +1,42 @@
 {
   "components": {
     "schemas": {
+      "BatonNotice": {
+        "description": "HB-09 — a handoff baton waiting on this agent, owed on its next recall.\n\nPresent until the agent accepts it (or takes it up on the bus) or it is 7\ndays old; at most two, newest first. ``core_api.services.baton_notices``\nhas the rules. The goal is cut to 300 characters; ``GET /batons/{id}``\nreads the whole baton.",
+        "properties": {
+          "ask": {
+            "description": "What the agent is asked to do, including how to accept.",
+            "title": "Ask",
+            "type": "string"
+          },
+          "baton_id": {
+            "title": "Baton Id",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "from_agent": {
+            "description": "The agent that handed the work over.",
+            "title": "From Agent",
+            "type": "string"
+          },
+          "goal": {
+            "title": "Goal",
+            "type": "string"
+          }
+        },
+        "required": [
+          "baton_id",
+          "from_agent",
+          "goal",
+          "created_at",
+          "ask"
+        ],
+        "title": "BatonNotice",
+        "type": "object"
+      },
       "BulkItemResult": {
         "description": "Per-item outcome of a bulk write (CAURA-602).\n\nStatus semantics:\n\n- ``\"created\"``: this attempt newly inserted the row; ``id`` is the\n  new row's id.\n- ``\"duplicate_attempt\"``: same ``X-Bulk-Attempt-Id``+index already\n  committed in a prior call. ``id`` is the canonical row from that\n  first attempt. Returned when a retry hits the per-item unique\n  constraint — what eliminates the silent-create class.\n- ``\"duplicate_content\"``: a different attempt's row with the same\n  ``content_hash`` already exists. ``id`` and ``duplicate_of`` both\n  point at the existing row; emitted in place of an insert.\n- ``\"error\"``: the row could not be processed (validation,\n  enrichment timeout, missing storage id). ``error`` describes.\n\nThe legacy ``\"duplicate\"`` status is gone — callers must read\n``duplicate_attempt`` vs ``duplicate_content`` because they imply\ndifferent client-side actions (an idempotent retry succeeded vs\n\"you already wrote this content earlier\").",
         "properties": {
@@ -2718,6 +2754,21 @@
       "SearchResponse": {
         "description": "Envelope for search results — matches PaginatedMemoryResponse shape.",
         "properties": {
+          "baton_notices": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/BatonNotice"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only when a handoff baton is waiting on this agent and it has not accepted it: at most 2, newest first. Absent otherwise.",
+            "title": "Baton Notices"
+          },
           "correction_notices": {
             "anyOf": [
               {

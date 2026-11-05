@@ -602,7 +602,7 @@
     "trust_required": 1
   },
   {
-    "description": "Per-memory lifecycle. bulk_delete, lineage, verify, unverify and send_correction are not in the plugin; lineage returns the supersession chain. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete and bulk_delete are soft (prefer transition to outdated). verify sets human_verified (trust 3), unverify clears it. send_correction notifies the agents that read a corrected memory (trust 3); confirm_correction acks a notice sent to you.",
+    "description": "Per-memory lifecycle. bulk_delete, lineage, verify, unverify, send_correction and read_baton are not in the plugin; lineage returns the supersession chain. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete and bulk_delete are soft (prefer transition to outdated). verify sets human_verified (trust 3), unverify clears it. send_correction notifies the agents that read a corrected memory (trust 3); confirm_correction acks a notice sent to you. read_baton and accept_baton act on a handoff baton handed to you.",
     "error_codes": [
       "AGENT_CREDENTIAL_FORBIDDEN",
       "AGENT_IDENTITY_MISMATCH",
@@ -707,18 +707,34 @@
           "correction_id"
         ],
         "trust_required": 0
+      },
+      {
+        "description": "Read a handoff baton handed to you.",
+        "name": "read_baton",
+        "required_params": [
+          "baton_id"
+        ],
+        "trust_required": 0
+      },
+      {
+        "description": "Accept a handoff baton handed to you.",
+        "name": "accept_baton",
+        "required_params": [
+          "baton_id"
+        ],
+        "trust_required": 0
       }
     ],
     "params": [
       {
-        "description": "read|update|transition|delete|bulk_delete|lineage|verify|unverify|send_correction|confirm_correction.",
+        "description": "read|update|transition|delete|bulk_delete|lineage|verify|unverify|send_correction|confirm_correction|read_baton|accept_baton.",
         "name": "op",
         "required": true,
         "type": "str"
       },
       {
         "default": "",
-        "description": "UUID. Required except for op=bulk_delete and the *_correction ops.",
+        "description": "UUID. Required except for op=bulk_delete and the *_correction, *_baton ops.",
         "name": "memory_id",
         "required": false,
         "type": "str"
@@ -783,6 +799,13 @@
         "default": "",
         "description": "op=send_correction|confirm_correction.",
         "name": "correction_id",
+        "required": false,
+        "type": "str"
+      },
+      {
+        "default": "",
+        "description": "op=read_baton|accept_baton.",
+        "name": "baton_id",
         "required": false,
         "type": "str"
       },

@@ -48,6 +48,7 @@ from core_storage_api.middleware import (
 from core_storage_api.routers import (
     agents_router,
     audit_router,
+    batons_router,
     capability_usage_router,
     corrections_router,
     debug_router,
@@ -433,6 +434,9 @@ def create_app() -> FastAPI:
     # Memory corrections (migration 073): who to tell about a correction.
     # Every route is bound to one tenant.
     app.include_router(corrections_router, prefix=prefix)
+    # Handoff batons (migration 076): which agents a baton is waiting on.
+    # Every route is bound to one tenant.
+    app.include_router(batons_router, prefix=prefix)
 
     return app
 

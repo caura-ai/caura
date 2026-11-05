@@ -1,7 +1,8 @@
 """ToolSpec for caura_manage — per-memory lifecycle (op-dispatched).
 
 Ops: read (by id), update, transition, delete, bulk_delete, lineage, verify,
-unverify, send_correction, confirm_correction — the same ten the handler accepts.
+unverify, send_correction, confirm_correction, read_baton, accept_baton — the
+same twelve the handler accepts.
 """
 
 from core_api import mcp_server
@@ -22,14 +23,16 @@ from ._types import OpSpec, ToolSpec
 # (tests/test_mcp_token_budget.py records the arithmetic), so say only what the
 # inputSchema does not already carry.
 _DESCRIPTION = (
-    "Per-memory lifecycle. bulk_delete, lineage, verify, unverify and send_correction are not in the plugin; "
+    "Per-memory lifecycle. bulk_delete, lineage, verify, unverify, send_correction and read_baton "
+    "are not in the plugin; "
     "lineage returns the supersession chain. "
     "update patches fields and re-embeds if content changes. "
     "transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). "
     "delete and bulk_delete are soft (prefer transition to outdated). "
     "verify sets human_verified (trust 3), unverify clears it. "
     "send_correction notifies the agents that read a corrected memory (trust 3); "
-    "confirm_correction acks a notice sent to you."
+    "confirm_correction acks a notice sent to you. "
+    "read_baton and accept_baton act on a handoff baton handed to you."
 )
 
 _SPEC = ToolSpec(
@@ -102,6 +105,17 @@ _SPEC = ToolSpec(
             name="confirm_correction",
             description="Confirm a correction notice sent to you.",
             required_params=("correction_id",),
+        ),
+        # HB-09. The receiver or sender only (``baton_notices.read_as_agent``).
+        OpSpec(
+            name="read_baton",
+            description="Read a handoff baton handed to you.",
+            required_params=("baton_id",),
+        ),
+        OpSpec(
+            name="accept_baton",
+            description="Accept a handoff baton handed to you.",
+            required_params=("baton_id",),
         ),
     ),
     error_codes=(

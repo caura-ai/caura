@@ -349,6 +349,7 @@ NON_ADMIN_PLANE_ROUTERS: dict[str, str] = {
     # Correction propagation: a person (or a trust-3 agent, enforce_send_correction)
     # sends a correction's notices; the recipient agent confirms its own.
     "corrections": "trust-plane send (enforce_send_correction); agent-plane confirm of its own notice",
+    "batons": "agent plane: a baton's receiver (or sender) reads it and accepts its own notice; storage refuses anyone else",
 }
 
 # Routers that exist ONLY under an explicit env flag, and so are not part of
