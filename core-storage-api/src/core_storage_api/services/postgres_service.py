@@ -22,7 +22,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, NamedTuple
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import (
     BigInteger,
@@ -135,6 +135,7 @@ from common.models.memory import (
     VERIFIED_STATUSES,
     is_real_source_uri,
 )
+from common.models.memory_correction import MAX_RECIPIENTS, MemoryCorrection, MemoryCorrectionRecipient
 from common.models.memory_exposure import MemoryExposure
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.models.recall_log import RecallCandidate, RecallEvent
@@ -1862,6 +1863,10 @@ _PURGE_TENANT_TABLES: tuple[str, ...] = (
     "memory_reuse",
     # Correction propagation (migration 072): same reasoning as the two above.
     "memory_exposure",
+    # Correction propagation (migration 073): recipients ahead of their record,
+    # both ahead of ``memories``, for the same reasoning.
+    "memory_correction_recipient",
+    "memory_correction",
     "memories",
     "entities",
     "agents",
@@ -7615,6 +7620,194 @@ class PostgresService:
                 }
                 for r in rows.all()
             ]
+
+    # ------------------------------------------------------------------
+    # Memory corrections (migration 073): who to tell about a correction
+    # ------------------------------------------------------------------
+
+    async def correction_record(
+        self,
+        tenant_id: str,
+        *,
+        event_id: str,
+        memory_id: str,
+        kind: str,
+        actor_kind: str,
+        actor_id: str | None,
+        corrected_at: datetime,
+        old_summary: str | None,
+        new_summary: str | None,
+        detail: dict,
+    ) -> dict | None:
+        """Record one correction and the agents to tell; ``None`` when the memory is gone.
+
+        The recipients are the ``memory_exposure`` rows of the memory whose
+        ``first_seen`` is before ``corrected_at`` (the agent read the old
+        version), less the correcting agent, latest read first, at most
+        ``MAX_RECIPIENTS``; ``truncated`` counts the rest. One transaction.
+
+        Idempotent on ``event_id``: a redelivered event returns the record the
+        first delivery wrote (``created`` False) and writes nothing.
+        """
+        mid = UUID(memory_id)
+        async with get_session() as session:
+            exists = await session.execute(
+                select(Memory.id).where(Memory.tenant_id == tenant_id, Memory.id == mid)
+            )
+            if exists.scalar_one_or_none() is None:
+                return None
+            inserted = await session.execute(
+                pg_insert(MemoryCorrection)
+                .values(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    memory_id=mid,
+                    event_id=UUID(event_id),
+                    kind=kind,
+                    actor_kind=actor_kind,
+                    actor_id=actor_id,
+                    corrected_at=corrected_at,
+                    old_summary=old_summary,
+                    new_summary=new_summary,
+                    detail=detail,
+                )
+                .on_conflict_do_nothing(index_elements=[MemoryCorrection.event_id])
+                .returning(MemoryCorrection.id)
+            )
+            correction_id = inserted.scalar_one_or_none()
+            if correction_id is None:
+                existing = await session.execute(
+                    select(MemoryCorrection.id).where(MemoryCorrection.event_id == UUID(event_id))
+                )
+                return {"id": str(existing.scalar_one()), "created": False}
+
+            readers = [
+                MemoryExposure.tenant_id == tenant_id,
+                MemoryExposure.memory_id == mid,
+                MemoryExposure.first_seen < corrected_at,
+            ]
+            if actor_kind == "agent" and actor_id:
+                readers.append(MemoryExposure.agent_id != actor_id)
+            total = (
+                await session.execute(select(func.count()).select_from(MemoryExposure).where(*readers))
+            ).scalar_one()
+            listed = (
+                await session.execute(
+                    select(
+                        MemoryExposure.agent_id,
+                        MemoryExposure.count.label("reads"),
+                        MemoryExposure.first_seen,
+                        MemoryExposure.last_seen,
+                        MemoryExposure.last_trace_id,
+                    )
+                    .where(*readers)
+                    .order_by(MemoryExposure.last_seen.desc(), MemoryExposure.agent_id)
+                    .limit(MAX_RECIPIENTS)
+                )
+            ).all()
+            if listed:
+                await session.execute(
+                    pg_insert(MemoryCorrectionRecipient).values(
+                        [
+                            {
+                                "correction_id": correction_id,
+                                "agent_id": r.agent_id,
+                                "tenant_id": tenant_id,
+                                "reads": int(r.reads),
+                                "first_seen": r.first_seen,
+                                "last_seen": r.last_seen,
+                                "last_trace_id": r.last_trace_id,
+                            }
+                            for r in listed
+                        ]
+                    )
+                )
+            truncated = max(0, int(total) - len(listed))
+            if truncated:
+                await session.execute(
+                    sql_update(MemoryCorrection)
+                    .where(MemoryCorrection.id == correction_id)
+                    .values(truncated=truncated)
+                )
+            return {
+                "id": str(correction_id),
+                "created": True,
+                "recipients": len(listed),
+                "truncated": truncated,
+            }
+
+    @staticmethod
+    def _correction_out(c: MemoryCorrection, recipients: list[MemoryCorrectionRecipient]) -> dict:
+        return {
+            "id": str(c.id),
+            "tenant_id": c.tenant_id,
+            "memory_id": str(c.memory_id),
+            "event_id": str(c.event_id),
+            "kind": c.kind,
+            "actor": {"kind": c.actor_kind, "id": c.actor_id},
+            "corrected_at": c.corrected_at.isoformat(),
+            "old_summary": c.old_summary,
+            "new_summary": c.new_summary,
+            "detail": c.detail or {},
+            "status": c.status,
+            "created_at": c.created_at.isoformat(),
+            "recipients": [
+                {
+                    "agent_id": r.agent_id,
+                    "reads": int(r.reads),
+                    "first_seen": r.first_seen.isoformat(),
+                    "last_seen": r.last_seen.isoformat(),
+                    "last_trace_id": r.last_trace_id,
+                    "notice_state": r.notice_state,
+                }
+                for r in recipients
+            ],
+            "counts": {
+                "recipients": len(recipients),
+                "truncated": int(c.truncated),
+                "readers": len(recipients) + int(c.truncated),
+                "pending": sum(1 for r in recipients if r.notice_state == "pending"),
+            },
+        }
+
+    async def _corrections_with_recipients(
+        self, session: AsyncSession, corrections: list[MemoryCorrection]
+    ) -> list[dict]:
+        if not corrections:
+            return []
+        rows = await session.execute(
+            select(MemoryCorrectionRecipient)
+            .where(MemoryCorrectionRecipient.correction_id.in_([c.id for c in corrections]))
+            .order_by(MemoryCorrectionRecipient.last_seen.desc(), MemoryCorrectionRecipient.agent_id)
+        )
+        by_correction: dict[UUID, list[MemoryCorrectionRecipient]] = {}
+        for r in rows.scalars().all():
+            by_correction.setdefault(r.correction_id, []).append(r)
+        return [self._correction_out(c, by_correction.get(c.id, [])) for c in corrections]
+
+    async def correction_get(self, tenant_id: str, correction_id: str) -> dict | None:
+        """One correction of this tenant with its recipients; ``None`` when it is not the tenant's."""
+        async with get_read_session() as session:
+            found = await session.execute(
+                select(MemoryCorrection).where(
+                    MemoryCorrection.tenant_id == tenant_id, MemoryCorrection.id == UUID(correction_id)
+                )
+            )
+            correction = found.scalar_one_or_none()
+            if correction is None:
+                return None
+            return (await self._corrections_with_recipients(session, [correction]))[0]
+
+    async def corrections_for_memory(self, tenant_id: str, memory_id: str, *, limit: int = 20) -> list[dict]:
+        """The memory's corrections in this tenant, newest first, each with its recipients."""
+        async with get_read_session() as session:
+            found = await session.execute(
+                select(MemoryCorrection)
+                .where(MemoryCorrection.tenant_id == tenant_id, MemoryCorrection.memory_id == UUID(memory_id))
+                .order_by(MemoryCorrection.corrected_at.desc(), MemoryCorrection.id)
+                .limit(limit)
+            )
+            return await self._corrections_with_recipients(session, list(found.scalars().all()))
 
     async def value_query(self, tenant_id: str, *, start: datetime, end: datetime, top: int = 8) -> dict:
         """One tenant's value figures in ``[start, end)``."""

@@ -26,10 +26,11 @@ class Memory(enum.StrEnum):
     # person, or an agent at trust >= 3, corrects a memory -- a content edit, a
     # status change to outdated/cancelled/deleted, an unverify, or a conflict
     # review. Automatic supersede by the contradiction detector does not
-    # publish it. See ``common.events.memory_corrected``. Nothing in this repo
-    # subscribes yet, so it is absent from ``events_manifest.json``; the topic
-    # itself is provisioned by the deployment (Terraform in enterprise), and a
-    # publish to a missing topic is dropped and logged, never raised.
+    # publish it. See ``common.events.memory_corrected``. core-worker consumes
+    # it (``common.events.correction_handlers``, CP-10: who to tell), so it is
+    # in ``events_manifest.json``; the topic and subscription are provisioned by
+    # the deployment (Terraform in enterprise), and a publish to a missing
+    # topic is dropped and logged, never raised.
     CORRECTED = "caura.memory.corrected"
 
 

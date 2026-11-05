@@ -471,6 +471,23 @@ async def upsert_tenant_suppression(
     resp.raise_for_status()
 
 
+async def record_memory_correction(client: httpx.AsyncClient, *, tenant_id: str, body: dict) -> dict:
+    """POST one memory correction (correction propagation, CP-10; migration 073).
+
+    Storage writes the record and its recipients in one transaction, keyed by
+    the event's ``event_id``, so the raise → nack → redeliver path cannot write
+    twice. Returns ``{id, created, recipients, truncated}``.
+    """
+    resp = await _signed_call(
+        client.post,
+        f"{_PREFIX}/memory-corrections",
+        params={"tenant_id": tenant_id},
+        json=body,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 async def flush_usage(client: httpx.AsyncClient, batch: dict) -> None:
     """Send one usage-metering batch (``common.usage.UsageAggregator``), a flush per tenant.
 

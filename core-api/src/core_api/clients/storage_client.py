@@ -1969,6 +1969,29 @@ class CoreStorageClient:
         result = await self._get(f"/memory-exposure/{memory_id}", tenant_id=tenant_id)
         return (result or {}).get("agents", [])
 
+    async def record_memory_correction(self, tenant_id: str, body: dict) -> dict:
+        """Record one correction and the agents to tell (migration 073).
+
+        ``body`` is :func:`common.events.correction_handlers.correction_body`.
+        Idempotent on its ``event_id``, so a retry after an ambiguous failure
+        returns the first record instead of writing a second.
+        """
+        result = await self._post(
+            f"/memory-corrections?tenant_id={quote(tenant_id, safe='')}", body, idempotent=True
+        )
+        return result or {}  # type: ignore[return-value]
+
+    async def get_memory_correction(self, tenant_id: str, correction_id: str) -> dict | None:
+        """One correction of this tenant with its recipients; ``None`` when it is not the tenant's."""
+        return await self._get(f"/memory-corrections/{correction_id}", tenant_id=tenant_id)
+
+    async def list_memory_corrections(self, tenant_id: str, memory_id: str, *, limit: int = 20) -> list[dict]:
+        """The memory's corrections in this tenant, newest first, each with its recipients."""
+        result = await self._get(
+            f"/memory-corrections/by-memory/{memory_id}", tenant_id=tenant_id, limit=limit
+        )
+        return (result or {}).get("corrections", [])
+
     async def increment_tenant_usage(self, rows: list[dict]) -> int:
         """ADD to per-tenant, per-period counters in ``tenant_usage_counters``.
 

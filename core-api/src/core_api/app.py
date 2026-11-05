@@ -59,6 +59,7 @@ from core_api.middleware.request_timeout import (
 from core_api.routes.agents import router as agents_router
 from core_api.routes.audit import router as audit_router
 from core_api.routes.conflicts import router as conflicts_router
+from core_api.routes.corrections import router as corrections_router
 from core_api.routes.crystallizer import router as crystallizer_router
 from core_api.routes.documents import router as documents_router
 from core_api.routes.entities import router as entities_router
@@ -716,6 +717,12 @@ async def lifespan(app):
         register_pipeline_consumers(lifecycle_adapter)
         if isinstance(event_bus, InProcessEventBus):
             register_archive_consumers(lifecycle_adapter)
+            # Correction propagation (CP-10): core-worker records who to tell on
+            # SaaS; with no worker process, core-api does.
+            from common.events.correction_handlers import register_correction_consumer
+            from core_api.services.correction_recipients import make_correction_adapter
+
+            register_correction_consumer(make_correction_adapter())
 
         await event_bus.start()
 
@@ -1274,6 +1281,7 @@ app.include_router(insights_router, prefix="/api/v1")
 app.include_router(interview_router, prefix="/api/v1")
 app.include_router(evolve_router, prefix="/api/v1")
 app.include_router(conflicts_router, prefix="/api/v1")
+app.include_router(corrections_router, prefix="/api/v1")
 app.include_router(lifecycle_router, prefix="/api/v1")
 app.include_router(scheduler_lease_router, prefix="/api/v1")
 app.include_router(org_deletion_router, prefix="/api/v1")
