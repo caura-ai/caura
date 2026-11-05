@@ -250,11 +250,12 @@ DEFAULT_SETTINGS: dict = {
         # report. The query is stored with PII masked, and events go after
         # ``lifecycle.memory_retention_days``.
         "recall_logging_enabled": None,
-        # On by default (opt out with False). The plugin's automatic
-        # ``/search`` path is ALSO logged — but in a lighter form: returned
-        # candidates only (id + scores), no below-floor near-misses, since
-        # ``/search`` is high-volume. Independent of ``recall_logging_enabled``
-        # so a tenant can turn the bulk path off and keep agent recalls.
+        # Opt-in (default off). When on, the plugin's automatic ``/search``
+        # path is ALSO logged — but in a lighter form: returned candidates
+        # only (id + scores), no below-floor near-misses, since ``/search``
+        # is high-volume. Independent of ``recall_logging_enabled`` so it can
+        # be enabled for a short diagnostic window on a couple of tenants and
+        # then turned back off.
         "search_recall_logging_enabled": None,
         # Fraction (0.0-1.0) of ``/search`` events for which below-floor
         # near-misses ARE recorded (only relevant when
@@ -1527,13 +1528,13 @@ class ResolvedConfig:
         val = self._ts.get("observability", {}).get("usage_metering_enabled")
         return val if val is not None else True
 
-    # Search-path recall logging — on by default (an explicit False opts out).
-    # The automatic ``/search`` path is logged too (lighter: returned-only, no
+    # Search-path recall logging — opt-in (default False). When on, the
+    # automatic ``/search`` path is logged too (lighter: returned-only, no
     # near-misses). Independent of ``recall_logging_enabled``.
     @property
     def search_recall_logging_enabled(self) -> bool:
         val = self._ts.get("observability", {}).get("search_recall_logging_enabled")
-        return val if val is not None else True
+        return val if val is not None else False
 
     # Fraction of ``/search`` events that keep below-floor near-misses
     # (default 0.0). Clamped to [0.0, 1.0]. Only consulted when

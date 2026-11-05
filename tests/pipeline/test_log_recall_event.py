@@ -1,6 +1,6 @@
 """Unit tests for LogRecallEvent — gating + candidate construction (no DB).
 
-Two independent, per-tenant modes (on by default, an explicit False opts out):
+Two independent, per-tenant modes (mcp_recall on by default, search opt-in):
   - source == "mcp_recall" + recall_logging_enabled
       → FULL log: returned candidates + capped below-floor near-misses.
   - source == "search" + search_recall_logging_enabled
@@ -254,19 +254,15 @@ async def test_persist_routes_to_storage_client():
 @pytest.mark.parametrize(
     ("observability", "expected"),
     [
-        # A tenant with no settings at all logs both paths (the default).
-        ({}, (True, True)),
+        # A tenant with no settings logs agent recalls; /search stays opt-in.
+        ({}, (True, False)),
         # An explicit False is an opt-out the default never overrides.
-        ({"recall_logging_enabled": False}, (False, True)),
-        ({"search_recall_logging_enabled": False}, (True, False)),
-        (
-            {"recall_logging_enabled": False, "search_recall_logging_enabled": False},
-            (False, False),
-        ),
+        ({"recall_logging_enabled": False}, (False, False)),
+        ({"search_recall_logging_enabled": True}, (True, True)),
     ],
-    ids=["unset", "recall-off", "search-off", "both-off"],
+    ids=["unset", "recall-off", "search-on"],
 )
-def test_recall_logging_is_on_by_default_and_opt_out(observability, expected):
+def test_recall_logging_is_on_by_default_search_is_opt_in(observability, expected):
     from core_api.services.organization_settings import ResolvedConfig
 
     cfg = ResolvedConfig({"observability": observability} if observability else None)
@@ -274,8 +270,8 @@ def test_recall_logging_is_on_by_default_and_opt_out(observability, expected):
 
 
 @pytest.mark.asyncio
-async def test_a_fresh_tenant_logs_both_paths(monkeypatch):
-    """A tenant with no settings row: both ``mcp_recall`` and ``search`` log."""
+async def test_a_fresh_tenant_logs_mcp_recall_only(monkeypatch):
+    """A tenant with no settings row: ``mcp_recall`` logs, ``search`` does not."""
     from core_api.services.organization_settings import ResolvedConfig
 
     captured = _capture(monkeypatch)
@@ -285,4 +281,4 @@ async def test_a_fresh_tenant_logs_both_paths(monkeypatch):
             _ctx(source, cfg, [_row(0.6, 0.55)], [_row(0.6, 0.55)])
         )
 
-    assert [ev["source"] for ev, _ in captured] == ["mcp_recall", "search"]
+    assert [ev["source"] for ev, _ in captured] == ["mcp_recall"]

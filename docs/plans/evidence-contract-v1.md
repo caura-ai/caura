@@ -191,9 +191,9 @@ unchanged; the survivors keep their order.
 
 Both numbers, per tenant: `GET /api/v1/reports/evidence-coverage?window_days=30`
 (tenant or admin credential). It measures the candidates recall returned in the
-window when recall logging recorded any (`observability.recall_logging_enabled`
-and `search_recall_logging_enabled`, both on unless a tenant sets them to
-`false`), and the tenant's live memories otherwise;
+window when recall logging recorded any (`observability.recall_logging_enabled`,
+on by default, logs MCP `caura_recall`; `search_recall_logging_enabled`, opt-in,
+adds the plugin's automatic `/search`), and the tenant's live memories otherwise;
 `denominator` says which. The excluded agent ids and `source_uri` values are
 `PLACEHOLDER_AGENT_IDS` and `NON_EVIDENCE_SOURCE_URIS` in `common/constants.py`.
 
