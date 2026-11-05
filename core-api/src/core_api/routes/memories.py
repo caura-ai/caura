@@ -505,6 +505,14 @@ async def list_memories(
         ),
     ),
     run_id: str | None = Query(default=None),
+    baton_id: str | None = Query(
+        default=None,
+        max_length=128,
+        description=(
+            "Only memories linked to this handoff baton (`metadata.baton_id`). "
+            "Narrows the caller's visibility; never widens it."
+        ),
+    ),
     weight_min: float | None = Query(default=None, ge=0, le=1),
     weight_max: float | None = Query(default=None, ge=0, le=1),
     cursor: str | None = Query(default=None),
@@ -659,6 +667,8 @@ async def list_memories(
         "created_before": created_before.isoformat() if created_before else None,
         "status": status,
         "run_id": run_id,
+        # Handoff batons (HB-10) — narrowing, ANDed after the scoping predicate.
+        "baton_id": baton_id,
         "weight_min": weight_min,
         "weight_max": weight_max,
         "include_deleted": await _effective_include_deleted(auth, include_deleted),
@@ -3180,6 +3190,7 @@ async def _search_inner(
             retrieval_ctx=retrieval_ctx,
             empty_hint_ctx=empty_hint_ctx,
             verified_only=body.verified_only,
+            baton_id=body.baton_id,
         )
     except HTTPException:
         # Auth / tenant errors raised downstream are expected outcomes,
@@ -3648,6 +3659,7 @@ async def recall_endpoint(
         top_k_explicit="top_k" in body.model_fields_set,
         empty_hint_ctx=empty_hint_ctx,
         verified_only=body.verified_only,
+        baton_id=body.baton_id,
     )
 
     # CAURA-723 — same shape as /search, and before the LLM brief so a

@@ -589,6 +589,13 @@
         "name": "include_deleted",
         "required": false,
         "type": "bool"
+      },
+      {
+        "default": null,
+        "description": "Only rows linked to this handoff baton.",
+        "name": "baton_id",
+        "required": false,
+        "type": "str | None"
       }
     ],
     "plugin_exposed": true,
@@ -893,6 +900,13 @@
         "name": "verified_only",
         "required": false,
         "type": "bool"
+      },
+      {
+        "default": null,
+        "description": "Only rows linked to this handoff baton.",
+        "name": "baton_id",
+        "required": false,
+        "type": "str | None"
       }
     ],
     "plugin_exposed": true,

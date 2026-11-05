@@ -51,6 +51,7 @@ FILTER_REASONS: dict[str, str] = {
     "verified_only": (
         "The search returns only verified memories (verified_only), and this one is unverified or disputed."
     ),
+    "baton_id": "The search returns only memories linked to one handoff baton (baton_id), and this one is not.",
     "status_filter": "The search filters to another status.",
     "status_superseded": (
         "The memory is superseded (status outdated or conflicted); search excludes superseded "

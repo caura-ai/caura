@@ -199,6 +199,8 @@ class LoadAndSerialize:
                         # unverified correction is not injected into a
                         # verified-only result set, as a wrong-type one is not.
                         "verified_only": bool(data.get("verified_only")),
+                        # HB-10 — likewise a successor outside the baton.
+                        "baton_id": data.get("baton_id"),
                         "valid_at": str(data["valid_at"]) if data.get("valid_at") else None,
                     }
                 )

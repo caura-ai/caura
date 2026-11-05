@@ -557,6 +557,7 @@ def _scored_search_row_filters(
     history_query: bool,
     valid_at: datetime | None,
     verified_only: bool = False,
+    baton_id: str | None = None,
 ) -> list[tuple[str, ColumnElement[bool]]]:
     """The scored search's row-level filters, each named for what it removes.
 
@@ -635,6 +636,8 @@ def _scored_search_row_filters(
         row_filters.append(("memory_type_filter", Memory.memory_type == memory_type_filter))
     if verified_only:
         row_filters.append(("verified_only", _verified_clause()))
+    if baton_id:
+        row_filters.append(("baton_id", _baton_clause(baton_id)))
     if status_filter:
         row_filters.append(("status_filter", Memory.status == status_filter))
     elif history_query:
@@ -751,6 +754,18 @@ def _verified_clause() -> ColumnElement[bool]:
     ``ix_memories_verification`` (partial on ``<> 'unverified'``).
     """
     return Memory.verification_status.in_(VERIFIED_STATUSES)
+
+
+def _baton_clause(baton_id: str) -> ColumnElement[bool]:
+    """``baton_id`` reads: the memories a receiver linked to a handoff baton.
+
+    One predicate for the list, the scored search, the by-id load and the
+    successor lookup. A narrowing filter only: every caller ANDs it onto its
+    visibility-scoped statement. Served by ``ix_memories_baton`` on
+    ``(tenant_id, metadata ->> 'baton_id')``; the key is a literal, not a bound
+    parameter, so the expression is the index's under a generic plan too.
+    """
+    return Memory.metadata_.op("->>")(literal_column("'baton_id'")) == baton_id
 
 
 # ``tenant_suppression`` is created in raw SQL (migration 019) and has no ORM
@@ -4361,6 +4376,7 @@ class PostgresService:
         history_query: bool = False,
         strict_fleet_scoping: bool = False,
         verified_only: bool = False,
+        baton_id: str | None = None,
     ) -> list[SimpleNamespace]:
         """Execute the full CTE-based scored search, then load the hits' entity links.
 
@@ -4543,6 +4559,7 @@ class PostgresService:
                 history_query=history_query,
                 valid_at=valid_at,
                 verified_only=verified_only,
+                baton_id=baton_id,
             )
         ]
 
@@ -5271,6 +5288,7 @@ class PostgresService:
         history_query: bool = False,
         strict_fleet_scoping: bool = False,
         verified_only: bool = False,
+        baton_id: str | None = None,
     ) -> dict[str, Any]:
         """Evaluate every scored-search row filter against ONE memory.
 
@@ -5307,6 +5325,7 @@ class PostgresService:
             history_query=history_query,
             valid_at=valid_at,
             verified_only=verified_only,
+            baton_id=baton_id,
         )
         check_cols = [func.coalesce(pred, false()).label(f"chk_{i}") for i, (_, pred) in enumerate(named)]
         stmt = select(
@@ -5363,6 +5382,7 @@ class PostgresService:
         readable_tenant_ids: list[str] | None = None,
         strict_fleet_scoping: bool = False,
         verified_only: bool = False,
+        baton_id: str | None = None,
     ) -> list[Memory]:
         """Load memories by ID with visibility/fleet/agent filters applied.
 
@@ -5413,6 +5433,8 @@ class PostgresService:
                 stmt = stmt.where(Memory.memory_type == memory_type_filter)
             if verified_only:
                 stmt = stmt.where(_verified_clause())
+            if baton_id:
+                stmt = stmt.where(_baton_clause(baton_id))
             if status_filter:
                 stmt = stmt.where(Memory.status == status_filter)
             else:
@@ -5508,6 +5530,7 @@ class PostgresService:
         strict_fleet_scoping: bool = False,
         readable_tenant_ids: list[str] | None = None,
         verified_only: bool = False,
+        baton_id: str | None = None,
     ) -> list[tuple[Memory, UUID]]:
         """Find the active/confirmed memories that replaced the given ones, each
         with the id of the one it replaced.
@@ -5542,6 +5565,8 @@ class PostgresService:
             scope.append(Memory.memory_type == memory_type_filter)
         if verified_only:
             scope.append(_verified_clause())
+        if baton_id:
+            scope.append(_baton_clause(baton_id))
         if valid_at:
             scope.append(_started_by(valid_at))
         async with get_read_session() as session:
@@ -9121,6 +9146,7 @@ class PostgresService:
         exclude_memory_types: list[str] | None = None,
         status: str | None = None,
         run_id: str | None = None,
+        baton_id: str | None = None,
         weight_min: float | None = None,
         weight_max: float | None = None,
         created_after: datetime | None = None,
@@ -9211,6 +9237,9 @@ class PostgresService:
             stmt = stmt.where(Memory.status == status)
         if run_id is not None:
             stmt = stmt.where(Memory.run_id == run_id)
+        if baton_id:
+            # Handoff batons (HB-10) — narrowing, like ``visibility`` below.
+            stmt = stmt.where(_baton_clause(baton_id))
         if visibility:
             # OSS 09/02 M-27 — a caller-supplied NARROWING filter, and only
             # that. It is ANDed onto a statement the scoping predicate above

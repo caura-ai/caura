@@ -1310,6 +1310,15 @@ class SearchRequest(TenantScopedBody):
             "A filter only; ranking is unchanged."
         ),
     )
+    # Handoff batons (HB-10). A narrowing storage filter like ``verified_only``.
+    baton_id: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Return only memories linked to this handoff baton (metadata.baton_id). "
+            "Narrows what the caller can already read; a filter only."
+        ),
+    )
     # pm-0918-c-03. Inherited by ``RecallRequest`` below, deliberately: /recall
     # summarises these rows into a brief, so a short fragment restating its
     # parent costs brief tokens on exactly the surface where they are scarcest.

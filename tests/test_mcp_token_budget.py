@@ -169,7 +169,14 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # parameter: the two names in the ``op`` roll-call, one sentence on what each
 # does (send's trust bar included), and the plugin-gap clause, since the plugin
 # dispatches neither. Ceiling 5743 -> 5811, raised by exactly the delta, leaving 0.
-CEILING_TOKENS = 5811
+#
+# 2026-11-05 (handoff batons, HB-10): 5884 cl100k (+73), measured with tiktoken
+# from the fixture. ``caura_list`` and ``caura_recall`` each gained an optional
+# ``baton_id`` filter (memories a receiver linked to a handoff baton). Almost
+# all of it is the ``anyOf`` string|null boilerplate per optional parameter; the
+# description is seven words. Ceiling 5811 -> 5884, raised by exactly the
+# delta, leaving 0.
+CEILING_TOKENS = 5884
 
 
 def _count(path: Path) -> int:

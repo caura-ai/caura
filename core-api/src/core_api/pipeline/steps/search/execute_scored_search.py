@@ -152,6 +152,8 @@ def build_scored_search_payload(data: dict, sp: dict, top_k: int) -> dict:
         search_data["status_filter"] = data["status_filter"]
     if data.get("verified_only"):
         search_data["verified_only"] = True
+    if data.get("baton_id"):
+        search_data["baton_id"] = data["baton_id"]
     if data.get("valid_at"):
         search_data["valid_at"] = str(data["valid_at"])
 

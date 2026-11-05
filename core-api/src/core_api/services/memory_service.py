@@ -6172,6 +6172,9 @@ async def search_memories(
     # (``VERIFIED_STATUSES``). A storage filter beside the others, never a
     # ranking input.
     verified_only: bool = False,
+    # Handoff batons (HB-10) — keep only rows whose ``metadata.baton_id`` is
+    # this. Narrowing, beside the other storage filters.
+    baton_id: str | None = None,
 ) -> list[SearchHitOut]:
     # ``allow_recall_bump`` defaults True so every existing caller — MCP
     # ``caura_recall``, the internal search paths — keeps bumping exactly as
@@ -6209,6 +6212,7 @@ async def search_memories(
             retrieval_ctx=retrieval_ctx,
             empty_hint_ctx=empty_hint_ctx,
             verified_only=verified_only,
+            baton_id=baton_id,
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
     # The legacy path bumps recall_count unconditionally (no caller-agent gate,
@@ -6239,6 +6243,7 @@ async def search_memories(
         include_derived=include_derived,
         top_k_explicit=top_k_explicit,
         verified_only=verified_only,
+        baton_id=baton_id,
     )
     if recall_ctx is not None:
         recall_ctx["recall_tracked"] = bool(legacy_results) and allow_recall_bump
@@ -6301,6 +6306,9 @@ async def _search_memories_pipeline(
     # (``VERIFIED_STATUSES``). A storage filter beside the others, never a
     # ranking input.
     verified_only: bool = False,
+    # Handoff batons (HB-10) — keep only rows whose ``metadata.baton_id`` is
+    # this. Narrowing, beside the other storage filters.
+    baton_id: str | None = None,
 ) -> list[SearchHitOut]:
     """Pipeline-based search_memories -- same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.search import (
@@ -6349,6 +6357,7 @@ async def _search_memories_pipeline(
             # and the request flag is the layer a caller can actually see.
             "include_derived": resolve_include_derived(include_derived, tenant_config),
             "verified_only": verified_only,
+            "baton_id": baton_id,
         },
         tenant_config=tenant_config,
     )
@@ -6462,6 +6471,9 @@ async def _search_memories_legacy(
     include_derived: bool | None = None,
     top_k_explicit: bool = False,
     verified_only: bool = False,
+    # Handoff batons (HB-10) — keep only rows whose ``metadata.baton_id`` is
+    # this. Narrowing, beside the other storage filters.
+    baton_id: str | None = None,
 ) -> list[SearchHitOut]:
     """Legacy search -- uses scored_search storage API endpoint."""
     sc = get_storage_client()
@@ -6554,6 +6566,7 @@ async def _search_memories_legacy(
         "memory_type_filter": memory_type_filter,
         "status_filter": status_filter,
         "verified_only": verified_only,
+        "baton_id": baton_id,
         "valid_at": valid_at.isoformat() if valid_at else None,
         "top_k": _overfetch_top_k,
         # Core-api-local, NOT a scoring knob: the route never reads it, and the

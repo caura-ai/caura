@@ -425,6 +425,18 @@ Index(
 )
 
 
+# Backs the ``baton_id`` read filter (handoff batons, HB-10): a receiver tags
+# what it found with ``metadata.baton_id``. Partial on rows that have one, deleted
+# rows included (``include_deleted`` lists use the filter too). Created
+# CONCURRENTLY in migration 075 with the same key and predicate.
+Index(
+    "ix_memories_baton",
+    Memory.tenant_id,
+    Memory.metadata_["baton_id"].astext,
+    postgresql_where=text("(metadata ->> 'baton_id') IS NOT NULL"),
+)
+
+
 # Backs the review queue of held memories and its count (g2.9). Held rows only,
 # so the queue costs what it holds, not what the tenant holds. Created
 # CONCURRENTLY in migration 062 with the same key and predicate.
