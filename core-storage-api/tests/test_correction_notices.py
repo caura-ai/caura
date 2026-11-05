@@ -1,10 +1,9 @@
 """Correction notices on recall (CP-13), the storage half, against a live PostgreSQL.
 
 ``GET /memory-corrections/notices`` lists what one agent still has to hear
-about: it is a recipient of a sent correction (past ``preview``) younger than 7 days, has not
-confirmed, and the bus is not carrying the notice (``channel=recall``, or the
-bus state is ``failed`` / ``unreachable``). Newest first, at most ``limit``,
-bound to the tenant. Sending (CP-11) is another PR, so the rows are set here
+about: it is a recipient of a sent correction (past ``preview``) younger than 7 days and has
+not confirmed, on either channel (the bus is the fast path, recall the
+guaranteed one). Newest first, at most ``limit``, bound to the tenant. Sending (CP-11) is another PR, so the rows are set here
 directly.
 """
 
@@ -123,6 +122,7 @@ async def test_a_recall_channel_recipient_sees_its_notice_and_no_one_else_does(c
             "old_summary",
             "new_summary",
             "corrected_at",
+            "notice_state",
             "notified_at",
         }
         assert n["notified_at"] is None
@@ -131,18 +131,31 @@ async def test_a_recall_channel_recipient_sees_its_notice_and_no_one_else_does(c
     assert await _notices(client, f"t-{uuid.uuid4().hex[:8]}", "a") == []
 
 
-async def test_confirmed_preview_bus_and_old_corrections_are_not_notices(client: AsyncClient):
+async def test_confirmed_preview_and_old_corrections_are_not_notices(client: AsyncClient):
     tenant = f"t-{uuid.uuid4().hex[:8]}"
     confirmed = await _correction(client, tenant, ["a"])
     await _set(confirmed, channel="recall", notice_state="confirmed")
+    confirmed_on_bus = await _correction(client, tenant, ["a"])
+    await _set(confirmed_on_bus, channel="bus", notice_state="confirmed")
     preview = await _correction(client, tenant, ["a"])
     await _set(preview, status="preview", channel="recall")
-    on_the_bus = await _correction(client, tenant, ["a"])
-    await _set(on_the_bus, channel="bus", notice_state="delivered")
     stale = await _correction(client, tenant, ["a"], ago=timedelta(days=8))
     await _set(stale, channel="recall", notice_state="sent")
 
     assert await _notices(client, tenant, "a") == []
+
+
+async def test_an_unconfirmed_bus_notice_is_also_owed_on_recall(client: AsyncClient):
+    """The bus takes a notice for any agent row, listening or not: recall is the guaranteed path."""
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    ids = {}
+    for hours, state in enumerate(("pending", "sent", "delivered", "late"), start=1):
+        ids[state] = await _correction(client, tenant, ["a"], ago=timedelta(hours=hours))
+        await _set(ids[state], channel="bus", notice_state=state)
+
+    notices = await _notices(client, tenant, "a", limit=10)
+    assert [n["correction_id"] for n in notices] == [ids[s] for s in ("pending", "sent", "delivered", "late")]
+    assert [n["notice_state"] for n in notices] == ["pending", "sent", "delivered", "late"]
 
 
 async def test_a_bus_notice_that_failed_falls_back_to_recall(client: AsyncClient):
@@ -249,3 +262,23 @@ async def test_a_legacy_unreachable_notice_is_delivered_and_a_confirmed_one_neve
     assert (await _recipient(legacy, "a"))[0] == "delivered"
     assert await _recipient(confirmed, "a") == ("confirmed", None)
     assert (await _recipient(failed, "a"))[0] == "failed"
+
+
+async def test_a_bus_sent_notice_shown_on_recall_is_delivered_and_keeps_its_send_time(
+    client: AsyncClient,
+):
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    sent_at = datetime.now(UTC) - timedelta(minutes=30)
+    sent = await _correction(client, tenant, ["a"])
+    await _set(sent, channel="bus", notice_state="sent", notified_at=sent_at)
+    late = await _correction(client, tenant, ["a"])
+    await _set(late, channel="bus", notice_state="late", notified_at=sent_at)
+    claimed = await _correction(client, tenant, ["a"])
+    await _set(claimed, channel="bus", notice_state="delivered", notified_at=sent_at)
+
+    assert await _delivered(client, tenant, "a", [sent, late, claimed]) == 1
+    state, notified_at = await _recipient(sent, "a")
+    assert state == "delivered" and notified_at == sent_at
+    assert await _recipient(late, "a") == ("late", sent_at)
+    assert await _recipient(claimed, "a") == ("delivered", sent_at)
+    assert await _delivered(client, tenant, "a", [sent]) == 0

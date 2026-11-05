@@ -1,13 +1,14 @@
-"""Correction notices on recall: the fallback when the bus cannot tell an agent (CP-13).
+"""Correction notices on recall: the guaranteed path to every recipient (CP-13).
 
 Correction propagation (``docs/plans/correction-propagation.md``). When a
 person corrects a memory, the agents that read the old version are told over
-the Caura bus. An agent the bus cannot reach (``channel=recall``: standalone
-OSS, an unknown agent, the bus disabled) or could not deliver to (``failed``, or
-the legacy ``unreachable``) hears about it on its next recall instead: every recall or
-search response for that agent carries ``correction_notices``, whatever the
-query, until the agent confirms (``POST /corrections/{id}/confirm``, MCP
-``caura_manage op=confirm_correction``) or the correction is 7 days old.
+the Caura bus where it can (the fast path), and on recall in every case: every
+recall or search response for a recipient that has not confirmed carries
+``correction_notices``, whatever the query and whatever the channel, until the
+agent confirms (``POST /corrections/{id}/confirm``, MCP ``caura_manage
+op=confirm_correction``) or the correction is 7 days old. The bus accepts a
+notice for any agent it has a row for, listening or not, so a bus send alone
+does not mean the agent heard.
 
 The rules, all here so the call sites stay two lines:
 
@@ -20,10 +21,11 @@ The rules, all here so the call sites stay two lines:
   never slow or break a recall.
 * No notices, no key: the response is byte-for-byte what it was.
 * The first response that hands the agent a notice marks it ``delivered``
-  (``notified_at`` set), so the person sees "seen on recall" the way a bus
-  claim shows for the bus. Fire-and-forget after the response, one UPDATE
-  that matches nothing on a repeat, only for notices not marked yet; a
-  failure is logged. A search that fails before :func:`finish_notices` marks
+  (``notified_at`` set unless a bus send set it), so the person sees "seen on
+  recall" the way a bus claim shows for the bus. Only a notice not yet past
+  delivery (:data:`_UNSEEN`) is marked; a bus ``delivered``, ``late`` or
+  ``failed`` keeps its state. Fire-and-forget after the response, one UPDATE
+  that matches nothing on a repeat; a failure is logged. A search that fails before :func:`finish_notices` marks
   nothing.
 
 ``old_summary`` is shown here only to the agent the notice is for, which is a
@@ -56,6 +58,16 @@ def _is_person() -> bool:
     return principal.get("credential_kind") == "person"
 
 
+#: Notice states a recall moves to ``delivered`` (storage applies the same rule).
+_UNSEEN = frozenset({"pending", "sent", "unreachable"})
+
+
+def _unseen(row: dict) -> bool:
+    state = row.get("notice_state")
+    # A storage without ``notice_state`` (mid-rollout) knew only recall-channel rows.
+    return state in _UNSEEN if state is not None else not row.get("notified_at")
+
+
 #: What a lookup found: the compact notices, and the ids of those no recall handed over yet.
 _Owed = tuple[list[dict], list[str]]
 
@@ -79,7 +91,7 @@ async def _lookup(tenant_id: str, agent_id: str, *, surface: Literal["mcp", "res
         }
         for r in rows
     ]
-    return notices, [r["correction_id"] for r in rows if not r.get("notified_at")]
+    return notices, [r["correction_id"] for r in rows if _unseen(r)]
 
 
 async def correction_notices(

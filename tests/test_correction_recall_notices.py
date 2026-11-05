@@ -123,6 +123,30 @@ async def test_handing_notices_over_marks_the_unseen_ones_delivered(storage, sch
 
 
 @pytest.mark.unit
+async def test_a_bus_notice_not_yet_claimed_is_marked_and_a_claimed_one_is_not(
+    storage, scheduled
+):
+    """Recall is the guaranteed path: a bus ``sent`` (``notified_at`` already set
+    by the send) is still unseen; ``delivered`` / ``late`` / ``failed`` are not."""
+    at = "2026-11-05T09:00:00+00:00"
+    storage.list_correction_notices.return_value = [
+        {**_row(1), "notice_state": "sent", "notified_at": at},
+        {**_row(2), "notice_state": "delivered", "notified_at": at},
+        {**_row(3), "notice_state": "pending", "notified_at": None},
+        {**_row(4), "notice_state": "late", "notified_at": at},
+    ]
+    out = await cn.finish_notices(cn.start_notices("t-1", "a", surface="mcp"))
+
+    assert [n["correction_id"] for n in out] == ["c-1", "c-2", "c-3"]
+    assert "notice_state" not in out[0]
+    (coro,) = scheduled
+    await coro
+    storage.mark_correction_notices_delivered.assert_awaited_once_with(
+        "t-1", "a", ["c-1", "c-3"]
+    )
+
+
+@pytest.mark.unit
 async def test_nothing_new_to_hand_over_writes_nothing(storage, scheduled):
     storage.list_correction_notices.return_value = [
         {**_row(1), "notified_at": "2026-11-05T09:00:00+00:00"}
