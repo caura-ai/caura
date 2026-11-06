@@ -10,6 +10,24 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.42.0](https://github.com/caura-ai/caura/compare/backend-v3.41.4...backend-v3.42.0) (2026-11-06)
+
+
+### Features
+
+* **core-api:** a command to enrich again memories that fell back to the heuristic ([#2359](https://github.com/caura-ai/caura/issues/2359)) ([4f9315a](https://github.com/caura-ai/caura/commit/4f9315a6e17309462f34d35e7fd31462d8ca0d4f))
+
+
+### Bug Fixes
+
+* **agents:** tombstone deleted agents; tools act as their own agent ([#2354](https://github.com/caura-ai/caura/issues/2354)) ([13ba4d9](https://github.com/caura-ai/caura/commit/13ba4d9e5872663d6115119fae2ebf27127f2941))
+* **crystallizer:** ask for the facts inside an object, as complete_json returns ([#2357](https://github.com/caura-ai/caura/issues/2357)) ([ea3b905](https://github.com/caura-ai/caura/commit/ea3b905aff79a0206eaaa69a9b0a75924949003a))
+
+
+### Documentation
+
+* name the OpenClaw fleets tab the app has ([#2360](https://github.com/caura-ai/caura/issues/2360)) ([e77b5b4](https://github.com/caura-ai/caura/commit/e77b5b40f58b5fb4b2b3115fefd2aaea25fd54ad))
+
 ## [3.41.4](https://github.com/caura-ai/caura/compare/backend-v3.41.3...backend-v3.41.4) (2026-11-06)
 
 
