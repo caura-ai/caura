@@ -23,6 +23,7 @@ process.env.CAURA_INTERVIEWER = "false";
 const { CauraContextEngine } = await import("./context-engine.js");
 const { formatBatonBlock, parseBatonNotices } = await import("./baton-notices.js");
 const { createToolFromSpec } = await import("./tool-definitions.js");
+const { resolveAgentIdQuiet } = await import("./resolve-agent.js");
 
 const BATON_ID = "7a1c2a8e-9d47-4b1e-8a3c-0f5e7d2b9c41";
 const MEMORY_ID = "11111111-1111-4111-8111-111111111111";
@@ -143,7 +144,7 @@ test("caura_manage op=accept_baton posts the agent's accept", async () => {
   requests = [];
   const out = await createToolFromSpec("caura_manage").execute(
     "call-1",
-    { op: "accept_baton", baton_id: BATON_ID, agent_id: "ops-bot" },
+    { op: "accept_baton", baton_id: BATON_ID },
     undefined as never,
   );
   const accept = requests.filter((r) => r.path.includes("/batons"));
@@ -151,7 +152,7 @@ test("caura_manage op=accept_baton posts the agent's accept", async () => {
   assert.equal(accept[0].method, "POST");
   assert.equal(accept[0].path, `/api/v1/batons/${BATON_ID}/accept`);
   assert.equal(accept[0].query.get("tenant_id"), "t-baton-notices");
-  assert.equal(accept[0].query.get("agent_id"), "ops-bot");
+  assert.equal(accept[0].query.get("agent_id"), resolveAgentIdQuiet({}));
   assert.ok(out);
 });
 
@@ -160,7 +161,7 @@ test("a malformed baton_id is refused before any request", async () => {
   await assert.rejects(
     createToolFromSpec("caura_manage").execute(
       "call-2",
-      { op: "accept_baton", baton_id: "../memories/x", agent_id: "ops-bot" },
+      { op: "accept_baton", baton_id: "../memories/x" },
       undefined as never,
     ),
     /baton_id/,

@@ -106,6 +106,7 @@ from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS, MEM
 from common.models import (
     Agent,
     AgentActivityDigest,
+    AgentTombstone,
     AuditChainHead,
     AuditLog,
     BackgroundTaskLog,
@@ -1905,6 +1906,8 @@ _PURGE_TENANT_TABLES: tuple[str, ...] = (
     "memories",
     "entities",
     "agents",
+    # Deleted agents' ids (migration 077): no foreign key, ids only.
+    "agent_tombstones",
     "fleet_nodes",
     "audit_log",
     # The tamper-evident chain head for ``audit_log`` (migration 025). Listed
@@ -13210,6 +13213,12 @@ class PostgresService:
         agent row to dodge the failure mode. ``create_only`` is for credential
         provisioning: a concurrent registration must never overwrite an
         existing agent's trust, fleet or name after a preceding GET missed it.
+
+        An id with an :class:`AgentTombstone` (its agent was deleted, and no
+        admin has approved it since) is created at trust 0 whatever trust
+        ``data`` asks for, and an existing row of it keeps its trust. Every
+        first touch comes through here: the heartbeat roster, a broker write,
+        read-path identity resolution and agent-key provisioning alike.
         """
         async with get_session() as session:
             stmt = (
@@ -13219,6 +13228,17 @@ class PostgresService:
                 .returning(Agent.id)
             )
             inserted_id = (await session.execute(stmt)).scalar_one_or_none()
+            # Read after the INSERT, not before: an INSERT that waited out a
+            # concurrent ``agent_delete`` sees the tombstone that delete
+            # committed with it.
+            tombstoned = (
+                await session.execute(
+                    select(AgentTombstone.agent_id).where(
+                        AgentTombstone.tenant_id == data["tenant_id"],
+                        AgentTombstone.agent_id == data["agent_id"],
+                    )
+                )
+            ).first() is not None
 
             if inserted_id is not None:
                 # New row — fetch the full ORM object for the return.
@@ -13235,6 +13255,9 @@ class PostgresService:
                     raise ValueError(
                         f"Agent row {inserted_id} vanished after INSERT — concurrent delete during agent_add"
                     )
+                if tombstoned and agent.trust_level != 0:
+                    agent.trust_level = 0
+                    await session.flush()
                 return agent, True
 
             # Conflict: another caller (or a prior attempt) already
@@ -13282,6 +13305,9 @@ class PostgresService:
             # existing row back.
             changed = False
             for key in ("fleet_id", "trust_level", "display_name", "install_id", "owner_install_uuid"):
+                if key == "trust_level" and tombstoned:
+                    # Only an admin changes a tombstoned id's trust.
+                    continue
                 if key in data and data[key] is not None and getattr(agent, key) != data[key]:
                     if key in ("install_id", "owner_install_uuid") and getattr(agent, key) is not None:
                         # ``install_id`` / ``owner_install_uuid`` are stable
@@ -13304,7 +13330,11 @@ class PostgresService:
             return agent, False
 
     async def agent_delete(self, agent_id: str, tenant_id: str) -> bool:
-        """Delete one tenant's agent. ``False`` when no row matched."""
+        """Delete one tenant's agent, leaving its :class:`AgentTombstone`.
+
+        In the same transaction, so the id is never without both. ``False``
+        when no row matched, and then no tombstone is written.
+        """
         async with get_session() as session:
             result = await session.execute(
                 select(Agent).where(
@@ -13315,6 +13345,14 @@ class PostgresService:
             agent = result.scalar_one_or_none()
             if agent is not None:
                 await session.delete(agent)
+                await session.execute(
+                    pg_insert(AgentTombstone)
+                    .values(tenant_id=tenant_id, agent_id=agent_id)
+                    .on_conflict_do_update(
+                        index_elements=["tenant_id", "agent_id"],
+                        set_={"deleted_at": func.now()},
+                    )
+                )
             return agent is not None
 
     async def agent_update_trust_level(
@@ -13324,7 +13362,11 @@ class PostgresService:
         trust_level: int,
         fleet_id: str | None = None,
     ) -> bool:
-        """Set one tenant's agent's trust. ``False`` when no row matched."""
+        """Set one tenant's agent's trust. ``False`` when no row matched.
+
+        Raising it above 0 approves the agent, so it also removes the id's
+        :class:`AgentTombstone`, if any: from then on it is an ordinary agent.
+        """
         async with get_session() as session:
             result = await session.execute(
                 select(Agent).where(
@@ -13339,6 +13381,13 @@ class PostgresService:
                     agent.fleet_id = fleet_id
                 agent.updated_at = datetime.now(UTC)
                 await session.flush()
+                if trust_level > 0:
+                    await session.execute(
+                        delete(AgentTombstone).where(
+                            AgentTombstone.tenant_id == tenant_id,
+                            AgentTombstone.agent_id == agent_id,
+                        )
+                    )
             return agent is not None
 
     async def agent_update_fleet(

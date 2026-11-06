@@ -63,20 +63,20 @@ async function write(
 describe("caura_write evidence", () => {
   test("a write carries the OpenClaw session it was made in", async () => {
     const req = await write(
-      { agent_id: "a1", content: "the deploy window moved to thursday" },
+      { content: "the deploy window moved to thursday" },
       { sessionKey: "agent:a1:telegram:dm:42" },
     );
     assert.equal(req.session, "openclaw:agent:a1:telegram:dm:42");
   });
 
   test("the session id stands in when OpenClaw names no session key", async () => {
-    const req = await write({ agent_id: "a1", content: "x".repeat(20) }, { sessionId: "uuid-1" });
+    const req = await write({ content: "x".repeat(20) }, { sessionId: "uuid-1" });
     assert.equal(req.session, "openclaw:uuid-1");
   });
 
   test("a batch carries the session too", async () => {
     const req = await write(
-      { agent_id: "a1", items: [{ content: "x".repeat(20) }] },
+      { items: [{ content: "x".repeat(20) }] },
       { sessionKey: "agent:a1:main" },
     );
     assert.ok(req.path.endsWith("/memories/bulk"));
@@ -84,13 +84,12 @@ describe("caura_write evidence", () => {
   });
 
   test("no run, no session header", async () => {
-    const req = await write({ agent_id: "a1", content: "x".repeat(20) });
+    const req = await write({ content: "x".repeat(20) });
     assert.equal(req.session, null);
   });
 
   test("the agent's evidence goes through, and the write's own call id never does", async () => {
     const req = await write({
-      agent_id: "a1",
       content: "x".repeat(20),
       tool_call_id: "toolu_01ABC",
       observed_at: "2026-11-01T09:30:00Z",
@@ -98,14 +97,13 @@ describe("caura_write evidence", () => {
     assert.equal(req.body?.tool_call_id, "toolu_01ABC");
     assert.equal(req.body?.observed_at, "2026-11-01T09:30:00Z");
 
-    const plain = await write({ agent_id: "a1", content: "x".repeat(20) });
+    const plain = await write({ content: "x".repeat(20) });
     assert.equal("tool_call_id" in (plain.body ?? {}), false);
     assert.equal(JSON.stringify(plain.body).includes("call_of_the_write_itself"), false);
   });
 
   test("on a batch the evidence lives in the items, not at the top level", async () => {
     const req = await write({
-      agent_id: "a1",
       tool_call_id: "stray",
       observed_at: "2026-11-01T09:30:00Z",
       trace_id: "stray",
