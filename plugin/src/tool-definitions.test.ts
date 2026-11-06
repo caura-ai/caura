@@ -214,9 +214,9 @@ describe("createToolFromSpec factory", () => {
     assert.ok(checked > 0, "no op-dispatched plugin tool was checked");
   });
 
-  test("caura_write requires only agent_id (content/items are mutually exclusive)", () => {
+  test("caura_write requires nothing: content/items are mutually exclusive, agent_id defaults", () => {
     const write = createToolFromSpec("caura_write").parameters as any;
-    assert.deepEqual(write.required, ["agent_id"]);
+    assert.deepEqual(write.required, []);
     assert.ok(write.properties.content);
     assert.ok(write.properties.items);
     assert.equal(write.properties.items.maxItems, 100);

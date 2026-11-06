@@ -29,7 +29,7 @@ import {
 } from "./env.js";
 import { assertSafePathSegment } from "./validation.js";
 import { sessionHeader } from "./origin-usage.js";
-import { resolveAgentIdQuiet } from "./resolve-agent.js";
+import { toolAgentId } from "./resolve-agent.js";
 import { getSpec } from "./tool-specs.js";
 import { fetchKeystonesPayload } from "./keystones.js";
 
@@ -102,6 +102,12 @@ interface EnrichOptions {
    * standard-trust caller to its home fleet, so recall must opt in explicitly.
    */
   skipAgentDefault?: boolean;
+
+  /**
+   * The run the tool was built for: its session names the agent a
+   * ``resolveIdentity`` call is sent as.
+   */
+  run?: ToolRunContext;
 }
 
 async function enrichBody(
@@ -110,13 +116,12 @@ async function enrichBody(
 ): Promise<Record<string, unknown>> {
   const body = { ...params };
   if (!body.tenant_id) body.tenant_id = await ensureTenantId();
-  // ``resolveAgentIdQuiet`` covers the env var too (its step 4), so the
-  // identity-bearing branch subsumes the plain one rather than racing it.
-  // Quiet, not loud: the install-scoped default IS the design for a tool call,
-  // which carries no session context to resolve a richer identity from. The
-  // loud variant is for the per-turn paths, where a fall-through is a real bug.
+  // ``toolAgentId`` covers the env var too, so the identity-bearing branch
+  // subsumes the plain one rather than racing it. It reads the run and the
+  // install's config, never ``params``: an ``agent_id`` the model passed was
+  // already checked against the run by ``createToolFromSpec``.
   if (!body.agent_id) {
-    if (opts.resolveIdentity) body.agent_id = resolveAgentIdQuiet(params);
+    if (opts.resolveIdentity) body.agent_id = toolAgentId(undefined, opts.run?.sessionKey);
     else if (!opts.skipAgentDefault && CAURA_AGENT_ID) body.agent_id = CAURA_AGENT_ID;
   }
   // The configured fleet below is a DEFAULT, for callers that did not say
@@ -218,9 +223,9 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
 
   caura_write: {
     type: "object",
-    required: ["agent_id"],
+    required: [],
     properties: {
-      agent_id: { type: "string", description: "REQUIRED. Your agent identifier." },
+      agent_id: { type: "string", description: "Optional. Your own agent id: calls are sent as the agent running them, and another agent's id is refused." },
       content: { type: "string", description: "Single-write content. Provide one of {content, items}." },
       items: {
         type: "array", minItems: 1, maxItems: 100,
@@ -578,9 +583,8 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   caura_write: async (params, signal, run) => {
     const isBatch = Array.isArray(params.items);
     // Never send an empty agent_id: on the gateway path it collapses onto the
-    // reserved "main" default. ``resolveIdentity`` supplies the install-scoped
-    // id this dispatch used to build inline.
-    const body = await enrichBody(params, { resolveIdentity: true });
+    // reserved "main" default. ``resolveIdentity`` supplies the run's agent.
+    const body = await enrichBody(params, { resolveIdentity: true, run });
     // SAFE-01. ``caura_write`` is ONE tool with two bodies behind it, and this
     // dispatch forwards the caller's params wholesale — so whichever half's
     // fields the caller didn't use rode along into the other half's endpoint.
@@ -618,9 +622,9 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     return apiCall("POST", "/memories", body, undefined, signal, undefined, session);
   },
 
-  caura_manage: async (params, signal) => {
+  caura_manage: async (params, signal, run) => {
     // op=update sends ``agent_id`` as a query param; the other ops ignore it.
-    const enriched = await enrichBody(params, { resolveIdentity: true });
+    const enriched = await enrichBody(params, { resolveIdentity: true, run });
     const op = enriched.op as ManageOp;
     const tenant_id = enriched.tenant_id as string;
     if (op === "confirm_correction") {
@@ -687,7 +691,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     unsupportedOp("caura_manage", op, MANAGE_OPS);
   },
 
-  caura_doc: async (params, signal) => {
+  caura_doc: async (params, signal, run) => {
     const op = params.op as DocOp;
     if (["write", "read", "query", "delete"].includes(op) &&
         (typeof params.collection !== "string" || !params.collection.trim())) {
@@ -700,7 +704,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
         (typeof params.doc_id !== "string" || !params.doc_id.trim())) {
       throw new Error(`[caura] caura_doc op=${op} requires a non-empty doc_id`);
     }
-    const enriched = await enrichBody(params, { resolveIdentity: op === "write" });
+    const enriched = await enrichBody(params, { resolveIdentity: op === "write", run });
     const collection = enriched.collection as string | undefined;
     const tenant_id = enriched.tenant_id as string;
     if (op === "write") {
@@ -793,8 +797,8 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     );
   },
 
-  caura_tune: async (params, signal) => {
-    const enriched = await enrichBody(params, { resolveIdentity: true });
+  caura_tune: async (params, signal, run) => {
+    const enriched = await enrichBody(params, { resolveIdentity: true, run });
     const tenant_id = enriched.tenant_id as string;
     const agent_id = enriched.agent_id as string;
     assertSafePathSegment(agent_id, "agent_id");
@@ -858,6 +862,25 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
 // --- Factory ---
 
 /**
+ * ``params`` with each agent id the model passed checked against the run's own
+ * agents (``toolAgentId``). The id picks the credential a call is sent with, so
+ * a tool call may act only as the agent running it; another id throws here,
+ * before any request. ``caller_agent_id`` is recall's spelling of the same id.
+ */
+function withRunIdentity(
+  params: Record<string, unknown>,
+  run?: ToolRunContext,
+): Record<string, unknown> {
+  const checked = { ...params };
+  for (const key of ["agent_id", "caller_agent_id"]) {
+    const value = checked[key];
+    if (value === undefined || value === null || value === "") continue;
+    checked[key] = toolAgentId(value, run?.sessionKey);
+  }
+  return checked;
+}
+
+/**
  * Build a registered `AgentTool` by name.
  *
  * Throws at construction if the tool is missing a parameters schema or
@@ -890,7 +913,7 @@ export function createToolFromSpec(name: string, run?: ToolRunContext): AgentToo
     // came from, so it is never sent as ``tool_call_id``: that field is the
     // evidence a fact was observed, and the agent names it when it has one.
     async execute(_toolCallId, params, signal) {
-      const result = await execute(params, signal, run);
+      const result = await execute(withRunIdentity(params, run), signal, run);
       return textResult(JSON.stringify(result, null, 2));
     },
   };

@@ -58,6 +58,7 @@ the token. It may remain only where this table says **Kept** for that step.
 | `background_task_log` | Background task names, statuses and errors | **No text** | **No text** | **Deleted** |
 | `forge_rejected_fingerprints` | Skill clusters a reviewer rejected, with the reason | **No text** | **No text** | **Deleted** |
 | `agents` | Registered agents and their profiles | **No text** | **No text** | **Deleted** |
+| `agent_tombstones` | The ids of agents deleted from the tenant, and when | **No text** | **No text** | **Deleted** |
 | `fleet_nodes` | Plugin nodes and what they report about themselves | **No text** | **No text** | **Deleted** |
 | `fleet_commands` | Commands sent to plugin nodes, and their results | **No text** | **No text** | **Deleted** |
 | `capability_usage` | Counts of which capabilities were used | **No text** | **No text** | **Deleted** |

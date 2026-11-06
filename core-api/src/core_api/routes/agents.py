@@ -309,12 +309,15 @@ async def delete_agent(
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Delete an agent. Memories written by this agent are NOT deleted."""
+    """Delete an agent. Memories written by this agent are NOT deleted.
+
+    Its id is tombstoned: when a heartbeat, a write or a read names it again,
+    it comes back at trust 0 until an admin approves it by raising its trust.
+    """
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
-    # Deleting an agent wipes its trust/profile/identity (and re-registration
-    # resets to DEFAULT_TRUST_LEVEL) — an agent must not delete itself/peers to
-    # evade controls.
+    # Deleting an agent wipes its trust/profile/identity — an agent must not
+    # delete itself/peers to evade controls.
     auth.enforce_not_agent_credential("delete agents")
     auth.enforce_not_org_member("delete agents")
     auth.enforce_tenant_admin_credential("delete agents")

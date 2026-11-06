@@ -51,6 +51,9 @@ async def get_or_create_agent(
     explicit bool only where a caller has deliberately decided otherwise (REST
     bulk — see ``_write_memories_bulk_inner``). An existing row is returned
     unchanged either way; the setting is consulted on the create branch only.
+    Neither decides for the id of a deleted agent: storage creates it at trust
+    0 until an admin approves it (``AgentTombstone``), and the audit row records
+    the trust the row got.
 
     ``display_name`` and ``install_id`` (Task 6) are accepted optionally
     on every call. On creation they're persisted; on lookup of an
@@ -207,7 +210,7 @@ async def get_or_create_agent(
         resource_id=agent.get("id"),
         detail={
             "fleet_id": fleet_id,
-            "trust_level": initial_trust,
+            "trust_level": agent.get("trust_level", initial_trust),
             "display_name": display_name,
             "install_id": install_id,
             "owner_install_uuid": owner_install_uuid,

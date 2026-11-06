@@ -22,6 +22,7 @@ process.env.CAURA_INTERVIEWER = "false";
 const { CauraContextEngine } = await import("./context-engine.js");
 const { formatCorrectionBlock, parseCorrectionNotices } = await import("./correction-notices.js");
 const { createToolFromSpec } = await import("./tool-definitions.js");
+const { resolveAgentIdQuiet } = await import("./resolve-agent.js");
 
 const CORRECTION_ID = "6f1c2a8e-9d47-4b1e-8a3c-0f5e7d2b9c41";
 const NOTICE = {
@@ -106,7 +107,7 @@ test("caura_manage op=confirm_correction posts the agent's confirm", async () =>
   requests = [];
   const out = await createToolFromSpec("caura_manage").execute(
     "call-1",
-    { op: "confirm_correction", correction_id: CORRECTION_ID, agent_id: "ops-bot" },
+    { op: "confirm_correction", correction_id: CORRECTION_ID },
     undefined as never,
   );
   const confirm = requests.filter((r) => r.path.includes("/corrections"));
@@ -114,7 +115,7 @@ test("caura_manage op=confirm_correction posts the agent's confirm", async () =>
   assert.equal(confirm[0].method, "POST");
   assert.equal(confirm[0].path, `/api/v1/corrections/${CORRECTION_ID}/confirm`);
   assert.equal(confirm[0].query.get("tenant_id"), "t-correction-notices");
-  assert.equal(confirm[0].query.get("agent_id"), "ops-bot");
+  assert.equal(confirm[0].query.get("agent_id"), resolveAgentIdQuiet({}));
   assert.ok(out);
 });
 
@@ -123,7 +124,7 @@ test("a malformed correction_id is refused before any request", async () => {
   await assert.rejects(
     createToolFromSpec("caura_manage").execute(
       "call-2",
-      { op: "confirm_correction", correction_id: "../memories/x", agent_id: "ops-bot" },
+      { op: "confirm_correction", correction_id: "../memories/x" },
       undefined as never,
     ),
     /correction_id/,
