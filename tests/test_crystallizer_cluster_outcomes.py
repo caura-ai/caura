@@ -248,7 +248,13 @@ _CONFIG = SimpleNamespace(enrichment_provider="openai")
 
 @pytest.mark.parametrize(
     "raw",
-    [{"content": "not a list"}, "not json", [{"memory_type": "fact"}], [None]],
+    [
+        {"content": "no facts key"},
+        {"facts": "not a list"},
+        "not json",
+        {"facts": [{"memory_type": "fact"}]},
+        {"facts": [None]},
+    ],
 )
 async def test_an_unusable_answer_decides_nothing(raw):
     """Not the model saying "nothing to keep": the cluster must come back."""
@@ -258,7 +264,7 @@ async def test_an_unusable_answer_decides_nothing(raw):
 
 
 async def test_an_empty_list_is_the_models_verdict():
-    with _answering([]):
+    with _answering({"facts": []}):
         out = await cs._crystallize_cluster([_row(uuid4())], _CONFIG)
     assert out == []
 

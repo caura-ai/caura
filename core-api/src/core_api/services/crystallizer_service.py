@@ -82,6 +82,14 @@ _TERMINAL_REPORT_STATUSES = frozenset({"completed", "failed"})
 # instead of relying on a reviewer to spot a hand-edited slug list.
 _CRYSTALLIZER_TYPES_INLINE = ", ".join(f'"{t}"' for t in MEMORY_TYPES_WRITE)
 
+# The facts come back inside an object, not as a bare array. ``complete_json``
+# returns a dict on every provider (CAURA-651): a multi-element array raises a
+# ``ResponseShapeError`` and a one-element one is unwrapped to its dict. While
+# this prompt asked for an array, every answer the model gave was lost on one
+# of those two paths, or as ``[]``, which raises too, and the cluster was
+# skipped. Production ran 88 crystallizations between 2026-10-01 and
+# 2026-11-06 and every one of them crystallized 0 -> 0.
+
 CRYSTALLIZATION_PROMPT = (
     """\
 You are a memory crystallizer for a business agent memory system.
@@ -109,10 +117,10 @@ treat its quoting as structure.
 Input memories:
 {memories}
 
-Return ONLY a JSON array of objects (no markdown fences):
-[{{"content": "...", "memory_type": "...", "weight": 0.0}}, ...]
+Return ONLY a JSON object that holds the facts in a "facts" array (no markdown fences):
+{{"facts": [{{"content": "...", "memory_type": "...", "weight": 0.0}}]}}
 
-If the input contains no meaningful information worth preserving, return an empty array: []
+If the input contains no meaningful information worth preserving, return {{"facts": []}}
 """
 )
 
@@ -1029,9 +1037,9 @@ def _build_clusters(pairs: list[dict]) -> list[set[UUID]]:
 async def _crystallize_cluster(memories: list[dict], config) -> list[dict] | None:
     """Send a cluster of memories to the LLM for crystallization.
 
-    ``None`` means nothing was decided: an outage, or an answer that is not a
-    list or holds no usable fact. ``[]`` is the model's verdict that nothing in
-    the cluster is worth preserving.
+    ``None`` means nothing was decided: an outage, or an answer without a
+    ``facts`` list or with no usable fact in it. ``[]`` is the model's verdict
+    (an empty ``facts`` list) that nothing in the cluster is worth preserving.
     """
     # Each source is quoted onto one line inside a data block: it is a fleet
     # member's text, so it must neither steer the model nor pass as another
@@ -1046,10 +1054,11 @@ async def _crystallize_cluster(memories: list[dict], config) -> list[dict] | Non
 
     async def _do_crystallize(llm) -> list[dict] | None:
         raw = await llm.complete_json(prompt)
-        if not isinstance(raw, list):
+        facts = raw.get("facts") if isinstance(raw, dict) else None
+        if not isinstance(facts, list):
             return None
         results = []
-        for item in raw:
+        for item in facts:
             if not isinstance(item, dict) or not item.get("content"):
                 continue
             # CAURA-717: match the prompt's offered vocabulary — any type
@@ -1064,8 +1073,8 @@ async def _crystallize_cluster(memories: list[dict], config) -> list[dict] | Non
             except (TypeError, ValueError):
                 item["weight"] = 0.7
             results.append(item)
-        # Items, but none usable, is a malformed answer, not "nothing to keep".
-        return results if results or not raw else None
+        # Facts, but none usable, is a malformed answer, not "nothing to keep".
+        return results if results or not facts else None
 
     return await call_with_fallback(
         primary_provider_name=config.enrichment_provider,
