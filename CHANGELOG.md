@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.41.1](https://github.com/caura-ai/caura/compare/backend-v3.41.0...backend-v3.41.1) (2026-11-06)
+
+
+### Performance
+
+* **storage:** keep the report's corpus counts for five minutes (Prism v2 N035) ([#2346](https://github.com/caura-ai/caura/issues/2346)) ([f012625](https://github.com/caura-ai/caura/commit/f012625a53d0ee8496ce1e5b57fe788a40285eb2))
+
 ## [3.41.0](https://github.com/caura-ai/caura/compare/backend-v3.40.0...backend-v3.41.0) (2026-11-05)
 
 
