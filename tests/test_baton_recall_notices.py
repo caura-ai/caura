@@ -270,6 +270,65 @@ async def test_a_non_receiver_cannot_accept(storage):
     assert exc.value.status_code == 404
 
 
+def _baton_routes(auth) -> TestClient:
+    from core_api.auth import get_auth_context
+    from core_api.routes import batons
+
+    app = FastAPI()
+    app.include_router(batons.router, prefix="/api/v1")
+    app.dependency_overrides[get_auth_context] = lambda: auth
+    return TestClient(app)
+
+
+_ACCEPTED = {
+    "baton_id": _row(1)["baton_id"],
+    "agent_id": "receiver",
+    "from_agent": "sender",
+    "state": "accepted",
+    "accepted_at": "2026-11-05T10:00:00+00:00",
+    "message_id": "msg-1",
+}
+
+
+@pytest.mark.unit
+def test_an_agent_key_follows_the_ask_as_written(storage):
+    """HB-15 F2: the notice's ask names no tenant; the agent key's own tenant is used."""
+    from core_api.auth import AuthContext
+
+    storage.accept_baton.return_value = _ACCEPTED
+    client = _baton_routes(
+        AuthContext(tenant_id="t-1", agent_id="receiver", readable_tenant_ids=["t-1"])
+    )
+    r = client.post(f"/api/v1/batons/{_row(1)['baton_id']}/accept")
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "accepted"
+    storage.accept_baton.assert_awaited_once_with(
+        "t-1", _row(1)["baton_id"], agent_id="receiver", via="recall"
+    )
+    # Echoing its own tenant still works; naming another is refused.
+    url = f"/api/v1/batons/{_row(1)['baton_id']}/accept"
+    assert client.post(f"{url}?tenant_id=t-1").status_code == 200
+    assert client.post(f"{url}?tenant_id=t-2").status_code == 403
+
+
+@pytest.mark.unit
+def test_an_admin_key_must_name_the_tenant(storage):
+    from core_api.auth import AuthContext
+
+    storage.accept_baton.return_value = _ACCEPTED
+    client = _baton_routes(AuthContext(tenant_id=None, is_admin=True))
+    url = f"/api/v1/batons/{_row(1)['baton_id']}"
+    r = client.post(f"{url}/accept?agent_id=receiver")
+    assert r.status_code == 400
+    assert "TENANT_REQUIRED" in r.text
+    assert client.get(f"{url}?agent_id=receiver").status_code == 400
+    ok = client.post(f"{url}/accept?tenant_id=t-1&agent_id=receiver")
+    assert ok.status_code == 200, ok.text
+    storage.accept_baton.assert_awaited_once_with(
+        "t-1", _row(1)["baton_id"], agent_id="receiver", via="recall"
+    )
+
+
 # ---------------------------------------------------------------------------
 # REST envelope: absent when empty, byte for byte
 # ---------------------------------------------------------------------------
