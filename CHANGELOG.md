@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.41.4](https://github.com/caura-ai/caura/compare/backend-v3.41.3...backend-v3.41.4) (2026-11-06)
+
+
+### Bug Fixes
+
+* **enrichment:** ask for one object when the memory content is a list ([#2355](https://github.com/caura-ai/caura/issues/2355)) ([de171f6](https://github.com/caura-ai/caura/commit/de171f60e668dea8a53a00fa71e153b17ad2af0c))
+
 ## [3.41.3](https://github.com/caura-ai/caura/compare/backend-v3.41.2...backend-v3.41.3) (2026-11-06)
 
 
