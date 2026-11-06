@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.41.3](https://github.com/caura-ai/caura/compare/backend-v3.41.2...backend-v3.41.3) (2026-11-06)
+
+
+### Bug Fixes
+
+* **api:** take the tenant from a tenant-bound credential on baton accept and correction confirm ([#2349](https://github.com/caura-ai/caura/issues/2349)) ([5ef839b](https://github.com/caura-ai/caura/commit/5ef839bf982726731e75f84b8e6b5f04aa5019da))
+
 ## [3.41.2](https://github.com/caura-ai/caura/compare/backend-v3.41.1...backend-v3.41.2) (2026-11-06)
 
 
