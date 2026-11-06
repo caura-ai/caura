@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.5.0...collaboration-clients-v0.6.0) (2026-11-05)
+
+
+### Features
+
+* **clients:** hand work over as a baton and show received batons in peer wait ([#2344](https://github.com/caura-ai/caura/issues/2344)) ([ea2e8e4](https://github.com/caura-ai/caura/commit/ea2e8e4dcd1896d6b527ca567aa490b800a16f63))
+
 ## [0.5.0](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.4.1...collaboration-clients-v0.5.0) (2026-11-05)
 
 

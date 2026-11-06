@@ -10,6 +10,20 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.41.0](https://github.com/caura-ai/caura/compare/backend-v3.40.0...backend-v3.41.0) (2026-11-05)
+
+
+### Features
+
+* **clients:** hand work over as a baton and show received batons in peer wait ([#2344](https://github.com/caura-ai/caura/issues/2344)) ([ea2e8e4](https://github.com/caura-ai/caura/commit/ea2e8e4dcd1896d6b527ca567aa490b800a16f63))
+* **memory:** tell a baton receiver on its next recall, and let it accept (HB-09) ([#2345](https://github.com/caura-ai/caura/issues/2345)) ([2235fe1](https://github.com/caura-ai/caura/commit/2235fe148ccabd63a23d101db3861bede96e726d))
+
+
+### Bug Fixes
+
+* **memory:** send a Cloud Run ID token with correction bus calls ([#2342](https://github.com/caura-ai/caura/issues/2342)) ([76b2cc1](https://github.com/caura-ai/caura/commit/76b2cc15019d2a014f452303022e1aa9f9be11fe))
+* **memory:** show a correction notice on recall to every unconfirmed recipient ([#2343](https://github.com/caura-ai/caura/issues/2343)) ([5b978d3](https://github.com/caura-ai/caura/commit/5b978d3841044e89b840f41054e4a0d7b60decf1))
+
 ## [3.40.0](https://github.com/caura-ai/caura/compare/backend-v3.39.3...backend-v3.40.0) (2026-11-05)
 
 
