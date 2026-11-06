@@ -125,7 +125,7 @@ curl -s "https://your-caura-server/api/v1/fleet/nodes?tenant_id=$TENANT_ID&fleet
         | {node_name, plugin_version, last_heartbeat}'
 ```
 
-That returns the stale-plugin set the auto-deploy gate is currently skipping. The dashboard's **Agents › Fleets and machines** page surfaces the same count in the Claws header.
+That returns the stale-plugin set the auto-deploy gate is currently skipping. In the Caura app, **Agents › OpenClaw fleets** shows the same count in the **OpenClaw nodes** header, as "N need re-install".
 
 ## What's preserved vs. clobbered
 
