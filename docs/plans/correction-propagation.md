@@ -246,7 +246,9 @@ confirms (`caura_manage op=confirm_correction`, `POST
 /api/v1/corrections/{id}/confirm`) or the correction is 7 days old. The key is
 absent when there is nothing to tell, so an ordinary recall is unchanged. The
 first response that carries a notice marks that recipient `delivered` (see
-Sending).
+Sending). A summary that quotes a memory deleted since (the corrected memory,
+or a conflict review's other memory) is null: the notice is still owed,
+without the deleted text.
 
 ## Done when
 

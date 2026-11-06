@@ -4,7 +4,7 @@
 about: it is a recipient of a sent correction (past ``preview``) younger than 7 days and has
 not confirmed, on either channel (the bus is the fast path, recall the
 guaranteed one). Newest first, at most ``limit``, bound to the tenant. Sending (CP-11) is another PR, so the rows are set here
-directly.
+directly. A summary that quotes a memory deleted since is null.
 """
 
 from __future__ import annotations
@@ -49,10 +49,19 @@ async def _memory(client: AsyncClient, tenant: str) -> str:
 
 
 async def _correction(
-    client: AsyncClient, tenant: str, readers: list[str], *, ago: timedelta = timedelta(hours=1)
+    client: AsyncClient,
+    tenant: str,
+    readers: list[str],
+    *,
+    ago: timedelta = timedelta(hours=1),
+    memory_id: str | None = None,
+    kind: str = "content_edit",
+    old_summary: str | None = "deploys on Tuesday",
+    new_summary: str | None = "deploys on Thursday",
+    detail: dict | None = None,
 ) -> str:
-    """A correction of a fresh memory, ``ago`` in the past, read first by ``readers``."""
-    m = await _memory(client, tenant)
+    """A correction of ``memory_id`` (else a fresh memory), ``ago`` in the past, read first by ``readers``."""
+    m = memory_id or await _memory(client, tenant)
     corrected_at = datetime.now(UTC) - ago
     for agent in readers:
         r = await client.post(
@@ -72,13 +81,13 @@ async def _correction(
         json={
             "event_id": str(uuid.uuid4()),
             "memory_id": m,
-            "kind": "content_edit",
+            "kind": kind,
             "actor_kind": "user",
             "actor_id": "person-1",
             "corrected_at": corrected_at.isoformat(),
-            "old_summary": "deploys on Tuesday",
-            "new_summary": "deploys on Thursday",
-            "detail": {},
+            "old_summary": old_summary,
+            "new_summary": new_summary,
+            "detail": detail or {},
         },
     )
     assert r.status_code == 200, r.text
@@ -202,6 +211,80 @@ async def test_a_correction_still_sending_or_closed_still_owes_its_recall_notice
     await _set(closed, status="closed", channel="bus", notice_state="failed")
 
     assert [n["correction_id"] for n in await _notices(client, tenant, "a")] == [closed, sending]
+
+
+async def _delete(client: AsyncClient, tenant: str, memory_id: str) -> None:
+    r = await client.post(
+        f"{PREFIX}/memories/soft-delete-by-ids", json={"tenant_id": tenant, "ids": [memory_id]}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] == 1
+
+
+async def test_a_notice_of_a_memory_deleted_since_is_still_owed_without_its_text(client: AsyncClient):
+    """A delete is itself a correction, so its own notice keeps the statuses it carries."""
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    m = await _memory(client, tenant)
+    edit = await _correction(client, tenant, ["a"], memory_id=m, ago=timedelta(hours=2))
+    await _set(edit, channel="recall", notice_state="sent")
+    (n,) = await _notices(client, tenant, "a")
+    assert (n["old_summary"], n["new_summary"]) == ("deploys on Tuesday", "deploys on Thursday")
+
+    await _delete(client, tenant, m)
+    deleted = await _correction(
+        client,
+        tenant,
+        ["a"],
+        memory_id=m,
+        kind="status",
+        old_summary="active",
+        new_summary="deleted",
+        detail={"old_status": "active", "new_status": "deleted"},
+    )
+    await _set(deleted, channel="recall", notice_state="sent")
+
+    notices = await _notices(client, tenant, "a")
+    assert [n["correction_id"] for n in notices] == [deleted, edit]
+    assert [(n["old_summary"], n["new_summary"]) for n in notices] == [("active", "deleted"), (None, None)]
+
+
+async def _review(client: AsyncClient, tenant: str, other: str) -> tuple[str, str]:
+    """A sent conflict review of a fresh memory against ``other``: ``(correction id, memory id)``."""
+    corrected = await _memory(client, tenant)
+    cid = await _correction(
+        client,
+        tenant,
+        ["a"],
+        memory_id=corrected,
+        kind="conflict_resolve",
+        detail={
+            "conflict_id": str(uuid.uuid4()),
+            "review_status": "resolved",
+            "resolution_action": "supersede",
+            "related_memory_id": other,
+        },
+    )
+    await _set(cid, channel="recall", notice_state="sent")
+    return cid, corrected
+
+
+async def test_a_conflict_review_notice_shows_no_text_of_a_deleted_or_purged_memory(client: AsyncClient):
+    """A review quotes the pair: the corrected memory, then the other one (``related_memory_id``)."""
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    deleted_other, purged_other = await _memory(client, tenant), await _memory(client, tenant)
+    review_1, corrected_1 = await _review(client, tenant, deleted_other)
+    review_2, _ = await _review(client, tenant, purged_other)
+
+    await _delete(client, tenant, deleted_other)
+    async with get_session() as session:
+        await session.execute(text("DELETE FROM memories WHERE id = :id"), {"id": purged_other})
+    by_id = {n["correction_id"]: n for n in await _notices(client, tenant, "a")}
+    assert (by_id[review_1]["old_summary"], by_id[review_1]["new_summary"]) == ("deploys on Tuesday", None)
+    assert (by_id[review_2]["old_summary"], by_id[review_2]["new_summary"]) == ("deploys on Tuesday", None)
+
+    await _delete(client, tenant, corrected_1)
+    by_id = {n["correction_id"]: n for n in await _notices(client, tenant, "a")}
+    assert (by_id[review_1]["old_summary"], by_id[review_1]["new_summary"]) == (None, None)
 
 
 async def _delivered(client: AsyncClient, tenant: str, agent: str, ids: list[str]) -> int:

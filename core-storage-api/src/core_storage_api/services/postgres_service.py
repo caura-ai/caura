@@ -7999,6 +7999,12 @@ class PostgresService:
         ``ix_memory_correction_recipient_agent`` (migration 074), at most 50
         rows per correction. On the replica like every recall read: a notice
         confirmed a moment ago can show once more under lag.
+
+        A summary that quotes a memory deleted since (soft-deleted, or purged:
+        a conflict review's other memory) is ``None``. The notice is still
+        owed, since a delete is itself a correction, but shows none of the
+        deleted text. That check is one more primary-key read, only when there
+        are notices.
         """
         r, c = MemoryCorrectionRecipient, MemoryCorrection
         async with get_read_session() as session:
@@ -8006,6 +8012,8 @@ class PostgresService:
                 select(
                     c.id,
                     c.memory_id,
+                    c.kind,
+                    c.detail,
                     c.old_summary,
                     c.new_summary,
                     c.corrected_at,
@@ -8024,18 +8032,56 @@ class PostgresService:
                 .order_by(c.corrected_at.desc(), c.id)
                 .limit(limit)
             )
+            found = [(row, *self._notice_quotes(row.kind, row.memory_id, row.detail)) for row in rows.all()]
+            quoted = {m for _, old, new in found for m in (old, new) if m is not None}
+            live: set[UUID] = set()
+            if quoted:
+                live = set(
+                    (
+                        await session.execute(
+                            select(Memory.id).where(
+                                Memory.tenant_id == tenant_id,
+                                Memory.id.in_(list(quoted)),
+                                Memory.deleted_at.is_(None),
+                                Memory.status != "deleted",
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
             return [
                 {
                     "correction_id": str(row.id),
                     "memory_id": str(row.memory_id),
-                    "old_summary": row.old_summary,
-                    "new_summary": row.new_summary,
+                    "old_summary": row.old_summary if old is None or old in live else None,
+                    "new_summary": row.new_summary if new is None or new in live else None,
                     "corrected_at": row.corrected_at.isoformat(),
                     "notice_state": row.notice_state,
                     "notified_at": _iso(row.notified_at),
                 }
-                for row in rows.all()
+                for row, old, new in found
             ]
+
+    @staticmethod
+    def _notice_quotes(kind: str, memory_id: UUID, detail: dict | None) -> tuple[UUID | None, UUID | None]:
+        """The memories a correction's old and new summaries quote; ``None`` for a summary that quotes none.
+
+        An edit quotes the corrected memory before and after. A conflict review
+        quotes the pair: the corrected memory, then the other one
+        (``related_memory_id``). An id there that doesn't parse reads as the nil
+        UUID, which no memory has, so that text is withheld too. A status change
+        and an unverify carry statuses, not text.
+        """
+        if kind == "content_edit":
+            return memory_id, memory_id
+        if kind == "conflict_resolve":
+            try:
+                related = UUID(str((detail or {}).get("related_memory_id")))
+            except ValueError:
+                related = UUID(int=0)
+            return memory_id, related
+        return None, None
 
     async def correction_notices_delivered(
         self, tenant_id: str, agent_id: str, correction_ids: list[str]
