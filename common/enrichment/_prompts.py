@@ -85,6 +85,13 @@ missing band:
   prompt with it. Unifying the 0.7 fallback onto ``DEFAULT_MEMORY_WEIGHT``
   would make the two paths agree, but that is a behaviour change to
   ranking (weight is 15% of base score) and belongs in its own PR.
+
+One memory, one object — content that is itself a list (bullets, a JSON
+array, records labelled as separate memories) led the model to classify each
+item and answer with an array of objects. The providers' shape guard rejects
+that, and the memory fell back to the keyword heuristic. The framing line
+above the field list and the "one object, not an array" line above the
+template close it; ``tests/test_enrichment_one_object.py`` has the numbers.
 """
 
 from __future__ import annotations
@@ -124,7 +131,9 @@ ENRICHMENT_PROMPT = (
     """\
 You are a memory classifier for a business agent memory system.
 
-Analyze the following memory content and return a JSON object with these fields:
+The content below is ONE memory, even when it lists several items or records
+or labels its parts as separate memories. Classify it as a whole and return
+exactly one JSON object with these fields:
 
 1. "memory_type": one of """
     + _TYPES_INLINE
@@ -246,7 +255,7 @@ Analyze the following memory content and return a JSON object with these fields:
     - When unsure, choose "business" — only mark "personal" when you are
       confident the content is non-work.
 
-Return ONLY valid JSON (no markdown fences):
+Return ONLY valid JSON: one object, not an array (no markdown fences):
 {{"memory_type": "...", "weight": 0.5, "title": "...", "summary": "...", "ts_valid_start": null, "ts_valid_end": null, "contains_pii": false, "pii_types": [], "atomic_facts": null, "business_relevance": "business"}}
 
 """
