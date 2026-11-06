@@ -29,7 +29,6 @@ from core_api.auth import AuthContext, get_auth_context
 from core_api.errors import (
     AUTH_AGENT_CREDENTIAL_FORBIDDEN,
     AUTH_AGENT_IDENTITY_MISMATCH,
-    AUTH_TENANT_REQUIRED,
     coded_detail,
 )
 from core_api.services.baton_notices import accept_as_agent, read_as_agent
@@ -40,22 +39,6 @@ _TENANT = (
     "Tenant of the baton. A tenant-bound credential (agent or tenant key) may omit it: "
     "its own tenant is used. An admin credential must name it."
 )
-
-
-def _tenant(auth: AuthContext, tenant_id: str | None) -> str:
-    """The explicit ``tenant_id``, else the credential's own; 400 when neither names one."""
-    resolved = tenant_id or auth.tenant_id
-    if not resolved:
-        raise HTTPException(
-            status_code=400,
-            detail=coded_detail(
-                AUTH_TENANT_REQUIRED,
-                "This operation must name a tenant.",
-                remediation="Supply the target tenant_id on the request.",
-            ),
-        )
-    auth.enforce_tenant(resolved)
-    return resolved
 
 
 def _receiver(auth: AuthContext, agent_id: str | None, action: str) -> AgentIdentity:
@@ -82,7 +65,7 @@ async def get_baton(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """The baton as this agent got it (receiver) or cited it (sender); 404 for anyone else."""
-    tenant_id = _tenant(auth, tenant_id)
+    tenant_id = auth.resolve_tenant(tenant_id)
     agent = _receiver(auth, agent_id, "read")
     return await read_as_agent(tenant_id, str(baton_id), agent)
 
@@ -103,6 +86,6 @@ async def accept_baton(
     second accept keeps the first ``accepted_at``.
     """
     auth.enforce_read_only()
-    tenant_id = _tenant(auth, tenant_id)
+    tenant_id = auth.resolve_tenant(tenant_id)
     agent = _receiver(auth, agent_id, "accept")
     return await accept_as_agent(tenant_id, str(baton_id), str(agent))

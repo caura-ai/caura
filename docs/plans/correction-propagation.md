@@ -208,7 +208,9 @@ the bus's `outcome` (`sent|delivered|confirmed|late|failed`) becomes the
 recipient's `notice_state`, and `confirmed_at` its reply or ack time. A
 recipient confirmed through `POST /api/v1/corrections/{id}/confirm` (MCP
 `caura_manage op=confirm_correction`, the recall fallback's path) keeps that
-state. The record is `closed` once every recipient is `confirmed` or `failed`.
+state. The confirm route takes the tenant from an agent or tenant key when
+`tenant_id` is omitted, so the notice's `ask` works as written; an admin key
+must name it. The record is `closed` once every recipient is `confirmed` or `failed`.
 The counts are `{recipients, truncated, readers, pending, sent, delivered,
 confirmed, late, failed, unreachable}` (`unreachable` counts legacy rows only).
 

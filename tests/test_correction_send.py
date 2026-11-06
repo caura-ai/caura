@@ -427,6 +427,73 @@ async def test_a_read_closes_a_correction_every_recipient_confirmed(wire) -> Non
     assert out["status"] == "closed"
 
 
+# ── confirm: the notice's ask names no tenant (HB-15 F2) ────────────────────
+
+_CID = "00000000-0000-4000-8000-0000000000c1"
+
+
+def _confirm_route(auth, monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from core_api.auth import get_auth_context
+    from core_api.routes import corrections
+
+    storage = MagicMock(name="storage_client")
+    storage.confirm_correction = AsyncMock(
+        return_value={
+            "id": _CID,
+            "memory_id": "m-1",
+            "recipients": [
+                {
+                    "agent_id": "reader",
+                    "notice_state": "confirmed",
+                    "confirmed_at": "2026-11-06T10:00:00Z",
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr(cs, "get_storage_client", lambda: storage)
+    app = FastAPI()
+    app.include_router(corrections.router, prefix="/api/v1")
+    app.dependency_overrides[get_auth_context] = lambda: auth
+    return TestClient(app), storage
+
+
+@pytest.mark.unit
+def test_an_agent_key_confirms_as_the_ask_is_written(monkeypatch) -> None:
+    from core_api.auth import AuthContext
+
+    client, storage = _confirm_route(
+        AuthContext(tenant_id="t-1", agent_id="reader", readable_tenant_ids=["t-1"]),
+        monkeypatch,
+    )
+    url = f"/api/v1/corrections/{_CID}/confirm"
+    r = client.post(url)
+    assert r.status_code == 200, r.text
+    assert r.json()["notice_state"] == "confirmed"
+    storage.confirm_correction.assert_awaited_once_with("t-1", _CID, agent_id="reader")
+    assert client.post(f"{url}?tenant_id=t-1").status_code == 200
+    assert client.post(f"{url}?tenant_id=t-2").status_code == 403
+
+
+@pytest.mark.unit
+def test_an_admin_key_confirming_must_name_the_tenant(monkeypatch) -> None:
+    from core_api.auth import AuthContext
+
+    client, storage = _confirm_route(
+        AuthContext(tenant_id=None, is_admin=True), monkeypatch
+    )
+    url = f"/api/v1/corrections/{_CID}/confirm"
+    r = client.post(f"{url}?agent_id=reader")
+    assert r.status_code == 400 and "TENANT_REQUIRED" in r.text
+    ok = client.post(f"{url}?tenant_id=t-1&agent_id=reader")
+    assert ok.status_code == 200, ok.text
+    storage.confirm_correction.assert_awaited_once_with("t-1", _CID, agent_id="reader")
+
+
 # ── integration: preview → send → confirm over REST ───────────────────────
 
 

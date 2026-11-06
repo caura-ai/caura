@@ -570,6 +570,27 @@ class AuthContext:
                 ),
             )
 
+    def resolve_tenant(self, requested_tenant: str | None) -> str:
+        """The tenant to act on: ``requested_tenant``, else the credential's own.
+
+        For routes a recall notice's ``ask`` names without a tenant (baton
+        accept, correction confirm): a tenant-bound credential (agent or tenant
+        key) may omit it. An explicit tenant must pass ``enforce_tenant``; an
+        admin credential, which has no tenant of its own, must name one (400).
+        """
+        resolved = requested_tenant or self.tenant_id
+        if not resolved:
+            raise HTTPException(
+                status_code=400,
+                detail=coded_detail(
+                    errors.AUTH_TENANT_REQUIRED,
+                    "This operation must name a tenant.",
+                    remediation="Supply the target tenant_id on the request.",
+                ),
+            )
+        self.enforce_tenant(resolved)
+        return resolved
+
     def enforce_readable_tenant(self, requested_tenant: str) -> None:
         """Raise 403 unless the caller may READ from the requested tenant.
 

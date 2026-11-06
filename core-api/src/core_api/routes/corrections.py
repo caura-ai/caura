@@ -14,7 +14,9 @@ cannot read, is a 404. An agent that is not a recipient does not see
 ``POST /corrections/{id}/send`` sends the notices (``services.correction_sender``):
 a person, an admin or tenant key, or an agent at trust_level >= 3. A status
 read refreshes the bus outcomes. ``POST /corrections/{id}/confirm`` is the
-recipient agent's own confirmation.
+recipient agent's own confirmation; it takes the tenant from an agent or
+tenant key when ``tenant_id`` is omitted, so the notice's ``ask`` works as
+written.
 
 See ``docs/plans/correction-propagation.md``.
 """
@@ -110,7 +112,11 @@ async def send_correction_notices(
 )
 async def confirm_correction(
     correction_id: UUID,
-    tenant_id: str = Query(...),
+    tenant_id: str | None = Query(
+        default=None,
+        description="Tenant of the correction. A tenant-bound credential (agent or tenant key) may "
+        "omit it: its own tenant is used. An admin credential must name it.",
+    ),
     agent_id: str | None = Query(
         default=None,
         description="The confirming agent, for a credential that names none (a tenant-key plugin).",
@@ -123,7 +129,7 @@ async def confirm_correction(
     otherwise). Idempotent: a second confirm keeps the first ``confirmed_at``.
     """
     auth.enforce_read_only()
-    auth.enforce_tenant(tenant_id)
+    tenant_id = auth.resolve_tenant(tenant_id)
     agent = auth.effective_agent_id(agent_id)
     if auth.is_person or not agent:
         raise HTTPException(
