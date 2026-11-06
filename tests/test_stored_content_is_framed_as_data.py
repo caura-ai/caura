@@ -142,7 +142,7 @@ async def test_the_crystallizer_quotes_each_source_inside_a_data_block():
 
     async def complete_json(prompt: str):
         captured.append(prompt)
-        return []
+        return {"facts": []}
 
     llm = SimpleNamespace(complete_json=complete_json)
 
