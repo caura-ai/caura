@@ -12,7 +12,9 @@ that only recalls sees a ``baton_notices`` entry on its next recall
   The bus's baton status shows the sender ``accepted``.
 
 Identity is the correction-confirm rule: an agent credential acts as itself; a
-tenant key names the agent with ``agent_id``; a signed-in person cannot.
+tenant key names the agent with ``agent_id``; a signed-in person cannot. The
+tenant comes from the credential when it is bound to one, so the notice's
+``ask`` works as written; an admin key names it with ``tenant_id``.
 """
 
 from __future__ import annotations
@@ -24,10 +26,19 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from core_api import openapi_responses as _oar
 from core_api.agent_ids import AgentIdentity
 from core_api.auth import AuthContext, get_auth_context
-from core_api.errors import AUTH_AGENT_CREDENTIAL_FORBIDDEN, AUTH_AGENT_IDENTITY_MISMATCH, coded_detail
+from core_api.errors import (
+    AUTH_AGENT_CREDENTIAL_FORBIDDEN,
+    AUTH_AGENT_IDENTITY_MISMATCH,
+    coded_detail,
+)
 from core_api.services.baton_notices import accept_as_agent, read_as_agent
 
 router = APIRouter(tags=["Handoff batons"])
+
+_TENANT = (
+    "Tenant of the baton. A tenant-bound credential (agent or tenant key) may omit it: "
+    "its own tenant is used. An admin credential must name it."
+)
 
 
 def _receiver(auth: AuthContext, agent_id: str | None, action: str) -> AgentIdentity:
@@ -47,14 +58,14 @@ def _receiver(auth: AuthContext, agent_id: str | None, action: str) -> AgentIden
 @router.get("/batons/{baton_id}", responses={200: {"model": _oar.BatonOut}})
 async def get_baton(
     baton_id: UUID,
-    tenant_id: str = Query(...),
+    tenant_id: str | None = Query(default=None, description=_TENANT),
     agent_id: str | None = Query(
         default=None, description="The reading agent, for a credential that names none (a tenant-key plugin)."
     ),
     auth: AuthContext = Depends(get_auth_context),
 ):
     """The baton as this agent got it (receiver) or cited it (sender); 404 for anyone else."""
-    auth.enforce_tenant(tenant_id)
+    tenant_id = auth.resolve_tenant(tenant_id)
     agent = _receiver(auth, agent_id, "read")
     return await read_as_agent(tenant_id, str(baton_id), agent)
 
@@ -62,7 +73,7 @@ async def get_baton(
 @router.post("/batons/{baton_id}/accept", responses={200: {"model": _oar.BatonAcceptResponse}})
 async def accept_baton(
     baton_id: UUID,
-    tenant_id: str = Query(...),
+    tenant_id: str | None = Query(default=None, description=_TENANT),
     agent_id: str | None = Query(
         default=None,
         description="The accepting agent, for a credential that names none (a tenant-key plugin).",
@@ -75,6 +86,6 @@ async def accept_baton(
     second accept keeps the first ``accepted_at``.
     """
     auth.enforce_read_only()
-    auth.enforce_tenant(tenant_id)
+    tenant_id = auth.resolve_tenant(tenant_id)
     agent = _receiver(auth, agent_id, "accept")
     return await accept_as_agent(tenant_id, str(baton_id), str(agent))

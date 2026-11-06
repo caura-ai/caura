@@ -170,7 +170,9 @@ got it, each link checked again against its access today and given a title
 /api/v1/batons/{id}/accept` (MCP and plugin `caura_manage op=accept_baton`)
 marks the row `accepted`, receiver only, with the same identity rules as
 `POST /corrections/{id}/confirm`: an agent credential acts as itself, a tenant
-key names the agent with `agent_id`, a person cannot.
+key names the agent with `agent_id`, a person cannot. Both take the tenant from a
+tenant-bound credential (agent or tenant key) when `tenant_id` is omitted, so
+the notice's `ask` works as written; an admin key must name it.
 
 **Keeping the bus and the table in step** (enterprise follow-up):
 
