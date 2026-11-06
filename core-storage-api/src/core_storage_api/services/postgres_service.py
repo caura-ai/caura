@@ -161,6 +161,7 @@ from core_storage_api.services.audit_chain import (
     compute_event_hash,
     scrub_pii,
 )
+from core_storage_api.services.corpus_counts import CorpusCountCache
 
 logger = logging.getLogger(__name__)
 
@@ -918,6 +919,13 @@ _FORGE_CORPUS_ROWS = (
 _EXPIRED_LIVE_ROWS = (
     "(ts_valid_end < NOW() OR expires_at < NOW()) AND status = ANY(:live_statuses) AND deleted_at IS NULL"
 )
+
+
+# The step ``memory_quality_metrics`` rounds its window's start down to, so
+# reports in the same few minutes share one corpus count (Prism App Review v2
+# N035). The counts themselves are kept by ``_CORPUS_COUNTS``.
+_CORPUS_WINDOW_STEP = timedelta(minutes=5)
+_CORPUS_COUNTS = CorpusCountCache()
 
 
 def _scope_sql(
@@ -10071,7 +10079,10 @@ class PostgresService:
         ``last_recalled_at >= recalled_after``. That is the "was the memory used
         this period" figure; never-recalled % cannot be, because a row written
         an hour ago has had an hour to be recalled. One extra pass over the
-        tenant's live rows, both counts in it (``COUNT(*) FILTER``).
+        tenant's live rows, both counts in it (``COUNT(*) FILTER``), so they
+        are kept for five minutes per scope and window (``CorpusCountCache``),
+        and the window's start is rounded down to five minutes to share them
+        (Prism App Review v2 N035).
 
         Kept separate from the GROUPING SETS breakdown so that shared (MCP stats)
         path stays untouched. The scope/visibility block below MUST mirror
@@ -10122,6 +10133,27 @@ class PostgresService:
         # ``conflicted`` stays: search still returns it on an exact match and on
         # an entity lookup (Prism App Review v2 N034).
         corpus_filters = [*live_filters, Memory.status != "outdated"]
+        corpus_key: tuple | None = None
+        corpus_counts: tuple[int, int] | None = None
+        if recalled_after is not None:
+            # Rounded down, so every report in the same five minutes counts
+            # from the same start and can share one count.
+            hour = recalled_after.replace(minute=0, second=0, microsecond=0)
+            recalled_after -= (recalled_after - hour) % _CORPUS_WINDOW_STEP
+            # Every input the corpus filters read, so no two scopes share a
+            # count. A new scope argument belongs here too.
+            corpus_key = (
+                tenant_id,
+                tuple(sorted(readable_tenant_ids or ())),
+                fleet_id,
+                agent_id,
+                include_scope_agent,
+                tuple(sorted(exclude_memory_types or ())),
+                tuple(sorted(exclude_agent_ids or ())),
+                exclude_title_regex,
+                recalled_after,
+            )
+            corpus_counts = _CORPUS_COUNTS.get(corpus_key)
 
         reused = case((Memory.recall_count > 0, 1), else_=0)
         per_type_stmt = (
@@ -10143,12 +10175,14 @@ class PostgresService:
             per_type = (await session.execute(per_type_stmt)).all()
             total, total_reused, total_recalls = (await session.execute(overall_stmt)).one()
             top_recalls = [int(x[0] or 0) for x in (await session.execute(top_stmt)).all()]
-            if recalled_after is not None:
+            if corpus_key is not None and corpus_counts is None:
                 corpus_stmt = select(
                     func.count(),
                     func.count().filter(Memory.last_recalled_at >= recalled_after),
                 ).where(*corpus_filters)
                 corpus_total, recalled_in_window = (await session.execute(corpus_stmt)).one()
+                corpus_counts = (int(corpus_total or 0), int(recalled_in_window or 0))
+                _CORPUS_COUNTS.put(corpus_key, corpus_counts)
         result = {
             "total": int(total or 0),
             "reused": int(total_reused or 0),
@@ -10156,9 +10190,8 @@ class PostgresService:
             "top_recalls": top_recalls,
             "by_type": {r.memory_type: {"total": int(r.n), "reused": int(r.r or 0)} for r in per_type},
         }
-        if recalled_after is not None:
-            result["corpus_total"] = int(corpus_total or 0)
-            result["recalled_in_window"] = int(recalled_in_window or 0)
+        if corpus_counts is not None:
+            result["corpus_total"], result["recalled_in_window"] = corpus_counts
         return result
 
     # ══════════════════════════════════════════════════════════════════════
