@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.28.1](https://github.com/caura-ai/caura/compare/plugin-v2.28.0...plugin-v2.28.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **agents:** tombstone deleted agents; tools act as their own agent ([#2354](https://github.com/caura-ai/caura/issues/2354)) ([13ba4d9](https://github.com/caura-ai/caura/commit/13ba4d9e5872663d6115119fae2ebf27127f2941))
+
 ## [2.28.0](https://github.com/caura-ai/caura/compare/plugin-v2.27.0...plugin-v2.28.0) (2026-11-05)
 
 
