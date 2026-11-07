@@ -378,7 +378,7 @@ parameter list.
 
 ### Behaviors the schema won't tell you
 
-- **`caura_recall`** excludes superseded memories (`status` ∈ {outdated, conflicted}) by default — pass `status` explicitly to walk the chain.
+- **`caura_recall`** excludes superseded and archived memories (`status` ∈ {outdated, conflicted, archived}) by default — pass `status` explicitly to walk the chain or read archived ones.
 - **`caura_write`** — leave `memory_type` out: the server classifies the prose. If you set it, use one of `fact` · `episode` · `decision` · `preference` · `task` · `plan` · `action`. Anything else (`guideline`, `action_item`, `explanation`, …) is rejected with `INVALID_ARGUMENTS`, and `insight` / `outcome` / `rule` are server-generated (via `caura_insights` / `caura_evolve`). `write_mode`: `fast` skips embedding → keyword-only recall afterwards; `strong` forces full LLM enrichment; `auto` is usually right.
 - **`caura_manage op=transition`** targets: `active · pending · confirmed · cancelled · outdated · conflicted · archived · deleted`.
 - **`caura_doc`** — `where` is scalar exact-match only (no array descent). A doc is invisible to `op=search` unless it has a `data["summary"]` (the only embedded field); re-write with one to index it retroactively. Scope the search to a collection when you know it; omit `collection` to return up to `top_k` matches across the tenant (default 5).

@@ -1235,17 +1235,18 @@ class SearchRequest(TenantScopedBody):
         # D6 — the default is NOT "every status". With this unset, search
         # excludes rows the contradiction detector has retired: ``outdated``
         # always, and ``conflicted`` unless the row is an exact lexical match
-        # for the query. That is deliberate (a stale claim shouldn't dilute
-        # ranking) but it was undocumented, which is what made it feel silent:
+        # for the query. It excludes ``archived`` rows too, which are no longer
+        # live. That is deliberate (a stale claim shouldn't dilute ranking) but
+        # it was undocumented, which is what made it feel silent:
         # a caller could not tell "nothing matched" from "matches were withheld".
         # Setting this to an explicit status turns the default policy off and
         # returns that status verbatim.
         description=(
-            "Restrict results to one status. When omitted, superseded memories are "
-            "hidden: 'outdated' rows are excluded, and 'conflicted' rows are excluded "
-            "unless they exactly match the query text. Their replacements are injected "
-            "in their place. Pass an explicit status to bypass this and read the "
-            "superseded rows directly."
+            "Restrict results to one status. When omitted, superseded and archived "
+            "memories are hidden: 'outdated' and 'archived' rows are excluded, and "
+            "'conflicted' rows are excluded unless they exactly match the query text. "
+            "Replacements for superseded rows are injected in their place. Pass an "
+            "explicit status to bypass this and read those rows directly."
         ),
     )
     valid_at: datetime | None = Field(

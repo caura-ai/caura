@@ -205,6 +205,25 @@ async def test_status_superseded(client):
     assert ex["details"]["memory_status"] == "outdated"
 
 
+async def test_archived_is_left_out_of_default_search(client):
+    tenant, headers = get_test_auth(_tenant())
+    q = f"dunlin saltmarsh {_uid()}"
+    mid = await _write(client, tenant, headers, q)
+    body = {"tenant_id": tenant, "query": q}
+    assert mid in await _search_ids(client, headers, body)
+
+    await get_storage_client().update_memory(mid, tenant, {"status": "archived"})
+    assert mid not in await _search_ids(client, headers, body)
+    ex = await _explain(client, headers, body, mid)
+    assert ex["removed_by"] == "status_superseded"
+    assert ex["details"]["memory_status"] == "archived"
+    assert "archived" in ex["reason"]
+
+    assert mid in await _search_ids(
+        client, headers, {**body, "status_filter": "archived"}
+    )
+
+
 async def test_status_filter_and_memory_type_filter(client):
     tenant, headers = get_test_auth(_tenant())
     q = f"curlew marsh {_uid()}"
