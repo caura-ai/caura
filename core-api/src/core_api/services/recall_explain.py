@@ -54,8 +54,8 @@ FILTER_REASONS: dict[str, str] = {
     "baton_id": "The search returns only memories linked to one handoff baton (baton_id), and this one is not.",
     "status_filter": "The search filters to another status.",
     "status_superseded": (
-        "The memory is superseded (status outdated or conflicted); search excludes superseded "
-        "memories (a conflicted one is kept only on an exact keyword match)."
+        "The memory is superseded or archived (status outdated, conflicted or archived); search "
+        "excludes those memories (a conflicted one is kept only on an exact keyword match)."
     ),
     "temporal_valid_at": "The memory becomes valid after the search's valid_at day.",
 }

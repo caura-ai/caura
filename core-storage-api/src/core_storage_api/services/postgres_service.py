@@ -685,6 +685,10 @@ def _scored_search_row_filters(
         # that need to inspect superseded rows pass an explicit
         # ``status_filter`` to override.
         #
+        # ``archived`` goes with them: it is not live (``LIVE_MEMORY_STATUSES``),
+        # and it covers the sources the crystallizer merged, which would otherwise
+        # come back alongside the merged row that replaced them.
+        #
         # Carve-out: a ``conflicted`` row that is an EXACT lexical match
         # for the query is kept. ``conflicted`` (unlike ``outdated``) means
         # "a competing claim exists", not "definitively retracted" — and the
@@ -712,7 +716,7 @@ def _scored_search_row_filters(
             (
                 "status_superseded",
                 or_(
-                    Memory.status.notin_(("outdated", "conflicted")),
+                    Memory.status.notin_(("outdated", "conflicted", "archived")),
                     carve_out,
                 ),
             )
@@ -5493,10 +5497,10 @@ class PostgresService:
                 stmt = stmt.where(Memory.status == status_filter)
             elif query and query.strip():
                 # Same rule as the scored path's ``status_superseded`` filter, so
-                # the short-circuit and the fallthrough agree: ``outdated`` is
-                # excluded, and a ``conflicted`` row is kept only when it is a
-                # lexical match for the query AND the row that superseded it is
-                # not. Keeping every conflicted row here (the previous rule,
+                # the short-circuit and the fallthrough agree: ``outdated`` and
+                # ``archived`` are excluded, and a ``conflicted`` row is kept only
+                # when it is a lexical match for the query AND the row that
+                # superseded it is not. Keeping every conflicted row here (the previous rule,
                 # below) served the stale side of most corrections whenever the
                 # query happened to take this route: a present-state question
                 # names the subject both rows share, so every row is "about the
@@ -5505,7 +5509,7 @@ class PostgresService:
                 ts_query = func.plainto_tsquery("english", query)
                 stmt = stmt.where(
                     or_(
-                        Memory.status.notin_(("outdated", "conflicted")),
+                        Memory.status.notin_(("outdated", "conflicted", "archived")),
                         and_(
                             Memory.status == "conflicted",
                             _fts_guard_clause(query, ts_query),
@@ -5517,9 +5521,10 @@ class PostgresService:
                 # No query text (a core-api older than the query forwarding, or a
                 # caller with none): the previous rule. These ids are scoped to
                 # the entities the query resolved to, so ``conflicted`` rows are
-                # kept and only ``outdated`` is excluded; load_and_serialize still
+                # kept and only ``outdated`` and ``archived`` (shelved, or merged
+                # into a crystallized row) are excluded; load_and_serialize still
                 # injects the supersedes successor so both sides remain visible.
-                stmt = stmt.where(Memory.status != "outdated")
+                stmt = stmt.where(Memory.status.notin_(("outdated", "archived")))
             if valid_at:
                 # Day-granular, as scored_search compares (same-day-later
                 # memories pass). End side is intentionally NOT a hard filter —
