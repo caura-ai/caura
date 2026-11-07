@@ -13,8 +13,9 @@ import json
 import logging
 import re
 import time
+from collections.abc import AsyncIterator
 from datetime import datetime as _dt
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID, uuid4
 
 import httpx
@@ -73,6 +74,8 @@ from core_api.middleware.idempotency import (
     idempotency_key_from_metadata,
     release_claim_on_error,
 )
+from core_api.middleware.per_tenant_concurrency import per_tenant_slot
+from core_api.middleware.rate_limit import Kind, bucket_key, charge_call, gateway_bucket_name
 from core_api.pagination import cursor_sortable, decode_cursor, encode_cursor
 from core_api.schemas import (
     BulkMemoryCreate,
@@ -246,6 +249,12 @@ _org_read_only_reason_var: contextvars.ContextVar[str | None] = contextvars.Cont
 # ``_check_plan_limit``.
 _org_read_only_unknown_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "mcp_org_read_only_unknown", default=False
+)
+# The caller's rate-limit bucket (``rate_limit.bucket_key``), named from what
+# the middleware verified as REST auth names it, so that a credential has one
+# budget on both transports.
+_rate_limit_bucket_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "mcp_rate_limit_bucket", default=None
 )
 
 _UNAUTH = "__unauthenticated__"
@@ -465,10 +474,14 @@ class MCPAuthMiddleware:
 
             via_gateway = False
             is_admin_credential = False
+            # What names the rate-limit bucket, as REST auth names it (L-69):
+            # only a credential something here verified.
+            rate_limit_key: str | None = None
             if admin_key and api_key and credential_matches(api_key, admin_key):
                 # ── Path 1: admin API key (REST ``auth.py`` Path 1) ──
                 _tenant_id_var.set(_ADMIN)
                 is_admin_credential = True
+                rate_limit_key = f"credential:{api_key}"
             elif shared_key:
                 # ── Path 2: CAURA_API_KEY shared gate (REST Path 2) ──
                 #
@@ -487,6 +500,7 @@ class MCPAuthMiddleware:
                         "token) on every request, including MCP.",
                     )
                     return
+                rate_limit_key = f"credential:{api_key}"
                 # Key verified. Resolve the tenant exactly as REST does on this
                 # path: standalone's fixed tenant, else the caller's
                 # ``X-Tenant-ID``, else no tenant at all.
@@ -532,6 +546,11 @@ class MCPAuthMiddleware:
                 ):
                     await _send_401(send, "Direct access to this service is not permitted.")
                     return
+                if gw_secret:
+                    # Without a secret these headers are the caller's own.
+                    rate_limit_key = gateway_bucket_name(
+                        lambda name: headers.get(name.encode(), b"").decode("latin-1"), tenant_header
+                    )
                 _tenant_id_var.set(tenant_header)
                 via_gateway = True
             elif settings.is_standalone:
@@ -544,6 +563,8 @@ class MCPAuthMiddleware:
             else:
                 _tenant_id_var.set(_UNAUTH)
             _via_gateway_var.set(via_gateway)
+            client = scope.get("client")
+            _rate_limit_bucket_var.set(bucket_key(rate_limit_key, client[0] if client else None))
 
             # X-Agent-ID / X-Readable-Tenant-IDs / X-Capabilities are
             # gateway-injected identity attributes — only honor them on the
@@ -1075,6 +1096,71 @@ async def _no_db():
 # ── MCPServer instance ──
 
 
+def _admission(tool: str, arguments: object) -> tuple[Kind, str, Literal["write", "search", "llm"]] | None:
+    """What a tool call pays before it runs, as its REST twin does.
+
+    ``(kind, bucket scope, tenant slot)``: the rate it is charged at, the bucket
+    it draws on, and the per-tenant slot it holds while it runs. Batch writes
+    and the model-calling tools draw on the buckets their REST routes share
+    (``write_bulk``, ``llm``), so a credential has one budget for them on both
+    transports; the others get a bucket per tool, as each REST route has one.
+    A tool absent here pays nothing, as its REST routes do.
+    """
+    args = arguments if isinstance(arguments, dict) else {}
+    if tool == "caura_write":
+        if args.get("items"):
+            return "write_bulk", "write_bulk", "write"
+        return "write", "mcp:caura_write", "write"
+    if tool == "caura_recall":
+        return "search", "mcp:caura_recall", "search"
+    if tool == "caura_list":
+        return "search", "mcp:caura_list", "search"
+    if tool == "caura_doc" and args.get("op") == "write":
+        return "write", "mcp:caura_doc:write", "write"
+    if tool == "caura_doc" and args.get("op") == "search":
+        return "search", "mcp:caura_doc:search", "search"
+    if tool in ("caura_insights", "caura_evolve"):
+        return "llm", "llm", "llm"
+    return None
+
+
+@contextlib.asynccontextmanager
+async def _admitted(tool: str, arguments: object) -> AsyncIterator[CallToolResult | None]:
+    """Charge a tool call's rate budget and hold its tenant slot while it runs.
+
+    Yields the refusal to return in place of running the tool, or None. The
+    twin of the rate-limit decorators and ``per_tenant_slot`` blocks REST
+    routes carry, which the ``/mcp`` mount is outside of. A sentinel tenant
+    pays nothing: the tool itself refuses it.
+    """
+    admission = _admission(tool, arguments)
+    tenant_id = _get_tenant()
+    if admission is None or tenant_id in _SENTINEL_TENANTS:
+        yield None
+        return
+    kind, scope, slot = admission
+    retry_after = charge_call(kind, bucket=_rate_limit_bucket_var.get(), tenant_id=tenant_id, scope=scope)
+    if retry_after is not None:
+        yield _as_error_result(
+            _error_response(
+                "RATE_LIMITED",
+                f"Rate limit exceeded for {tool}. Retry in {retry_after}s.",
+                retry_after_seconds=retry_after,
+            )
+        )
+        return
+    held = contextlib.AsyncExitStack()
+    try:
+        await held.enter_async_context(per_tenant_slot(slot, tenant_id))
+    except HTTPException as exc:
+        yield _as_error_result(
+            _error_response("RATE_LIMITED", _detail_text(exc.detail), retry_after_seconds=1)
+        )
+        return
+    async with held:
+        yield None
+
+
 class _InstrumentedMCPServer(MCPServer):
     """MCPServer that records one capability-usage sample per tool call.
 
@@ -1089,7 +1175,9 @@ class _InstrumentedMCPServer(MCPServer):
     comes straight from the call arguments. ``status`` is derived from
     raised exceptions only — business-logic error envelopes (returned as
     ``CallToolResult(isError=True)``) still count as usage, which is the
-    right semantics for adoption (the capability was invoked).
+    right semantics for adoption (the capability was invoked). A call
+    refused admission (``_admitted``) never reached the tool, so it is
+    recorded as an error.
     """
 
     async def call_tool(self, name, arguments, context=None):  # type: ignore[override]
@@ -1141,7 +1229,10 @@ class _InstrumentedMCPServer(MCPServer):
         with request_phase.own_deadline(budget) as phases:
             try:
                 try:
-                    async with asyncio.timeout(budget):
+                    async with asyncio.timeout(budget), _admitted(tool_name, arguments) as refusal:
+                        if refusal is not None:
+                            status = "error"
+                            return refusal
                         return await super().call_tool(name, arguments, context)
                 except TimeoutError:
                     # Hops below run their own ``wait_for`` (the embedding gate

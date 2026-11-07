@@ -64,7 +64,7 @@ from core_api.middleware.idempotency import (
     release_claim_on_error,
 )
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot
-from core_api.middleware.rate_limit import search_limit, write_bulk_limit, write_limit
+from core_api.middleware.rate_limit import llm_limit, search_limit, write_bulk_limit, write_limit
 from core_api.pagination import cursor_sortable, decode_cursor, encode_cursor
 from core_api.schemas import (
     BatonNotice,
@@ -3317,9 +3317,26 @@ async def _ingest_preview_agent_id(auth: AuthContext, tenant_id: str, claimed_id
     return agent_id
 
 
+async def _run_preview(auth: AuthContext, body: IngestRequest) -> dict:
+    """Run a preview in one of the tenant's model slots and meter its model calls.
+
+    One ``ingest`` unit per extraction call, which is one per section; a cached
+    or too-short preview makes none. Skipped for the admin key, as every other
+    meter in this module is.
+    """
+    async with per_tenant_slot("llm", body.tenant_id):
+        result = await ingest_preview(body)
+    if auth.tenant_id and (calls := result.get("sections")):
+        await check_and_increment(body.tenant_id, "ingest", calls)
+    return result
+
+
 @router.post("/ingest/preview", responses={200: {"model": _oar.IngestPreviewResponse}})
+@llm_limit
 async def ingest_preview_endpoint(
+    request: Request,
     body: IngestRequest,
+    response: Response,
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Extract facts from a URL or text for preview (no writes).
@@ -3330,11 +3347,11 @@ async def ingest_preview_endpoint(
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
     body.agent_id = await _ingest_preview_agent_id(auth, body.tenant_id, body.agent_id)
-    return await ingest_preview(body)
+    return await _run_preview(auth, body)
 
 
 @router.post("/ingest/commit", responses={200: {"model": _oar.IngestCommitResponse}})
-@write_limit
+@write_bulk_limit
 async def ingest_commit_endpoint(
     request: Request,
     body: IngestCommitRequest,
@@ -3409,7 +3426,10 @@ async def ingest_commit_endpoint(
 
 
 @router.post("/ingest/file", responses={200: {"model": _oar.IngestPreviewResponse}})
+@llm_limit
 async def ingest_file_endpoint(
+    request: Request,
+    response: Response,
     file: UploadFile = File(...),
     tenant_id: str = Form(...),
     focus: str | None = Form(None),
@@ -3466,7 +3486,7 @@ async def ingest_file_endpoint(
     kwargs["source_uri"] = f"upload:{filename}" if filename else "upload"
     req = IngestRequest(**kwargs)
     req.agent_id = await _ingest_preview_agent_id(auth, tenant_id, req.agent_id)
-    return await ingest_preview(req)
+    return await _run_preview(auth, req)
 
 
 @router.post("/ingest/undo/{run_id}", responses={200: {"model": _oar.IngestUndoResponse}})

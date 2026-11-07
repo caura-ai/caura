@@ -47,7 +47,8 @@ class TenantUsageCounter(Base):
     # Tenant the usage is attributed to. Grouping dimension, not an RLS key.
     tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     # One of core-api's metered operations: write | search | recall | insights
-    # | evolve. Stored as data so a sixth needs no schema change.
+    # | evolve | ingest. Stored as data, so ingest, the sixth, needed no schema
+    # change.
     operation: Mapped[str] = mapped_column(Text, nullable=False)
     # Start of the billing period, UTC. Supplied by the caller (month-truncated)
     # rather than derived here, so a row cannot land in a period other than the

@@ -758,15 +758,25 @@ not part of the self-hosted runtime.
 
 ## Rate limiting
 
-Rate limiting is enforced in-process by [slowapi](https://github.com/laurentS/slowapi), keyed by
-API key where one is present and by remote IP otherwise. It is applied per route, not globally —
-`/health`, `/version`, and `/mcp` are never throttled:
+Rate limiting is enforced in-process by [slowapi](https://github.com/laurentS/slowapi). Each limit
+is per credential (the key auth verified; behind a gateway, the credential it accepted), or per
+remote IP when none was verified. Each also has a tenant-wide budget, at five times its rate by
+default, shared by all the tenant's credentials. It is applied per route and per MCP tool, not
+globally, so `/health` and `/version` are never throttled:
 
-| Route | Default | Setting |
-|---|---|---|
-| `POST /memories`, `POST /documents`, `POST /ingest/commit`, `POST /stm/promote` | 10/second | `RATE_LIMIT_WRITE` |
-| `POST /memories/bulk` | 2/second | `RATE_LIMIT_WRITE_BULK` |
-| `POST /search`, `POST /recall` | 30/second | `RATE_LIMIT_SEARCH` |
+| Route | MCP tool | Default | Setting |
+|---|---|---|---|
+| `POST /memories`, `POST /documents`, `POST /stm/promote` | `caura_write`, `caura_doc` write | 10/second | `RATE_LIMIT_WRITE` |
+| `POST /memories/bulk`, `POST /ingest/commit` | `caura_write` with `items` | 2/second, one budget across these | `RATE_LIMIT_WRITE_BULK` |
+| `POST /search`, `POST /recall`, `GET /memories`, `POST /documents/search` | `caura_recall`, `caura_list`, `caura_doc` search | 30/second | `RATE_LIMIT_SEARCH` |
+| `POST /ingest/preview`, `/ingest/file`, `/interview/submit`, `/insights/generate`, `/evolve/report` | `caura_insights`, `caura_evolve` | 10/minute, one budget across these | `RATE_LIMIT_LLM` |
+
+The tenant-wide budgets are `RATE_LIMIT_WRITE_TENANT`, `RATE_LIMIT_WRITE_BULK_TENANT`,
+`RATE_LIMIT_SEARCH_TENANT` and `RATE_LIMIT_LLM_TENANT`. A bulk write or ingest commit takes at most
+100 items, and a preview at most 32 sections (one model call each). Beside the rate limits, each
+tenant has a cap on requests in flight per process, answered with 429 and `Retry-After: 1`: 16
+writes, 32 searches and 2 model-calling requests (`PER_TENANT_LLM_CONCURRENCY`). An MCP call
+refused by either gets a `RATE_LIMITED` error with `retry_after_seconds`.
 
 Every response from a rate-limited route carries `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and
 `X-RateLimit-Reset`; a rejected request gets HTTP 429 with `Retry-After`. Counters live in Redis when

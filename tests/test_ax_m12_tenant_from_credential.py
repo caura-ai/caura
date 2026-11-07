@@ -85,7 +85,7 @@ def _minimal(name: str) -> dict:
             "relation_type": "knows",
         },
         "IngestRequest": {"text": "x"},
-        "IngestCommitRequest": {"facts": []},
+        "IngestCommitRequest": {"facts": [{"content": "x"}]},
     }[name]
 
 

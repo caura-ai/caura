@@ -54,7 +54,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 
-OperationType = Literal["write", "search", "recall", "insights", "evolve"]
+# ``ingest`` is one ingest-preview extraction call, so a preview costs its
+# section count. Recorded only: no plan limit reads it.
+OperationType = Literal["write", "search", "recall", "insights", "evolve", "ingest"]
 
 # --- Per-verb usage policy: what a mutating operation costs, and what gates it -
 #

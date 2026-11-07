@@ -412,7 +412,9 @@ async def test_rest_documents_search_emits_cross_tenant_audit(monkeypatch):
     auth = _cross_tenant_auth()
 
     await documents_routes.search_documents(
+        request=None,
         body=body,
+        response=None,
         auth=auth,
     )
 
