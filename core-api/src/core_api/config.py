@@ -7,6 +7,7 @@ from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_va
 from pydantic_settings import BaseSettings
 
 from common.embedding._registry import DEFAULT_LOCAL_EMBEDDING_MODEL
+from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS, MEMORY_RETENTION_MIN_DAYS
 from common.provider_names import DEFAULT_EMBEDDING_PROVIDER
 from common.storage_auth import read_shared_secret_file
 
@@ -457,6 +458,12 @@ class Settings(BaseSettings):
     # also gets one build at a time, and requests for a map already being
     # built share it. A request past either cap gets 429 with Retry-After.
     memory_field_max_concurrent_builds: int = 2
+    # Days to keep soft-deleted memories for an org with no
+    # ``lifecycle.memory_retention_days`` of its own, so a deployment can
+    # shorten the window for every org without a settings write per tenant.
+    # An org's explicit value still wins. Clamped to the range that setting
+    # accepts.
+    lifecycle_memory_retention_days: int = MEMORY_RETENTION_MAX_DAYS
     # Idempotency-Key inbox TTL. 24h matches Stripe's default and is
     # longer than any realistic client retry budget. Cached responses
     # older than this are treated as absent and the request re-runs.
@@ -657,6 +664,20 @@ class Settings(BaseSettings):
         if v < 1:
             raise ValueError(f"{info.field_name} must be >= 1; 0 would block every acquire of that cap")
         return v
+
+    @field_validator("lifecycle_memory_retention_days")
+    @classmethod
+    def _clamp_memory_retention_days(cls, v: int) -> int:
+        clamped = max(MEMORY_RETENTION_MIN_DAYS, min(v, MEMORY_RETENTION_MAX_DAYS))
+        if clamped != v:
+            logger.warning(
+                "LIFECYCLE_MEMORY_RETENTION_DAYS=%d is outside [%d, %d]; using %d",
+                v,
+                MEMORY_RETENTION_MIN_DAYS,
+                MEMORY_RETENTION_MAX_DAYS,
+                clamped,
+            )
+        return clamped
 
     @model_validator(mode="after")
     def _validate_timeout_ordering(self) -> "Settings":
