@@ -660,6 +660,10 @@ def _scored_search_row_filters(
         # that need to inspect superseded rows pass an explicit
         # ``status_filter`` to override.
         #
+        # ``archived`` goes with them: it is not live (``LIVE_MEMORY_STATUSES``),
+        # and it covers the sources the crystallizer merged, which would otherwise
+        # come back alongside the merged row that replaced them.
+        #
         # Carve-out: a ``conflicted`` row that is an EXACT lexical match
         # for the query is kept. ``conflicted`` (unlike ``outdated``) means
         # "a competing claim exists", not "definitively retracted" — and the
@@ -675,7 +679,7 @@ def _scored_search_row_filters(
             (
                 "status_superseded",
                 or_(
-                    Memory.status.notin_(("outdated", "conflicted")),
+                    Memory.status.notin_(("outdated", "conflicted", "archived")),
                     and_(Memory.status == "conflicted", fts_guard),
                 ),
             )
@@ -5459,9 +5463,10 @@ class PostgresService:
                 # ``conflicted`` rows (a competing claim about the very entity
                 # asked for, which the semantic contradiction path routinely
                 # mismarks across distinct ``#NNNN`` siblings) and exclude only
-                # ``outdated`` (definitively retracted). load_and_serialize still
+                # ``outdated`` (definitively retracted) and ``archived`` (shelved,
+                # or merged into a crystallized row). load_and_serialize still
                 # injects the supersedes successor so both sides remain visible.
-                stmt = stmt.where(Memory.status != "outdated")
+                stmt = stmt.where(Memory.status.notin_(("outdated", "archived")))
             if valid_at:
                 # Day-granular, as scored_search compares (same-day-later
                 # memories pass). End side is intentionally NOT a hard filter —

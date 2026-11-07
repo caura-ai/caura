@@ -202,6 +202,44 @@ class TestExplainAgreesWithSearch:
         assert returned
         assert "status_superseded" not in {c["filter"] for c in ex["checks"]}
 
+    async def test_archived_is_left_out_even_on_an_exact_match(self, client: AsyncClient, scope) -> None:
+        tenant, fleet, kw = scope
+        mid = await _write(client, tenant, fleet, kw)
+        await _sql("UPDATE memories SET status = 'archived' WHERE id = :id", id=uuid.UUID(mid))
+        returned, ex = await _search_and_explain(client, mid, _body(tenant, kw))
+        assert not returned
+        assert _first_failed(ex) == "status_superseded"
+        # An explicit filter is how a caller reads archived rows back.
+        returned, ex = await _search_and_explain(client, mid, _body(tenant, kw, status_filter="archived"))
+        assert returned and _first_failed(ex) is None
+        # A63: a history query wants what was once true, archived rows included.
+        returned, ex = await _search_and_explain(client, mid, _body(tenant, kw, history_query=True))
+        assert returned and _first_failed(ex) is None
+
+    async def test_entity_lookup_load_leaves_out_archived(self, client: AsyncClient, scope) -> None:
+        """The ENTITY_LOOKUP short-circuit loads by id without scoring, so it has
+        its own default status filter, and that has to agree with the scored path."""
+        tenant, fleet, kw = scope
+        ids = {
+            status: await _write(client, tenant, fleet, f"{kw}{status}")
+            for status in ("active", "conflicted", "outdated", "archived")
+        }
+        for status, mid in ids.items():
+            await _sql(
+                "UPDATE memories SET status = :status WHERE id = :id", status=status, id=uuid.UUID(mid)
+            )
+
+        async def load(**extra) -> set[str]:
+            resp = await client.post(
+                f"{PREFIX}/memories/load-by-ids",
+                json={"tenant_id": tenant, "memory_ids": list(ids.values()), **extra},
+            )
+            assert resp.status_code == 200, resp.text
+            return {r["id"] for r in resp.json()}
+
+        assert await load() == {ids["active"], ids["conflicted"]}
+        assert await load(status_filter="archived") == {ids["archived"]}
+
     async def test_conflicted_exact_match_carve_out(self, client: AsyncClient, scope) -> None:
         tenant, fleet, kw = scope
         mid = await _write(client, tenant, fleet, kw)
