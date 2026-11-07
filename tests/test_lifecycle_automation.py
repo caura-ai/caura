@@ -104,6 +104,53 @@ class TestMemoryRetentionSettings:
         config = ResolvedConfig({})
         assert config.memory_retention_days == 30
 
+    def test_default_follows_the_deployment_setting(self, monkeypatch):
+        from core_api.config import settings
+        from core_api.services.organization_settings import ResolvedConfig
+
+        monkeypatch.setattr(settings, "lifecycle_memory_retention_days", 1)
+        assert ResolvedConfig({}).memory_retention_days == 1
+        assert (
+            ResolvedConfig(
+                {"lifecycle": {"memory_retention_days": None}}
+            ).memory_retention_days
+            == 1
+        )
+
+    def test_org_value_beats_the_deployment_setting(self, monkeypatch):
+        from core_api.config import settings
+        from core_api.services.organization_settings import ResolvedConfig
+
+        monkeypatch.setattr(settings, "lifecycle_memory_retention_days", 1)
+        config = ResolvedConfig({"lifecycle": {"memory_retention_days": 7}})
+        assert config.memory_retention_days == 7
+
+    @pytest.mark.parametrize(
+        ("env_value", "expected"),
+        [
+            ("-5", 1),
+            ("0", 1),
+            ("1", 1),
+            ("14", 14),
+            ("30", 30),
+            ("31", 30),
+            ("365", 30),
+        ],
+    )
+    def test_env_value_is_clamped_to_the_setting_range(
+        self, monkeypatch, env_value, expected
+    ):
+        from core_api.config import Settings
+
+        monkeypatch.setenv("LIFECYCLE_MEMORY_RETENTION_DAYS", env_value)
+        assert Settings().lifecycle_memory_retention_days == expected
+
+    def test_env_default_is_30_when_unset(self, monkeypatch):
+        from core_api.config import Settings
+
+        monkeypatch.delenv("LIFECYCLE_MEMORY_RETENTION_DAYS", raising=False)
+        assert Settings(_env_file=None).lifecycle_memory_retention_days == 30
+
     def test_override_within_range(self):
         from core_api.services.organization_settings import ResolvedConfig
 

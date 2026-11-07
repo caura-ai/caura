@@ -222,7 +222,8 @@ DEFAULT_SETTINGS: dict = {
         # Days to keep soft-deleted memories before they're physically
         # purged (CAURA-656). Daily cron reads this per-org and runs
         # ``purge-soft-deleted``. ``None`` means "use the global
-        # default" (30 — see ResolvedConfig.memory_retention_days).
+        # default" (``LIFECYCLE_MEMORY_RETENTION_DAYS``, 30 unless set — see
+        # ResolvedConfig.memory_retention_days).
         # Range constrained to 1-30 by the validator below; the UI
         # numeric input mirrors that range.
         "memory_retention_days": None,
@@ -1492,14 +1493,15 @@ class ResolvedConfig:
     @property
     def memory_retention_days(self) -> int:
         """Days to keep soft-deleted memories before they're purged
-        (CAURA-656). Default 30 matches the UI numeric input's upper
-        bound — generous on the safe side; an org tightens it down to
-        as low as 1 day if their compliance posture demands it. The
-        validator on settings PUT already constrains the override to
-        [1, 30].
+        (CAURA-656). The default is the deployment's
+        ``LIFECYCLE_MEMORY_RETENTION_DAYS``, 30 unless set, which matches
+        the UI numeric input's upper bound — generous on the safe side; an
+        org tightens it down to as low as 1 day if their compliance posture
+        demands it. The validator on settings PUT already constrains the
+        override to [1, 30].
         """
         val = self._ts.get("lifecycle", {}).get("memory_retention_days")
-        return val if val is not None else 30
+        return val if val is not None else global_settings.lifecycle_memory_retention_days
 
     # Entity linking
     @property
