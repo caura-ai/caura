@@ -8,10 +8,12 @@ fresh budget per request.
 
 Behind the gateway the key is not proof either. The gateway's auth subrequest
 accepts a JWT bearer, then a session cookie, and only then ``X-API-Key``, and it
-forwards every one of them unchanged; core-api cannot tell which it accepted. A
-signed-in user could add a fresh ``X-API-Key`` per request. So behind the gateway
-a credential names the bucket only when it is the request's sole one, and
-otherwise the identity the gateway itself set does: tenant, user, agent, install.
+forwards every one of them unchanged. A signed-in user could add a fresh
+``X-API-Key`` per request. The gateway does say which API key it accepted, in
+``X-Caura-Credential-ID``, which it sets on every request. That id names the
+bucket, and a request it accepted no key for (a session or a JWT) is bucketed by
+the identity the gateway set: tenant, user, agent, install. Which headers the
+client sent beside the key no longer matters.
 """
 
 from types import SimpleNamespace
@@ -74,13 +76,24 @@ async def test_the_caura_api_key_names_the_bucket(monkeypatch):
     assert (await _bucket(monkeypatch, headers, caura_key="ck")).startswith("key:")
 
 
-async def test_behind_the_gateway_a_sole_key_names_the_bucket(monkeypatch):
-    """With one credential and no cookie, that is what the gateway accepted, so
-    each key keeps its own budget."""
-    sole = [{"x-api-key": "k1"}, {"x-api-key": "k2"}, {"authorization": "Bearer k3"}]
-    buckets = {await _bucket(monkeypatch, _gateway(h), secret="gw") for h in sole}
+async def test_behind_the_gateway_each_credential_has_its_own_bucket(monkeypatch):
+    keys = [
+        {"x-api-key": "k1", "x-caura-credential-id": "c1"},
+        {"x-api-key": "k2", "x-caura-credential-id": "c2"},
+        {"authorization": "Bearer k3", "x-caura-credential-id": "c3"},
+    ]
+    buckets = {await _bucket(monkeypatch, _gateway(h), secret="gw") for h in keys}
     assert len(buckets) == 3
     assert IP not in buckets
+
+
+async def test_headers_beside_a_key_do_not_move_it_to_another_bucket(monkeypatch):
+    """A junk cookie or bearer beside the key: the gateway tried it, fell
+    through to the key and accepted that, so the budget is still the key's."""
+    key = {"x-api-key": "k1", "x-caura-credential-id": "c1"}
+    shapes = [key, {**key, "cookie": "a=b"}, {**key, "authorization": "Bearer junk"}]
+    buckets = {await _bucket(monkeypatch, _gateway(h), secret="gw") for h in shapes}
+    assert len(buckets) == 1
 
 
 async def test_a_rotated_key_beside_a_bearer_does_not_escape_the_limit(monkeypatch):
