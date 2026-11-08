@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.44.0](https://github.com/caura-ai/caura/compare/backend-v3.43.0...backend-v3.44.0) (2026-11-08)
+
+
+### Features
+
+* **common:** send a Cloud Run identity token to listed model backends ([#2375](https://github.com/caura-ai/caura/issues/2375)) ([f4b0940](https://github.com/caura-ai/caura/commit/f4b09401b0e6cd847ff6477b7a4c0faa049c130d))
+* **core-operations:** send a Cloud Run identity token when calling core-api ([#2374](https://github.com/caura-ai/caura/issues/2374)) ([0a60e8d](https://github.com/caura-ai/caura/commit/0a60e8d2470d3eb5e18f6f8b9e4046f8693a3021))
+
 ## [3.43.0](https://github.com/caura-ai/caura/compare/backend-v3.42.1...backend-v3.43.0) (2026-11-08)
 
 
