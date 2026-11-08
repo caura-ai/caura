@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.28.2](https://github.com/caura-ai/caura/compare/plugin-v2.28.1...plugin-v2.28.2) (2026-11-08)
+
+
+### Bug Fixes
+
+* **core-api:** one admission policy for REST and MCP calls ([#2363](https://github.com/caura-ai/caura/issues/2363)) ([6ab3c29](https://github.com/caura-ai/caura/commit/6ab3c29adf8a759ee1c2f5e12c428f958edc364f))
+
 ## [2.28.1](https://github.com/caura-ai/caura/compare/plugin-v2.28.0...plugin-v2.28.1) (2026-11-06)
 
 

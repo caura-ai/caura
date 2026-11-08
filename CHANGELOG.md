@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.42.1](https://github.com/caura-ai/caura/compare/backend-v3.42.0...backend-v3.42.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* **core-api:** one admission policy for REST and MCP calls ([#2363](https://github.com/caura-ai/caura/issues/2363)) ([6ab3c29](https://github.com/caura-ai/caura/commit/6ab3c29adf8a759ee1c2f5e12c428f958edc364f))
+* **llm:** fit the seed to Vertex and Gemini's int32 field ([#2367](https://github.com/caura-ai/caura/issues/2367)) ([7d6041e](https://github.com/caura-ai/caura/commit/7d6041ec28be309b76466bf3f319b18d39fd4b4f))
+
 ## [3.42.0](https://github.com/caura-ai/caura/compare/backend-v3.41.4...backend-v3.42.0) (2026-11-06)
 
 
