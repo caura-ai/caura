@@ -18,6 +18,8 @@ Both keys are present even when unknown, so an exporter can tell "not known"
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -45,6 +47,8 @@ from tests._mcp_test_helpers import parse_envelope, stub_storage_client
 # No asyncio mark: ``asyncio_mode = auto`` runs the async tests, and the mark on
 # the sync ones would only warn.
 pytestmark = pytest.mark.unit
+
+ROOT = Path(__file__).resolve().parents[1]
 
 ACTOR = {"user_id": "user-1", "surface": "prism"}
 
@@ -90,6 +94,45 @@ def test_every_listed_surface_is_kept(value):
 
 def test_case_and_surrounding_whitespace_are_forgiven():
     assert parse_surface("  Prism ") == "prism"
+
+
+# The enterprise web app names the place in its navigation a page belongs to,
+# so an audit row says where in the console a write was made: a resolve from
+# Review, a tune from Agents.
+CONSOLE_PLACES = [
+    "prism.home",
+    "prism.memory",
+    "prism.review",
+    "prism.agents",
+    "prism.insights",
+    "prism.connect",
+    "prism.settings",
+]
+
+
+@pytest.mark.parametrize("value", CONSOLE_PLACES)
+def test_each_console_place_is_kept(value):
+    assert parse_surface(value) == value
+
+
+def test_a_place_is_forgiven_its_case_but_matched_whole():
+    assert parse_surface(" Prism.Review ") == "prism.review"
+    assert parse_surface("prism.") is None
+    assert parse_surface("prism.lens") is None
+    assert parse_surface("prism.review.held") is None
+
+
+def test_the_values_older_clients_send_are_still_kept():
+    # A dashboard deployed before the places sends these, and rows already carry them.
+    assert parse_surface("dashboard") == "dashboard"
+    assert parse_surface("prism") == "prism"
+
+
+def test_the_docs_table_lists_every_surface():
+    # A new client gets a value in SURFACES and a row in this table in the same change.
+    text = (ROOT / "docs" / "api-reference.md").read_text(encoding="utf-8")
+    table = text.split("| `X-Caura-Surface` | Client |", 1)[1].split("\n\n", 1)[0]
+    assert set(re.findall(r"^\| `([^`]+)` \|", table, re.M)) == set(SURFACES)
 
 
 @pytest.mark.parametrize(
@@ -202,6 +245,13 @@ async def test_the_surface_is_read_behind_the_gateway(monkeypatch):
         monkeypatch, _gateway(**{"x-caura-surface": "dashboard"}), secret="gw"
     )
     assert ctx.surface == "dashboard"
+
+
+async def test_a_place_is_read_behind_the_gateway(monkeypatch):
+    ctx = await _resolve(
+        monkeypatch, _gateway(**{"x-caura-surface": "prism.review"}), secret="gw"
+    )
+    assert ctx.surface == "prism.review"
 
 
 async def test_an_unknown_surface_is_dropped_not_refused(monkeypatch):

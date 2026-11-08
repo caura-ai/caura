@@ -183,8 +183,15 @@ request goes ahead as normal (no 4xx).
 
 | `X-Caura-Surface` | Client |
 |---|---|
-| `dashboard` | The enterprise web app, outside `/prism` |
-| `prism` | The enterprise web app, on `/prism` |
+| `prism.home` | The enterprise web app, on Home |
+| `prism.memory` | The enterprise web app, in Memory (`/prism`) |
+| `prism.review` | The enterprise web app, in Review |
+| `prism.agents` | The enterprise web app, in Agents |
+| `prism.insights` | The enterprise web app, in Insights |
+| `prism.connect` | The enterprise web app, in Connect |
+| `prism.settings` | The enterprise web app, in Settings |
+| `dashboard` | The enterprise web app, on a page outside those places; from older versions, any page outside `/prism` |
+| `prism` | The enterprise web app, on `/prism`, from older versions |
 | `broker` | caura-daemon, including the `caura` CLI and `caura mcp-server`, which reach core-api through it |
 | `openclaw_plugin` | The OpenClaw plugin |
 
