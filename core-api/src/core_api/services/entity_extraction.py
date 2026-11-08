@@ -415,7 +415,10 @@ async def extract_entities_from_content(
         # (e.g., "helios-9" → 'technology' on one call, 'project' on the
         # next). CRC32 of the encoded prompt gives a deterministic 32-bit
         # integer that survives process restarts — unlike ``hash()`` which
-        # is salted per-process for str inputs.
+        # is salted per-process for str inputs. It is UNSIGNED, and Vertex
+        # and Gemini take a signed int32 seed: their providers fit it
+        # (``common/llm/providers/_genai_seed.py``), or half of all prompts
+        # are refused with a 400.
         seed = zlib.crc32(prompt.encode("utf-8"))
         # A5b #3 — declare the expected shape via response_schema. It is a
         # HINT, not the server-side guarantee A5b originally claimed: the
