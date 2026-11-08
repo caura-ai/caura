@@ -17,6 +17,7 @@ import logging
 import httpx
 
 from core_operations.config import settings
+from core_operations.identity_token import CoreApiIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ async def _fire_fanout(action: str, *, dedup_window_hours: float | None = None) 
         )
 
     timeout = httpx.Timeout(settings.core_api_http_timeout_s)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, auth=CoreApiIdentity()) as client:
         try:
             params = {"dedup_window_hours": dedup_window_hours} if dedup_window_hours is not None else None
             resp = await client.post(url, headers=headers, params=params)
@@ -125,7 +126,7 @@ async def run_lifecycle_reconcile_tick() -> None:
         )
 
     timeout = httpx.Timeout(settings.core_api_http_timeout_s)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, auth=CoreApiIdentity()) as client:
         try:
             resp = await client.post(url, headers=headers)
         except httpx.HTTPError:
@@ -224,7 +225,7 @@ async def _run_rerun_sweep(path: str, label: str, *, swept: str, idle: str) -> N
         logger.warning("core-operations: CORE_API_ADMIN_API_KEY unset; the %s will be unauthorised", label)
 
     timeout = httpx.Timeout(settings.core_api_http_timeout_s)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, auth=CoreApiIdentity()) as client:
         try:
             resp = await client.post(url, headers=headers)
         except httpx.HTTPError:
@@ -417,7 +418,7 @@ async def run_embedding_coverage_tick() -> None:
         )
 
     timeout = httpx.Timeout(settings.core_api_http_timeout_s)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, auth=CoreApiIdentity()) as client:
         try:
             resp = await client.get(url, headers=headers)
         except httpx.HTTPError:
@@ -535,7 +536,7 @@ async def _fire_agent_digest(period: str) -> None:
     # Generation is a long inline job (LLM per agent across opted-in orgs), so
     # give it a generous timeout rather than the short storage default.
     timeout = httpx.Timeout(settings.agent_digest_http_timeout_s)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, auth=CoreApiIdentity()) as client:
         try:
             resp = await client.post(url, headers=headers)
         except httpx.HTTPError:
@@ -590,7 +591,7 @@ async def run_interviewer_schedule_tick() -> None:
     # call and the ordering against core-api's own deadline has to hold for
     # every one of them, not just the slow one.
     timeout = httpx.Timeout(settings.core_api_http_timeout_s)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, auth=CoreApiIdentity()) as client:
         try:
             resp = await client.post(url, headers=headers)
         except httpx.HTTPError:
