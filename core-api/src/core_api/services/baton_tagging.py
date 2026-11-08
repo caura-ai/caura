@@ -7,38 +7,41 @@ work: in the HB-14 two-agent run only 9 of 25 receiver writes carried it, and
 Claude never called ``memory_context`` once. So the write path sets it, the
 way it stamps ``trace_id``:
 
-* A write that names ``metadata.baton_id`` keeps it only when the writer is
-  that baton's sender or one of its receivers (``baton_recipient``); anyone
-  else gets a 422. A baton is never a tag an agent can borrow.
-* A write that names none, from an agent with a baton still waiting on it
-  (``delivered``: not accepted on recall, not acked or replied on the bus,
-  younger than 7 days), is tagged with that baton, the newest one when there
-  are several, and marked ``_system.baton_tagged = "auto"``.
+* With a bus configured, a write that names ``metadata.baton_id`` keeps it
+  only when the writer is that baton's sender or one of its receivers
+  (``baton_recipient``); anyone else gets a 422. A baton is never a tag an
+  agent can borrow. Standalone OSS has no bus and no batons, so it keeps an
+  explicit ``baton_id`` unchecked, as before.
+* A write that names none, from an agent with exactly one baton still waiting
+  on it (``delivered``: not accepted on recall, not acked or replied on the
+  bus, younger than 7 days), is tagged with that baton and marked
+  ``_system.baton_tagged = "auto"``. With none or several waiting it is left
+  as it is: guessing between batons would put findings under the wrong one.
 * A write whose metadata carries bus provenance (``source: caura-bus``, from
-  ``memory_context``) for a waiting baton's own message gets that baton. Bus
-  provenance for another message is no reason to skip: in HB-14 the
-  receiver's contract and outcome writes for the baton's work carried the
-  context of other threads.
+  ``memory_context``) for a waiting baton's own message gets that baton, even
+  with several waiting: the context names it.
 
-The bus owns delivery state. Before tagging with a bus-delivered baton, the
-bus is asked whether that receiver already acked or replied (the
-``baton_notices`` sync, without its 30 s throttle: a write right after a reply
-must not carry the finished baton); a taken-up baton is copied into the row
-and skipped. Only an agent with a waiting baton pays that call.
-Writes by a person, and platform writes (crystallizer, insights, the broker)
-are never tagged. One indexed storage read per agent write; a failure reads as
-no baton. No LLM calls.
+The bus owns delivery state, and the row is the write path's copy of it. As on
+recall (``baton_notices``), a row is refreshed from the bus at most every
+:data:`~core_api.services.baton_notices.BUS_CHECK_S` seconds per (agent, baton),
+and a write waits at most :data:`BUS_TIMEOUT_S` for it; on a timeout or error
+the row's last known state stands. A taken-up baton is copied into the row and
+skipped. Writes by a person, and platform writes (crystallizer, insights, the
+broker) are never tagged. One indexed storage read per agent write; a failure
+reads as no baton. No LLM calls.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import HTTPException
 
 from core_api.clients.storage_client import get_storage_client
-from core_api.services.baton_notices import _bus_state, _is_person
+from core_api.services.baton_notices import BUS_CHECK_S, _bus_state, _is_person, _parse
 from core_api.services.correction_sender import bus_configured
 from core_api.services.system_metadata import SYSTEM_NAMESPACE
 
@@ -47,10 +50,10 @@ logger = logging.getLogger(__name__)
 BATON_KEY = "baton_id"
 #: ``_system`` marker on a row the write path tagged by itself.
 TAGGED_KEY = "baton_tagged"
-#: Waiting batons read per write; the newest one that is still open wins.
+#: Waiting batons read per write: enough to tell one from several.
 MAX_OPEN = 5
-#: Bus checks one write may wait for.
-MAX_BUS_CHECKS = 2
+#: The longest a write waits for the bus; the row's state stands after that.
+BUS_TIMEOUT_S = 0.3
 
 
 class BatonTagger:
@@ -73,7 +76,12 @@ class BatonTagger:
     async def _taken_up(self, row: dict) -> bool:
         """Ask the bus whether the receiver acked or replied; copy a taken-up state into the row."""
         agent = str(self.agent_id)
-        state = await _bus_state(self.tenant_id, agent, row["baton_id"])
+        try:
+            state = await asyncio.wait_for(_bus_state(self.tenant_id, agent, row["baton_id"]), BUS_TIMEOUT_S)
+        except Exception:
+            # Slow or down: the row's last known state stands until the next window.
+            logger.warning("baton bus state not read", exc_info=True)
+            state = None
         if state in ("accepted", "replied"):
             await self.sc.accept_baton(
                 self.tenant_id, row["baton_id"], agent_id=agent, via="bus", state=state
@@ -91,18 +99,26 @@ class BatonTagger:
         except Exception:
             logger.warning("open batons not read", exc_info=True)
             return self._open
-        # Read the bus every time: a receiver that replied a moment ago must not
-        # tag its next write with the baton it just finished.
-        checks = MAX_BUS_CHECKS if bus_configured() else 0
-        for row in rows:
-            if checks and row.get("message_id"):
-                checks -= 1
-                try:
-                    if await self._taken_up(row):
-                        continue
-                except Exception:
-                    logger.warning("baton bus state not read", exc_info=True)
-            self._open.append(row)
+        bus = bus_configured()
+        stale = datetime.now(UTC) - timedelta(seconds=BUS_CHECK_S)
+        due = [
+            r
+            for r in rows
+            if bus
+            and r.get("message_id")
+            and ((checked := _parse(r.get("bus_checked_at"))) is None or checked < stale)
+        ]
+        try:
+            # In parallel, so a write waits at most one BUS_TIMEOUT_S however many are due.
+            taken = dict(
+                zip(
+                    (r["baton_id"] for r in due), await asyncio.gather(*map(self._taken_up, due)), strict=True
+                )
+            )
+        except Exception:
+            logger.warning("baton rows not refreshed", exc_info=True)
+            taken = {}
+        self._open = [r for r in rows if not taken.get(r["baton_id"])]
         return self._open
 
     async def tag(self, metadata: dict | None) -> dict | None:
@@ -112,6 +128,8 @@ class BatonTagger:
         marker is the platform's own.
         """
         explicit = (metadata or {}).get(BATON_KEY)
+        if explicit is not None and not bus_configured():
+            return metadata
         if explicit is not None:
             try:
                 baton_id = str(UUID(str(explicit)))
@@ -131,7 +149,7 @@ class BatonTagger:
             # Bus provenance that names a waiting baton's own message picks it.
             message_id = (metadata or {}).get("message_id")
             rows = [r for r in rows if message_id and r.get("message_id") == message_id] or rows
-        if not rows:
+        if len(rows) != 1:
             return metadata
         tagged = {**(metadata or {}), BATON_KEY: str(rows[0]["baton_id"])}
         tagged[SYSTEM_NAMESPACE] = {**tagged.get(SYSTEM_NAMESPACE, {}), TAGGED_KEY: "auto"}

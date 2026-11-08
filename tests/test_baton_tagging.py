@@ -9,6 +9,8 @@ a receiver. ``services/baton_tagging.py`` has the rules; storage's half is
 
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
@@ -21,6 +23,7 @@ from core_api.services import baton_tagging as bt
 
 B1 = "00000001-0000-4000-8000-000000000000"
 B2 = "00000002-0000-4000-8000-000000000000"
+B3 = "00000003-0000-4000-8000-000000000000"
 
 
 def _row(baton_id: str, message_id: str, **extra) -> dict:
@@ -88,9 +91,10 @@ async def test_nothing_waiting_leaves_the_write_as_it_is(storage):
 
 
 @pytest.mark.unit
-async def test_the_newest_waiting_baton_wins(storage):
+async def test_several_waiting_batons_tag_nothing(storage):
+    # Guessing between batons would put findings under the wrong one.
     storage.list_baton_notices.return_value = [_row(B2, "msg-2"), _row(B1, "msg-1")]
-    assert (await bt.tag_write("t-1", "engine", {}))["baton_id"] == B2
+    assert await bt.tag_write("t-1", "engine", {"a": 1}) == {"a": 1}
 
 
 @pytest.mark.unit
@@ -98,10 +102,13 @@ async def test_bus_provenance_names_its_own_message(storage):
     storage.list_baton_notices.return_value = [_row(B2, "msg-2"), _row(B1, "msg-1")]
     bus = {"source": "caura-bus", "thread_id": "t", "message_id": "msg-1"}
     assert (await bt.tag_write("t-1", "engine", bus))["baton_id"] == B1
-    # Another thread's context (HB-14: contract writes for the baton's work) is
-    # tagged like a plain write.
+    # Another message's context with several waiting is still ambiguous.
     other = {"source": "caura-bus", "thread_id": "t", "message_id": "msg-9"}
-    assert (await bt.tag_write("t-1", "engine", other))["baton_id"] == B2
+    assert "baton_id" not in await bt.tag_write("t-1", "engine", other)
+    # With one waiting, it is tagged like a plain write (HB-14: contract
+    # writes for the baton's work carried other threads' contexts).
+    storage.list_baton_notices.return_value = [_row(B1, "msg-1")]
+    assert (await bt.tag_write("t-1", "engine", other))["baton_id"] == B1
 
 
 @pytest.mark.unit
@@ -137,33 +144,51 @@ async def test_a_baton_replied_on_the_bus_is_copied_back_and_skipped(
 
     out = await bt.tag_write("t-1", "engine", {})
 
-    assert out["baton_id"] == B1 and asked == [B2, B1]
+    assert out["baton_id"] == B1 and sorted(asked) == sorted([B2, B1])
     storage.accept_baton.assert_awaited_once_with(
         "t-1", B2, agent_id="engine", via="bus", state="replied"
     )
 
 
 @pytest.mark.unit
-async def test_the_bus_is_read_on_every_write_even_just_after_a_check(
-    storage, bus_states
-):
-    # A receiver that replied a moment ago must not tag its next write with it.
+async def test_no_bus_call_within_the_cache_window(storage, bus_states):
     states, asked = bus_states
     now = datetime.now(UTC).isoformat()
     storage.list_baton_notices.return_value = [_row(B1, "msg-1", bus_checked_at=now)]
     states[B1] = "replied"
-    assert "baton_id" not in await bt.tag_write("t-1", "engine", {})
-    assert asked == [B1]
+    # Checked moments ago: the row's state stands, the bus is not asked.
+    assert (await bt.tag_write("t-1", "engine", {}))["baton_id"] == B1
+    assert asked == []
 
 
 @pytest.mark.unit
-async def test_an_unreachable_bus_keeps_the_table_state(storage, monkeypatch):
+@pytest.mark.parametrize("bus", ["slow", "down"])
+async def test_a_slow_or_down_bus_adds_at_most_the_timeout(storage, monkeypatch, bus):
+    async def slow(*_a):
+        await asyncio.sleep(5)
+        return "replied"
+
     monkeypatch.setattr(settings, "collaboration_api_url", "http://bus.test")
     monkeypatch.setattr(
-        bt, "_bus_state", AsyncMock(side_effect=RuntimeError("bus down"))
+        bt,
+        "_bus_state",
+        slow if bus == "slow" else AsyncMock(side_effect=OSError("down")),
     )
-    storage.list_baton_notices.return_value = [_row(B1, "msg-1")]
-    assert (await bt.tag_write("t-1", "engine", {}))["baton_id"] == B1
+    storage.list_baton_notices.return_value = [
+        _row(B2, "msg-2"),
+        _row(B1, "msg-1"),
+        _row(B3, "msg-3"),
+    ]
+    t0 = time.perf_counter()
+    out = await bt.BatonTagger("t-1", "engine", storage).tag(
+        {"source": "caura-bus", "message_id": "msg-1"}
+    )
+    elapsed = time.perf_counter() - t0
+    # The last known row state stands; all three checks shared one timeout.
+    assert out["baton_id"] == B1
+    assert elapsed < bt.BUS_TIMEOUT_S + 0.15
+    # Marked checked, so the next write inside the window skips the bus.
+    assert storage.mark_baton_notices_checked.await_count == 3
 
 
 # ---------------------------------------------------------------------------
@@ -171,9 +196,14 @@ async def test_an_unreachable_bus_keeps_the_table_state(storage, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def a_bus(monkeypatch):
+    monkeypatch.setattr(settings, "collaboration_api_url", "http://bus.test")
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize("writer", ["engine", "sender"])
-async def test_a_party_keeps_its_explicit_baton_id(storage, writer):
+async def test_a_party_keeps_its_explicit_baton_id(storage, a_bus, writer):
     storage.list_baton_recipients.return_value = [
         {"agent_id": "engine", "from_agent": "sender"}
     ]
@@ -185,7 +215,7 @@ async def test_a_party_keeps_its_explicit_baton_id(storage, writer):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("baton_id", [B1, "not-a-uuid", ""])
-async def test_anyone_else_is_refused(storage, baton_id):
+async def test_anyone_else_is_refused(storage, a_bus, baton_id):
     storage.list_baton_recipients.return_value = [
         {"agent_id": "engine", "from_agent": "sender"}
     ]
@@ -195,9 +225,18 @@ async def test_anyone_else_is_refused(storage, baton_id):
 
 
 @pytest.mark.unit
-async def test_an_unknown_baton_is_refused(storage):
+async def test_an_unknown_baton_is_refused(storage, a_bus):
     with pytest.raises(HTTPException):
         await bt.tag_write("t-1", "engine", {"baton_id": B1})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("baton_id", [B1, "not-a-uuid"])
+async def test_standalone_oss_keeps_an_explicit_baton_id_unchecked(storage, baton_id):
+    # No bus, no batons: nothing to check against, so the write is as before.
+    meta = {"baton_id": baton_id}
+    assert await bt.tag_write("t-1", "outsider", meta) is meta
+    storage.list_baton_recipients.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -240,11 +279,11 @@ async def test_create_memory_tags_and_platform_writes_do_not(monkeypatch):
 
 @pytest.mark.unit
 async def test_a_bulk_write_reads_the_waiting_batons_once(storage):
-    storage.list_baton_notices.return_value = [_row(B2, "msg-2"), _row(B1, "msg-1")]
+    storage.list_baton_notices.return_value = [_row(B1, "msg-1")]
     tagger = bt.BatonTagger("t-1", "engine", storage)
     out = [
         await tagger.tag(m)
         for m in ({}, None, {"source": "caura-bus", "message_id": "msg-1"})
     ]
-    assert [m["baton_id"] for m in out] == [B2, B2, B1]
+    assert [m["baton_id"] for m in out] == [B1, B1, B1]
     storage.list_baton_notices.assert_awaited_once()
