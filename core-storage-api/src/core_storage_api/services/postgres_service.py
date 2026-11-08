@@ -545,6 +545,29 @@ def _fts_guard_clause(query: str, ts_query: ColumnElement[Any]) -> ColumnElement
     return Memory.search_vector.op("@@")(ts_query) if query and query.strip() else false()
 
 
+def _successor_fts_clause(query: str, ts_query: ColumnElement[Any]) -> ColumnElement[bool]:
+    """True when the row that superseded this one is ALSO a lexical match for the query.
+
+    Path A marks the older row ``conflicted`` and points the newer row at it via
+    ``supersedes_id``. The conflicted carve-out below exists for queries that name
+    the older row specifically ("Wayne #0000" vs a successor about "Wayne #0704"):
+    there the successor does not match and the older row must stay visible. When
+    the successor matches the same query just as well, the query is about the
+    shared subject, not the old row, and surfacing the old row serves a stale claim
+    next to its correction. ``false()`` for a blank query, like ``_fts_guard_clause``.
+    """
+    if not (query and query.strip()):
+        return false()
+    successor = aliased(Memory)
+    return exists().where(
+        successor.supersedes_id == Memory.id,
+        successor.tenant_id == Memory.tenant_id,
+        successor.deleted_at.is_(None),
+        successor.status.notin_(("outdated", "conflicted", QUARANTINED_MEMORY_STATUS)),
+        successor.search_vector.op("@@")(ts_query),
+    )
+
+
 def _scored_search_row_filters(
     *,
     tenant_id: str,
@@ -561,6 +584,7 @@ def _scored_search_row_filters(
     valid_at: datetime | None,
     verified_only: bool = False,
     baton_id: str | None = None,
+    successor_fts: ColumnElement[bool] | None = None,
 ) -> list[tuple[str, ColumnElement[bool]]]:
     """The scored search's row-level filters, each named for what it removes.
 
@@ -574,7 +598,8 @@ def _scored_search_row_filters(
 
     ``fts_guard`` is the query's ``search_vector @@ plainto_tsquery`` match
     (``false()`` for a blank query), built by the caller because the scorer
-    also projects it.
+    also projects it. ``successor_fts`` (``_successor_fts_clause``) narrows the
+    conflicted carve-out; omitted, the carve-out keeps its older, wider form.
     """
     row_filters: list[tuple[str, ColumnElement[bool]]] = [
         # Multi-tenant read predicate: when ``readable_tenant_ids``
@@ -671,12 +696,24 @@ def _scored_search_row_filters(
         # conflicted row un-demoted, and load_and_serialize still injects its
         # supersedes successor so both sides are visible. ``outdated`` stays
         # fully excluded.
+        #
+        # The carve-out applies only while the row's successor does NOT match
+        # the query too. ``plainto_tsquery`` matches every row containing all of
+        # the query's words, so a present-state question about a subject ("which
+        # REST version does billing-api expose?") matched the stale row in most
+        # corrections and served it next to its successor (fleet-bench: the old
+        # fact stayed in the top 5 for 88% of recognised and missed corrections).
+        # A query that names the old row specifically still keeps it: its
+        # successor does not match.
+        carve_out = and_(Memory.status == "conflicted", fts_guard)
+        if successor_fts is not None:
+            carve_out = and_(carve_out, ~successor_fts)
         row_filters.append(
             (
                 "status_superseded",
                 or_(
                     Memory.status.notin_(("outdated", "conflicted")),
-                    and_(Memory.status == "conflicted", fts_guard),
+                    carve_out,
                 ),
             )
         )
@@ -4563,6 +4600,7 @@ class PostgresService:
                 tenant_id=tenant_id,
                 readable_tenant_ids=readable_tenant_ids,
                 fts_guard=_fts_guard,
+                successor_fts=_successor_fts_clause(query, ts_query),
                 fleet_ids=fleet_ids,
                 strict_fleet_scoping=strict_fleet_scoping,
                 caller_agent_id=caller_agent_id,
@@ -5329,6 +5367,7 @@ class PostgresService:
             tenant_id=tenant_id,
             readable_tenant_ids=readable_tenant_ids,
             fts_guard=_fts_guard_clause(query, ts_query),
+            successor_fts=_successor_fts_clause(query, ts_query),
             fleet_ids=fleet_ids,
             strict_fleet_scoping=strict_fleet_scoping,
             caller_agent_id=caller_agent_id,
@@ -5397,6 +5436,7 @@ class PostgresService:
         strict_fleet_scoping: bool = False,
         verified_only: bool = False,
         baton_id: str | None = None,
+        query: str | None = None,
     ) -> list[Memory]:
         """Load memories by ID with visibility/fleet/agent filters applied.
 
@@ -5451,15 +5491,33 @@ class PostgresService:
                 stmt = stmt.where(_baton_clause(baton_id))
             if status_filter:
                 stmt = stmt.where(Memory.status == status_filter)
+            elif query and query.strip():
+                # Same rule as the scored path's ``status_superseded`` filter, so
+                # the short-circuit and the fallthrough agree: ``outdated`` is
+                # excluded, and a ``conflicted`` row is kept only when it is a
+                # lexical match for the query AND the row that superseded it is
+                # not. Keeping every conflicted row here (the previous rule,
+                # below) served the stale side of most corrections whenever the
+                # query happened to take this route: a present-state question
+                # names the subject both rows share, so every row is "about the
+                # entity". A query that names the old row specifically (Wayne
+                # #0000 vs a successor about #0704) still gets it.
+                ts_query = func.plainto_tsquery("english", query)
+                stmt = stmt.where(
+                    or_(
+                        Memory.status.notin_(("outdated", "conflicted")),
+                        and_(
+                            Memory.status == "conflicted",
+                            _fts_guard_clause(query, ts_query),
+                            ~_successor_fts_clause(query, ts_query),
+                        ),
+                    )
+                )
             else:
-                # ENTITY_LOOKUP path: these memory IDs are already scoped to the
-                # entities the caller's query resolved to — every row here is
-                # "about" the named entity, the entity-graph analogue of the
-                # scored path's exact-lexical-match carve-out. So we keep
-                # ``conflicted`` rows (a competing claim about the very entity
-                # asked for, which the semantic contradiction path routinely
-                # mismarks across distinct ``#NNNN`` siblings) and exclude only
-                # ``outdated`` (definitively retracted). load_and_serialize still
+                # No query text (a core-api older than the query forwarding, or a
+                # caller with none): the previous rule. These ids are scoped to
+                # the entities the query resolved to, so ``conflicted`` rows are
+                # kept and only ``outdated`` is excluded; load_and_serialize still
                 # injects the supersedes successor so both sides remain visible.
                 stmt = stmt.where(Memory.status != "outdated")
             if valid_at:

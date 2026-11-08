@@ -53,13 +53,16 @@ from core_storage_api.services.postgres_service import _saturate_rank
 # win is the ANN candidate pool. An earlier "427ms -> 90ms" figure for the split
 # alone did not reproduce.
 _EXPECTED_TS_RANK_CD_RENDERS = 1
-# ``plainto_tsquery`` remains in exactly four places, all inside the
+# ``plainto_tsquery`` remains in exactly five places, all inside the
 # ingredients CTE: the CAURA-594 admission guard (WHERE), the conflicted
-# carve-out (WHERE), the ``ts_rank_cd`` call inside ``fts_score``, and the
-# ``fts_match`` projection. The WHERE-clause renders cannot fold into the
-# projected column — predicate evaluation happens before the targetlist — so 4
-# is the floor for this statement shape, not a concession.
-_EXPECTED_TSQUERY_RENDERS = 4
+# carve-out (WHERE), the carve-out's successor check (WHERE, inside a
+# correlated EXISTS on the indexed ``supersedes_id``), the ``ts_rank_cd`` call
+# inside ``fts_score``, and the ``fts_match`` projection. The WHERE-clause
+# renders cannot fold into the projected column — predicate evaluation happens
+# before the targetlist. 4 -> 5 deliberately: the successor check tests the
+# successor row's own ``search_vector``, so it cannot share the outer row's
+# match; it runs only for ``conflicted`` rows that already matched the query.
+_EXPECTED_TSQUERY_RENDERS = 5
 # The pgvector cosine distance: the single most expensive expression in the
 # statement (a 1024-dim float loop plus a TOAST fetch per evaluation; one
 # evaluation pass over 42.7k rows costs ~59 ms on the rig above, a ts_rank_cd

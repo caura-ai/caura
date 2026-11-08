@@ -443,6 +443,7 @@ async def load_by_ids(request: Request) -> list[dict]:
                 strict_fleet_scoping=body.get("strict_fleet_scoping", False),
                 verified_only=bool(body.get("verified_only", False)),
                 baton_id=body.get("baton_id") or None,
+                query=body.get("query") or None,
             )
         # No vectors (L-188): ClassifyQuery builds result rows from these, and
         # a result carries no vector.

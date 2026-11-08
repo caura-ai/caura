@@ -711,6 +711,10 @@ class ClassifyQuery:
             # entirely, so it needs the scope flag in its own right; inheriting
             # it only on the scored path would leave this route permissive.
             "strict_fleet_scoping": strict_fleet_scoping,
+            # The query text lets storage apply the scored path's conflicted
+            # rule (keep a conflicted row only while its successor does not
+            # match too) instead of keeping every conflicted row in the pool.
+            "query": query,
         }
         if valid_at is not None:
             search_data["valid_at"] = str(valid_at)

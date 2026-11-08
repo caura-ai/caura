@@ -230,10 +230,12 @@ async def test_collect_memories_forwards_valid_at_and_readable_tenant_ids():
         f"readable_tenant_ids must be forwarded for cross-tenant reads; "
         f"got {sent.get('readable_tenant_ids')!r}"
     )
-    # Sanity: the old stale keys (embedding/query/search_params/entity_lookup)
-    # MUST NOT be present — they were the original payload-contract bug.
+    # The query is forwarded so storage can apply the scored path's conflicted rule
+    # (a conflicted row is kept only when it matches and its successor does not).
+    assert sent["query"] == "central control"
+    # Sanity: the old stale keys (embedding/search_params/entity_lookup) MUST NOT be
+    # present — they were the original payload-contract bug.
     assert "embedding" not in sent
-    assert "query" not in sent
     assert "search_params" not in sent
     assert "entity_lookup" not in sent
 

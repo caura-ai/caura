@@ -214,6 +214,36 @@ class TestExplainAgreesWithSearch:
         assert not returned
         assert _first_failed(ex) == "status_superseded"
 
+    async def test_conflicted_carve_out_off_when_successor_matches(self, client: AsyncClient, scope) -> None:
+        """A correction that matches the same query hides the stale row it superseded."""
+        tenant, fleet, kw = scope
+        old = await _write(client, tenant, fleet, kw)
+        new = await _write(client, tenant, fleet, kw)
+        await _sql("UPDATE memories SET status = 'conflicted' WHERE id = :id", id=uuid.UUID(old))
+        await _sql(
+            "UPDATE memories SET supersedes_id = :old WHERE id = :id", old=uuid.UUID(old), id=uuid.UUID(new)
+        )
+        returned, ex = await _search_and_explain(client, old, _body(tenant, kw))
+        assert not returned
+        assert _first_failed(ex) == "status_superseded"
+        # The successor itself is still served.
+        returned, ex = await _search_and_explain(client, new, _body(tenant, kw))
+        assert returned and _first_failed(ex) is None
+
+    async def test_conflicted_carve_out_kept_when_successor_does_not_match(
+        self, client: AsyncClient, scope
+    ) -> None:
+        """A query that names the old row specifically still gets it (Wayne #0000 vs #0704)."""
+        tenant, fleet, kw = scope
+        old = await _write(client, tenant, fleet, kw)
+        new = await _write(client, tenant, fleet, f"{kw}other")
+        await _sql("UPDATE memories SET status = 'conflicted' WHERE id = :id", id=uuid.UUID(old))
+        await _sql(
+            "UPDATE memories SET supersedes_id = :old WHERE id = :id", old=uuid.UUID(old), id=uuid.UUID(new)
+        )
+        returned, ex = await _search_and_explain(client, old, _body(tenant, kw))
+        assert returned and _first_failed(ex) is None
+
     async def test_temporal_valid_at(self, client: AsyncClient, scope) -> None:
         tenant, fleet, kw = scope
         mid = await _write(client, tenant, fleet, kw)
