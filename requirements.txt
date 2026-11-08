@@ -26,6 +26,10 @@ google-genai>=2.34.0
 # transitive pull, so a future GCP-SDK cleanup can't silently break it.
 # Capped as core-worker caps it (L-166).
 requests>=2.34.2,<3
+# google.auth is what core_api.clients.identity_token and
+# common.cloud_run_identity fetch the ID token with; listed for the same reason
+# as requests above. Range as core-api, core-worker and core-storage-api declare it.
+google-auth>=2.30,<3
 openai>=3.41.0,<4
 python-dateutil>=2.9.0.post0,<3
 httpx>=0.28.1,<1

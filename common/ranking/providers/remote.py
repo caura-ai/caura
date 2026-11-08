@@ -24,10 +24,12 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+from collections.abc import AsyncGenerator
 from typing import cast
 
 import httpx
 
+from common import cloud_run_identity
 from common.ranking.constants import RANK_REMOTE_MAX_BATCH, RANK_TIMEOUT_SECONDS
 from common.ranking.errors import PermanentRankError
 from common.ranking.protocols import RankCandidate
@@ -66,6 +68,17 @@ _ERROR_BODY_LIMIT = 300
 _instance_seq = itertools.count()
 
 
+class _CloudRunIdentity(httpx.Auth):
+    """``common.cloud_run_identity`` for this client."""
+
+    async def async_auth_flow(
+        self, request: httpx.Request
+    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        request.headers.update(await cloud_run_identity.headers_for(str(request.url)))
+        response = yield request
+        cloud_run_identity.refused(str(request.url), response.status_code)
+
+
 class RemoteRanker:
     """Reranker backed by a separate HTTP ``/rerank`` service."""
 
@@ -98,6 +111,9 @@ class RemoteRanker:
             headers=headers,
             timeout=timeout,
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            # A rerank service on Cloud Run listed in
+            # CLOUD_RUN_ID_TOKEN_ORIGINS gets an identity token.
+            auth=_CloudRunIdentity(),
         )
 
     @property
