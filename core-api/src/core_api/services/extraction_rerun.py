@@ -8,6 +8,12 @@ is a run that settled for the regex heuristic after the providers kept failing.
 Until this module the table had writers and no reader, so those memories kept a
 partial graph, the heuristic's, or none at all, and nothing ran them again.
 
+``entity_extraction_degraded_unretryable`` is a run that settled for the heuristic
+at once, because the providers failed in a way asking again would repeat (a
+rejected request, output that does not parse). The sweep leaves those rows alone:
+until their cause is fixed, every re-run fails the same way. A re-run by hand
+closes them with the rest.
+
 This is the reader. ``rerun_lost_extractions`` is the hourly sweep
 (core-operations' ``entity-extraction-rerun`` job, through
 ``POST /admin/entity-extraction/rerun-lost``), and ``schedule_rerun`` is what
@@ -49,6 +55,9 @@ logger = logging.getLogger(__name__)
 # The ``background_task_log.task_name`` values that mean "this memory does not
 # have the model's graph".
 LOST_EXTRACTION_TASKS = ("entity_extraction", "entity_extraction_degraded")
+# The same, for a run whose providers failed in a way asking again would repeat.
+# Not swept; closed by a re-run by hand.
+UNRETRYABLE_EXTRACTION_TASKS = ("entity_extraction_degraded_unretryable",)
 
 # Rows older than this are left alone: a week is long past any outage worth
 # recovering from automatically, and it bounds what an hourly sweep reads.
@@ -147,7 +156,7 @@ async def schedule_rerun(memory: dict, tenant_id: str) -> int:
     sc = get_storage_client()
     rows = await sc.list_open_task_failures(
         tenant_id,
-        LOST_EXTRACTION_TASKS,
+        LOST_EXTRACTION_TASKS + UNRETRYABLE_EXTRACTION_TASKS,
         since=datetime.now(UTC) - RERUN_LOOKBACK,
         limit=RERUN_ROWS_PER_TENANT,
         memory_id=str(memory["id"]),
