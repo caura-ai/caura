@@ -919,26 +919,24 @@ class SearchDiagnostic(BaseModel):
     # after any per-request ``min_similarity`` override).
     search_params: dict = {}
     # One entry per widened candidate: id/title/type/status + score + factors +
-    # ``excluded`` (None | "below_min_similarity" | "trimmed_by_top_k").
+    # ``excluded`` (None | "below_min_similarity" | "derived_excluded" |
+    # "trimmed_by_top_k").
     #
-    #
-    # KNOWN GAP (CAURA-722, not fixed here): five of these factors —
-    # ``entity_boost``, ``freshness``, ``recall_boost``, ``temporal_boost``,
-    # ``fts_score`` — are ``None`` on every row of the scored-search path.
-    # Storage computes them in the scored CTE, uses them to build ``score``,
-    # and then omits them from the outer ``select()``, so the route never
-    # serializes them (``postgres_service.memory_scored_search``). Only
-    # ``score``, ``vec_sim``, ``fts_match`` and ``status_penalty`` are real
-    # today. Do not read a null factor as "this signal did not apply" — it
-    # applied to ``score`` and was simply not reported.
+    # On the scored-search path every factor is reported, ``entity_boost``,
+    # ``freshness``, ``recall_boost``, ``temporal_boost`` and ``fts_score``
+    # included. Until CAURA-722 (9936f7a7) storage built ``score`` from those
+    # five but left them out of its outer ``select()``, so they were ``None``
+    # on every row. A null factor still means "not reported", never "this
+    # signal did not apply" (core-storage-api's ``routers/memories.py`` says
+    # when it is left ``None``).
     #
     # This matters most for ``entity_boost``, because it is the ONLY place the
     # entity *boost* is observable. ``retrieval_strategy`` reports only the
     # ENTITY_LOOKUP *short-circuit*, which fires solely when the entity-linked
     # pool fills ``top_k`` unaided — so a run that reads the strategy alone and
     # concludes "entity retrieval contributed nothing" has measured the
-    # short-circuit, not the subsystem, and the field that would settle it is
-    # currently null.
+    # short-circuit, not the subsystem. ``entity_boost`` on the candidates is
+    # the field that settles it.
     all_candidates: list[dict] = []
     # CAURA-722 — the two facts that separate the reasons entity retrieval
     # stayed out of a query. Before these, ``retrieval_strategy`` said only
