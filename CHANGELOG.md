@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.45.0](https://github.com/caura-ai/caura/compare/backend-v3.44.1...backend-v3.45.0) (2026-11-08)
+
+
+### Features
+
+* **audit:** the web app can name the console place a write came from ([#2379](https://github.com/caura-ai/caura/issues/2379)) ([e539b0a](https://github.com/caura-ai/caura/commit/e539b0a8265f391097fbddc02961b2f390d0f8d3))
+
+
+### Bug Fixes
+
+* **core-api:** take a re-extraction's outcome from the worker, not the graph ([#2380](https://github.com/caura-ai/caura/issues/2380)) ([d72a3dc](https://github.com/caura-ai/caura/commit/d72a3dcae5253c816ecfa6677fd01c4266070216))
+
 ## [3.44.1](https://github.com/caura-ai/caura/compare/backend-v3.44.0...backend-v3.44.1) (2026-11-08)
 
 
