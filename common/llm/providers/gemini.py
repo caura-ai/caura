@@ -20,6 +20,7 @@ from common.llm.constants import (
     GOOGLE_GENAI_REQUEST_TIMEOUT_SECONDS,
     LLM_JSON_MAX_OUTPUT_TOKENS,
 )
+from common.llm.providers._genai_seed import genai_seed
 from common.llm.providers._genai_usage import record_genai_call
 from common.llm.providers._json_shape import unwrap_singleton_array
 from common.llm.providers._shape_error import ProviderResponseShapeError
@@ -96,7 +97,8 @@ class GeminiLLMProvider:
                 # The caller's seed (L-95): entity extraction pins one so a
                 # re-ask returns the same answer, and skips retrying a shape
                 # failure on that basis. Dropping it made that false here.
-                seed=seed,
+                # Fitted to the field's int32: a CRC32 seed is unsigned.
+                seed=genai_seed(seed),
                 # Runaway guard — same failure mode as the Vertex provider:
                 # an uncapped looping generation comes back as truncated JSON.
                 max_output_tokens=LLM_JSON_MAX_OUTPUT_TOKENS,
