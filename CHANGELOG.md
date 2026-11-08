@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.43.0](https://github.com/caura-ai/caura/compare/backend-v3.42.1...backend-v3.43.0) (2026-11-08)
+
+
+### Features
+
+* **core-api:** a command to extract again the entity graphs the heuristic made ([#2371](https://github.com/caura-ai/caura/issues/2371)) ([393f713](https://github.com/caura-ai/caura/commit/393f713d7fcb588fbe21df5c8b782a0a97d70dea))
+
+
+### Bug Fixes
+
+* **core-api:** record extractions that fell back for a failure asking again would repeat ([#2369](https://github.com/caura-ai/caura/issues/2369)) ([de65225](https://github.com/caura-ai/caura/commit/de65225aa63bdee00b9f45ff093cc4bd7bdcbf57))
+
 ## [3.42.1](https://github.com/caura-ai/caura/compare/backend-v3.42.0...backend-v3.42.1) (2026-11-08)
 
 
