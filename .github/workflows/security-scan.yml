@@ -23,6 +23,9 @@ on:
 env:
   PYTHON_VERSION: "3.13"
   UV_VERSION: "0.9.26"
+  # Managed Pythons come from Astral's mirror, not GitHub release assets,
+  # which have failed setup with 504s (tests/test_workflow_uv_python_mirror.py).
+  UV_PYTHON_INSTALL_MIRROR: "https://releases.astral.sh/github/python-build-standalone/releases/download"
 
 permissions:
   contents: read
@@ -37,7 +40,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5.4.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
