@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.44.1](https://github.com/caura-ai/caura/compare/backend-v3.44.0...backend-v3.44.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* **search:** stop serving conflicted (stale) rows next to their correction ([#2373](https://github.com/caura-ai/caura/issues/2373)) ([db914c0](https://github.com/caura-ai/caura/commit/db914c053a686b3aa876d40971f95f4f334138ea))
+
 ## [3.44.0](https://github.com/caura-ai/caura/compare/backend-v3.43.0...backend-v3.44.0) (2026-11-08)
 
 
