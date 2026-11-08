@@ -5436,6 +5436,7 @@ class PostgresService:
         strict_fleet_scoping: bool = False,
         verified_only: bool = False,
         baton_id: str | None = None,
+        query: str | None = None,
     ) -> list[Memory]:
         """Load memories by ID with visibility/fleet/agent filters applied.
 
@@ -5490,15 +5491,33 @@ class PostgresService:
                 stmt = stmt.where(_baton_clause(baton_id))
             if status_filter:
                 stmt = stmt.where(Memory.status == status_filter)
+            elif query and query.strip():
+                # Same rule as the scored path's ``status_superseded`` filter, so
+                # the short-circuit and the fallthrough agree: ``outdated`` is
+                # excluded, and a ``conflicted`` row is kept only when it is a
+                # lexical match for the query AND the row that superseded it is
+                # not. Keeping every conflicted row here (the previous rule,
+                # below) served the stale side of most corrections whenever the
+                # query happened to take this route: a present-state question
+                # names the subject both rows share, so every row is "about the
+                # entity". A query that names the old row specifically (Wayne
+                # #0000 vs a successor about #0704) still gets it.
+                ts_query = func.plainto_tsquery("english", query)
+                stmt = stmt.where(
+                    or_(
+                        Memory.status.notin_(("outdated", "conflicted")),
+                        and_(
+                            Memory.status == "conflicted",
+                            _fts_guard_clause(query, ts_query),
+                            ~_successor_fts_clause(query, ts_query),
+                        ),
+                    )
+                )
             else:
-                # ENTITY_LOOKUP path: these memory IDs are already scoped to the
-                # entities the caller's query resolved to — every row here is
-                # "about" the named entity, the entity-graph analogue of the
-                # scored path's exact-lexical-match carve-out. So we keep
-                # ``conflicted`` rows (a competing claim about the very entity
-                # asked for, which the semantic contradiction path routinely
-                # mismarks across distinct ``#NNNN`` siblings) and exclude only
-                # ``outdated`` (definitively retracted). load_and_serialize still
+                # No query text (a core-api older than the query forwarding, or a
+                # caller with none): the previous rule. These ids are scoped to
+                # the entities the query resolved to, so ``conflicted`` rows are
+                # kept and only ``outdated`` is excluded; load_and_serialize still
                 # injects the supersedes successor so both sides remain visible.
                 stmt = stmt.where(Memory.status != "outdated")
             if valid_at:
