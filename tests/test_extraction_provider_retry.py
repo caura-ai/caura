@@ -11,6 +11,13 @@ Now a provider failure that asking again may fix makes the extractor raise
 ``ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S`` before it settles for the
 heuristic. A run the heuristic finished is recorded
 (``entity_extraction_degraded``) and its audit entry says ``degraded``.
+
+Prod, 2026-10-10 to 2026-11-08: Vertex refused about half of all prompts with a
+400 on the seed (caura#2367). A 400 is not worth asking again, so the extractor
+settled for the heuristic itself and handed its graph back as the model's: no
+row, no flag. Now it raises ``UnretryableProviderFailureError`` instead, and the
+worker settles for the heuristic at once and records it under a task of its own
+(``entity_extraction_degraded_unretryable``), which the hourly sweep leaves alone.
 """
 
 from __future__ import annotations
@@ -35,6 +42,7 @@ from core_api.services.entity_extraction import (
     ExtractedEntity,
     ExtractedGraph,
     ProvidersUnavailableError,
+    UnretryableProviderFailureError,
 )
 from tests.conftest import close_scheduled_coro
 
@@ -123,9 +131,16 @@ async def test_a_rate_limited_provider_is_handed_back_instead_of_the_heuristic(
     assert not [r for r in caplog.records if _DEGRADED_LINE in r.getMessage()]
 
 
-async def test_without_asking_for_it_the_extractor_still_degrades(chain, caplog):
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(_vertex(429), id="transient"),
+        pytest.param(_vertex(400), id="unretryable"),
+    ],
+)
+async def test_without_asking_for_it_the_extractor_still_degrades(chain, caplog, error):
     """Every other caller keeps the old contract: a graph, never a raise."""
-    chain(_vertex(429))
+    chain(error)
 
     with caplog.at_level(logging.ERROR, logger=ee.__name__):
         graph = await ee.extract_entities_from_content(
@@ -165,38 +180,63 @@ async def test_every_kind_of_transient_failure_is_handed_back(chain, error):
 
 
 @pytest.mark.parametrize(
-    ("outcome", "is_fake"),
+    ("outcome", "label"),
     [
-        pytest.param(["not", "a", "graph"], False, id="output-that-does-not-parse"),
+        pytest.param(
+            ["not", "a", "graph"],
+            "ExtractionShapeError",
+            id="output-that-does-not-parse",
+        ),
         pytest.param(
             ProviderResponseShapeError("vertex", "not json", "str"),
-            False,
+            "ProviderResponseShapeError",
             id="response-shape",
         ),
         pytest.param(
             UnsupportedStructuredOutputError("no json mode"),
-            False,
+            "UnsupportedStructuredOutputError",
             id="no-structured-output",
         ),
-        pytest.param({}, True, id="no-usable-provider"),
-        pytest.param(_openai(401), False, id="bad-key"),
-        pytest.param(_vertex(403), False, id="forbidden"),
-        pytest.param(_vertex(404), False, id="unknown-model"),
-        pytest.param(_openai(400), False, id="rejected-request"),
-        pytest.param(_httpx(404), False, id="httpx-404"),
+        pytest.param(_openai(401), "APIStatusError", id="bad-key"),
+        pytest.param(_vertex(403), "ClientError", id="forbidden"),
+        pytest.param(_vertex(404), "ClientError", id="unknown-model"),
+        pytest.param(_openai(400), "APIStatusError", id="rejected-request"),
+        pytest.param(_vertex(400), "ClientError", id="refused-seed"),
+        pytest.param(_httpx(404), "HTTPStatusError", id="httpx-404"),
         pytest.param(
-            RuntimeError("an error nobody classified"), False, id="unknown-error"
+            RuntimeError("an error nobody classified"),
+            "RuntimeError",
+            id="unknown-error",
         ),
     ],
 )
-async def test_a_failure_asking_again_cannot_fix_degrades_at_once(
-    chain, caplog, outcome, is_fake
+async def test_a_failure_asking_again_cannot_fix_is_handed_back_as_unretryable(
+    chain, caplog, outcome, label
 ):
     """A bad key, an unknown model or a rejected request fails the same way
-    later; the seed is pinned, so bad output repeats; with no usable provider
-    there is no one to ask; and an error nobody classified is not assumed to
-    pass. Waiting minutes for any of them would only delay the heuristic."""
-    chain(outcome, is_fake=is_fake)
+    later; the seed is pinned, so bad output repeats; and an error nobody
+    classified is not assumed to pass. The caller does not wait for any of
+    them, but it must know the graph it writes is the heuristic's, so the
+    extractor hands the failure back rather than degrading in silence."""
+    chain(outcome)
+
+    with caplog.at_level(logging.ERROR, logger=ee.__name__):
+        with pytest.raises(UnretryableProviderFailureError) as caught:
+            await ee.extract_entities_from_content(
+                "Anna Bergstrom joined Acme Corp.",
+                "fact",
+                raise_on_provider_failure=True,
+            )
+
+    if isinstance(outcome, BaseException):
+        assert caught.value.__cause__ is outcome
+    assert str(caught.value).endswith(f"the last with {label}")
+    assert not [r for r in caplog.records if _DEGRADED_LINE in r.getMessage()]
+
+
+async def test_with_no_usable_provider_the_extractor_still_degrades(chain, caplog):
+    """No provider was reached, so there is no failure to hand back."""
+    chain({}, is_fake=True)
 
     with caplog.at_level(logging.ERROR, logger=ee.__name__):
         graph = await ee.extract_entities_from_content(
@@ -435,6 +475,65 @@ async def test_a_failed_row_read_does_not_cost_the_extraction():
 
     assert extract.await_count == len(ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S) + 1
     assert seen.record.await_args.args[0] == "entity_extraction_degraded"
+    assert _audits(seen) == [
+        {"entities_count": 0, "relations_count": 0, "degraded": True}
+    ]
+
+
+# ── The worker: an unretryable failure, settled at once and recorded apart ──
+
+
+def _unretryable() -> UnretryableProviderFailureError:
+    exc = UnretryableProviderFailureError(
+        "every entity-extraction provider failed; the last with ClientError"
+    )
+    exc.__cause__ = RuntimeError("400 INVALID_ARGUMENT")
+    return exc
+
+
+@pytest.mark.parametrize(
+    ("content", "entities"),
+    [
+        pytest.param(_NAMED, 1, id="heuristic-found-a-name"),
+        pytest.param(_PLAIN, 0, id="heuristic-found-nothing"),
+    ],
+)
+async def test_an_unretryable_failure_is_not_asked_again_but_is_recorded_apart(
+    content, entities
+):
+    """Asking again would fail the same way, so the heuristic's graph is written
+    at once, as before. What is new is that the run is recorded, under a task
+    the hourly sweep does not read, and its audit entry says ``degraded``."""
+    extract = AsyncMock(side_effect=_unretryable())
+    sc = _sc(content)
+
+    seen = await _run(extract, sc, content)
+
+    assert extract.await_count == 1
+    seen.sleep.assert_not_awaited()
+    assert sc.bulk_upsert_entities.await_count == entities
+    seen.record.assert_awaited_once()
+    task, _memory_id, tenant, error = seen.record.await_args.args
+    assert (task, tenant) == ("entity_extraction_degraded_unretryable", "t1")
+    assert "ClientError, which asking again would repeat" in str(error)
+    assert "Last error: RuntimeError: 400 INVALID_ARGUMENT" in str(error)
+    assert "400 INVALID_ARGUMENT" in seen.record.await_args.kwargs["tb"]
+    [audit] = _audits(seen)
+    assert audit["degraded"] is True
+    assert audit["entities_count"] == entities
+
+
+async def test_end_to_end_a_refused_request_is_recorded_without_asking_again(chain):
+    """The prod sequence through the real extractor and fallback chain: Vertex
+    refuses the request with a 400, as it refused the out-of-range seed."""
+    chain(_vertex(400))
+    extract = AsyncMock(wraps=ee.extract_entities_from_content)
+
+    seen = await _run(extract, _sc(_PLAIN), _PLAIN)
+
+    assert extract.await_count == 1
+    assert seen.record.await_args.args[0] == "entity_extraction_degraded_unretryable"
+    assert "Last error: ClientError: 400" in str(seen.record.await_args.args[3])
     assert _audits(seen) == [
         {"entities_count": 0, "relations_count": 0, "degraded": True}
     ]

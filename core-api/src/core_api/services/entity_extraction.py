@@ -42,10 +42,27 @@ class ProvidersUnavailableError(Exception):
     memory with no entities, and nothing retried it.
 
     Only for failures that asking again may fix (``_may_pass_if_asked_again``):
-    a timeout, a lost connection, an HTTP 408, 425, 429 or 5xx. Everything else
-    still degrades at once: a bad key, an unknown model or a rejected request
-    fails the same way later, output that does not parse repeats because the
-    seed is pinned, and with no usable provider there is no one to ask.
+    a timeout, a lost connection, an HTTP 408, 425, 429 or 5xx. Any other
+    provider failure is ``UnretryableProviderFailureError``, and with no usable
+    provider there is no one to ask, so that still degrades here.
+
+    ``__cause__`` is the last provider error.
+    """
+
+
+class UnretryableProviderFailureError(Exception):
+    """Every provider was reached and failed in a way asking again would repeat.
+
+    The other half of ``raise_on_provider_failure``. A bad key, an unknown model
+    or a rejected request fails the same way later; output that does not parse
+    repeats because the seed is pinned; an error nobody classified is not
+    assumed to pass. So the caller does not ask again: it settles for the
+    heuristic at once, as the extractor did, but it knows that it did.
+
+    The extractor used to settle for the heuristic itself and hand back its
+    graph as if the model had made it. From 2026-10-10 to 2026-11-08 Vertex
+    refused about half of all prompts with a 400 on the seed (caura#2367), and
+    the worker recorded none of them and flagged no audit entry.
 
     ``__cause__`` is the last provider error.
     """
@@ -395,9 +412,11 @@ async def extract_entities_from_content(
       2. Alternative LLM provider (with retry) — if API key available
       3. Regex heuristic (_fake_extract) — always succeeds
 
-    With ``raise_on_provider_failure``, step 3 raises
-    ``ProvidersUnavailableError`` instead when a provider was reached and
-    failed on something asking again may fix; the caller retries later.
+    With ``raise_on_provider_failure``, step 3 raises instead when a provider
+    was reached and failed: ``ProvidersUnavailableError`` when asking again may
+    fix it, and the caller retries later; ``UnretryableProviderFailureError``
+    when it would not, and the caller settles for the heuristic itself. With no
+    usable provider it still returns the heuristic's graph.
 
     Otherwise never raises; always returns an ExtractedGraph.
     """
@@ -480,21 +499,27 @@ async def extract_entities_from_content(
         or None
     )
 
-    # The provider errors that asking again may fix, for the last resort below.
-    provider_errors: list[Exception] = []
+    # The provider errors, by whether asking again may fix them, for the last
+    # resort below.
+    transient_errors: list[Exception] = []
+    unretryable_errors: list[Exception] = []
 
     async def _attempt(llm: LLMProvider) -> ExtractedGraph:
         try:
             return await _do_extract(llm)
         except Exception as exc:
-            if _may_pass_if_asked_again(exc):
-                provider_errors.append(exc)
+            (transient_errors if _may_pass_if_asked_again(exc) else unretryable_errors).append(exc)
             raise
 
     def _last_resort() -> ExtractedGraph:
-        if raise_on_provider_failure and provider_errors:
-            last = provider_errors[-1]
+        if raise_on_provider_failure and transient_errors:
+            last = transient_errors[-1]
             raise ProvidersUnavailableError(
+                f"every entity-extraction provider failed; the last with {type(last).__name__}"
+            ) from last
+        if raise_on_provider_failure and unretryable_errors:
+            last = unretryable_errors[-1]
+            raise UnretryableProviderFailureError(
                 f"every entity-extraction provider failed; the last with {type(last).__name__}"
             ) from last
         return degraded_graph(content, tenant_config)

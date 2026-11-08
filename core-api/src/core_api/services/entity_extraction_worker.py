@@ -30,6 +30,7 @@ from core_api.services.audit_service import log_action
 from core_api.services.entity_extraction import (
     ExtractedGraph,
     ProvidersUnavailableError,
+    UnretryableProviderFailureError,
     degraded_graph,
     extract_entities_from_content,
 )
@@ -372,6 +373,16 @@ async def _recheck_row_after_writes(
 # retries. Apart from ``entity_extraction``: the run did not fail, it wrote the
 # heuristic's graph (which may be empty), and that is what an operator counts.
 _DEGRADED_TASK = "entity_extraction_degraded"
+# The same, for an extraction that settled for the heuristic at once because
+# every provider failed in a way asking again would repeat
+# (``UnretryableProviderFailureError``). A task of its own so that the hourly
+# re-run sweep, which reads ``entity_extraction_degraded``, does not ask again a
+# request that fails the same way every hour; an operator still counts these,
+# and re-runs them by hand once the cause is fixed.
+_DEGRADED_UNRETRYABLE_TASK = "entity_extraction_degraded_unretryable"
+
+# What ``_extract_asking_again`` hands back for a graph the heuristic made.
+_ProviderFailure = ProvidersUnavailableError | UnretryableProviderFailureError
 
 
 async def _still_wants_extraction(memory_id: UUID, tenant_id: str, content: str) -> bool:
@@ -401,7 +412,7 @@ async def _still_wants_extraction(memory_id: UUID, tenant_id: str, content: str)
 
 async def _extract_asking_again(
     memory_id: UUID, tenant_id: str, content: str, memory_type: str, tenant_cfg: Any
-) -> tuple[ExtractedGraph, ProvidersUnavailableError | None] | None:
+) -> tuple[ExtractedGraph, _ProviderFailure | None] | None:
     """Extract, and if every provider fails, ask again later before the heuristic.
 
     A provider failure is usually brief. On staging (2026-10-07) a Vertex 429
@@ -409,9 +420,10 @@ async def _extract_asking_again(
     nothing, and the memory kept no entities with nothing to retry it. So the
     whole provider chain runs again after each of
     ``ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S``, and only then does this
-    settle for the heuristic. A failure asking again cannot fix (output that
-    does not parse, no usable provider) is not retried: the extractor degrades
-    it at once, as before.
+    settle for the heuristic. A failure asking again cannot fix (a rejected
+    request, output that does not parse) is not retried: this settles for the
+    heuristic at once, as before, and hands back that failure too. With no
+    usable provider the extractor degrades by itself, and nothing is handed back.
 
     This runs in a background task, so the waits cost no request anything.
 
@@ -432,10 +444,14 @@ async def _extract_asking_again(
     the providers were failing.
     """
 
-    async def _extract() -> ExtractedGraph:
-        return await extract_entities_from_content(
-            content, memory_type, tenant_config=tenant_cfg, raise_on_provider_failure=True
-        )
+    async def _extract() -> tuple[ExtractedGraph, UnretryableProviderFailureError | None]:
+        try:
+            graph = await extract_entities_from_content(
+                content, memory_type, tenant_config=tenant_cfg, raise_on_provider_failure=True
+            )
+        except UnretryableProviderFailureError as exc:
+            return degraded_graph(content, tenant_cfg), exc
+        return graph, None
 
     async def _wanted() -> bool:
         if await _still_wants_extraction(memory_id, tenant_id, content):
@@ -448,7 +464,7 @@ async def _extract_asking_again(
 
     for delay in ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S:
         try:
-            return await _extract(), None
+            return await _extract()
         except ProvidersUnavailableError as exc:
             if not await _wanted():
                 return None
@@ -464,29 +480,31 @@ async def _extract_asking_again(
             )
             await asyncio.sleep(wait)
     try:
-        return await _extract(), None
+        return await _extract()
     except ProvidersUnavailableError as exc:
         if not await _wanted():
             return None
         return degraded_graph(content, tenant_cfg), exc
 
 
-async def _record_degraded(memory_id: UUID, tenant_id: str, exc: ProvidersUnavailableError) -> None:
+async def _record_degraded(memory_id: UUID, tenant_id: str, exc: _ProviderFailure) -> None:
     """One ``background_task_log`` row for an extraction the heuristic finished.
 
     The provider's own error goes in the message. The traceback prints it first,
     and ``record_task_failure`` keeps only the traceback's tail, so behind a deep
     SDK stack it would be cut off.
     """
-    tries = len(ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S) + 1
+    if isinstance(exc, UnretryableProviderFailureError):
+        task, tried = _DEGRADED_UNRETRYABLE_TASK, "which asking again would repeat"
+    else:
+        task, tried = _DEGRADED_TASK, f"on all {len(ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S) + 1} tries"
     cause = exc.__cause__ or exc
     await record_task_failure(
-        _DEGRADED_TASK,
+        task,
         memory_id,
         tenant_id,
         RuntimeError(
-            f"{exc}, on all {tries} tries; the regex heuristic was used. "
-            f"Last error: {type(cause).__name__}: {cause}"
+            f"{exc}, {tried}; the regex heuristic was used. Last error: {type(cause).__name__}: {cause}"
         ),
         tb="".join(traceback.format_exception(exc)),
     )

@@ -589,3 +589,37 @@ async def test_re_extracting_one_memory_marks_its_rows_and_schedules_it(
     assert body == {"memory_id": memory, "scheduled": True, "rows_marked": 1}
     assert scheduled == [(tenant, memory)]
     assert await _open(sc, tenant) == []
+
+
+async def test_the_sweep_leaves_an_unretryable_extraction_to_a_re_run_by_hand(
+    sc, monkeypatch
+):
+    """A run whose providers failed in a way asking again would repeat (prod's
+    refused seed, caura#2367) fails the same way on every sweep until its cause
+    is fixed. The sweep leaves its row open; a re-run by hand closes it."""
+    from core_api.routes import lifecycle
+
+    tenant = new_tenant_id()
+    await sc.update_org_settings(tenant, {"entity_extraction": {"enabled": True}})
+    memory = await _memory(sc, tenant, "Anna Bergstrom joined Acme Corp.")
+    await _failure(sc, tenant, memory, "entity_extraction_degraded_unretryable")
+    scheduled: list = []
+    monkeypatch.setattr(sc, "list_active_tenants", AsyncMock(return_value=[tenant]))
+    monkeypatch.setattr(er, "track_task", scheduled.append)
+    monkeypatch.setattr(er, "_schedule", lambda m, t: scheduled.append((t, m)))
+
+    assert (await er.rerun_lost_extractions())["memories"] == 0
+    assert scheduled == []
+
+    body = await lifecycle.re_extract_memory(
+        UUID(memory), tenant_id=tenant, auth=MagicMock()
+    )
+
+    assert body == {"memory_id": memory, "scheduled": True, "rows_marked": 1}
+    assert scheduled == [(tenant, memory)]
+    assert (
+        await sc.list_open_task_failures(
+            tenant, er.UNRETRYABLE_EXTRACTION_TASKS, since=_SINCE, limit=100
+        )
+        == []
+    )
