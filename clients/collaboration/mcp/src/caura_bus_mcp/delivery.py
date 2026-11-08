@@ -54,8 +54,9 @@ class DeliverySession:
         self.surfaced: set[str] = set()
         # Request message IDs this session sent; correlates responses returned by wait.
         self.sent_requests: set[str] = set()
-        # Thread ID -> baton ID of handoff batons this session received; memory_context
-        # for that thread adds baton_id, so the receiver's findings link back to it.
+        # Thread ID -> baton ID of handoff batons this session received or sent;
+        # memory_context for that thread adds baton_id, so the receiver's findings
+        # and the sender's own record of the handover link back to it.
         self.baton_threads: dict[str, str] = {}
 
     @staticmethod
@@ -112,6 +113,15 @@ class DeliverySession:
                 }
                 delivery["note"] = BATON_NOTE
             return {"delivery": delivery, "notices": notices}
+
+    def baton_sent(self, receipt: dict) -> None:
+        """Remember the thread of a baton this session handed off (every part's thread)."""
+        if not receipt.get("baton_id"):
+            return
+        parts = receipt.get("messages") or [receipt]
+        for thread_id in {receipt.get("thread_id"), *(p.get("thread_id") for p in parts)}:
+            if thread_id:
+                self.baton_threads[thread_id] = receipt["baton_id"]
 
     def baton_context(self, context: dict) -> dict:
         """``memory_context`` for a received baton's thread, with its ``baton_id`` added."""

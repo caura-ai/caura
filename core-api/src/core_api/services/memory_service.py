@@ -955,6 +955,13 @@ async def create_memory(
         from core_api.session_context import current_session_id
 
         stamp_capture(data, current_session_id())
+    # Handoff batons (D5): a baton_id only from its sender or a receiver, and
+    # the one waiting on this agent when the write names none. Platform writes
+    # are nobody's handoff work.
+    if not is_inferred and not system_values:
+        from core_api.services.baton_tagging import tag_write
+
+        data.metadata = await tag_write(data.tenant_id, data.agent_id, data.metadata, get_storage_client())
     if system_values:
         data.metadata = data.metadata or {}
         for key, value in system_values.items():
@@ -1734,6 +1741,14 @@ async def create_memories_bulk(
     for item in items:
         if item.metadata:
             item.metadata = sanitize_caller_metadata(item.metadata)
+    # Handoff batons (D5), as for a single write; the broker's captures and
+    # platform batches are nobody's handoff work.
+    if not (from_broker or is_inferred or system_values):
+        from core_api.services.baton_tagging import BatonTagger
+
+        tagger = BatonTagger(data.tenant_id, data.agent_id, sc)
+        for item in items:
+            item.metadata = await tagger.tag(item.metadata)
     for item, values in zip(items, system_values or [], strict=False):
         if values:
             item.metadata = item.metadata or {}
@@ -5024,6 +5039,13 @@ async def update_memory(
         # corrupting the audit-log ``old`` field.
         raw_meta = mem.get("metadata_")
         old_meta = raw_meta if raw_meta is not None else mem.get("metadata")
+        # Handoff batons (D5): a new baton_id only from that baton's sender or a
+        # receiver (the editor, else the row's author).
+        new_baton = (data.metadata or {}).get("baton_id")
+        if new_baton is not None and new_baton != (old_meta or {}).get("baton_id"):
+            from core_api.services.baton_tagging import tag_write
+
+            data.metadata = await tag_write(tenant_id, agent_id or mem.get("agent_id"), data.metadata, sc)
         # oss-0814-l-08 — PATCH is the third surface on which a caller supplies
         # metadata, and the only one C25's write-time snapshot cannot see: that
         # set was taken from the CREATE payload and is already on its way to (or

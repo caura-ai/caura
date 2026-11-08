@@ -207,5 +207,6 @@ async def test_the_bus_status_lists_a_batons_rows(client: AsyncClient):
         ("b", "delivered", None),
     ]
     assert rows[0]["accepted_at"] and rows[1]["accepted_at"] is None
+    assert {x["from_agent"] for x in rows} == {"sender"}
     other = await client.get(f"{PREFIX}/batons/{baton_id}/recipients", params={"tenant_id": f"o-{tenant}"})
     assert other.json() == {"recipients": []}

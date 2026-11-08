@@ -98,7 +98,7 @@ async def tool(monkeypatch):
             result = {
                 "source": "caura-bus",
                 "tenant_id": "tenant",
-                "thread_id": "t-baton",
+                "thread_id": state.get("context_thread", "t-baton"),
                 "message_id": "msg-1",
             }
         else:
@@ -213,6 +213,23 @@ async def test_memory_context_for_a_received_baton_carries_its_id(tool):
     await tool.call({"op": "wait", "args": {"timeout": 0}})
     after = await tool.call({"op": "memory_context", "args": {"delivery_id": "d-1"}})
     assert after["baton_id"] == BATON_ID and after["thread_id"] == "t-baton"
+
+
+async def test_memory_context_for_a_sent_baton_carries_its_id(tool):
+    # HB-14: the sender's own writes about the handover carried no baton_id.
+    tool.state["context_thread"] = "t1"
+    before = await tool.call({"op": "memory_context", "args": {"message_id": "m1"}})
+    assert "baton_id" not in before
+    await tool.call({"op": "handoff", "args": HANDOFF})
+    after = await tool.call({"op": "memory_context", "args": {"message_id": "m1"}})
+    assert after["baton_id"] == BATON_ID and after["thread_id"] == "t1"
+
+
+async def test_a_plain_request_sets_no_baton(tool):
+    tool.state["context_thread"] = "t1"
+    tool.state["receipt"] = {k: v for k, v in SEND_RECEIPT.items() if k not in {"baton", "messages"}}
+    await tool.call({"op": "handoff", "args": HANDOFF})
+    assert "baton_id" not in await tool.call({"op": "memory_context", "args": {"message_id": "m1"}})
 
 
 @pytest.mark.parametrize("sender", ["caura:corrections", "human:user-1", "c"])

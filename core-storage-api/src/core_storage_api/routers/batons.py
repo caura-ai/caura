@@ -60,7 +60,7 @@ async def record_recipients(tenant_id: str, baton_id: UUID, body: RecipientsIn) 
 
 @router.get("/{baton_id}/recipients")
 async def list_recipients(tenant_id: str, baton_id: UUID) -> dict:
-    """The baton's receiver rows: ``{"recipients": [{agent_id, state, accepted_at, accepted_via}]}``."""
+    """The baton's receiver rows: ``{"recipients": [{agent_id, from_agent, state, accepted_at, accepted_via}]}``."""
     _require_tenant(tenant_id)
     return {"recipients": await _svc.baton_recipients_for_baton(tenant_id, str(baton_id))}
 
