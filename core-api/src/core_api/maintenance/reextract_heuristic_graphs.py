@@ -25,11 +25,20 @@ Each runs as ``POST /admin/memories/{id}/re-extract`` does
 (``extraction_rerun._rerun``): the row is read again, its links, relations and
 orphaned entities are reset, and ``process_entity_extraction`` runs, inline
 here. What follows any extraction follows this one: the subject write-back, and
-contradiction detection, which may mark older memories outdated. The links are
-read again afterwards. A graph that is still all ``mentioned`` means the
-providers failed again, and five such failures or errors in a row stop the run.
-A rerun finds only what is still left: a memory extracted again has the model's
-graph, unless it came back empty.
+contradiction detection, which may mark older memories outdated.
+
+The worker says what it did, and that, not the graph, is the outcome: the
+providers failed again (``heuristic_again``) or it raised (``error``), and five
+of those in a row stop the run. A model graph that names no subject has the
+heuristic's shape, so the graph alone cannot tell them apart; it is reported
+``extracted_no_subject``, which is not a failure. But it is also all that comes
+back from a job that reached no provider at all: the extractor then degrades by
+itself without telling the worker, and logs only
+``entity_extraction_degraded_to_heuristic``. So twenty of those in a row, with
+no ``extracted`` between them, stop the run as well; a model names no subject
+far less often than that. Either stop makes the exit status 1. A rerun picks
+again what is still left: what failed, what came back empty, and the model
+graphs that named no subject.
 
 Only memories created in the window are found. The listing pages by
 ``created_at`` and carries no edit time, so a memory written before ``--since``
@@ -74,6 +83,7 @@ EMPTY = "empty"
 NOT_LIVE = "not_live"
 NO_CONTENT = "no_content"
 EXTRACTED = "extracted"
+EXTRACTED_NO_SUBJECT = "extracted_no_subject"
 HEURISTIC_AGAIN = "heuristic_again"
 EMPTY_AGAIN = "empty_again"
 GONE = "gone"
@@ -82,6 +92,8 @@ ERROR = "error"
 # int32, the ones Vertex refused before caura#2367. Rebuilt from the row as it is
 # now, so a type enrichment changed after the write makes it approximate.
 SEED_PAST_INT32 = "seed_past_int32"
+# 1 for the tenant whose extractions stopped the run.
+STOPPED = "stopped"
 OUTCOMES = (
     MODEL,
     HEURISTIC,
@@ -89,17 +101,23 @@ OUTCOMES = (
     NOT_LIVE,
     NO_CONTENT,
     EXTRACTED,
+    EXTRACTED_NO_SUBJECT,
     HEURISTIC_AGAIN,
     EMPTY_AGAIN,
     GONE,
     ERROR,
     SEED_PAST_INT32,
+    STOPPED,
 )
 
 # A run whose extractions keep failing has a cause that will fail the rest the
 # same way; stopping leaves the remainder for a rerun.
 _MAX_CONSECUTIVE_FAILURES = 5
 _FAILURES = (HEURISTIC_AGAIN, ERROR)
+# A model names no subject in at most about one graph in fourteen (prod,
+# 2026-11-08: 11 of 154 had links but no subject). A run of these this long
+# means no model is answering.
+_MAX_NO_SUBJECT_IN_A_ROW = 20
 _PAGE = 500
 _INT32_MAX = 2**31 - 1
 # The scan stops this long before now. With failing providers the worker waits
@@ -177,7 +195,7 @@ async def reextract(sc, tenant_id: str, memory_id: str) -> str:
     if memory is None or memory.get("deleted_at") is not None:
         return GONE
     await sc.reset_entity_artifacts(tenant_id, memory_id)
-    await process_entity_extraction(
+    done = await process_entity_extraction(
         UUID(memory_id),
         tenant_id,
         memory.get("fleet_id"),
@@ -185,10 +203,16 @@ async def reextract(sc, tenant_id: str, memory_id: str) -> str:
         memory.get("content") or "",
         memory.get("memory_type") or "fact",
     )
-    # It records its own failures and never raises, so the graph is the answer.
+    # It records its own failures and never raises, so what it did is the answer.
+    if done == "heuristic":
+        return HEURISTIC_AGAIN
+    if done == "failed":
+        return ERROR
+    if done == "skipped":
+        return GONE
     # The subject is written back from a subject link, so the links alone tell.
     links = (await sc.get_entity_links_for_memories([memory_id], tenant_id)).get(memory_id, [])
-    return {MODEL: EXTRACTED, HEURISTIC: HEURISTIC_AGAIN, EMPTY: EMPTY_AGAIN}[graph_shape(None, links)]
+    return {MODEL: EXTRACTED, HEURISTIC: EXTRACTED_NO_SUBJECT, EMPTY: EMPTY_AGAIN}[graph_shape(None, links)]
 
 
 async def _reextract_all(
@@ -196,14 +220,21 @@ async def _reextract_all(
 ) -> bool:
     """Extract each again, ``per_second`` started a second, ``concurrency`` at once.
 
-    Returns whether it stopped on failures in a row.
+    Returns whether it stopped, on failures in a row or on model graphs with no
+    subject in a row.
     """
     slots = asyncio.Semaphore(concurrency)
     running: set[asyncio.Task] = set()
     failures_in_a_row = 0
+    no_subject_in_a_row = 0
+
+    def _stopping() -> bool:
+        return (
+            failures_in_a_row >= _MAX_CONSECUTIVE_FAILURES or no_subject_in_a_row >= _MAX_NO_SUBJECT_IN_A_ROW
+        )
 
     async def _one(memory_id: str) -> None:
-        nonlocal failures_in_a_row
+        nonlocal failures_in_a_row, no_subject_in_a_row
         try:
             outcome = await reextract(sc, tenant_id, memory_id)
         except Exception:
@@ -211,13 +242,19 @@ async def _reextract_all(
             outcome = ERROR
         counts[outcome] += 1
         failures_in_a_row = failures_in_a_row + 1 if outcome in _FAILURES else 0
+        # Only a graph the model plainly made ends that run; an empty one, a
+        # failure or a row gone since could all come from no provider too.
+        if outcome == EXTRACTED:
+            no_subject_in_a_row = 0
+        elif outcome == EXTRACTED_NO_SUBJECT:
+            no_subject_in_a_row += 1
         print(f"{tenant_id} {memory_id} {outcome}", flush=True)
         slots.release()
 
     for memory_id in memory_ids:
         await slots.acquire()
         # Checked once a slot is free: the extraction that freed it is counted.
-        if failures_in_a_row >= _MAX_CONSECUTIVE_FAILURES:
+        if _stopping():
             slots.release()
             break
         # Each extraction starts contradiction detection in a task of its own;
@@ -230,8 +267,16 @@ async def _reextract_all(
     await asyncio.gather(*running)
     if failures_in_a_row >= _MAX_CONSECUTIVE_FAILURES:
         logger.error("stopping after %d failures in a row", failures_in_a_row)
-        return True
-    return False
+    elif no_subject_in_a_row >= _MAX_NO_SUBJECT_IN_A_ROW:
+        logger.error(
+            "stopping after %d model graphs in a row that name no subject: is a provider "
+            "answering? look for entity_extraction_degraded_to_heuristic in this job's logs",
+            no_subject_in_a_row,
+        )
+    else:
+        return False
+    counts[STOPPED] = 1
+    return True
 
 
 async def _extraction_on(tenant_id: str) -> bool:
@@ -321,7 +366,12 @@ async def _run(args: argparse.Namespace) -> int:
         # Pub/Sub has the message, and the process exits right after this.
         await get_event_bus().stop()
         await get_storage_client().close()
-    return 1 if outcomes[ERROR] or outcomes[HEURISTIC_AGAIN] else 0
+    return exit_status(outcomes)
+
+
+def exit_status(outcomes: Counter) -> int:
+    """1 when an extraction failed or the run stopped; 0 otherwise."""
+    return 1 if outcomes[ERROR] or outcomes[HEURISTIC_AGAIN] or outcomes[STOPPED] else 0
 
 
 def main(argv: list[str] | None = None) -> int:
