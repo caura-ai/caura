@@ -3,8 +3,9 @@
 ``reextract_heuristic_graphs`` walks each tenant's memories created in a window,
 reads their entity links, and with ``--apply`` resets and extracts again those
 whose graph has the heuristic's shape. Storage is a small in-memory fake and
-``process_entity_extraction`` is patched where the command imports it, so these
-pin what it reads, what it picks, and what it calls.
+``process_entity_extraction`` is patched where the command imports it, leaving a
+graph behind and saying what made it, so these pin what it reads, what it picks,
+what it calls, and what it makes of the answer.
 """
 
 from __future__ import annotations
@@ -98,18 +99,27 @@ class _Storage:
 
 @pytest.fixture
 def setup(monkeypatch):
-    """Install a storage fake, an extraction that leaves ``graph`` behind, and tenant settings."""
+    """Install a storage fake, an extraction that leaves ``graph`` behind (or
+    ``graph(memory_id)``) and says ``done``, and tenant settings."""
 
     def _install(
-        rows, links=None, *, graph=_MODEL_LINKS, enabled=True, provider="vertex"
+        rows,
+        links=None,
+        *,
+        graph=_MODEL_LINKS,
+        done="model",
+        enabled=True,
+        provider="vertex",
     ):
         sc = _Storage(rows, links)
         extract = AsyncMock()
 
         async def _extract(memory_id, tenant_id, *_args):
             await extract(memory_id, tenant_id, *_args)
-            if graph:
-                sc.links[str(memory_id)] = list(graph)
+            made = graph(str(memory_id)) if callable(graph) else graph
+            if made:
+                sc.links[str(memory_id)] = list(made)
+            return done
 
         monkeypatch.setattr(rx, "get_storage_client", lambda: sc)
         monkeypatch.setattr(rx, "process_entity_extraction", _extract)
@@ -333,16 +343,107 @@ async def test_apply_resets_and_extracts_each_picked_memory_again(setup, capsys)
     assert f"t1 {heuristic['id']} extracted" in capsys.readouterr().out
 
 
-async def test_a_graph_still_all_mentions_counts_against_the_run(setup):
-    """The providers failed again: the extraction wrote the heuristic's graph."""
+async def test_a_fallback_again_counts_against_the_run(setup):
+    """The providers failed again: the worker settled for the heuristic's graph."""
     memory = _memory(_SINCE + timedelta(days=1))
     _sc, _extract = setup(
-        [memory], {memory["id"]: _HEURISTIC_LINKS}, graph=_HEURISTIC_LINKS
+        [memory],
+        {memory["id"]: _HEURISTIC_LINKS},
+        graph=_HEURISTIC_LINKS,
+        done="heuristic",
     )
 
     outcomes = await _run(apply=True)
 
     assert outcomes[rx.HEURISTIC_AGAIN] == 1
+
+
+async def test_a_model_graph_that_names_no_subject_is_not_a_failure(setup, capsys):
+    """Its links are all ``mentioned``, the heuristic's shape, but the model
+    made it. Read from the graph, a dozen of these would stop the run as if the
+    providers were failing."""
+    rows = [_memory(_SINCE + timedelta(minutes=i)) for i in range(12)]
+    _sc, extract = setup(
+        rows,
+        {r["id"]: _HEURISTIC_LINKS for r in rows},
+        graph=_HEURISTIC_LINKS,
+        done="model",
+    )
+
+    outcomes = await _run(apply=True)
+
+    assert extract.await_count == 12
+    assert outcomes[rx.EXTRACTED_NO_SUBJECT] == 12
+    assert outcomes[rx.HEURISTIC_AGAIN] == 0
+    assert outcomes[rx.STOPPED] == 0
+    assert f"t1 {rows[0]['id']} extracted_no_subject" in capsys.readouterr().out
+    assert rx.exit_status(outcomes) == 0
+
+
+async def test_twenty_model_graphs_in_a_row_with_no_subject_stop_the_run(setup):
+    """All a job that reached no provider gets back: the extractor degrades by
+    itself and the worker hears nothing of it."""
+    rows = [_memory(_SINCE + timedelta(minutes=i)) for i in range(25)]
+    _sc, extract = setup(
+        rows,
+        {r["id"]: _HEURISTIC_LINKS for r in rows},
+        graph=_HEURISTIC_LINKS,
+        done="model",
+    )
+
+    outcomes = await _run(apply=True, tenants=("t1", "t1"))
+
+    # Two at once: the twentieth lands while the twenty-first may be in flight.
+    assert 20 <= extract.await_count <= 21
+    assert outcomes[rx.EXTRACTED_NO_SUBJECT] == extract.await_count
+    assert outcomes[rx.STOPPED] == 1
+    assert outcomes[rx.HEURISTIC] == 25  # the second tenant was not scanned
+    assert rx.exit_status(outcomes) == 1
+
+
+async def test_a_graph_with_a_subject_ends_a_run_of_ones_without(setup):
+    """Twelve, then one the model plainly made, then twelve more: no twenty in
+    a row, so nothing stops."""
+    rows = [_memory(_SINCE + timedelta(minutes=i)) for i in range(25)]
+    middle = rows[12]["id"]
+    _sc, extract = setup(
+        rows,
+        {r["id"]: _HEURISTIC_LINKS for r in rows},
+        graph=lambda memory_id: (
+            _MODEL_LINKS if memory_id == middle else _HEURISTIC_LINKS
+        ),
+        done="model",
+    )
+
+    outcomes = await _run(apply=True)
+
+    assert extract.await_count == 25
+    assert outcomes[rx.EXTRACTED] == 1
+    assert outcomes[rx.EXTRACTED_NO_SUBJECT] == 24
+    assert outcomes[rx.STOPPED] == 0
+
+
+@pytest.mark.parametrize(
+    ("done", "outcome"),
+    [
+        pytest.param("failed", rx.ERROR, id="the-worker-raised"),
+        pytest.param("skipped", rx.GONE, id="gone-held-or-edited-meanwhile"),
+    ],
+)
+async def test_what_the_worker_did_without_a_graph_is_reported_as_such(
+    setup, done, outcome
+):
+    """Its links were reset and nothing was written, so they would read
+    ``empty_again``: a failure would pass for a model that found nothing."""
+    memory = _memory(_SINCE + timedelta(days=1))
+    _sc, _extract = setup(
+        [memory], {memory["id"]: _HEURISTIC_LINKS}, graph=[], done=done
+    )
+
+    outcomes = await _run(apply=True)
+
+    assert outcomes[outcome] == 1
+    assert outcomes[rx.EMPTY_AGAIN] == 0
 
 
 async def test_an_empty_graph_again_is_not_a_failure(setup):
@@ -363,7 +464,10 @@ async def test_apply_stops_after_five_failures_in_a_row(setup):
     memory in the list; five in a row is enough to stop and look."""
     rows = [_memory(_SINCE + timedelta(minutes=i)) for i in range(12)]
     _sc, extract = setup(
-        rows, {r["id"]: _HEURISTIC_LINKS for r in rows}, graph=_HEURISTIC_LINKS
+        rows,
+        {r["id"]: _HEURISTIC_LINKS for r in rows},
+        graph=_HEURISTIC_LINKS,
+        done="heuristic",
     )
 
     outcomes = await _run(apply=True, tenants=("t1", "t1"))
@@ -372,6 +476,7 @@ async def test_apply_stops_after_five_failures_in_a_row(setup):
     assert 5 <= extract.await_count <= 6
     assert outcomes[rx.HEURISTIC_AGAIN] == extract.await_count
     assert outcomes[rx.HEURISTIC] == 12  # the second tenant was not scanned
+    assert outcomes[rx.STOPPED] == 1
 
 
 async def test_a_memory_gone_since_the_scan_is_not_reset(setup):
@@ -418,8 +523,9 @@ async def test_the_run_waits_for_the_contradiction_detection_its_extractions_sta
         finished.append(memory_id)
 
     async def _extract(memory_id, *args):
-        await extract_and_detect(memory_id, *args)
+        done = await extract_and_detect(memory_id, *args)
         tasks.track_task(_detection(str(memory_id)))
+        return done
 
     monkeypatch.setattr(rx, "process_entity_extraction", _extract)
 
@@ -470,3 +576,18 @@ def test_bad_arguments_are_refused(argv):
 def test_a_time_without_a_zone_is_utc():
     assert rx._timestamp("2026-10-10T23:00:00") == _SINCE
     assert rx._timestamp("2026-10-10T23:00:00Z") == _SINCE
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "status"),
+    [
+        pytest.param({rx.EXTRACTED: 3, rx.EXTRACTED_NO_SUBJECT: 2}, 0, id="clean"),
+        pytest.param({rx.EXTRACTED: 3, rx.ERROR: 1}, 1, id="an-error"),
+        pytest.param(
+            {rx.EXTRACTED: 3, rx.HEURISTIC_AGAIN: 1}, 1, id="a-fallback-again"
+        ),
+        pytest.param({rx.EXTRACTED_NO_SUBJECT: 20, rx.STOPPED: 1}, 1, id="stopped"),
+    ],
+)
+def test_the_exit_status(outcomes, status):
+    assert rx.exit_status(Counter(outcomes)) == status

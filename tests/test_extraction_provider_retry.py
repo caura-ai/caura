@@ -301,7 +301,9 @@ async def _run(extract: AsyncMock, sc: MagicMock, content: str) -> SimpleNamespa
         patch.object(w.asyncio, "sleep", new=seen.sleep),
         patch("core_api.tasks.track_task", side_effect=close_scheduled_coro),
     ):
-        await w.process_entity_extraction(uuid4(), "t1", None, "a1", content, "fact")
+        seen.done = await w.process_entity_extraction(
+            uuid4(), "t1", None, "a1", content, "fact"
+        )
     return seen
 
 
@@ -338,6 +340,7 @@ async def test_a_provider_failure_is_asked_again_and_the_answer_used():
     assert _within_jitter(_waits(seen), ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S[:1])
     seen.record.assert_not_awaited()
     assert _audits(seen) == []
+    assert seen.done == "model"
 
 
 async def test_providers_failing_on_every_try_are_recorded_and_audited_as_degraded():
@@ -357,6 +360,7 @@ async def test_providers_failing_on_every_try_are_recorded_and_audited_as_degrad
     assert _audits(seen) == [
         {"entities_count": 0, "relations_count": 0, "degraded": True}
     ]
+    assert seen.done == "heuristic"
 
 
 async def test_a_graph_the_heuristic_found_is_written_and_audited_as_degraded():
@@ -371,6 +375,7 @@ async def test_a_graph_the_heuristic_found_is_written_and_audited_as_degraded():
     [audit] = _audits(seen)
     assert audit["degraded"] is True
     assert audit["entities_count"] == 1
+    assert seen.done == "heuristic"
 
 
 async def test_a_model_graph_is_audited_as_before():
@@ -387,6 +392,7 @@ async def test_a_model_graph_is_audited_as_before():
     assert "degraded" not in audit
     seen.sleep.assert_not_awaited()
     seen.record.assert_not_awaited()
+    assert seen.done == "model"
 
 
 @pytest.mark.parametrize(
@@ -413,6 +419,7 @@ async def test_a_row_that_no_longer_wants_the_extraction_is_not_asked_again(row)
     seen.sleep.assert_not_awaited()
     seen.record.assert_not_awaited()
     assert _audits(seen) == []
+    assert seen.done == "skipped"
 
 
 async def test_a_row_gone_during_the_last_wait_is_not_recorded_or_audited():
@@ -429,6 +436,7 @@ async def test_a_row_gone_during_the_last_wait_is_not_recorded_or_audited():
     assert extract.await_count == len(ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S) + 1
     seen.record.assert_not_awaited()
     assert _audits(seen) == []
+    assert seen.done == "skipped"
 
 
 async def test_end_to_end_a_rate_limited_provider_is_asked_again_then_recorded(chain):
@@ -521,6 +529,7 @@ async def test_an_unretryable_failure_is_not_asked_again_but_is_recorded_apart(
     [audit] = _audits(seen)
     assert audit["degraded"] is True
     assert audit["entities_count"] == entities
+    assert seen.done == "heuristic"
 
 
 async def test_end_to_end_a_refused_request_is_recorded_without_asking_again(chain):
@@ -537,3 +546,75 @@ async def test_end_to_end_a_refused_request_is_recorded_without_asking_again(cha
     assert _audits(seen) == [
         {"entities_count": 0, "relations_count": 0, "degraded": True}
     ]
+
+
+# ---------------------------------------------------------------------------
+# What the worker says it did
+# ---------------------------------------------------------------------------
+
+_MODEL_GRAPH = ExtractedGraph(
+    entities=[ExtractedEntity(canonical_name="anna bergstrom", entity_type="person")]
+)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param(None, id="gone-or-held"),
+        pytest.param(
+            {"id": "m", "deleted_at": None, "content": "edited text"}, id="edited"
+        ),
+    ],
+)
+async def test_a_model_graph_for_a_row_gone_or_edited_meanwhile_is_skipped(row):
+    """The model answered, but the row was gone or held, or its text changed,
+    before anything was written. The re-extraction command reads this; the
+    links alone would say the model found nothing."""
+    sc = _sc(_NAMED, row=row)
+
+    seen = await _run(AsyncMock(return_value=_MODEL_GRAPH), sc, _NAMED)
+
+    sc.bulk_upsert_entities.assert_not_awaited()
+    assert seen.done == "skipped"
+
+
+@pytest.mark.parametrize("recheck", ["dropped", "edited"])
+@pytest.mark.parametrize(
+    "answers",
+    [
+        pytest.param([], id="after-the-links"),
+        pytest.param(["live"], id="after-every-write"),
+    ],
+)
+async def test_a_row_dropped_or_edited_while_its_graph_was_written_is_skipped(
+    answers, recheck
+):
+    """The graph written was purged, or replaced by the edit's own extraction,
+    whichever of the two checks after the writes saw it."""
+    sc = _sc(_NAMED)
+    rechecks = AsyncMock(side_effect=[*answers, recheck])
+    with patch.object(w, "_recheck_row_after_writes", new=rechecks):
+        seen = await _run(AsyncMock(return_value=_MODEL_GRAPH), sc, _NAMED)
+
+    assert rechecks.await_count == len(answers) + 1
+    assert seen.done == "skipped"
+
+
+async def test_a_row_still_live_after_its_graph_was_written_keeps_the_answer():
+    rechecks = AsyncMock(return_value="live")
+    with patch.object(w, "_recheck_row_after_writes", new=rechecks):
+        seen = await _run(AsyncMock(return_value=_MODEL_GRAPH), _sc(_NAMED), _NAMED)
+
+    assert rechecks.await_count == 2
+    assert seen.done == "model"
+
+
+async def test_an_extraction_that_raises_says_it_failed():
+    """It logs and records the failure and returns, as it always has; it now
+    also says so, where the graph would only show what was reset."""
+    sc = _sc(_NAMED)
+    sc.bulk_upsert_entities = AsyncMock(side_effect=RuntimeError("storage 503"))
+
+    seen = await _run(AsyncMock(return_value=_MODEL_GRAPH), sc, _NAMED)
+
+    assert seen.done == "failed"

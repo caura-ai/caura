@@ -384,6 +384,20 @@ _DEGRADED_UNRETRYABLE_TASK = "entity_extraction_degraded_unretryable"
 # What ``_extract_asking_again`` hands back for a graph the heuristic made.
 _ProviderFailure = ProvidersUnavailableError | UnretryableProviderFailureError
 
+# What ``process_entity_extraction`` did:
+#   * ``heuristic``: it settled for the heuristic's graph after a provider failure;
+#   * ``model``: it kept the extractor's graph. With no usable provider the
+#     extractor degrades by itself and nothing is handed back (see
+#     ``_extract_asking_again``), so that graph is the heuristic's too;
+#   * ``skipped``: the row was gone, held or edited before its graph was written,
+#     or while it was, so what this extracted is not the memory's graph;
+#   * ``failed``: it raised, and logged and recorded the failure.
+# Either graph may be empty. The schedulers that fire it and forget ignore this.
+# ``maintenance.reextract_heuristic_graphs`` reads it, because a model graph that
+# names no subject has the heuristic's shape and the graph alone cannot tell them
+# apart.
+ExtractionOutcome = Literal["model", "heuristic", "skipped", "failed"]
+
 
 async def _still_wants_extraction(memory_id: UUID, tenant_id: str, content: str) -> bool:
     """Is the row still live, and still holding this text?
@@ -601,7 +615,7 @@ async def process_entity_extraction(
     agent_id: str,
     content: str,
     memory_type: str,
-) -> None:
+) -> ExtractionOutcome:
     # CAURA-595: today this runs in-process in core-api (every scheduler
     # in the codebase wraps it in `track_task`). That satisfies the
     # literal "off the hot path" framing but not the original intent of
@@ -634,8 +648,9 @@ async def process_entity_extraction(
 
         extracted = await _extract_asking_again(memory_id, tenant_id, content, memory_type, tenant_cfg)
         if extracted is None:
-            return
+            return "skipped"
         graph, degraded_by = extracted
+        made_by: ExtractionOutcome = "heuristic" if degraded_by is not None else "model"
         # Only an extraction the heuristic finished is marked, so the audit
         # entries of every other run read as they always have.
         degraded = {"degraded": True} if degraded_by is not None else {}
@@ -654,7 +669,7 @@ async def process_entity_extraction(
                     resource_id=memory_id,
                     detail={"entities_count": 0, "relations_count": 0, **degraded},
                 )
-            return
+            return made_by
 
         sc = get_storage_client()
 
@@ -683,7 +698,7 @@ async def process_entity_extraction(
                 memory_id,
                 len(graph.entities),
             )
-            return
+            return "skipped"
         # M-39: the same check for an edit. Nothing is written yet, so there is
         # nothing to reset, and the edit scheduled its own extraction of the new
         # text.
@@ -694,7 +709,7 @@ async def process_entity_extraction(
                 memory_id,
                 len(graph.entities),
             )
-            return
+            return "skipped"
 
         blocklist = tenant_cfg.entity_blocklist
 
@@ -1093,7 +1108,7 @@ async def process_entity_extraction(
                 # below would write the old text's graph back.
                 recheck = await _recheck_row_after_writes(sc, memory_id, tenant_id, content)
                 if recheck in ("dropped", "edited"):
-                    return
+                    return "skipped"
                 # Surface any FK violations from the per-item path
                 # (storage-side reports ``error="fk_violation"`` for rows
                 # whose memory_id or entity_id no longer exists). Same
@@ -1429,12 +1444,16 @@ async def process_entity_extraction(
         # "the persistence block ran". Cross-link discovery sets it too, and
         # gating on the narrower reading would leak exactly the links it creates.
         #
-        # The result is not branched on: nothing follows this, so ``live`` and
-        # ``unknown`` are the same instruction — do nothing — and ``dropped`` has
-        # already purged by the time it returns, as ``edited`` has reset and
-        # re-extracted.
-        if wrote_graph_rows:
-            await _recheck_row_after_writes(sc, memory_id, tenant_id, content)
+        # Only the outcome branches on the result. ``live`` and ``unknown`` mean
+        # do nothing; ``dropped`` has already purged by the time it returns, and
+        # ``edited`` has reset and re-extracted, so the graph written above is no
+        # longer this memory's.
+        if wrote_graph_rows and await _recheck_row_after_writes(sc, memory_id, tenant_id, content) in (
+            "dropped",
+            "edited",
+        ):
+            return "skipped"
+        return made_by
 
     except Exception as exc:
         logger.exception("Entity extraction failed for memory %s (non-fatal)", memory_id)
@@ -1485,3 +1504,4 @@ async def process_entity_extraction(
         # alternative was losing the audit record outright.
         if wrote_graph_rows:
             await _recheck_row_after_writes(sc, memory_id, tenant_id, content)
+        return "failed"
