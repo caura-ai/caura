@@ -24,7 +24,7 @@ under-reports, which is the failure mode that passes:
    as emitted by no tool (L-138); the name is resolved through ``mcp_server``.
 
 ``emitted_codes`` follows paths 1-4 through helper calls within ``mcp_server``.
-TWO MORE PATHS reach a caller from outside the handler (L-138), and each has
+THREE MORE PATHS reach a caller from outside the handler (L-138), and each has
 its own entry point below:
 
 5. The dispatcher. ``_InstrumentedMCPServer.call_tool`` runs every handler
@@ -37,6 +37,11 @@ its own entry point below:
    ``HTTPException`` raised below such a ``try`` is a code the tool can
    answer — ``CONFLICT`` and ``DUPLICATE_MEMORY`` on ``caura_write``,
    ``AGENT_TRUST_TOO_LOW`` on ``caura_manage`` (``service_codes``).
+7. Admission. Before the handler runs, ``call_tool`` charges the call's rate
+   budget and tenant slot (``_admitted``) and answers ``RATE_LIMITED`` when
+   either is spent, but only for the tools ``_admission`` names. So path 5
+   leaves ``_admitted`` out, and its codes go to those tools alone
+   (``admission_codes``).
 
 Path 6 is a whole-program walk, so where it stops matters as much as what it
 finds. It follows calls whose target resolves to a function or class defined
@@ -184,8 +189,12 @@ def emitted_codes(
 
 
 def dispatch_codes() -> frozenset[str]:
-    """Codes ``call_tool`` can answer for whichever tool it dispatched."""
-    return emitted_codes("call_tool")
+    """Codes ``call_tool`` can answer for whichever tool it dispatched.
+
+    Without ``_admitted``'s, which are path 7's: passed as already walked, so
+    the walk stops there.
+    """
+    return emitted_codes("call_tool", frozenset({_ADMISSION_GATE}))
 
 
 # --- path 6: the service layer ----------------------------------------------
@@ -623,7 +632,43 @@ def reached_definitions(function_name: str) -> frozenset[str]:
     return frozenset(f"{m}.{q}" for m, q in _service_walk(function_name).reached)
 
 
+# --- path 7: admission ------------------------------------------------------
+
+_ADMISSION_GATE = "_admitted"
+
+
+def admitted_tools() -> frozenset[str]:
+    """The tools ``_admission`` charges: the names it compares ``tool`` to."""
+    functions, _ = _module()
+    found: set[str] = set()
+    for sub in ast.walk(functions["_admission"]):
+        if not (
+            isinstance(sub, ast.Compare)
+            and isinstance(sub.left, ast.Name)
+            and sub.left.id == "tool"
+        ):
+            continue
+        for comparator in sub.comparators:
+            for const in ast.walk(comparator):
+                if isinstance(const, ast.Constant) and isinstance(const.value, str):
+                    found.add(const.value)
+    return frozenset(found)
+
+
+def admission_codes(function_name: str) -> frozenset[str]:
+    """Codes ``call_tool`` answers in place of running this handler, if it is
+    one ``_admission`` charges. A handler is named for its tool."""
+    if function_name not in admitted_tools():
+        return frozenset()
+    return emitted_codes(_ADMISSION_GATE)
+
+
 def tool_codes(function_name: str) -> frozenset[str]:
-    """Every code a caller of this handler can receive: paths 1-6."""
+    """Every code a caller of this handler can receive: paths 1-7."""
     own = emitted_codes(function_name)
-    return own | dispatch_codes() | service_codes(function_name)
+    return (
+        own
+        | dispatch_codes()
+        | service_codes(function_name)
+        | admission_codes(function_name)
+    )

@@ -1555,7 +1555,9 @@ class IngestCommitRequest(TenantScopedBody):
     fleet_id: str | None = None
     agent_id: str = "ingest-agent"
     url: str | None = None
-    facts: list[IngestFact]
+    # One bulk batch, as ``POST /memories/bulk`` takes, on the same rate
+    # limit. A preview can yield more, which a caller commits in batches.
+    facts: list[IngestFact] = Field(min_length=1, max_length=BULK_MAX_ITEMS)
     run_id: str | None = None
     # A2: optional. When the caller echoes the ``doc_hash`` from a prior
     # preview, commit stamps it on every persisted memory's metadata so

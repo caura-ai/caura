@@ -25,7 +25,7 @@ pytestmark = pytest.mark.unit
 _ROUTES_DIR = (
     pathlib.Path(__file__).resolve().parents[1] / "core-api" / "src" / "core_api"
 )
-_LIMIT_DECORATORS = {"write_limit", "search_limit", "write_bulk_limit"}
+_LIMIT_DECORATORS = {"write_limit", "search_limit", "write_bulk_limit", "llm_limit"}
 
 
 def _decorator_names(fn: ast.AsyncFunctionDef | ast.FunctionDef) -> set[str]:

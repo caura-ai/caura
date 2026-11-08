@@ -384,8 +384,22 @@ class Settings(BaseSettings):
     # Bulk write fans out to BULK_MAX_ITEMS=100 memories per request, so a
     # stricter request-level cap keeps the effective memory-write ceiling
     # aligned with the single-write path (2/s * 100 = 200/s vs 10/s single).
+    # One budget for every door that writes up to 100 rows a call:
+    # POST /memories/bulk, POST /ingest/commit and MCP ``caura_write(items)``.
     rate_limit_write_bulk: str = "2/second"
     rate_limit_search: str = "30/second"
+    # One budget for the routes that call a model per request (ingest preview
+    # and file, interview submit, insights generate, evolve report) and their
+    # MCP twins. A preview makes one extraction call per section, up to
+    # ``INGEST_MAX_SECTIONS``, so this counts requests, not model calls.
+    rate_limit_llm: str = "10/minute"
+    # The limits above are per credential, and an org may hold hundreds, so
+    # each also has a tenant-wide bucket: five times its rate, so that agents
+    # working at once under one tenant do not throttle each other.
+    rate_limit_write_tenant: str = "50/second"
+    rate_limit_write_bulk_tenant: str = "10/second"
+    rate_limit_search_tenant: str = "150/second"
+    rate_limit_llm_tenant: str = "50/minute"
     # Per-tenant in-flight concurrency caps (see
     # ``middleware/per_tenant_concurrency.py`` for full rationale).
     # Per-instance state — fleet-wide cap is roughly
@@ -407,6 +421,12 @@ class Settings(BaseSettings):
     # few concurrent cold embeds. Fast-fails 429 like the other
     # route-entry caps rather than queueing behind TEI.
     per_tenant_embed_concurrency: int = 6
+    # Per-tenant cap on in-flight model-calling requests (the
+    # ``rate_limit_llm`` routes and tools). One preview runs up to four
+    # extraction calls at a time and holds a worker thread for its chunking,
+    # so a tenant's previews are what fill the provider quota and thread pool
+    # every tenant's recall shares. Fast-fails 429 like the caps above.
+    per_tenant_llm_concurrency: int = 2
     # Deeper bulkhead at the storage roundtrip itself
     # (CAURA-602 follow-up). Smaller than the route-entry caps above
     # because each request only holds the storage slot for the actual
@@ -641,6 +661,7 @@ class Settings(BaseSettings):
         "per_tenant_search_concurrency",
         "per_tenant_write_concurrency",
         "per_tenant_embed_concurrency",
+        "per_tenant_llm_concurrency",
         "per_tenant_storage_write_concurrency",
         "per_tenant_storage_search_concurrency",
         "contradiction_detection_concurrency",

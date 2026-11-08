@@ -30,6 +30,21 @@ def _request(tenant_id: str = "t1", *facts: str, **kwargs) -> IngestCommitReques
     )
 
 
+def _unvalidated_request(tenant_id: str, *facts: str, **kwargs) -> IngestCommitRequest:
+    """A commit the request model refuses: no facts, or more than ``BULK_MAX_ITEMS``.
+
+    The route takes 1 to ``BULK_MAX_ITEMS`` facts, so a commit is one bulk batch.
+    The service still handles the rest (an empty list is a no-op, and a longer
+    one is chunked, which keeps H-07 fixed if the cap is ever raised), and these
+    build the request past the model to keep that pinned.
+    """
+    return IngestCommitRequest.model_construct(
+        tenant_id=tenant_id,
+        facts=[IngestFact(content=c, suggested_type="fact") for c in facts],
+        **kwargs,
+    )
+
+
 @pytest.fixture
 def captured(monkeypatch):
     """Patch the external collaborators of ``ingest_commit`` and capture all calls.
@@ -527,7 +542,7 @@ async def test_pre_loop_dedup_failure_falls_through_to_per_fact_path(
 @pytest.mark.asyncio
 async def test_empty_facts_list_is_a_noop(captured):
     """No facts → no DB writes, no bulk_find, but still returns a valid run_id."""
-    req = _request("t1")  # no facts
+    req = _unvalidated_request("t1")  # no facts
     result = await ingest_service.ingest_commit(request=req)
 
     assert result["facts_extracted"] == 0
@@ -845,7 +860,7 @@ async def test_a_commit_larger_than_one_batch_persists_every_fact(captured):
     n = BULK_MAX_ITEMS + 50
     facts = [f"h07 fact number {i}" for i in range(n)]
 
-    req = _request("t1", *facts)
+    req = _unvalidated_request("t1", *facts)
     result = await ingest_service.ingest_commit(request=req)
 
     assert result["facts_extracted"] == n
@@ -877,7 +892,7 @@ async def test_every_batch_shares_one_attempt_id(captured):
     from core_api.constants import BULK_MAX_ITEMS
 
     facts = [f"h07 shared attempt id {i}" for i in range(BULK_MAX_ITEMS + 5)]
-    req = _request("t1", *facts, run_id="run-h07")
+    req = _unvalidated_request("t1", *facts, run_id="run-h07")
     await ingest_service.ingest_commit(request=req)
 
     assert len(captured.bulk_attempt_ids) == 2, captured.bulk_attempt_ids
@@ -907,7 +922,7 @@ async def test_a_failed_batch_stops_the_run_and_reports_what_landed(captured, ca
     # Second batch (0-based index 1) fails; the third must never be attempted.
     captured.raise_http_on_batch = {1: HTTPException(status_code=504, detail="burned")}
 
-    req = _request("t1", *facts)
+    req = _unvalidated_request("t1", *facts)
     with caplog.at_level("ERROR"):
         result = await ingest_service.ingest_commit(request=req)
 

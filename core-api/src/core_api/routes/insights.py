@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import Field, field_validator, model_validator
 
 from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.constants import INSIGHTS_FOCUS_MODES, VALID_SCOPES
+from core_api.middleware.per_tenant_concurrency import per_tenant_slot
+from core_api.middleware.rate_limit import llm_limit
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.audit_service import log_action
 from core_api.services.caller_identity import resolve_caller_and_gate
@@ -65,8 +67,11 @@ class InsightsRequest(TenantScopedBody):
 
 
 @router.post("/insights/generate", responses={200: {"model": _oar.InsightsResponse}})
+@llm_limit
 async def generate_insights_endpoint(
+    request: Request,
     body: InsightsRequest,
+    response: Response,
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Generate insights over stored memories.
@@ -109,17 +114,18 @@ async def generate_insights_endpoint(
         action="insights",
     )
 
-    await check_and_increment(body.tenant_id, "insights")
-
     from core_api.services.insights_service import generate_insights
 
-    result = await generate_insights(
-        tenant_id=body.tenant_id,
-        focus=body.focus,
-        scope=body.scope,
-        fleet_id=body.fleet_id,
-        agent_id=caller_agent_id,
-    )
+    # The slot first, so a run refused for want of one is not charged.
+    async with per_tenant_slot("llm", body.tenant_id):
+        await check_and_increment(body.tenant_id, "insights")
+        result = await generate_insights(
+            tenant_id=body.tenant_id,
+            focus=body.focus,
+            scope=body.scope,
+            fleet_id=body.fleet_id,
+            agent_id=caller_agent_id,
+        )
 
     await log_action(
         tenant_id=body.tenant_id,
