@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.6.0...collaboration-clients-v0.7.0) (2026-11-09)
+
+
+### Features
+
+* **batons:** tag handoff findings with baton_id on the write path ([#2365](https://github.com/caura-ai/caura/issues/2365)) ([ff17f39](https://github.com/caura-ai/caura/commit/ff17f39f3692f1049a7e4264b858ed86b7aa0fd6))
+
 ## [0.6.0](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.5.0...collaboration-clients-v0.6.0) (2026-11-05)
 
 
