@@ -1347,6 +1347,9 @@ Follow these steps in order:
 
 1. Extract subject_a: the entity Statement A is primarily about
    (person, company, project, product, etc.). Use a short noun phrase.
+   The subject is what the claim is about, not the person or agent who
+   recorded, changed or confirmed it ("Nera Sol changed the gateway's
+   region to X" is about the gateway's region).
 2. Extract subject_b: the entity Statement B is primarily about.
 3. Decide same_subject. Set true ONLY when subject_a and subject_b refer
    to the SAME real-world entity. Treat these as same_subject=true:
@@ -1872,6 +1875,8 @@ For EACH candidate index decide, applying the rules in order:
    to the SAME real-world entity (exact name / known alias / role+name in
    context / unambiguously resolved pronoun). false for two people sharing a
    name, different companies/products/projects/teams, or any uncertainty.
+   The subject is what a statement is about, not the person or agent who
+   recorded, changed or confirmed it.
 2. non_conflict_reason (exactly one): "none"; "temporal_supersession"
    (BOTH statements are records of PAST events that stay true as history —
    "hired in 2020" / "promoted in 2023"; NOT for current-state claims where
