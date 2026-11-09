@@ -37,7 +37,13 @@ from core_api.services.agent_service import (
     enforce_fleet_write,
 )
 from core_api.services.audit_service import log_action, log_cross_tenant_read
+from core_api.services.interview_cursor_access import (
+    cursor_read_access,
+    visible_cursor_search_rows,
+    visible_document_collections,
+)
 from core_api.services.interview_service import (
+    WATERMARK_COLLECTION,
     refuse_system_collection,
     refuse_system_read,
     without_system_rows,
@@ -808,12 +814,8 @@ async def list_collections(
         fleet_id=fleet_id,
         readable_tenant_ids=(auth.readable_tenant_ids if auth.is_cross_tenant_read else None),
     )
-    return JSONResponse(
-        {
-            "collections": result.get("collections", []),
-            "count": result.get("count", 0),
-        }
-    )
+    collections = visible_document_collections(result.get("collections", []))
+    return JSONResponse({"collections": collections, "count": len(collections)})
 
 
 # ``{doc_id:path}`` on the two by-id routes because a doc_id may contain "/":
@@ -838,9 +840,17 @@ async def get_document(
     auth.enforce_readable_tenant(tenant_id)
     refuse_system_read(collection)
     sc = get_storage_client()
-    doc = await sc.get_document(tenant_id=tenant_id, collection=collection, doc_id=doc_id)
+    access = cursor_read_access(auth, tenant_id) if collection == WATERMARK_COLLECTION else None
+    doc = await sc.get_document(
+        tenant_id=tenant_id,
+        collection=collection,
+        doc_id=doc_id,
+        read=access is None,
+    )
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
+    if access:
+        access.require(doc)
     return _dict_to_out(doc)
 
 
@@ -857,6 +867,10 @@ async def query_documents(
     """
     auth.enforce_readable_tenant(body.tenant_id)
     refuse_system_read(body.collection)
+    access = cursor_read_access(auth, body.tenant_id) if body.collection == WATERMARK_COLLECTION else None
+    where = access.query_where(body.where) if access else body.where
+    if access and where is None:
+        return []
 
     sc = get_storage_client()
     docs = await sc.query_documents(
@@ -864,7 +878,7 @@ async def query_documents(
             "tenant_id": body.tenant_id,
             "collection": body.collection,
             "fleet_id": body.fleet_id,
-            "where": body.where,
+            "where": where,
             "order_by": body.order_by,
             "order": body.order,
             "limit": body.limit,
@@ -872,7 +886,7 @@ async def query_documents(
         }
     )
 
-    return [_dict_to_out(d) for d in docs]
+    return [_dict_to_out(d) for d in docs if access is None or access.allows(d)]
 
 
 @router.post("/skills/installable", responses={200: {"model": list[DocOut]}})
@@ -931,10 +945,23 @@ async def list_documents(
     auth.enforce_readable_tenant(tenant_id)
     refuse_system_read(collection)
     sc = get_storage_client()
-    docs = await sc.list_documents(
-        tenant_id=tenant_id, collection=collection, fleet_id=fleet_id, limit=limit, offset=offset
-    )
-    return [_dict_to_out(d) for d in docs]
+    access = cursor_read_access(auth, tenant_id) if collection == WATERMARK_COLLECTION else None
+    if access and access.owner_agent_id is not None:
+        docs = await sc.query_documents(
+            {
+                "tenant_id": tenant_id,
+                "collection": collection,
+                "fleet_id": fleet_id,
+                "limit": limit,
+                "offset": offset,
+                "where": access.query_where({}),
+            }
+        )
+    else:
+        docs = await sc.list_documents(
+            tenant_id=tenant_id, collection=collection, fleet_id=fleet_id, limit=limit, offset=offset
+        )
+    return [_dict_to_out(d) for d in docs if access is None or access.allows(d)]
 
 
 @router.delete("/documents/{doc_id:path}", status_code=204)
@@ -1000,10 +1027,19 @@ async def search_documents(
     Embeds ``body.query`` via the configured embedding provider, then ranks
     documents by cosine similarity. ``collection=None`` searches across all
     collections in the tenant; supplying ``collection`` scopes the search.
+
+    Watermark ownership is checked after storage selects ``top_k``. A scoped
+    or broad search may therefore return a short/empty page even when other
+    owned watermark rows exist. Use ``/interview/cursor`` for a known node or
+    ``/documents/query`` with pagination to enumerate owned watermarks.
+    Unindexed-count diagnostics are omitted for watermark and broad searches
+    because the aggregate count cannot enforce watermark ownership.
     """
     auth.enforce_readable_tenant(body.tenant_id)
     if body.collection is not None:
         refuse_system_read(body.collection)
+    if body.collection == WATERMARK_COLLECTION:
+        cursor_read_access(auth, body.tenant_id)
     if auth.tenant_id:
         # Rate-limit against the home tenant (not every tenant in the
         # readable set) — mirrors recall's pattern. The home tenant pays
@@ -1054,6 +1090,7 @@ async def search_documents(
             }
         )
     )
+    pairs = visible_cursor_search_rows(pairs, auth, body.tenant_id)
     items = [
         {
             "collection": d["collection"],
@@ -1098,14 +1135,19 @@ async def search_documents(
     unindexed = 0
     if not items:
         try:
-            unindexed = await sc.count_unindexed_documents(
-                {
-                    "tenant_id": body.tenant_id,
-                    "collection": body.collection,
-                    "fleet_id": body.fleet_id,
-                    "readable_tenant_ids": (auth.readable_tenant_ids if auth.is_cross_tenant_read else None),
-                }
-            )
+            # The aggregate count has no ownership filter. Restrict this
+            # optional diagnostic to an ordinary, explicitly named collection.
+            if body.collection is not None and body.collection != WATERMARK_COLLECTION:
+                unindexed = await sc.count_unindexed_documents(
+                    {
+                        "tenant_id": body.tenant_id,
+                        "collection": body.collection,
+                        "fleet_id": body.fleet_id,
+                        "readable_tenant_ids": (
+                            auth.readable_tenant_ids if auth.is_cross_tenant_read else None
+                        ),
+                    }
+                )
         except Exception:
             # Diagnostics must never turn a successful empty search into an
             # error — the caller still gets its (correct) zero.

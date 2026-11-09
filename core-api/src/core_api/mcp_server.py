@@ -36,7 +36,7 @@ from core_api.agent_ids import (
     effective_write_agent_id,
 )
 from core_api.audit_actor import MCP_SURFACE, actor_detail, audit_credential_kind, audit_principal
-from core_api.auth import get_admin_key
+from core_api.auth import CAURA_KEY_CREDENTIAL, AuthContext, get_admin_key
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.constants import (
     DEFAULT_DOC_SEARCH_TOP_K,
@@ -115,7 +115,13 @@ from core_api.services.correction_notices import finish_notices, start_notices
 from core_api.services.correction_sender import compact as compact_correction
 from core_api.services.correction_sender import confirm_as_agent, send_correction
 from core_api.services.entity_service import get_entity
+from core_api.services.interview_cursor_access import (
+    cursor_read_access,
+    visible_cursor_search_rows,
+    visible_document_collections,
+)
 from core_api.services.interview_service import (
+    WATERMARK_COLLECTION,
     refuse_system_collection,
     refuse_system_read,
     without_system_rows,
@@ -198,6 +204,11 @@ def _dumps(payload) -> str:
 # ── Auth via context vars ──
 
 _tenant_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("mcp_tenant_id")
+# Request-scoped credential provenance for cursor reads. Tool arguments never
+# establish ownership, and the shared-key branch must be explicitly identified.
+_cursor_auth_var: contextvars.ContextVar[AuthContext | None] = contextvars.ContextVar(
+    "mcp_cursor_auth", default=None
+)
 # Holds the gateway-verified ``X-Agent-ID``, so this ContextVar is the MCP
 # plane's twin of ``AuthContext.agent_id`` and its single construction point
 # for ``AgentIdentity``.
@@ -474,6 +485,8 @@ class MCPAuthMiddleware:
 
             via_gateway = False
             is_admin_credential = False
+            shared_key_verified = False
+            standalone_admin = False
             # What names the rate-limit bucket, as REST auth names it (L-69):
             # only a credential something here verified.
             rate_limit_key: str | None = None
@@ -501,6 +514,7 @@ class MCPAuthMiddleware:
                     )
                     return
                 rate_limit_key = f"credential:{api_key}"
+                shared_key_verified = True
                 # Key verified. Resolve the tenant exactly as REST does on this
                 # path: standalone's fixed tenant, else the caller's
                 # ``X-Tenant-ID``, else no tenant at all.
@@ -558,6 +572,7 @@ class MCPAuthMiddleware:
                 from core_api.standalone import get_standalone_tenant_id
 
                 _tenant_id_var.set(get_standalone_tenant_id())
+                standalone_admin = True
             elif not api_key:
                 _tenant_id_var.set(_UNAUTH if admin_key else _NO_AUTH)
             else:
@@ -695,6 +710,18 @@ class MCPAuthMiddleware:
             # one on this response. See ``core_api.session_context``.
             from core_api.session_context import run_with_mcp_session
 
+            cursor_auth_token = _cursor_auth_var.set(
+                AuthContext(
+                    tenant_id=tenant_header if is_admin_credential else _get_tenant(),
+                    is_admin=is_admin_credential,
+                    credential_id=CAURA_KEY_CREDENTIAL if shared_key_verified else None,
+                    agent_id=_get_agent_id(),
+                    agent_id_verified=via_gateway,
+                    org_role="admin" if standalone_admin else _org_role_var.get(),
+                    credential_kind=_credential_kind_var.get(),
+                    is_install_credential=_is_install_credential(),
+                )
+            )
             principal_token = audit_principal.set(
                 {
                     **_audit_actor(),
@@ -720,6 +747,7 @@ class MCPAuthMiddleware:
                 await run_with_mcp_session(scope, receive, send, self.app)
             finally:
                 audit_principal.reset(principal_token)
+                _cursor_auth_var.reset(cursor_auth_token)
             return
 
         await self.app(scope, receive, send)
@@ -3272,7 +3300,15 @@ async def caura_doc(
     """Structured-document CRUD. Op-dispatched. Replaces the 4 prior
     `caura_doc_*` tools."""
     t0 = time.perf_counter()
-    if err := _check_auth():
+    cursor_auth = _cursor_auth_var.get()
+    admin_cursor_read = bool(
+        cursor_auth
+        and cursor_auth.is_admin
+        and cursor_auth.tenant_id
+        and collection == WATERMARK_COLLECTION
+        and op in {"read", "query", "search"}
+    )
+    if not admin_cursor_read and (err := _check_auth()):
         return err
     _valid_ops = {"write", "read", "query", "delete", "list_collections", "search"}
     if op not in _valid_ops:
@@ -3300,7 +3336,8 @@ async def caura_doc(
         return err
     if op == "delete" and (refuse := _refuse_tenant_admin_op("delete documents")):
         return _with_latency(refuse, t0)
-    tenant_id = _get_tenant()
+    tenant_id = cursor_auth.tenant_id if admin_cursor_read and cursor_auth else _get_tenant()
+    assert tenant_id is not None
     # Raw authenticated identity for the delete trust gate (None ⇒ no agent
     # context). Must not fall back to the ``mcp-agent`` default.
     caller_agent_id = _get_agent_id()
@@ -3310,7 +3347,9 @@ async def caura_doc(
     # silent-empty-result UX is its own class of paper cut, and ``delete``
     # is a destructive op that was inadvertently un-guarded under the
     # earlier write-only scope.
-    if refuse := _refuse_default_agent_on_gateway(agent_id):
+    if not (collection == WATERMARK_COLLECTION and op in {"read", "query", "search"}) and (
+        refuse := _refuse_default_agent_on_gateway(agent_id)
+    ):
         return _with_latency(refuse, t0)
 
     # Cross-tenant credentials widen READ ops (list_collections, read, query,
@@ -3329,13 +3368,20 @@ async def caura_doc(
             # (REST refuses them the same way).
             if op in {"read", "query", "search"}:
                 refuse_system_read(collection)
+            cursor_access = None
+            if collection == WATERMARK_COLLECTION and op in {"read", "query", "search"}:
+                cursor_access = cursor_read_access(cursor_auth, tenant_id)
+                readable = None  # Cursor ownership never widens across tenants.
             if op == "list_collections":
                 collections_resp = await sc.list_document_collections(
                     tenant_id=tenant_id,
                     fleet_id=fleet_id,
                     readable_tenant_ids=readable if op in READ_OPS else None,
                 )
-                rows = [(c["name"], c["count"]) for c in collections_resp.get("collections", [])]
+                rows = [
+                    (c["name"], c["count"])
+                    for c in visible_document_collections(collections_resp.get("collections", []))
+                ]
                 # Active-only count correction for skills: the listing
                 # must not advertise non-active skills in the count —
                 # they're invisible to read/query/search, so a count that
@@ -3744,12 +3790,15 @@ async def caura_doc(
                     collection=collection,  # type: ignore[arg-type]
                     doc_id=doc_id,
                     readable_tenant_ids=readable,
+                    **({"read": False} if cursor_access else {}),
                 )
                 # One reply for a missing doc and a hidden skill below, so neither
                 # leaks existence; the envelope, as REST's 404 (M-23). It was prose.
                 not_found = _error_response("NOT_FOUND", f"Not found: {collection}/{doc_id}")
                 if not doc:
                     return _with_latency(not_found, t0)
+                if cursor_access:
+                    cursor_access.require(doc)
                 # Active-only gate for agent-facing skill reads. A
                 # candidate / staged / quarantined / rejected skill is
                 # in-flight or blocked and must not surface to agents —
@@ -3770,6 +3819,21 @@ async def caura_doc(
                 )
             if op == "query":
                 effective_where = dict(where or {})
+                if cursor_access:
+                    scoped_where = cursor_access.query_where(effective_where)
+                    if scoped_where is None:
+                        return _with_latency(
+                            _dumps(
+                                {
+                                    "collection": collection,
+                                    "count": 0,
+                                    "items": [],
+                                    "results": [],
+                                }
+                            ),
+                            t0,
+                        )
+                    effective_where = scoped_where
                 if collection == SKILLS_COLLECTION:
                     caller_status = effective_where.get("status")
                     if caller_status is not None and caller_status != _AGENT_VISIBLE_SKILL_STATUS:
@@ -3810,7 +3874,11 @@ async def caura_doc(
                 )
                 # The SQL filter above already scopes skills to 'active'; the
                 # per-row check keeps it so whatever storage returns.
-                docs = [d for d in docs if not _skill_hidden_from_agent(d)]
+                docs = [
+                    d
+                    for d in docs
+                    if not _skill_hidden_from_agent(d) and (cursor_access is None or cursor_access.allows(d))
+                ]
                 items = [{"doc_id": _doc_field(d, "doc_id"), "data": _doc_field(d, "data")} for d in docs]
                 return _with_latency(
                     # ``items`` is canonical everywhere (D1); ``results`` stays for
@@ -3877,6 +3945,7 @@ async def caura_doc(
                     "status": search_status,
                 }
                 pairs = without_system_rows(await sc.search_documents_vector(search_data))
+                pairs = visible_cursor_search_rows(pairs, cursor_auth, tenant_id)
                 # A broad search (collection=None) has no status filter in
                 # the SQL, so drop the non-active skill rows it returned.
                 pairs = [d for d in pairs if not _skill_hidden_from_agent(d)]

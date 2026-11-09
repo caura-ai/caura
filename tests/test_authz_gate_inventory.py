@@ -385,6 +385,7 @@ WRITE_GATE_ALLOWLIST: dict[str, str] = {
     ),
     "POST /api/v1/documents/query": "read: POST-bodied query, gated by enforce_readable_tenant",
     "POST /api/v1/documents/search": "read: POST-bodied query, gated by enforce_readable_tenant",
+    "POST /api/v1/interview/cursor": "read: credential-owned cursor, gated by cursor_read_access",
     "POST /api/v1/skills/installable": "read: POST-bodied query, gated by enforce_readable_tenant",
     # Unauthenticated bootstrap. These take no ``auth`` parameter at all — they
     # render an install script for a machine that does not have a credential

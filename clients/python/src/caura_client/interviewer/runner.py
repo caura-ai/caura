@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..client import Caura
-from ..exceptions import AuthError, CauraAPIError, NotFoundError, TransportError
+from ..exceptions import AuthError, CauraAPIError, TransportError
 from .discovery import HARNESS_CLAUDE_CODE, HARNESS_CURSOR, Transcript
 from .parser import count_lines, scan_events
 from .windows import Window, build_windows, window_is_worth_interviewing
@@ -107,16 +107,21 @@ def _log(cfg: RunConfig, msg: str) -> None:
 
 
 def read_watermark(mc: Caura, node_id: str) -> int:
-    """Server-side cursor for this file; -1 when never interviewed."""
+    """Read the authorized cursor; failures must never restart a stream."""
     try:
-        doc = mc.get_document(watermark_doc_id(node_id), collection=WATERMARK_COLLECTION)
-    except NotFoundError:
-        return -1
-    data = doc.get("data") if isinstance(doc, dict) else None
-    try:
-        return int(data.get("last_seq", -1)) if isinstance(data, dict) else -1
-    except (TypeError, ValueError):
-        return -1
+        return mc.get_interview_cursor(node_id, tenant_id=mc.tenant_id)
+    except AuthError as exc:
+        if exc.status_code != 403:
+            raise
+        raise AuthError(
+            403,
+            "Cursor read refused. Check the selected tenant and use the owning agent credential, "
+            "an organization/system admin credential, or the tenant-wide shared deployment key. "
+            "Install credentials and non-admin tenant credentials without a verified agent identity "
+            "cannot resume streams with this adapter, even if they can submit windows. "
+            "Changing --agent-id does not grant stream ownership.",
+            details=exc.details,
+        ) from exc
 
 
 def _submit_window(mc: Caura, cfg: RunConfig, node_id: str, window: Window) -> dict:
@@ -182,17 +187,20 @@ def run_file(
     if not scan.events:
         # Pure-noise tail: nothing to interview, nothing to submit (server
         # requires >= 1 event). Local-only rescan next run; bounded.
-        result.skipped_reason = f"no interview-worthy events in {scan.last_complete_line - cursor_from + 1} new lines"
+        result.skipped_reason = (
+            f"no interview-worthy events in {scan.last_complete_line - cursor_from + 1} new lines"
+        )
         return result
 
-    for window in build_windows(
-        scan.events, cursor_from=cursor_from, eof_line_index=scan.last_complete_line
-    ):
+    for window in build_windows(scan.events, cursor_from=cursor_from, eof_line_index=scan.last_complete_line):
         if windows_budget - result.windows_submitted <= 0:
             _log(cfg, f"{transcript.path.name}: windows budget exhausted, resuming next run")
             break
         if not window_is_worth_interviewing(window, min_events=cfg.min_events, flush=cfg.flush):
-            _log(cfg, f"{transcript.path.name}: final window below dribble gate ({len(window.events)} events), deferred")
+            _log(
+                cfg,
+                f"{transcript.path.name}: final window below dribble gate ({len(window.events)} events), deferred",
+            )
             break
         if cfg.dry_run:
             print(

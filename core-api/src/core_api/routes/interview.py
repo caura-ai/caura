@@ -52,7 +52,9 @@ from core_api.middleware.rate_limit import llm_limit
 from core_api.routes.memories import _resolve_rest_write_agent_id
 from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.agent_service import enforce_fleet_write, resolve_write_agent
+from core_api.services.interview_cursor_access import cursor_read_access
 from core_api.services.interview_service import (
+    WATERMARK_COLLECTION,
     InterviewJobPermanentlyFailedError,
     advance_watermark,
     enqueue_interview_job,
@@ -61,6 +63,7 @@ from core_api.services.interview_service import (
     run_interview,
     run_interview_schedule,
     synthesis_sem,
+    watermark_doc_id,
 )
 from core_api.services.organization_settings import get_settings_for_display
 
@@ -109,6 +112,44 @@ def _log_task_exc(task: asyncio.Task) -> None:
     exc = task.exception()
     if exc is not None:
         logger.error("interview submit: fire-and-forget synthesis task crashed", exc_info=exc)
+
+
+class InterviewCursorIn(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
+    node_id: str = Field(min_length=1, max_length=200)
+    tenant_id: str | None = None
+
+
+class InterviewCursorOut(BaseModel):
+    last_seq: int = Field(ge=-1)
+
+
+@router.post("/interview/cursor", response_model=InterviewCursorOut)
+async def get_interview_cursor(
+    body: InterviewCursorIn,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Read a stream cursor as its verified owner or a tenant administrator.
+
+    Only an authorized absent stream returns -1. Reads use the primary so
+    replica lag cannot reset a committed stream. This endpoint never writes.
+    """
+    access = cursor_read_access(auth, body.tenant_id)
+    doc = await get_storage_client().get_document(
+        tenant_id=access.tenant_id,
+        collection=WATERMARK_COLLECTION,
+        doc_id=watermark_doc_id(body.node_id),
+        read=False,
+    )
+    if doc is None:
+        return InterviewCursorOut(last_seq=-1)
+    access.require(doc)
+    data = doc.get("data")
+    last_seq = data.get("last_seq") if isinstance(data, dict) else None
+    if type(last_seq) is not int or last_seq < 0:
+        raise HTTPException(503, "Interview cursor is unavailable")
+    return InterviewCursorOut(last_seq=last_seq)
 
 
 class InterviewEventIn(BaseModel):
@@ -180,6 +221,13 @@ async def submit_interview(
     last advanced it (409 otherwise). And ``cursor_to`` may run at most
     ``INTERVIEW_MAX_CURSOR_ADVANCE`` past the stream's committed watermark
     (422 otherwise).
+
+    Cursor reads have separate authority requirements. Install credentials
+    and non-admin tenant credentials without a verified agent identity may
+    submit here but cannot read ``/interview/cursor``. The Python adapter's
+    online run/status therefore require the stream's verified agent credential,
+    an org/system admin, or the tenant-wide shared deployment key. A submitted
+    ``agent_id`` does not grant cursor ownership.
 
     A window for a fleet node must also cite an unused ``interview_request``
     that was delivered to that node (403 otherwise), whatever the credential

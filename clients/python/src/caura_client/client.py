@@ -72,8 +72,7 @@ def _check_key_transport(base_url: str, allow_insecure_http: bool | None) -> Non
             f"Refusing to send the API key to {host}: base_url uses plain HTTP to a "
             "non-loopback host, so the key would cross the network in cleartext. Use https://, or "
             "pass allow_insecure_http=True (or set CAURA_ALLOW_INSECURE_HTTP=true) to accept the "
-            "risk, e.g. on a trusted private network."
-            + invalid_env
+            "risk, e.g. on a trusted private network." + invalid_env
         )
 
 
@@ -338,6 +337,23 @@ class Caura:
         )
         self._raise_for_status(response)
         return self._json(response)
+
+    def get_interview_cursor(self, node_id: str, *, tenant_id: str | None = None) -> int:
+        """Read an authorized stream cursor; -1 means the stream does not exist.
+
+        Requires the stream's verified agent credential, an org/system admin,
+        or the tenant-wide deployment key. All HTTP and transport errors propagate.
+        """
+        body: dict[str, Any] = {"node_id": node_id}
+        if tenant_id is not None:
+            body["tenant_id"] = tenant_id
+        response = self._request("POST", "/api/v1/interview/cursor", json=body)
+        self._raise_for_status(response)
+        payload = self._json(response)
+        last_seq = payload.get("last_seq") if isinstance(payload, dict) else None
+        if type(last_seq) is not int or last_seq < -1:
+            raise CauraAPIError(response.status_code, "Invalid interview cursor response")
+        return last_seq
 
     def submit_interview(
         self,
