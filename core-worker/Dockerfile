@@ -9,7 +9,7 @@
 # lands in the image. Runtime activation is further gated by
 # docker-entrypoint.sh on DD_API_KEY.
 ARG DD_APM_ENABLED=false
-FROM datadog/serverless-init:1@sha256:30c3fcfd9c642ae064f716f6dcb05d9b11ce232146cc71fecb47e09b23b242f0 AS dd-bin
+FROM datadog/serverless-init:1@sha256:6cb81a6eb0af744cbcda72047db3d1bd97ea5743d4e61dc7fe04a630b7b5100f AS dd-bin
 # python:3.12-slim (3.12.15 on 2026-10-07) and uv are pinned by digest, as their
 # tags move (L-67); Dependabot's docker updates propose each new digest.
 FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS dd-apm-true
