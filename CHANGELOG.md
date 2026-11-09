@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.47.0](https://github.com/caura-ai/caura/compare/backend-v3.46.2...backend-v3.47.0) (2026-11-09)
+
+
+### Features
+
+* **batons:** tag handoff findings with baton_id on the write path ([#2365](https://github.com/caura-ai/caura/issues/2365)) ([ff17f39](https://github.com/caura-ai/caura/commit/ff17f39f3692f1049a7e4264b858ed86b7aa0fd6))
+
 ## [3.46.2](https://github.com/caura-ai/caura/compare/backend-v3.46.1...backend-v3.46.2) (2026-11-09)
 
 
