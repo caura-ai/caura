@@ -97,6 +97,34 @@ and `source_uri = "caura-bus:message/<message_id>"`. A `baton_id` read filter
 on `caura_list`, REST list and recall finds them (HB-10). `supersedes_id`
 stays server-owned.
 
+The tag does not depend on the model passing it. In the HB-14 two-agent run
+only 9 of 25 receiver writes carried it: Claude never called `memory_context`,
+and a sender's `memory_context` lacked the `baton_id`. So:
+
+- core-api's write path (`services/baton_tagging.py`; MCP `caura_write`, REST
+  single and bulk create) tags an agent's write that names no `baton_id` when
+  exactly one baton is waiting on that agent (`baton_recipient` row
+  `delivered`, under 7 days), and marks it `_system.baton_tagged = "auto"`.
+  With none or several waiting the write stays untagged (explicit tagging
+  still works), unless its bus provenance (`source: caura-bus` from
+  `memory_context`) names a waiting baton's `message_id`. The row is the
+  write path's copy of the bus state: as on recall, it is refreshed from the
+  bus at most every 30 s per (agent, baton), and a write waits at most 300 ms
+  for that; on a timeout or error the row's last known state stands. Writes
+  by a person and platform writes (crystallizer, insights, the broker's
+  captures) are never tagged.
+- With a bus configured, a `metadata.baton_id` on a create or update is kept
+  only when the writer is that baton's sender or one of its receivers; anyone
+  else gets 422. Standalone OSS (no bus, no batons) keeps an explicit
+  `baton_id` unchecked, as before.
+- caura-bus-mcp's `memory_context` adds the `baton_id` for a baton this session
+  sent as well as received, so the sender's own record of the handover links
+  back.
+
+A receiver that accepted on recall (`accepted`) is no longer tagged
+automatically: the row has no "done" signal to end the window. It tags by
+hand, as the notice asks.
+
 **D6. Duplicates.** The baton links, it never copies. Receiver instructions
 say: cite the baton, do not re-write the linked memories. `memory_exposure`
 (migration 072) shows which linked memories each receiver actually read.

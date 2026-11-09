@@ -30,6 +30,14 @@ class TestQualityGateConstants:
 
 @pytest.mark.unit
 class TestCreateMemoryQualityGate:
+    @pytest.fixture(autouse=True)
+    def no_waiting_batons(self, monkeypatch):
+        """create_memory looks up the writer's handoff batons (D5) before the gate."""
+        monkeypatch.setattr(
+            "core_api.clients.storage_client.CoreStorageClient.list_baton_notices",
+            AsyncMock(return_value=[]),
+        )
+
     @pytest.fixture
     def mock_db(self):
         return AsyncMock()

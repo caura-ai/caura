@@ -339,7 +339,7 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
     requests: state=awaiting|overdue|unanswered, limit=20. Lists sent requests and retires listed notices.
     memory_context: exactly one of delivery_id or message_id. Read-only provenance for an
       explicit Caura memory write; no bodies, keys or memory writes. Sent fanout needs delivery_id.
-      For a received handoff baton it also carries baton_id.
+      For a handoff baton you received or sent it also carries baton_id.
     handoff: to*, goal*, idempotency_key*, decisions=[], failed_approaches=[{what, why}],
       open_questions=[], memory_ids=[] (UUIDs, max 50), doc_ids=[{collection, doc_id}],
       thread_id, expect_reply_within_seconds (default 7 days). Hands work over as a baton
@@ -419,7 +419,10 @@ async def dispatch(
     match params:
         case Handoff():
             # A baton is an ordinary request: same allow-list and consultation bounds.
-            return baton_receipt(await dispatch(app, "send", params.send(), leased=leased))
+            receipt = baton_receipt(await dispatch(app, "send", params.send(), leased=leased))
+            # The sender's own writes for this work link back too (memory_context).
+            app.delivery.baton_sent(receipt)
+            return receipt
         case MemoryContext():
             return app.delivery.baton_context(await app.bus.memory_context(**params.model_dump()))
         case Wait():

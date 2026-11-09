@@ -8211,17 +8211,22 @@ class PostgresService:
             return int(result.rowcount or 0)  # type: ignore[attr-defined]
 
     async def baton_recipients_for_baton(self, tenant_id: str, baton_id: str) -> list[dict]:
-        """Every receiver row of one baton, by agent: what the bus's status read merges in."""
+        """Every receiver row of one baton, by agent: what the bus's status read merges in.
+
+        ``from_agent`` lets core-api check that a writer tagging a memory with
+        this baton is its sender or one of its receivers.
+        """
         r = BatonRecipient
         async with get_read_session() as session:
             rows = await session.execute(
-                select(r.agent_id, r.state, r.accepted_at, r.accepted_via)
+                select(r.agent_id, r.from_agent, r.state, r.accepted_at, r.accepted_via)
                 .where(r.tenant_id == tenant_id, r.baton_id == UUID(baton_id))
                 .order_by(r.agent_id)
             )
             return [
                 {
                     "agent_id": row.agent_id,
+                    "from_agent": row.from_agent,
                     "state": row.state,
                     "accepted_at": _iso(row.accepted_at),
                     "accepted_via": row.accepted_via,
