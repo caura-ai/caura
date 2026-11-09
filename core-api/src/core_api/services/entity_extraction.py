@@ -137,6 +137,14 @@ Rules:
          mentioned: nera sol
   Otherwise every agent that reports a correction becomes a different subject,
   and no correction ever supersedes the fact another agent reported.
+- "V AS THE S" PUTS THE SUBJECT LAST. In "<who> recorded / set / listed /
+  assigned V as the S", V is the value and S is the subject:
+    "Jora Kelm recorded canary release as the Orvella API's rollout policy."
+      -> subject: orvella api rollout policy   object: canary release
+  Name the subject with its attribute (the rollout policy, the read-replica
+  count, the storage tier), the same way whichever verb the writer used, so
+  "set X's retention to 30 days" and "extended X's retention to 90 days" share
+  the subject "x retention".
 - KEEP a bracketed qualifier the content attaches to a name. "Acme (Delaware)"
   and "Acme (Ohio)" are two different organizations, so they are "acme
   (delaware)" and "acme (ohio)" — never a bare "acme". Dropping the qualifier
