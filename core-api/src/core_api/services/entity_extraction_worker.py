@@ -26,6 +26,7 @@ from core_api.constants import (
     MIN_ENTITY_NAME_LENGTH,
 )
 from core_api.schemas import RelationUpsert
+from core_api.services.abbreviations import defined_abbreviations, initials, looks_like_abbreviation
 from core_api.services.audit_service import log_action
 from core_api.services.entity_extraction import (
     ExtractedGraph,
@@ -148,6 +149,81 @@ def _merge_alias_into(item: dict, *names: str) -> None:
         if name and name not in aliases:
             aliases.append(name)
     attrs["_aliases"] = aliases
+
+
+def _apply_defined_abbreviations(
+    content: str, filtered: list[tuple[str, str, str]]
+) -> tuple[list[tuple[str, str, str]], dict[str, str]]:
+    """Fold an abbreviation the memory defines into the name it abbreviates.
+
+    Returns the entities with a trailing "(abbr)" dropped from the name and any
+    separately extracted bare abbreviation removed (its role passes to the full
+    name when it was the subject), plus ``{full_name: abbreviation}`` for the
+    alias write. See ``core_api.services.abbreviations``.
+    """
+    found = defined_abbreviations(content, [name for name, _type, _role in filtered])
+    if not found:
+        return filtered, {}
+    abbrs = {abbr for _full, abbr in found.values()}
+    bare_subject = {name for name, _type, role in filtered if name in abbrs and role == "subject"}
+    out: list[tuple[str, str, str]] = []
+    alias_of: dict[str, str] = {}
+    seen: set[str] = set()
+    for name, entity_type, role in filtered:
+        if name in abbrs and name not in found:
+            continue
+        if name in found:
+            full, abbr = found[name]
+            if abbr in bare_subject:
+                role = "subject"
+            name = full
+            alias_of[full] = abbr
+        key = canonical_match_key(name)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((name, entity_type, role))
+    if len([1 for _n, _t, r in out if r == "subject"]) > 1 and bare_subject:
+        # The bare abbreviation was the subject and the full name was too: keep one.
+        first = next(i for i, (_n, _t, r) in enumerate(out) if r == "subject")
+        out = [(n, t, "mentioned" if r == "subject" and i != first else r) for i, (n, t, r) in enumerate(out)]
+    return out, alias_of
+
+
+async def _resolve_abbreviations(
+    sc: Any,
+    tenant_id: str,
+    fleet_id: str | None,
+    content: str,
+    filtered: list[tuple[str, str, str]],
+    resolved: list[dict | None],
+) -> None:
+    """Resolve an unmatched bare abbreviation ("rep") to the one entity of the
+    fleet that carries it as an alias and whose name it abbreviates.
+
+    Best effort and conservative: exactly one such entity, or nothing changes
+    and the name goes on to similarity resolution as before.
+    """
+    for i, (name, _type, _role) in enumerate(filtered):
+        if resolved[i] is not None or not looks_like_abbreviation(name, content):
+            continue
+        try:
+            ids = await sc.fts_search_entities(
+                {"tokens": [name], "tenant_id": tenant_id, "fleet_ids": [fleet_id] if fleet_id else None}
+            )
+            rows = await sc.get_entities_by_ids(list(ids)[:20], tenant_id) if ids else {}
+        except Exception:
+            logger.warning("abbreviation lookup failed for %r", name, exc_info=True)
+            continue
+        hits = [
+            (eid, row)
+            for eid, row in (rows or {}).items()
+            if name in [str(a).lower() for a in ((row.get("attributes") or {}).get("_aliases") or [])]
+            and initials(row.get("canonical_name") or "").endswith(name)
+        ]
+        if len(hits) == 1:
+            eid, row = hits[0]
+            resolved[i] = {"entity_id": eid, "canonical_name": row.get("canonical_name")}
 
 
 async def _discover_cross_links_for_memory(
@@ -743,6 +819,8 @@ async def process_entity_extraction(
             seen_names.add(match_key)
             filtered.append((ent.canonical_name, ent.entity_type, ent.role))
 
+        filtered, alias_of = _apply_defined_abbreviations(content, filtered)
+
         if not filtered:
             # Nothing to persist; skip the bulk flow but keep the
             # downstream audit-log + contradiction-trigger paths so a
@@ -763,6 +841,9 @@ async def process_entity_extraction(
             # vector it has: ``entity_merge`` only fills a row with none, and
             # the nightly ``BackfillEntityEmbeddings`` fills the rest.
             resolved = await _resolve_entities(sc, tenant_id, fleet_id, filtered, [None] * len(filtered))
+
+            # ---- Step 1b: a bare abbreviation resolves through the aliases ----
+            await _resolve_abbreviations(sc, tenant_id, fleet_id, content, filtered, resolved)
 
             # ---- Step 2a: embed what that left, then resolve it by similarity ----
             #
@@ -930,6 +1011,12 @@ async def process_entity_extraction(
                     item["attributes"] = {}
                 upsert_items.append(item)
                 upsert_names.append([name])
+
+            # An abbreviation this memory defines becomes an alias of its entity.
+            for j, names in enumerate(upsert_names):
+                for n in names:
+                    if n in alias_of:
+                        _merge_alias_into(upsert_items[j], alias_of[n])
 
             # ---- Step 2c: bulk upsert ----
             #
