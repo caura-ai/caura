@@ -227,10 +227,10 @@ async def test_flush_callable_failure_does_not_kill_loop() -> None:
     assert any(e.get("will_succeed") for e in flat), (
         f"recovery flush must include the second event; got {flushed_batches!r}"
     )
-    # The first event was drained but lost; the second was written.
-    # Counters split so dashboards can tell the two apart.
-    assert q.failed_count == 1, f"expected 1 failed event; got {q.failed_count}"
-    assert q.flushed_count == 1, f"expected 1 flushed event; got {q.flushed_count}"
+    # The first event recovers on retry, so neither event is a final loss.
+    assert any(e.get("will_fail") for e in flat)
+    assert q.failed_count == 0
+    assert q.flushed_count == 2
 
 
 @pytest.mark.asyncio
@@ -295,9 +295,8 @@ async def test_drain_chunks_above_chunk_size() -> None:
 @pytest.mark.asyncio
 async def test_chunk_failure_does_not_drop_other_chunks() -> None:
     """Per-chunk failure isolation: when chunk 1 of N fails, the
-    remaining chunks must still flush. ``_failed_count`` increments
-    by the failed chunk's size; ``_flushed_count`` increments by the
-    successful chunks' sizes."""
+    remaining chunks must still flush, then shutdown retries the failed slice.
+    Recovered events are counted once as flushed, never as lost."""
     seen_chunks: list[list[dict]] = []
 
     async def flush(events: list[dict]) -> None:
@@ -315,15 +314,16 @@ async def test_chunk_failure_does_not_drop_other_chunks() -> None:
     )
     await q.start()
     for i in range(6):
-        q.enqueue({"i": i})
+        q.enqueue({"tenant_id": f"tenant-{i // 2}", "i": i})
     await q.stop()
 
-    assert len(seen_chunks) == 3, (
-        f"all 3 chunks must reach the callable even though chunk 2 raised; "
+    assert len(seen_chunks) == 4, (
+        f"all 3 chunks and the retry must reach the callable even though chunk 2 raised; "
         f"got {seen_chunks!r}"
     )
-    assert q.flushed_count == 4, f"chunks 1+3 flushed = 4 events; got {q.flushed_count}"
-    assert q.failed_count == 2, f"chunk 2 failed = 2 events; got {q.failed_count}"
+    assert seen_chunks[-1] == seen_chunks[1]
+    assert q.flushed_count == 6
+    assert q.failed_count == 0
     assert q.interrupted_count == 0, "an ordinary failure is not an interruption"
 
 
