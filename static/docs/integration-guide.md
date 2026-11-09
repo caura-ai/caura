@@ -236,8 +236,9 @@ the agent (`scope_agent`; authorized organization members with access to all
 scopes can still read them), are scanned by current servers, and return through
 automatic recall only to their originating conversation. Assistant summaries
 allow ten attempted writes per session, including failed/concurrent requests;
-100 conversations are tracked per process, after which new conversations stop
-auto-writing turns until restart. Real wrapper-shaped OpenClaw `ingest` remains
+up to 100 conversations are tracked per process. At capacity, the least
+recently used tracked budget is evicted so new conversations keep capturing; an evicted
+conversation gets a fresh budget on return. Real wrapper-shaped OpenClaw `ingest` remains
 non-persisting. The automatic memory-flush turn is disabled because its supported
 callback cannot identify the conversation. Set `CAURA_AUTO_WRITE_TURNS=false`
 (or `0`, `no`, `off`) in `.env` or the plugin's `config` block and restart to

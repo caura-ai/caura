@@ -87,9 +87,43 @@ if (mode === "blocked") {
   for (let i = 0; i < 100; i++) await afterTurn("agent:writer:telegram:dm:" + i);
   assert.equal(writes.length, 100);
   await afterTurn("agent:writer:telegram:dm:overflow");
-  assert.equal(writes.length, 100, "a full budget table must fail closed for new conversations");
+  assert.equal(writes.length, 101, "the 101st conversation must still capture a turn");
+  assert.equal(writes[100].session, "openclaw:agent:writer:telegram:dm:overflow");
   for (let i = 0; i < 14; i++) await afterTurn(directKey, substantive + i);
-  assert.equal(writes.length, 109, "table saturation must not reset an existing conversation budget");
+  assert.equal(writes.length, 110, "admitting a new conversation must preserve retained budgets");
+} else if (mode === "oldest-session-budget") {
+  const keyFor = (id: number) => "agent:writer:telegram:dm:" + id;
+  // Fill in order, exhausting 0 and 2. No later access refreshes an earlier
+  // conversation, so the resulting LRU order is still 0, 1, 2, ... 99.
+  for (let i = 0; i < 100; i++) {
+    for (let turn = 0; turn < (i === 0 || i === 2 ? 10 : 1); turn++) {
+      await afterTurn(keyFor(i), substantive + turn);
+    }
+  }
+  assert.equal(writes.length, 118);
+  await afterTurn("agent:writer:telegram:dm:overflow");
+  const beforeReturn = writes.length;
+  // Accepted trade-off: the evicted least-recently-used conversation gets a fresh budget
+  // on return. A different eviction victim or no eviction leaves it exhausted.
+  for (let i = 0; i < 10; i++) await afterTurn(keyFor(0), substantive + i);
+  assert.equal(writes.length, beforeReturn + 10, "the least-recently-used counter must be evicted");
+  // Reintroducing 0 evicts 1, not the later retained and exhausted budget 2.
+  await afterTurn(keyFor(2));
+  assert.equal(writes.length, beforeReturn + 10, "eviction must not clear unrelated counters");
+} else if (mode === "turn-budget-lru") {
+  const keyFor = (id: number) => "agent:writer:telegram:dm:" + id;
+  for (let i = 0; i < 100; i++) await afterTurn(keyFor(i));
+  await afterTurn(keyFor(0)); // refresh the oldest-created conversation
+  assert.equal(writes.length, 101);
+  await afterTurn("agent:writer:telegram:dm:overflow");
+  assert.equal(writes.length, 102);
+  // A recent reservation must keep 0's existing two-write budget. FIFO
+  // evicts 0 instead and incorrectly grants ten more writes on its return.
+  for (let i = 0; i < 14; i++) await afterTurn(keyFor(0), substantive + i);
+  assert.equal(writes.length, 110, "recently reserved conversations must retain their budget");
+  // Conversation 1 is now least recently used, so it gets a fresh budget.
+  for (let i = 0; i < 10; i++) await afterTurn(keyFor(1), substantive + i);
+  assert.equal(writes.length, 120, "the idle conversation must be the eviction victim");
 } else if (mode === "wrapper") {
   // This is the real OpenClaw call shape. It currently does not persist user
   // messages; bounding capture must not silently turn that path on.

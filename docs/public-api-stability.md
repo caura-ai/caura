@@ -79,8 +79,10 @@ Legacy flat `ingest` calls can persist substantive user messages in direct
 contexts, capped at ten writes per session; real wrapper-shaped OpenClaw ingest
 remains non-persisting. Assistant summaries allow ten attempted writes per
 session, including failures and concurrent hooks. These budgets survive engine
-recreation, track at most 100 conversations per process, and refuse new
-conversations once full until restart. User messages and assistant summaries
+recreation and track at most 100 conversations per process. A new conversation
+at capacity evicts the least recently used tracked budget, ordered by its last
+reserved write attempt. An evicted conversation starts with a fresh budget if
+it returns. User messages and assistant summaries
 require at least 100 characters and are truncated to 500 plus an ellipsis.
 Compaction summaries require direct context too. The automatic pre-compaction
 flush is disabled because its supported callback cannot identify a conversation.

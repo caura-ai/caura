@@ -98,7 +98,7 @@ describe("automatic capture conversation bounds", () => {
     test("interviewer message mirroring respects conversation bounds for " + label, () =>
       runFixture("interview-bounds", JSON.stringify(context), expected));
   }
-  for (const mode of ["session-cap", "concurrent-cap", "short-turns", "failed-attempt-cap", "config-opt-out", "tracked-session-cap"]) {
+  for (const mode of ["session-cap", "concurrent-cap", "short-turns", "failed-attempt-cap", "config-opt-out", "tracked-session-cap", "oldest-session-budget", "turn-budget-lru"]) {
     test(mode, () => runFixture(mode));
   }
 });

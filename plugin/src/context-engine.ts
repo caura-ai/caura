@@ -109,17 +109,24 @@ const SESSION_BUFFER_CAP = 50;
 const MAX_SESSIONS = 100;
 const MAX_INGEST_WRITES_PER_SESSION = 10;
 const MAX_TURN_WRITES_PER_SESSION = 10;
-// Process-wide because OpenClaw recreates engine instances. Keep a bounded
-// table without eviction: evicting a counter would reopen an exhausted budget.
-// Once full, new conversations stop auto-writing until the process restarts.
+// Process-wide because OpenClaw recreates engine instances. Bound the table
+// by evicting the least recently used conversation when a new one arrives at
+// the cap. Recency follows successful reservations, not refused over-budget
+// calls. Accepted trade-off: an evicted conversation returns with a fresh budget.
 const sessionTurnWriteAttempts = new Map<string, number>();
 
 function reserveTurnWrite(sessionKey: string): boolean {
   const attempts = sessionTurnWriteAttempts.get(sessionKey);
-  if (attempts === undefined && sessionTurnWriteAttempts.size >= MAX_SESSIONS) return false;
+  if (attempts === undefined && sessionTurnWriteAttempts.size >= MAX_SESSIONS) {
+    const leastRecent = sessionTurnWriteAttempts.keys().next().value!;
+    sessionTurnWriteAttempts.delete(leastRecent);
+  }
   if ((attempts ?? 0) >= MAX_TURN_WRITES_PER_SESSION) return false;
   // Reserve synchronously, before tenant resolution or the HTTP request can
   // yield. Concurrent hooks and failed requests share the same request bound.
+  // Map.set on an existing key does not refresh its position; delete+set
+  // keeps a recently reserved conversation behind idle ones in the LRU order.
+  if (attempts !== undefined) sessionTurnWriteAttempts.delete(sessionKey);
   sessionTurnWriteAttempts.set(sessionKey, (attempts ?? 0) + 1);
   return true;
 }

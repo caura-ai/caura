@@ -339,8 +339,9 @@ current OpenClaw wrapper-shaped `ingest` call does not persist user messages.
 Turn summaries require at least 100 characters and allow ten attempted writes
 per session, including failures and concurrent hooks. Both are truncated to
 500 characters plus an ellipsis. Turn budgets survive engine recreation and
-track up to 100 conversations per plugin process; once full, new conversations
-stop auto-writing turns until restart instead of resetting an existing budget.
+track up to 100 conversations per plugin process. At capacity, the least
+recently used tracked conversation is evicted so new ones keep capturing;
+an evicted conversation gets a fresh budget if it returns.
 The automatic **memory-flush turn** is disabled: the supported callback has no
 trustworthy per-conversation key. Normal runtime compaction remains available.
 
