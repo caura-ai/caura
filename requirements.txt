@@ -30,7 +30,7 @@ requests>=2.34.2,<3
 # common.cloud_run_identity fetch the ID token with; listed for the same reason
 # as requests above. Range as core-api, core-worker and core-storage-api declare it.
 google-auth>=2.30,<3
-openai>=3.41.0,<4
+openai>=3.46.0,<4
 python-dateutil>=2.9.0.post0,<3
 httpx>=0.28.1,<1
 httpx2>=2.16.0,<3
