@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.46.2](https://github.com/caura-ai/caura/compare/backend-v3.46.1...backend-v3.46.2) (2026-11-09)
+
+
+### Dependencies
+
+* **core-worker:** move torch to 2.15.0 so setuptools can reach 84.2.1 ([#2408](https://github.com/caura-ai/caura/issues/2408)) ([375f80d](https://github.com/caura-ai/caura/commit/375f80d1f1b7e61457c7f442c012702718b80217))
+
 ## [3.46.1](https://github.com/caura-ai/caura/compare/backend-v3.46.0...backend-v3.46.1) (2026-11-09)
 
 
