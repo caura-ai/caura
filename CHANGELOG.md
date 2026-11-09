@@ -10,6 +10,15 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.45.1](https://github.com/caura-ai/caura/compare/backend-v3.45.0...backend-v3.45.1) (2026-11-09)
+
+
+### Dependencies
+
+* **docker:** bump datadog/serverless-init from `30c3fcf` to `6cb81a6` in /core-api ([#2389](https://github.com/caura-ai/caura/issues/2389)) ([f935fad](https://github.com/caura-ai/caura/commit/f935fad9f31c521e3113430829f208de87200326))
+* **docker:** bump datadog/serverless-init from `30c3fcf` to `6cb81a6` in /core-operations ([#2390](https://github.com/caura-ai/caura/issues/2390)) ([9329245](https://github.com/caura-ai/caura/commit/9329245123ee010c9f6d11bd7168ad252ffa006e))
+* **docker:** bump datadog/serverless-init from `30c3fcf` to `6cb81a6` in /core-worker ([#2392](https://github.com/caura-ai/caura/issues/2392)) ([e34fc01](https://github.com/caura-ai/caura/commit/e34fc0106007fd7ffe208a4b03008729a3a19a5e))
+
 ## [3.45.0](https://github.com/caura-ai/caura/compare/backend-v3.44.1...backend-v3.45.0) (2026-11-08)
 
 
