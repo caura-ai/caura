@@ -39,3 +39,12 @@ def test_extraction_carries_a_reported_example():
 @pytest.mark.parametrize("prompt", [CONTRADICTION_PROMPT, BATCH_CONTRADICTION_PROMPT])
 def test_judge_prompts_say_the_reporter_is_not_the_subject(prompt):
     assert "not the person or agent who" in prompt
+
+
+def test_extraction_says_v_as_the_s_puts_the_subject_last():
+    assert '"V AS THE S" PUTS THE SUBJECT LAST' in EXTRACTION_PROMPT
+    assert "subject: orvella api rollout policy" in EXTRACTION_PROMPT
+
+
+def test_extraction_names_the_subject_with_its_attribute():
+    assert "Name the subject with its attribute" in EXTRACTION_PROMPT
