@@ -19,11 +19,12 @@ knows. Using it is the job, not an optional extra.
 runtime the Caura plugin handles the automatic layer: it injects the mandatory
 keystones at session start (§1), recalls relevant memory before your substantive
 turns (§11), and writes a short **turn summary** afterward as a backstop
-(`CAURA_AUTO_WRITE_TURNS`, on by default). The same switch also controls
-automatic saves of user messages and compaction summaries, and the
-memory-flush turn that asks you to save a session summary before compaction;
-set it to `false` (or `0`, `no`, `off`) and restart the plugin to disable all four. Treat the
-automatic layer as a floor, not a substitute. You still call the `caura_*` tools **directly** whenever you need
+(`CAURA_AUTO_WRITE_TURNS`, on by default), only when the hook supplies an
+explicitly direct conversation key. Group and unknown-context capture is
+refused. The automatic memory-flush turn is disabled because its callback
+cannot identify the conversation. Set the switch to `false` (or `0`, `no`,
+`off`) and restart the plugin to disable automatic conversation-memory writes.
+Treat the automatic layer as a floor, not a substitute. You still call the `caura_*` tools **directly** whenever you need
 to interact deliberately — above all to **write the high-value memories the
 auto-summary won't** (a decision and its *why*, an outcome, a rule), and to
 recall something specific the auto-gate didn't fetch, look up or publish a
@@ -156,8 +157,8 @@ Interviewer enabled, a scheduled server-side job reads your durable work trail
 it — episodes, decisions, outcomes — after the fact. You don't invoke it and
 won't see it run. This is a **different mechanism** from the plugin's per-turn
 auto-writes (`CAURA_AUTO_WRITE_TURNS`, described in the preamble): the
-auto-write layer saves user messages and turn/compaction summaries as you work;
-the Interviewer is a
+auto-write layer saves turn/compaction summaries in eligible direct conversations
+(the wrapper-shaped ingest does not save user messages); the Interviewer is a
 server-side scheduled synthesis from the work trail. Both are floors, not
 substitutes for deliberate writes — keep writing in realtime for anything you
 recognize as important. Realtime writes are immediate and precise; the
@@ -326,18 +327,31 @@ don't hit the backend and pay tokens for an unhelpful recall block.
 Rolling skip counters (`recall_metrics`) ride the heartbeat for per-fleet
 visibility.
 
-The plugin also automatically saves **user messages**, short **assistant turn
-summaries** and **compaction summaries** as episode memories private to you
-(`scope_agent`), scanned for secrets and marked as captured; automatic recall
-puts a captured memory back only into the conversation it came from. Anything
-the team should know, write deliberately. User-message saves require at least 100
-characters, are truncated to 500 characters plus an ellipsis, and are capped
-at 10 per session. Before OpenClaw compacts a long session, a **memory-flush
-turn** asks you to save a session summary with `caura_write`, private to you.
-`CAURA_AUTO_WRITE_TURNS=false` (or `0`, `no`, `off`) disables all four automatic writes, the flush
-turn included, after a plugin restart. Local buffering, recall, explicit memory tools
-and runtime compaction remain available; existing memories are not deleted.
-The separately enabled Interviewer (`CAURA_INTERVIEWER`) is unaffected.
+Automatic **assistant turn summaries** and **compaction summaries** require an
+explicit per-call direct-conversation key. Group and unknown contexts are not
+persisted. Episode memories stay `scope_agent`, scanned and marked as captured;
+automatic recall returns them only to their originating conversation. Anything
+the team should know, write deliberately.
+
+User-message saves through legacy flat `ingest` calls require the same direct
+context, at least 100 characters, and have a ten-write per-session limit. The
+current OpenClaw wrapper-shaped `ingest` call does not persist user messages.
+Turn summaries require at least 100 characters and allow ten attempted writes
+per session, including failures and concurrent hooks. Both are truncated to
+500 characters plus an ellipsis. Turn budgets survive engine recreation and
+track up to 100 conversations per plugin process; once full, new conversations
+stop auto-writing turns until restart instead of resetting an existing budget.
+The automatic **memory-flush turn** is disabled: the supported callback has no
+trustworthy per-conversation key. Normal runtime compaction remains available.
+
+`CAURA_AUTO_WRITE_TURNS=false` (or `0`, `no`, `off`) disables automatic
+conversation-memory writes after restart. The effective parsed switch appears
+in heartbeat `metadata.auto_capture_enabled`; it does not mean every
+conversation is eligible. Local buffering, recall and explicit memory tools
+remain available; existing memories are not deleted. The independently enabled
+Interviewer keeps its separate switch, but message mirroring also refuses group
+and unknown contexts. This documentation is operator guidance, not an end-user
+capture notice; the checked host integration supplies no notice mechanism.
 These automatic writes are a backstop, not a
 replacement for the deliberate, high-value writes in §3 — and it never evolves,
 supersedes, or files docs for you. Do that work yourself.

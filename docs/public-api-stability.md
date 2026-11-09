@@ -61,23 +61,38 @@ Read by the OpenClaw plugin. The plugin's published name (`memclaw`) and these v
 | `CAURA_TENANT_ID` | Optional pre-resolved tenant id; bypasses lookup. |
 | `CAURA_FLEET_ID` | Default fleet id for writes/heartbeat. |
 | `CAURA_NODE_NAME` | Fleet node identifier reported on heartbeat. |
-| `CAURA_AUTO_WRITE_TURNS` | Automatic conversation-memory writes (default `true`): user messages from `ingest`, assistant turn summaries, compaction summaries, and the session summary that OpenClaw's pre-compaction memory-flush turn asks the agent to write. Set `false` (or `0`, `no`, `off`, any case; a blank value is off too) to disable all four; OpenClaw then runs no memory-flush turn. It can also be set in the plugin's config block (`plugins.entries.<id>.config`), which wins over the environment. |
+| `CAURA_AUTO_WRITE_TURNS` | Automatic conversation-memory writes (default `true`), limited to explicit per-call direct-conversation keys. Group/unknown contexts are refused. The flush callback supplies no conversation identity, so its automatic turn is disabled. Set `false` (or `0`, `no`, `off`, any case; blank is off) to disable capture. Plugin config overrides the environment. Heartbeats report the effective boolean as `metadata.auto_capture_enabled`. |
 
-The automatic writes create episode memories visible only to the agent that
-captured them (`scope_agent`); the flush turn's prompt asks for the same. The
-server recognises their tags (`auto-ingest`, `auto-turn-summary`,
-`auto-compaction`) and stores such a row `scope_agent` whatever the request
-says, masks credentials and personal data in it even when the organization's
-PII gate is off, and records `system_metadata.capture` (the trigger and a hash
-of the conversation) where no caller can change it. The plugin's automatic
-recall injects a captured row only into the conversation it came from, and
-marks it as captured. Ingest saves user messages of at least 100 characters,
-truncates them to 500 characters plus an ellipsis, and caps writes at 10 per
-session. Turning this flag off leaves in-memory buffering, recall, explicit
-`caura_write` calls and OpenClaw's runtime compaction available. It does not
-delete previously saved memories. The independently enabled Interviewer and
-its durable work-trail buffer have separate controls (`CAURA_INTERVIEWER`).
-Restart the plugin after changing the environment variable.
+Automatic writes require a per-call `sessionKey` in OpenClaw's explicit
+`agent:<name>:<channel>:dm:<id>` or `agent:<name>:<channel>:direct:<id>` shape.
+A factory default, opaque `sessionId`, group/channel key or unknown shape does
+not establish a direct conversation. This deliberately skips capture for hosts
+that cannot provide that context; it does not guess from message content.
+
+Captured episodes remain `scope_agent`. Current servers recognize the capture
+tags, mask credentials and personal data even with the organization's PII gate
+off, and stamp protected `system_metadata.capture`. Automatic recall returns a
+captured row only to its originating conversation. Authorized organization
+members who may read all scopes can still read agent-private memories.
+
+Legacy flat `ingest` calls can persist substantive user messages in direct
+contexts, capped at ten writes per session; real wrapper-shaped OpenClaw ingest
+remains non-persisting. Assistant summaries allow ten attempted writes per
+session, including failures and concurrent hooks. These budgets survive engine
+recreation, track at most 100 conversations per process, and refuse new
+conversations once full until restart. User messages and assistant summaries
+require at least 100 characters and are truncated to 500 plus an ellipsis.
+Compaction summaries require direct context too. The automatic pre-compaction
+flush is disabled because its supported callback cannot identify a conversation.
+
+Turning the switch off leaves local buffering, recall, deliberate memory tools
+and ordinary runtime compaction available. Existing memories are not deleted.
+The independently enabled Interviewer retains its own controls, but message
+mirroring shares the direct-conversation gate. Heartbeat state describes the
+parsed global switch, not whether an individual conversation is eligible.
+Restart the plugin after changing its environment. This documentation is
+operator guidance; the checked host integration establishes no end-user notice
+mechanism, so documentation is not claimed as capture notice.
 
 **Legacy spellings.** Every `CAURA_*` variable in this document — the table above, the `CAURA_API_KEY` server gate, and `CAURA_VERSION` in compose — currently also answers to its pre-rename `MEMCLAW_*` name. Use `CAURA_*` for new configuration. Where both are set the first **non-empty** value wins — deliberately, rather than the first one *defined* — so an unfilled `CAURA_FOO=` in a deploy template cannot blank out a working `MEMCLAW_FOO`. <!-- legacy-name-floor: documents the current dual-read behavior -->
 

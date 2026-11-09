@@ -11,6 +11,8 @@
  *   enabled by default; opt out with CAURA_AUTO_WRITE_TURNS=false (or 0, no,
  *   off). They are written ``scope_agent`` with the conversation's session
  *   header; core-api marks them as captured and records the conversation.
+ *   Only explicit per-call dm/direct session keys qualify; groups and unknown
+ *   contexts cannot persist turns or mirror messages to the Interviewer.
  * - Automatic recall injects a captured row only into the conversation it
  *   came from (``recallableInConversation``).
  * - Recall timeout enforced via AbortController
@@ -87,11 +89,40 @@ function sessionKeyOf(context: unknown): string | undefined {
   return typeof key === "string" && key ? key : undefined;
 }
 
+/**
+ * Only a per-call, explicitly direct OpenClaw conversation may be captured.
+ * sessionId is opaque; factory defaults and arbitrary/unknown key shapes do
+ * not establish that a turn is private. Anchor the full shape so a group id
+ * containing "dm" cannot pass. Local buffering and deliberate tools do not
+ * depend on this gate.
+ */
+function captureSessionKey(context: unknown): string | undefined {
+  const key = (context as { sessionKey?: unknown } | null)?.sessionKey;
+  return typeof key === "string" && /^agent:[^:\s]+:[^:\s]+:(?:dm|direct):[^:\s]+$/.test(key)
+    ? key
+    : undefined;
+}
+
 // --- Session message buffer (LRU, per-session) ---
 
 const SESSION_BUFFER_CAP = 50;
 const MAX_SESSIONS = 100;
 const MAX_INGEST_WRITES_PER_SESSION = 10;
+const MAX_TURN_WRITES_PER_SESSION = 10;
+// Process-wide because OpenClaw recreates engine instances. Keep a bounded
+// table without eviction: evicting a counter would reopen an exhausted budget.
+// Once full, new conversations stop auto-writing until the process restarts.
+const sessionTurnWriteAttempts = new Map<string, number>();
+
+function reserveTurnWrite(sessionKey: string): boolean {
+  const attempts = sessionTurnWriteAttempts.get(sessionKey);
+  if (attempts === undefined && sessionTurnWriteAttempts.size >= MAX_SESSIONS) return false;
+  if ((attempts ?? 0) >= MAX_TURN_WRITES_PER_SESSION) return false;
+  // Reserve synchronously, before tenant resolution or the HTTP request can
+  // yield. Concurrent hooks and failed requests share the same request bound.
+  sessionTurnWriteAttempts.set(sessionKey, (attempts ?? 0) + 1);
+  return true;
+}
 const sessionBuffers = new Map<string, IngestMessage[]>();
 const sessionIngestCounts = new Map<string, number>();
 
@@ -150,6 +181,7 @@ export function _sessionKeysForTests(): string[] {
 export function _resetSessionBuffersForTests(): void {
   sessionBuffers.clear();
   sessionIngestCounts.clear();
+  sessionTurnWriteAttempts.clear();
 }
 
 /**
@@ -811,12 +843,13 @@ export class CauraContextEngine {
       message as unknown as Record<string, unknown>,
     );
     pushToBuffer(sessionKey, message);
+    const captureSession = captureSessionKey(message);
 
-    // Interviewer Phase 1 (opt-in): mirror every message into the durable
+    // Interviewer Phase 1 (opt-in): mirror eligible direct messages into the durable
     // on-disk buffer the interview_request handler reads. Fire-and-forget —
     // the write chain inside the buffer preserves ordering, and a disk
     // error must never break the turn.
-    if (CAURA_INTERVIEWER) {
+    if (CAURA_INTERVIEWER && captureSession) {
       const bufContent =
         typeof message.content === "string"
           ? message.content
@@ -832,7 +865,7 @@ export class CauraContextEngine {
     // Persist user messages as episode memories (async, non-blocking).
     // Capped at MAX_INGEST_WRITES_PER_SESSION to prevent memory spam in long sessions.
     // The in-memory buffer still receives all messages for buildQueryFromMessages.
-    if (CAURA_AUTO_WRITE_TURNS && message.role === "user") {
+    if (CAURA_AUTO_WRITE_TURNS && captureSession && message.role === "user") {
       const content =
         typeof message.content === "string"
           ? message.content
@@ -858,7 +891,7 @@ export class CauraContextEngine {
           content.length > MAX_TURN_SUMMARY_LENGTH
             ? content.slice(0, MAX_TURN_SUMMARY_LENGTH) + "..."
             : content;
-        const ingestSession = sessionKeyOf(message);
+        const ingestSession = captureSession;
         await apiCall(
           "POST",
           "/memories",
@@ -1335,14 +1368,14 @@ export class CauraContextEngine {
     // is worth keeping if we can. Failure here is logged and
     // swallowed; never let it cascade into "compaction failed."
     const summary = context?.summary || context?.compactionSummary;
-    if (CAURA_AUTO_WRITE_TURNS && summary && typeof summary === "string") {
+    const compactSession = captureSessionKey(context);
+    if (CAURA_AUTO_WRITE_TURNS && compactSession && summary && typeof summary === "string") {
       try {
         const tid = await ensureTenantId();
         const agentId = resolveAgentId(
           context as Record<string, unknown>,
           this.config,
         );
-        const compactSession = sessionKeyOf(context);
         const origin = takeOrigin(compactSession);
         await apiCall(
           "POST",
@@ -1525,13 +1558,14 @@ export class CauraContextEngine {
     };
   }
 
-  /** afterTurn — auto-write turn summary. Enabled by default; opt out with CAURA_AUTO_WRITE_TURNS=false. */
+  /** afterTurn — bounded automatic summaries for explicitly direct conversations. */
   async afterTurn(context: AfterTurnContext): Promise<void> {
     // Value metering: count the turn's provider-reported usage whether or not
     // this turn writes, so the next write carries the work behind it.
     const sessionKey = sessionKeyOf(context);
     recordTurn(sessionKey, context?.messages as Array<{ role: string } & Record<string, unknown>> | undefined);
-    if (!CAURA_AUTO_WRITE_TURNS) return;
+    const captureSession = captureSessionKey(context);
+    if (!CAURA_AUTO_WRITE_TURNS || !captureSession) return;
 
     const lastAssistant = context?.messages
       ?.filter((m) => m.role === "assistant")
@@ -1543,6 +1577,7 @@ export class CauraContextEngine {
         ? lastAssistant.content
         : JSON.stringify(lastAssistant.content);
     if (content.length < MIN_TURN_CONTENT_LENGTH) return;
+    if (!reserveTurnWrite(getSessionKey(this.config, context))) return;
 
     try {
       const tid = await ensureTenantId();
@@ -1554,7 +1589,7 @@ export class CauraContextEngine {
         content.length > MAX_TURN_SUMMARY_LENGTH
           ? content.slice(0, MAX_TURN_SUMMARY_LENGTH) + "..."
           : content;
-      const origin = takeOrigin(sessionKey);
+      const origin = takeOrigin(captureSession);
       await apiCall(
         "POST",
         "/memories",
@@ -1576,7 +1611,7 @@ export class CauraContextEngine {
         undefined,
         undefined,
         undefined,
-        sessionHeader(sessionKey),
+        sessionHeader(captureSession),
       );
     } catch (e: unknown) {
       // 409 dedup rejection is expected when the same agent emits identical

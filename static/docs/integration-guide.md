@@ -229,19 +229,24 @@ CAURA_NODE_NAME=my-gateway                              # friendly name shown un
 
 The plugin loads this `.env` file automatically. Both `CAURA_*` and `MEMCLAW_*` keys are read — and only those, so a `.env` cannot set `PATH` or `NODE_OPTIONS`. The pre-rename `MEMCLAW_*` spelling of every name above keeps working; where both are set the first **non-empty** one wins, so a half-filled template cannot blank out a working value. If you use systemd, also add the vars to a drop-in file (`.env` values don't override existing process env). <!-- legacy-name-floor: rule 3 dual-read alias -->
 
-Automatic conversation writes include user messages from `ingest`, assistant
-turn summaries, compaction summaries, and the session summary that OpenClaw's
-pre-compaction memory-flush turn asks the agent to write, all stored as episode
-memories visible only to the agent that captured them (`scope_agent`). The
-server masks credentials and personal data in them even when the PII gate is
-off and marks them as captured, and the plugin's automatic recall puts a
-captured memory back only into the conversation it came from. Set
-`CAURA_AUTO_WRITE_TURNS=false` (or `0`, `no`, `off`) and restart the plugin to
-disable all four, in `.env` or as `CAURA_AUTO_WRITE_TURNS` in the plugin's
-`config` block below; OpenClaw then runs no memory-flush turn. Local message buffering, recall,
-explicit memory tools and runtime compaction continue to work. This does not
-delete existing memories or disable the separately enabled Interviewer
-(`CAURA_INTERVIEWER`).
+Automatic conversation capture is on by default only for explicitly identified
+direct conversations. Group and unknown-context hooks do not persist turns,
+summaries or mirrored Interviewer messages. Captured episodes stay private to
+the agent (`scope_agent`; authorized organization members with access to all
+scopes can still read them), are scanned by current servers, and return through
+automatic recall only to their originating conversation. Assistant summaries
+allow ten attempted writes per session, including failed/concurrent requests;
+100 conversations are tracked per process, after which new conversations stop
+auto-writing turns until restart. Real wrapper-shaped OpenClaw `ingest` remains
+non-persisting. The automatic memory-flush turn is disabled because its supported
+callback cannot identify the conversation. Set `CAURA_AUTO_WRITE_TURNS=false`
+(or `0`, `no`, `off`) in `.env` or the plugin's `config` block and restart to
+disable conversation-memory capture; heartbeat `metadata.auto_capture_enabled`
+reports the effective parsed switch. Local buffering, recall, explicit memory
+tools and ordinary runtime compaction remain available. Existing memories are
+not deleted. The separately enabled Interviewer retains its own switch. This
+is operator guidance, not end-user notice; the checked host integration supplies
+no capture-notice mechanism.
 
 **Configure OpenClaw** — edit `~/.openclaw/openclaw.json`:
 

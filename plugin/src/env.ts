@@ -149,12 +149,13 @@ export function parseBoolSetting(value: string | undefined, defaultValue: boolea
   return !["false", "0", "", "no", "off", "disabled"].includes(value.trim().toLowerCase());
 }
 
-// Default to true for all automatic conversation-memory writes: user messages
-// from ingest, turn summaries, compaction summaries and the pre-compaction
-// memory-flush turn (index.ts). Off disables these four paths; explicit writes
-// and runtime compaction remain available. The independently enabled
-// Interviewer has its own controls. What these writes become on the server
-// (private to the agent, scanned, marked as captured) is in context-engine.ts.
+// Default to true for eligible direct-conversation writes: legacy flat
+// ingest, turn summaries and compaction summaries (context-engine.ts). Groups
+// and unknown contexts are refused. The automatic flush turn is disabled in
+// index.ts because its callback has no conversation identity. Explicit writes,
+// local buffering and runtime compaction remain available. The independently
+// enabled Interviewer keeps its own switch; message mirroring shares the
+// direct-conversation gate.
 //
 // ``let`` because the plugin config can set it after import (applyPluginConfig);
 // importers read the live binding.

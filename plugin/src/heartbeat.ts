@@ -29,6 +29,7 @@ import {
   CAURA_API_PREFIX,
   CAURA_API_KEY,
   CAURA_TENANT_ID,
+  CAURA_AUTO_WRITE_TURNS,
   CAURA_NODE_NAME,
   CAURA_FLEET_ID,
   CAURA_REQUIRE_SIGNED_COMMANDS,
@@ -691,7 +692,12 @@ async function runHeartbeat(): Promise<void> {
     install_id: installId,
     agents,
     tools: CAURA_TOOLS,
-    metadata: setupStatus ? { setup_status: setupStatus } : undefined,
+    metadata: {
+      ...(setupStatus ? { setup_status: setupStatus } : {}),
+      // Effective parsed config, not the raw environment value. Metadata is
+      // already accepted and stored by older fleet intake versions.
+      auto_capture_enabled: CAURA_AUTO_WRITE_TURNS,
+    },
     // CAURA-444: rolling counters reset on plugin restart. Backend
     // stores latest snapshot per node; aggregated via the existing
     // /fleet/nodes endpoint.
