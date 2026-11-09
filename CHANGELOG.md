@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.45.2](https://github.com/caura-ai/caura/compare/backend-v3.45.1...backend-v3.45.2) (2026-11-09)
+
+
+### Dependencies
+
+* **actions:** bump the actions group with 4 updates ([#2388](https://github.com/caura-ai/caura/issues/2388)) ([da1c9a7](https://github.com/caura-ai/caura/commit/da1c9a7add76ca6b332aacdc0c21f386a05b1ed3))
+* update cachetools requirement from &lt;8,&gt;=7.2.4 to &gt;=7.3.0,&lt;8 ([#2383](https://github.com/caura-ai/caura/issues/2383)) ([1e5b56d](https://github.com/caura-ai/caura/commit/1e5b56d89efaebc32732a8f348fb23cc752033a6))
+* update openai requirement from &lt;4,&gt;=3.41.0 to &gt;=3.46.0,&lt;4 ([#2384](https://github.com/caura-ai/caura/issues/2384)) ([710fd5f](https://github.com/caura-ai/caura/commit/710fd5fea7062990f3c1ce7853a460e57db39722))
+* update pydantic requirement from &lt;3,&gt;=2.14.2 to &gt;=2.14.3,&lt;3 ([#2385](https://github.com/caura-ai/caura/issues/2385)) ([9baf5e2](https://github.com/caura-ai/caura/commit/9baf5e22eb36ee7cf88b5c06a6f6eb436dc0af3b))
+* update sentry-sdk requirement from &lt;3,&gt;=2.73.0 to &gt;=2.74.0,&lt;3 ([#2386](https://github.com/caura-ai/caura/issues/2386)) ([71a1a2d](https://github.com/caura-ai/caura/commit/71a1a2db54105c4bdc761c985b9a6bebfecaef02))
+* update sqlalchemy requirement from &lt;2.2,&gt;=2.1.6 to &gt;=2.1.8,&lt;2.2 ([#2387](https://github.com/caura-ai/caura/issues/2387)) ([0c16481](https://github.com/caura-ai/caura/commit/0c1648178e1e94513bba959a2dd41aaa93de2598))
+
 ## [3.45.1](https://github.com/caura-ai/caura/compare/backend-v3.45.0...backend-v3.45.1) (2026-11-09)
 
 
