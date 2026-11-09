@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID, uuid4
 
+from common.constants import QUARANTINE_REJECT_ACTION, QUARANTINE_RELEASE_ACTION
 from core_api.audit_actor import audit_principal
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.audit_queue import get_audit_queue
@@ -34,6 +35,25 @@ logger = logging.getLogger(__name__)
 # its text: the log is hash-chained, so a row cannot be redacted when the memory
 # is deleted later.
 _MEMORY_TEXT_FIELDS = frozenset({"title", "object_value", "source_uri", "predicate"})
+
+# These state changes must take the critical overflow path on every surface,
+# including callers that omit the opt-in flag. Match both fields so unrelated
+# events with a generic action name do not become synchronous under load.
+_CRITICAL_EVENTS = frozenset(
+    {
+        ("bulk_delete", "memory"),
+        ("delete", "memory"),
+        ("ingest_undo", "memory"),
+        ("status_update", "memory"),
+        (QUARANTINE_RELEASE_ACTION, "memory"),
+        (QUARANTINE_REJECT_ACTION, "memory"),
+        ("agent_trust_update", "agent"),
+        ("agent_fleet_update", "agent"),
+        ("delete", "agent"),
+        ("keystone.set", "keystone"),
+        ("keystone.delete", "keystone"),
+    }
+)
 
 
 async def _post_audit_sync(payload: dict) -> None:
@@ -69,7 +89,9 @@ async def log_action(
     queue overflow: when the queue is full, it falls back to a
     synchronous storage POST instead of dropping. Non-critical events
     keep the fire-and-forget enqueue (drop-with-counter on overflow), so
-    the high-volume hot path is unaffected.
+    the high-volume hot path is unaffected. The destructive/admin event
+    categories in ``_CRITICAL_EVENTS`` always use this overflow protection;
+    callers can opt other categories in with ``critical=True``.
     """
     # Copy before projecting: callers may still need their original detail.
     detail = dict(detail or {})
@@ -115,6 +137,7 @@ async def log_action(
         # across a retry of the same enqueued event.
         "client_event_id": str(uuid4()),
     }
+    critical = critical or (action, resource_type) in _CRITICAL_EVENTS
     queue = get_audit_queue()
     if queue is not None:
         # Non-blocking enqueue. Overflow is mapped to a structured
@@ -128,16 +151,16 @@ async def log_action(
             return
         # Critical event rejected by a full queue: sync POST so the decision
         # isn't dropped. If that ALSO fails (queue saturated AND storage down),
-        # log loudly but do NOT propagate — a critical audit precedes an
-        # enforcement action (a 4xx reject or a soft-delete), and a failing
-        # audit must not block it (else the row the policy means to drop stays).
+        # log loudly but do NOT propagate. Some events precede enforcement;
+        # others describe an already-committed mutation. A logging failure must
+        # neither block enforcement nor report a committed operation as failed.
         logger.warning("audit queue full; writing critical %r event synchronously", action)
         try:
             await _post_audit_sync(payload)
         except Exception:
             logger.exception(
                 "audit queue full AND sync fallback failed; critical %r event LOST "
-                "(storage degraded?) — proceeding so enforcement isn't blocked",
+                "(storage degraded?) — proceeding with the operation",
                 action,
             )
         return
