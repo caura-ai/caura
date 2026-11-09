@@ -209,11 +209,17 @@ async def _resolve_abbreviations(
             continue
         try:
             ids = await sc.fts_search_entities(
-                {"tokens": [name], "tenant_id": tenant_id, "fleet_ids": [fleet_id] if fleet_id else None}
+                {
+                    "tokens": [name],
+                    "tenant_id": tenant_id,
+                    "fleet_ids": [fleet_id] if fleet_id else None,
+                    # As name resolution: only this fleet's own entities.
+                    "strict_fleet_scoping": True,
+                }
             )
             rows = await sc.get_entities_by_ids(list(ids)[:20], tenant_id) if ids else {}
         except Exception:
-            logger.warning("abbreviation lookup failed for %r", name, exc_info=True)
+            logger.warning("abbreviation lookup failed for tenant %s", tenant_id, exc_info=True)
             continue
         hits = [
             (eid, row)
