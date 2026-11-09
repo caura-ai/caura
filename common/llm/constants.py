@@ -24,6 +24,20 @@ GEMINI_DEFAULT_MODEL = os.environ.get(
 # shape, with the base URL swapped via tenant-config override).
 OPENAI_CHAT_BASE_URL = "https://api.openai.com/v1"
 
+
+def openai_chat_base_url() -> str:
+    """The OpenAI chat endpoint this deployment uses.
+
+    ``PLATFORM_LLM_BASE_URL`` (operator env, never tenant config) points every
+    OpenAI chat call at an OpenAI-compatible endpoint instead: a metering or
+    caching proxy, a gateway, or a self-hosted model server. It mirrors
+    ``PLATFORM_EMBEDDING_BASE_URL``. Read at call time, so a restart is not
+    needed in tests; unset or blank keeps ``api.openai.com``.
+    """
+    configured = (os.environ.get("PLATFORM_LLM_BASE_URL") or "").strip().rstrip("/")
+    return configured or OPENAI_CHAT_BASE_URL
+
+
 # Anthropic + OpenRouter base URLs and default models. The
 # ``OpenAILLMProvider`` works against any of these endpoints by varying
 # ``base_url``; the registry picks the right tuple based on
