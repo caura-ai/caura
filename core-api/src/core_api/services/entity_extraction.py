@@ -128,6 +128,15 @@ Rules:
   statement about a different subject, and the update would never supersede the
   value it replaces. Exactly one entity carries role=subject unless the content
   genuinely asserts facts about two independent subjects.
+- ATTRIBUTION IS NOT THE SUBJECT. When the main clause only reports a fact
+  ("<who> recorded / changed / set / confirmed / noted / said that X is Y"),
+  the grammatical subject to use is that of the clause stating the fact: X,
+  the thing the fact is about. The reporter is role=mentioned.
+    "Nera Sol changed the Velquill gateway's primary region to cobalt ridge."
+      -> subject: velquill gateway primary region   object: cobalt ridge
+         mentioned: nera sol
+  Otherwise every agent that reports a correction becomes a different subject,
+  and no correction ever supersedes the fact another agent reported.
 - KEEP a bracketed qualifier the content attaches to a name. "Acme (Delaware)"
   and "Acme (Ohio)" are two different organizations, so they are "acme
   (delaware)" and "acme (ohio)" — never a bare "acme". Dropping the qualifier
