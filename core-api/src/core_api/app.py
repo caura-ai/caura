@@ -301,8 +301,8 @@ async def _flush_one_tenant(tid: str, tevs: list[dict]) -> None:
         # an httpx error, not ``TimeoutError``.
         logger.error(
             "audit batch flush for tenant=%s (events=%d) could not acquire a "
-            "storage_write slot within %ss; events lost from this tenant's "
-            "slice so the other tenants' flush is not held behind it",
+            "storage_write slot within %ss; deferring this tenant's slice "
+            "to the queue's retry policy",
             tid,
             len(tevs),
             budget,
@@ -310,7 +310,7 @@ async def _flush_one_tenant(tid: str, tevs: list[dict]) -> None:
         raise
     except Exception:
         logger.exception(
-            "audit batch flush failed for tenant=%s (events=%d); events lost from this tenant's slice",
+            "audit batch flush failed for tenant=%s (events=%d); deferring to the queue's retry policy",
             tid,
             len(tevs),
         )
@@ -551,9 +551,9 @@ async def lifespan(app):
                 # Per-tenant failures don't abort sibling tenants;
                 # ``return_exceptions=True`` lets every group's outcome land,
                 # then we re-raise the last error and attach the actually-failed
-                # event count via ``failed_event_count`` so ``_drain_and_flush``
-                # can credit the surviving tenants to ``_flushed_count`` instead
-                # of marking the whole chunk lost.
+                # events via ``failed_events`` so ``_drain_and_flush`` retries
+                # only those tenants and credits the surviving tenants once.
+                # Keep ``failed_event_count`` for interruption accounting.
                 by_tenant: dict[str | object, list[dict]] = {}
                 for ev in events:
                     # ``.get()`` so a malformed event missing tenant_id can't
@@ -618,16 +618,16 @@ async def lifespan(app):
                     and not isinstance(r, asyncio.CancelledError)
                 ]
 
-                # Count actually-lost events across all failure buckets.
-                # ``_drain_and_flush`` reads ``failed_event_count`` from the
-                # raised exception to keep ``_flushed_count`` /
-                # ``_failed_count`` accounting accurate when only some
-                # tenants in the chunk fail.
-                total_failed_events = sum(
-                    len(tevs)
+                # Preserve the exact failed subset, including stable write
+                # keys, across the queue boundary. A count alone cannot tell
+                # the queue which tenants have already committed.
+                failed_events = [
+                    ev
                     for (_tid, tevs), r in zip(tasks, results, strict=True)
                     if isinstance(r, BaseException)
-                )
+                    for ev in tevs
+                ]
+                total_failed_events = len(failed_events)
 
                 # Priority order: cancel → other_base → errors. Cancellation
                 # wins so shutdown signals propagate even if a co-occurring
@@ -637,10 +637,12 @@ async def lifespan(app):
                 if cancel_errors:
                     e_cancel = cancel_errors[-1]
                     e_cancel.failed_event_count = total_failed_events  # type: ignore[attr-defined]
+                    e_cancel.failed_events = failed_events  # type: ignore[attr-defined]
                     raise e_cancel
                 if other_base:
                     e_base = other_base[-1]
                     e_base.failed_event_count = total_failed_events  # type: ignore[attr-defined]
+                    e_base.failed_events = failed_events  # type: ignore[attr-defined]
                     raise e_base
                 if errors:
                     # Single-tenant failure: re-raise the underlying error
@@ -654,12 +656,14 @@ async def lifespan(app):
                     if len(errors) == 1:
                         last_error = errors[-1]
                         last_error.failed_event_count = total_failed_events  # type: ignore[attr-defined]
+                        last_error.failed_events = failed_events  # type: ignore[attr-defined]
                         raise last_error
                     eg = ExceptionGroup(
                         f"audit batch flush failed for {len(errors)} tenants",
                         errors,
                     )
                     eg.failed_event_count = total_failed_events  # type: ignore[attr-defined]
+                    eg.failed_events = failed_events  # type: ignore[attr-defined]
                     raise eg
 
             audit_queue = AuditEventQueue(
