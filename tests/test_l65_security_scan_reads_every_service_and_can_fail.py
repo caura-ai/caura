@@ -6,12 +6,16 @@ source, not ``common/``, core-worker's or core-operations', and pip-audit
 checked a fresh resolution of those two services' pyproject ranges instead of
 the ``uv.lock`` each image installs. Now bandit reads ``common/`` and every
 service's source, pip-audit reads every service's lock as its Dockerfile
-exports it, and a finding fails the job.
+exports it, and a finding fails the job. A pip-audit crash fails it too, as
+unaudited rather than as a finding.
 """
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -93,3 +97,140 @@ def test_every_accepted_advisory_says_why() -> None:
     text = SCAN.read_text()
     assert len(ignored) == audit.count("--ignore-vuln")
     assert [vid for vid in ignored if text.count(vid) < 2] == []
+
+
+# The step's own script, run with stand-ins for uv, pip-audit and sleep. The
+# stand-in pip-audit plays clean, finding, crash or crash-once for each service
+# named in FAKE_AUDIT ("core-api=finding core-worker=crash"), as pip-audit
+# 2.10.1 does: a clean audit exits 0 and writes no -o report, a finding exits 1
+# and writes it, and a crash exits 1 with only a traceback.
+_UV = """#!/bin/sh
+while [ $# -gt 0 ]; do
+  if [ "$1" = -o ]; then : > "$2"; fi
+  shift
+done
+"""
+
+_PIP_AUDIT = """#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in -r) req=$2; shift ;; -o) out=$2; shift ;; esac
+  shift
+done
+service=$(basename "$req" .txt)
+echo call >> "$RUNNER_TEMP/$service.calls"
+mode=clean
+for pair in $FAKE_AUDIT; do
+  if [ "${pair%%=*}" = "$service" ]; then mode=${pair#*=}; fi
+done
+case "$mode" in
+  finding) echo "mako 1.3.12 PYSEC-0000-0 1.4.2 a finding" > "$out"; exit 1 ;;
+  crash) echo "requests.exceptions.ReadTimeout: api.osv.dev" >&2; exit 1 ;;
+  crash-once)
+    if [ "$(wc -l < "$RUNNER_TEMP/$service.calls")" -eq 1 ]; then exit 1; fi ;;
+esac
+echo "No known vulnerabilities found" >&2
+"""
+
+
+def _has_mapfile() -> bool:
+    bash = shutil.which("bash")
+    if bash is None:
+        return False
+    probe = subprocess.run(
+        [bash, "-c", "mapfile -t x < /dev/null"], capture_output=True, check=False
+    )
+    return probe.returncode == 0
+
+
+needs_mapfile = pytest.mark.skipif(
+    not _has_mapfile(),
+    reason="the step uses mapfile, which needs bash 4; GitHub's runners have bash 5",
+)
+
+
+def _audit(
+    tmp_path: Path, fake_audit: str
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    for name, body in {
+        "uv": _UV,
+        "pip-audit": _PIP_AUDIT,
+        "sleep": "#!/bin/sh\n",
+    }.items():
+        (stubs / name).write_text(body)
+        (stubs / name).chmod(0o755)
+    for service in SERVICES:
+        (tmp_path / service).mkdir()
+        (tmp_path / service / "Dockerfile").write_text(
+            "RUN uv export --frozen --extra datadog\n"
+        )
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    env = {
+        **os.environ,
+        "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
+        "RUNNER_TEMP": str(runner_temp),
+        "FAKE_AUDIT": fake_audit,
+    }
+    # ``bash -e`` is how Actions runs a ``run:`` step that names no shell.
+    result = subprocess.run(
+        ["bash", "-e", "-c", _runs("pip-audit --")],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, runner_temp
+
+
+def _calls(runner_temp: Path, service: str) -> int:
+    return (runner_temp / f"{service}.calls").read_text().count("call")
+
+
+@needs_mapfile
+def test_a_clean_audit_passes(tmp_path: Path) -> None:
+    result, runner_temp = _audit(tmp_path, "")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert [_calls(runner_temp, service) for service in sorted(SERVICES)] == [
+        1,
+        1,
+        1,
+        1,
+    ]
+
+
+@needs_mapfile
+def test_a_finding_fails_the_step_with_its_report(tmp_path: Path) -> None:
+    result, runner_temp = _audit(tmp_path, "core-api=finding")
+    assert result.returncode == 1
+    assert "Known-vulnerable dependencies in: core-api." in result.stdout
+    assert "PYSEC-0000-0" in result.stdout
+    assert _calls(runner_temp, "core-api") == 1
+
+
+@needs_mapfile
+def test_a_crash_fails_the_step_as_unaudited_not_vulnerable(tmp_path: Path) -> None:
+    """On 9 Nov 2026 api.osv.dev timed out, pip-audit crashed, and the step
+    reported core-storage-api as known-vulnerable."""
+    result, runner_temp = _audit(tmp_path, "core-storage-api=crash")
+    assert result.returncode == 1
+    assert "Known-vulnerable" not in result.stdout
+    assert "pip-audit did not finish for: core-storage-api, twice" in result.stdout
+    assert _calls(runner_temp, "core-storage-api") == 2
+
+
+@needs_mapfile
+def test_a_crash_the_retry_gets_past_passes(tmp_path: Path) -> None:
+    result, runner_temp = _audit(tmp_path, "core-worker=crash-once")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _calls(runner_temp, "core-worker") == 2
+
+
+@needs_mapfile
+def test_a_finding_and_a_crash_are_both_reported(tmp_path: Path) -> None:
+    result, _ = _audit(tmp_path, "core-api=finding core-operations=crash")
+    assert result.returncode == 1
+    assert "Known-vulnerable dependencies in: core-api." in result.stdout
+    assert "pip-audit did not finish for: core-operations, twice" in result.stdout
