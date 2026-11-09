@@ -32,8 +32,8 @@ from common.embedding import (
 )
 from common.llm.constants import (
     LLM_FALLBACK_MODEL_OPENAI,
-    OPENAI_CHAT_BASE_URL,
     VERTEX_LLM_DEFAULT_MODEL,
+    openai_chat_base_url,
 )
 from common.llm.protocols import LLMProvider
 from common.provider_names import ProviderName
@@ -168,7 +168,7 @@ def init_platform_providers() -> None:
                 _platform_llm = OpenAILLMProvider(
                     api_key=api_key,
                     model=resolved_model,
-                    base_url=OPENAI_CHAT_BASE_URL,
+                    base_url=openai_chat_base_url(),
                     provider_name=ProviderName.OPENAI,
                 )
                 logger.info("Platform LLM: openai/%s", resolved_model)
