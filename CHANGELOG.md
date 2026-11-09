@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.46.0](https://github.com/caura-ai/caura/compare/backend-v3.45.4...backend-v3.46.0) (2026-11-09)
+
+
+### Features
+
+* **llm:** PLATFORM_LLM_BASE_URL points OpenAI chat calls at a compatible endpoint ([#2400](https://github.com/caura-ai/caura/issues/2400)) ([5af00de](https://github.com/caura-ai/caura/commit/5af00de07831843194ff0ec00372a3b66faecb28))
+
+
+### Bug Fixes
+
+* **entities:** in "V as the S", S is the subject, named with its attribute ([#2399](https://github.com/caura-ai/caura/issues/2399)) ([ddd8281](https://github.com/caura-ai/caura/commit/ddd828171c4bde6f316a1fcdfe5270807e76f1db))
+
 ## [3.45.4](https://github.com/caura-ai/caura/compare/backend-v3.45.3...backend-v3.45.4) (2026-11-09)
 
 

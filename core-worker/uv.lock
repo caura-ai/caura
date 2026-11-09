@@ -317,7 +317,7 @@ wheels = [
 
 [[package]]
 name = "core-worker"
-version = "3.45.4"
+version = "3.46.0"
 source = { editable = "." }
 dependencies = [
     { name = "cachetools" },
