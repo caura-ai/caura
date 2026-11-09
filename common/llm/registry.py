@@ -132,6 +132,7 @@ _OPENAI_COMPATIBLE = frozenset(
         ProviderName.ANTHROPIC,
         ProviderName.OPENROUTER,
         ProviderName.ATLASCLOUD,
+        ProviderName.CHEAPERINFERENCE,
     }
 )
 

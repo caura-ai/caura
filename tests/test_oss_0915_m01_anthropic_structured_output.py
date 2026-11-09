@@ -70,7 +70,7 @@ async def test_anthropic_complete_json_refuses_without_a_request(schema):
 
 @pytest.mark.asyncio
 async def test_other_openai_compatible_providers_still_send_the_request():
-    for name in ("openai", "openrouter", "atlascloud"):
+    for name in ("openai", "openrouter", "atlascloud", "cheaperinference"):
         p, completions = _provider(name, json.dumps({"ok": 1}))
         assert await p.complete_json("prompt") == {"ok": 1}
         assert len(completions.calls) == 1

@@ -22,6 +22,8 @@ from common.llm.constants import (
     ANTHROPIC_DEFAULT_MODEL,
     ATLASCLOUD_CHAT_BASE_URL,
     ATLASCLOUD_DEFAULT_MODEL,
+    CHEAPERINFERENCE_CHAT_BASE_URL,
+    CHEAPERINFERENCE_DEFAULT_MODEL,
     GEMINI_DEFAULT_MODEL,
     LLM_FALLBACK_MODEL_OPENAI,
     OPENAI_CHAT_BASE_URL,
@@ -43,6 +45,8 @@ def _env_key(provider: str) -> str:
         return os.environ.get("OPENROUTER_API_KEY", "")
     if provider == ProviderName.ATLASCLOUD:
         return os.environ.get("ATLASCLOUD_API_KEY", "")
+    if provider == ProviderName.CHEAPERINFERENCE:
+        return os.environ.get("CHEAPERINFERENCE_API_KEY", "")
     if provider == ProviderName.GEMINI:
         return os.environ.get("GEMINI_API_KEY", "")
     return ""
@@ -81,6 +85,13 @@ _MODEL_FAMILY_PREFIXES: dict[str, tuple[str, ...]] = {
 }
 
 
+# Gateways that serve several model families. A configured id is never
+# replaced for them: ``claude-sonnet-5`` is a valid id on either one.
+_MULTI_FAMILY_PROVIDERS: frozenset[str] = frozenset(
+    {ProviderName.ATLASCLOUD, ProviderName.CHEAPERINFERENCE}
+)
+
+
 def _model_family(model: str) -> str | None:
     """The provider family a model id confidently belongs to, or None."""
     low = (model or "").strip().lower()
@@ -115,9 +126,10 @@ def _model_for_provider(
     # harder to see.
     if not isinstance(configured, str) or not configured.strip():
         return default_model
-    # Atlas serves multiple model families and accepts some bare aliases.
-    # Let its API validate availability instead of replacing explicit choices.
-    if provider == ProviderName.ATLASCLOUD:
+    # Atlas and Cheaper Inference serve multiple model families and accept
+    # bare ids such as ``claude-sonnet-5``. Let their APIs validate
+    # availability instead of replacing explicit choices.
+    if provider in _MULTI_FAMILY_PROVIDERS:
         return configured
     family = _model_family(configured)
     if family is not None and family != provider:
@@ -148,11 +160,12 @@ def model_override_for_provider(
     Gemini / OpenRouter / Anthropic were sent ``gpt-5.4-nano`` on every call.
     Same conservative rule: only a confident foreign-family match is replaced
     (with ``resolved_model``, the provider's own resolution), anything
-    unrecognised passes through, and Atlas — multi-family — is never touched.
+    unrecognised passes through, and Atlas and Cheaper Inference —
+    multi-family — are never touched.
     """
     if not isinstance(model_override, str) or not model_override.strip():
         return resolved_model
-    if provider == ProviderName.ATLASCLOUD:
+    if provider in _MULTI_FAMILY_PROVIDERS:
         return model_override
     family = _model_family(model_override)
     if family is not None and family != provider:
@@ -245,6 +258,21 @@ def resolve_openai_compatible(
             provider, tenant_config, model_attr, ATLASCLOUD_DEFAULT_MODEL
         )
         return key, ATLASCLOUD_CHAT_BASE_URL, model
+
+    if provider == ProviderName.CHEAPERINFERENCE:
+        key = (
+            (
+                getattr(tenant_config, "cheaperinference_api_key", None)
+                if tenant_config is not None
+                else None
+            )
+            or _env_key(ProviderName.CHEAPERINFERENCE)
+            or ""
+        )
+        model = _model_for_provider(
+            provider, tenant_config, model_attr, CHEAPERINFERENCE_DEFAULT_MODEL
+        )
+        return key, CHEAPERINFERENCE_CHAT_BASE_URL, model
 
     return "", "", ""
 
