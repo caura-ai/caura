@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.45.3](https://github.com/caura-ai/caura/compare/backend-v3.45.2...backend-v3.45.3) (2026-11-09)
+
+
+### Bug Fixes
+
+* **contradiction:** the reporter of a fact is not its subject ([#2396](https://github.com/caura-ai/caura/issues/2396)) ([920ce3b](https://github.com/caura-ai/caura/commit/920ce3be80dff40d76ce4db6dcfa51c14ba3b30b))
+* **entities:** an abbreviation a memory defines is an alias of its entity ([#2398](https://github.com/caura-ai/caura/issues/2398)) ([d9c65ab](https://github.com/caura-ai/caura/commit/d9c65ab6d36516c1ead759ffd83aa0d03e48f6a0))
+
 ## [3.45.2](https://github.com/caura-ai/caura/compare/backend-v3.45.1...backend-v3.45.2) (2026-11-09)
 
 
