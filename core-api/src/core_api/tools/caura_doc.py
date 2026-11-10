@@ -96,7 +96,11 @@ _SPEC = ToolSpec(
                 "(no summary → no embedding → invisible to search). Returns "
                 "up to top_k results ordered by cosine similarity (1.0 = "
                 "identical). Each row includes its own collection so the "
-                "caller can follow up with op=read."
+                "caller can follow up with op=read. Watermark ownership is "
+                "filtered after top_k in scoped and broad searches, so a "
+                "short or empty page does not establish that no owned streams "
+                "exist. Use op=query with pagination to enumerate owned "
+                "watermarks, or op=read for a known document."
             ),
             required_params=("query",),
         ),
@@ -120,6 +124,8 @@ _SPEC = ToolSpec(
         "PLAN_LIMIT_READ_ONLY",
         "RATE_LIMITED",
         "REQUEST_BUDGET_EXCEEDED",
+        "TENANT_MISMATCH",
+        "TENANT_REQUIRED",
         "UNAUTHORIZED",
         "UNAVAILABLE",
         "UPSTREAM_ERROR",

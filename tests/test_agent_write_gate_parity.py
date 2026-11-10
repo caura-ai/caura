@@ -46,6 +46,7 @@ import pytest
 
 import core_api.services.interview_service as interview_service
 from core_api import errors
+from core_api.auth import CAURA_KEY_CREDENTIAL
 from core_api.routes import agents as agents_routes
 from core_api.routes import memories as memories_routes
 from core_api.services.agent_service import get_or_create_agent
@@ -1299,18 +1300,44 @@ async def test_a_document_delete_cannot_reach_the_interview_collections(
     assert await sc.get_document(tenant, collection, doc_id, read=False) is not None
 
 
-async def test_the_interview_watermark_stays_readable(client, as_auth, sc):
-    """``caura-interviewer`` reads its stream's watermark through this route."""
+@pytest.mark.parametrize(
+    "authority, status",
+    [
+        pytest.param(
+            {"credential_id": CAURA_KEY_CREDENTIAL}, 200, id="shared-deployment-key"
+        ),
+        pytest.param({"org_role": "admin"}, 200, id="org-admin"),
+        pytest.param({"is_admin": True}, 200, id="system-admin"),
+        pytest.param({}, 403, id="no-verified-authority"),
+        pytest.param({"org_role": "member"}, 403, id="org-member"),
+        pytest.param(
+            {
+                "agent_id": "reader",
+                "agent_id_verified": True,
+                "credential_kind": "agent",
+            },
+            403,
+            id="verified-agent-without-ownership",
+        ),
+    ],
+)
+async def test_ownerless_interview_watermark_requires_tenant_admin(
+    client, as_auth, sc, authority, status
+):
+    """Legacy generic reads remain available through the explicit admin paths."""
     tenant = new_tenant_id()
     doc_id = f"doc-{_uid()}"
     collection = interview_service.WATERMARK_COLLECTION
     await _seed_interview_doc(sc, tenant, collection, doc_id)
-    as_auth(tenant)
+    as_auth(tenant, **authority)
 
     resp = await client.get(
         f"/api/v1/documents/{doc_id}",
         params={"tenant_id": tenant, "collection": collection},
     )
 
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["data"] == {"last_seq": 5}
+    assert resp.status_code == status, resp.text
+    if status == 200:
+        assert resp.json()["data"] == {"last_seq": 5}
+    else:
+        assert "last_seq" not in resp.text

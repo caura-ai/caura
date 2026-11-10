@@ -17,9 +17,16 @@ bounded() {
   fi
 }
 
-# Per request: give up on a stalled connection after 30 s and try it again, rather
-# than wait on apt's longer default.
-APT=(sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+# The runner prefers Azure even when its archive downloads stall. Keep the
+# official Ubuntu fallbacks, and change only this disposable runner's mirror list.
+# Do not remove anything unless the official archive entry is already present.
+if [[ -f /etc/apt/apt-mirrors.txt ]] && grep -Eq '^https?://archive[.]ubuntu[.]com/ubuntu/' /etc/apt/apt-mirrors.txt; then
+  sudo sed -i '/azure[.]archive[.]ubuntu[.]com/d' /etc/apt/apt-mirrors.txt
+fi
+
+# Match the runner image's short acquire bounds so retries cannot consume the
+# whole outer download budget before apt can try another mirror.
+APT=(sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
 bounded 180 "apt-get update" "${APT[@]}" update
 bounded 180 "apt-get install" "${APT[@]}" install -y bubblewrap apparmor-utils
 
