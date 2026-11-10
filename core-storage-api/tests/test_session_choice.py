@@ -374,7 +374,13 @@ def test_the_writer_session_population_is_pinned() -> None:
     # updates one and reads it back in the same transaction, and
     # ``baton_bus_checked`` stamps when the bus was read; the lookup
     # (``baton_notices_for_agent``) reads on the replica.
-    assert len(methods) == 151, f"{len(methods)} methods open a writer session"
+    # 151 -> 155 (pure unchanged at 61): saved field layouts (migration 078).
+    # ``projection_claim`` takes the fit claim with an ``INSERT ... ON CONFLICT
+    # DO UPDATE`` and reads the saved version back in the same transaction,
+    # ``projection_release`` and ``projection_model_save`` update the claim and
+    # the model, and ``projection_positions_save`` upserts positions; the model
+    # read (``projection_model_get``) and the field page read on the replica.
+    assert len(methods) == 155, f"{len(methods)} methods open a writer session"
     assert len(pure) == 61, f"{len(pure)} of them show no write marker"
 
 

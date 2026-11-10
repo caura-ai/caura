@@ -67,8 +67,10 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # joins the probe. 076 creates ``baton_recipient`` and builds
 # ``ix_baton_recipient_waiting`` last, in one transaction, so that index joins
 # the probe. 077 creates ``agent_tombstones`` in one transaction, so the table
-# joins the probe.
-_HEAD_FINGERPRINT_REVISION = "077"
+# joins the probe. 078 creates ``projection_models`` and ``memory_projections``
+# and builds ``ix_memory_projections_memory`` last, in one transaction, so that
+# index joins the probe.
+_HEAD_FINGERPRINT_REVISION = "078"
 _HEAD_FINGERPRINT_SQL: str | None = (
     "SELECT (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -106,7 +108,9 @@ _HEAD_FINGERPRINT_SQL: str | None = (
     "AND EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' "
     "AND indexname = 'ix_baton_recipient_waiting') "
     "AND EXISTS (SELECT 1 FROM information_schema.tables "
-    "WHERE table_schema = 'public' AND table_name = 'agent_tombstones')"
+    "WHERE table_schema = 'public' AND table_name = 'agent_tombstones') "
+    "AND EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' "
+    "AND indexname = 'ix_memory_projections_memory')"
 )
 
 _engine: AsyncEngine | None = None

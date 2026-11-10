@@ -17,6 +17,7 @@ from core_storage_api.routers.lifecycle_audit import router as lifecycle_audit_r
 from core_storage_api.routers.memories import router as memories_router
 from core_storage_api.routers.organization_settings import router as organization_settings_router
 from core_storage_api.routers.preview import router as preview_router
+from core_storage_api.routers.projections import router as projections_router
 from core_storage_api.routers.purge import router as purge_router
 from core_storage_api.routers.reports import router as reports_router
 from core_storage_api.routers.skill_factory import router as skill_factory_router
@@ -48,6 +49,7 @@ __all__ = [
     "memories_router",
     "organization_settings_router",
     "preview_router",
+    "projections_router",
     "purge_router",
     "reports_router",
     "skill_factory_router",

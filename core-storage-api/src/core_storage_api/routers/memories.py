@@ -34,6 +34,7 @@ from core_storage_api.routers._validation import (
 )
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import (
+    FIELD_PAGE_EMBEDDINGS,
     MISSING_PROVENANCE_PREDICATE_SQL,
     BulkValidationError,
     PostgresService,
@@ -1890,10 +1891,25 @@ async def field_page(request: Request) -> dict:
     ``/list`` exactly, so the field never places a row the caller's memory
     list would not show. Returns ``{rows, entities, next_cursor}``; each row's
     embedding is base64 little-endian float32 (``embedding_b64``).
+
+    Optional ``model_version`` adds each row's saved position under that
+    version (``x``, ``y``, ``cluster``, null when it has none) and its
+    ``row_version``, which a position computed from it must name when saved
+    (``POST /projections/positions``), and optional
+    ``embeddings`` (``all``, the default, ``unplaced`` or ``none``) picks which
+    rows ship their embedding. Without either, the answer is as before.
     """
     body: dict = await request.json()
     tenant_id = _require(body, "tenant_id")
     args = _field_scope_args(tenant_id, body)
+    model_version = body.get("model_version")
+    if model_version is not None and (not isinstance(model_version, str) or not 0 < len(model_version) <= 64):
+        raise HTTPException(status_code=422, detail="model_version must be a string of 1-64 characters")
+    embeddings = body.get("embeddings", "all")
+    if embeddings not in FIELD_PAGE_EMBEDDINGS:
+        raise HTTPException(
+            status_code=422, detail=f"embeddings must be one of {sorted(FIELD_PAGE_EMBEDDINGS)}"
+        )
     try:
         limit = max(1, min(int(body.get("limit", 2000)), 2000))
     except (TypeError, ValueError):
@@ -1909,7 +1925,14 @@ async def field_page(request: Request) -> dict:
         raise HTTPException(status_code=422, detail=f"invalid cursor fields: {exc}") from exc
     if cursor_ts is not None and cursor_ts.tzinfo is None:
         raise HTTPException(status_code=422, detail="cursor_ts must be timezone-aware")
-    return await _svc.memory_field_page(**args, limit=limit, cursor_ts=cursor_ts, cursor_id=cursor_id)
+    return await _svc.memory_field_page(
+        **args,
+        limit=limit,
+        cursor_ts=cursor_ts,
+        cursor_id=cursor_id,
+        model_version=model_version,
+        embeddings=embeddings,
+    )
 
 
 @router.post("/stats-breakdown")
