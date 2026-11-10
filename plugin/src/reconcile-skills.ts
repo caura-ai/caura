@@ -1,61 +1,20 @@
 /**
- * Plugin-side skill reconciler — Phase A of the skills-as-documents
- * migration.
- *
- * On every heartbeat, mirror the visible ``collection=skills`` catalog
- * onto ``<target>/<slug>/SKILL.md`` on local disk. Replaces the dropped
- * ``install_skill`` / ``uninstall_skill`` fleet commands (which were
- * Phase B's removed push-mode behaviour).
- *
- * Targets: by default the reconciler converges the plugin's own skills
- * dir (``getPluginDir()/skills``) in ``owned`` mode. Additional targets
- * can be configured via ``CAURA_SKILL_TARGETS`` (see
- * {@link resolveSkillTargets}). Two modes:
- *   - ``owned`` ({@link reconcileOwnedDir}): the dir is fully
- *     Caura-managed; any on-disk skill not in the catalog is pruned
- *     (except {@link PROTECTED_SKILLS}).
- *   - ``additive`` ({@link reconcileAdditiveDir}): a shared/foreign dir.
- *     Caura only ever touches entries it wrote, tracked per-skill via
- *     the {@link OWNED_MARKER} sentinel — foreign skills are never
- *     overwritten (collisions are skipped) or removed.
- * With no config, the single default ``owned`` target makes behaviour
- * byte-identical to before targets were configurable.
- *
- * Properties:
- *
- * - **Declarative**: the catalog row IS the source of truth; the
- *   reconciler only converges the on-disk view.
- * - **Self-healing**: missed heartbeats catch up on the next tick.
- *   No queue, no "lost install command" failure mode.
- * - **Idempotent**: re-running is a no-op when disk already matches.
- * - **Server-gated catalog**: the reconciler pulls from
- *   ``/skills/installable``, which applies ALL policy server-side —
- *   tenant + fleet visibility AND (for Skill-Factory-opted-in tenants)
- *   the active-only lifecycle gate. So the reconciler carries no opt-in
- *   flag and no status filter: skills the server returns → on disk;
- *   anything it withholds (a sibling fleet's skill, or a candidate /
- *   staged / quarantined skill on an opted-in tenant) → never on disk.
- *   This is the SAME gate the MCP pull surface enforces (PR #315), so
- *   push (this reconciler) and pull (caura_doc) agree on what an agent
- *   may see. A skill flipping active→rejected/quarantined drops out of
- *   the catalog and is removed from disk on the next tick (owned mode).
- *
- * Failure mode: fail open. If the catalog query throws or the server
- * returns non-2xx (network, server, schema, or the fail-closed 503 the
- * install surface raises during a settings outage), the reconciler logs
- * and returns; existing on-disk skills are preserved untouched and
- * nothing new is written — so an outage can never push a non-active
- * skill to disk. The heartbeat loop continues.
+ * Reconcile administrator-approved, node-bound skill artifacts onto local disk.
+ * Validate a complete versioned manifest and every artifact before any writes
+ * or pruning. Failures retain the existing installed set. Held legacy slugs
+ * remain unchanged without becoming approved installations. Owned/additive
+ * directory protections and collision rules apply after delivery validation.
  */
 
 import {
   existsSync, mkdirSync, readdirSync, readFileSync,
-  rmSync, statSync, writeFileSync,
+  rmSync, statSync, writeFileSync, renameSync,
 } from "fs";
 import path, { join, resolve } from "path";
+import { createHash, randomUUID } from "node:crypto";
 
 import { apiCall } from "./transport.js";
-import { CAURA_TENANT_ID, CAURA_FLEET_ID, readEnv } from "./env.js";
+import { CAURA_TENANT_ID, readEnv } from "./env.js";
 import { getPluginDir, ensureExtraSkillDirs } from "./config.js";
 import { logError } from "./logger.js";
 
@@ -96,9 +55,29 @@ function isCauraOwned(skillDir: string): boolean {
   return existsSync(join(skillDir, OWNED_MARKER));
 }
 
+/** Verify a same-directory temporary file before replacing an existing copy. */
+function writeSkillAtomically(target: string, content: string): void {
+  const bytes = Buffer.from(content, "utf8");
+  if (bytes.length > 65_536) throw new Error("Skill exceeds 64 KiB");
+  const temporary = `${target}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, bytes, { flag: "wx", mode: 0o600 });
+    if (!readFileSync(temporary).equals(bytes)) throw new Error("Skill file verification failed");
+    renameSync(temporary, target);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
+
+/** Wire normalization: match Python's explicit space/tab/CR/LF set exactly. */
+function trimSkillMetadata(value: string): string {
+  return value.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+}
+
 interface CatalogDoc {
   doc_id?: string;
   data?: Record<string, unknown>;
+  delivery?: { grant_id?: string; artifact_hash?: string; bytes?: number };
 }
 
 export interface ReconcileSummary {
@@ -314,6 +293,7 @@ function reconcileOwnedDir(
   skillsRoot: string,
   desired: Map<string, string>,
   held: ReadonlySet<string>,
+  pruneAllowed: boolean,
 ): DirReconcileResult {
   const result: DirReconcileResult = {
     added: [],
@@ -336,7 +316,7 @@ function reconcileOwnedDir(
   // the same heartbeat window.
   for (const slug of onDisk) {
     if (desired.has(slug) || held.has(slug)) continue;
-    if (PROTECTED_SKILLS.has(slug)) {
+    if (!pruneAllowed || PROTECTED_SKILLS.has(slug)) {
       result.protected.push(slug);
       continue;
     }
@@ -379,7 +359,7 @@ function reconcileOwnedDir(
     }
     try {
       mkdirSync(dir, { recursive: true });
-      writeFileSync(target, content, "utf-8");
+      writeSkillAtomically(target, content);
       installedSet.add(slug);
       result.added.push(slug);
       console.log(
@@ -416,6 +396,7 @@ function reconcileAdditiveDir(
   skillsRoot: string,
   desired: Map<string, string>,
   held: ReadonlySet<string>,
+  pruneAllowed: boolean,
 ): DirReconcileResult {
   const result: DirReconcileResult = {
     added: [],
@@ -441,7 +422,7 @@ function reconcileAdditiveDir(
     // rather than misreport it as a Caura-protected skill. An OWNED
     // protected dir still survives via the protected check below.
     if (!isCauraOwned(join(skillsRoot, slug))) continue; // foreign — leave alone
-    if (PROTECTED_SKILLS.has(slug)) {
+    if (!pruneAllowed || PROTECTED_SKILLS.has(slug)) {
       result.protected.push(slug);
       continue;
     }
@@ -526,7 +507,7 @@ function reconcileAdditiveDir(
       if (isNew || !existsSync(join(skillDir, OWNED_MARKER))) {
         writeFileSync(join(skillDir, OWNED_MARKER), OWNED_MARKER_BODY, "utf-8");
       }
-      writeFileSync(target, content, "utf-8");
+      writeSkillAtomically(target, content);
       installedSet.add(slug);
       result.added.push(slug);
       console.log(
@@ -545,7 +526,7 @@ function reconcileAdditiveDir(
  * Mirror the catalog onto the configured target dirs. Returns a summary
  * for tests / logging; never throws.
  */
-export async function reconcileSkills(): Promise<ReconcileSummary> {
+export async function reconcileSkills(receiver?: { nodeId: string }): Promise<ReconcileSummary> {
   const summary: ReconcileSummary = {
     catalogCount: 0,
     installed: [],
@@ -558,34 +539,53 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
     registeredDirs: [],
   };
 
-  if (!CAURA_TENANT_ID) {
+  if (!CAURA_TENANT_ID || !receiver?.nodeId) {
     // No tenant resolved — heartbeat already short-circuits in this
     // case, but the reconciler is called independently in tests.
     return summary;
   }
 
-  // 1. Fetch the installable catalog. ALL policy — tenant + fleet
-  //    visibility AND the active-only Skill-Factory gate (for opted-in
-  //    tenants) — is applied server-side by ``/skills/installable``; we
-  //    just pass our tenant + fleet binding through. The endpoint
-  //    cannot be widened by the client (no caller ``where``), so a node
-  //    can never pull a non-active skill.
+  // 1. Validate the entire versioned manifest before touching any target.
+  // Unknown/legacy/incomplete responses are failures, never an empty catalog.
   let catalog: CatalogDoc[];
+  let pruneAllowed = false;
+  const heldSlugs = new Set<string>();
   try {
-    const resp = (await apiCall(
-      "POST",
-      "/skills/installable",
-      {
-        tenant_id: CAURA_TENANT_ID,
-        fleet_id: CAURA_FLEET_ID || undefined,
-        limit: 1000,
-      },
-    )) as { documents?: CatalogDoc[] } | CatalogDoc[];
-    catalog = Array.isArray(resp)
-      ? resp
-      : Array.isArray(resp?.documents)
-        ? resp.documents
-        : [];
+    const resp = await apiCall("POST", "/skills/installable", {
+      tenant_id: CAURA_TENANT_ID, node_id: receiver.nodeId, delivery_version: 1,
+    }) as Record<string, unknown>;
+    if (!resp || Array.isArray(resp) || resp.delivery_version !== 1 || resp.complete !== true
+        || resp.node_id !== receiver.nodeId || typeof resp.prune_allowed !== "boolean" || !Array.isArray(resp.documents) || !Array.isArray(resp.held)) {
+      throw new Error("Incomplete or incompatible skill delivery manifest");
+    }
+    pruneAllowed = resp.prune_allowed;
+    for (const held of resp.held) {
+      const slug = held && typeof held.doc_id === "string" ? filesystemSlugForCatalogId(held.doc_id) : null;
+      if (!slug || held.reason !== "approval_required") throw new Error("Invalid held skill identity");
+      heldSlugs.add(slug);
+    }
+    catalog = resp.documents;
+    for (const doc of catalog) {
+      if (!doc || !doc.data || typeof doc.data.content !== "string" || !doc.delivery
+          || typeof doc.delivery.grant_id !== "string" || !doc.delivery.grant_id) {
+        throw new Error("Unapproved skill delivery entry");
+      }
+      const slug = filesystemSlugForCatalogId(typeof doc.doc_id === "string" ? doc.doc_id : "");
+      if (!slug) throw new Error("Invalid skill catalog identity");
+      const name = typeof doc.data.name === "string" && trimSkillMetadata(doc.data.name) ? trimSkillMetadata(doc.data.name) : (slug ?? "");
+      const description = typeof doc.data.description === "string" ? trimSkillMetadata(doc.data.description) : "";
+      const raw = doc.data.content;
+      if (!raw || !description) throw new Error("Incomplete skill artifact");
+      if ([raw, name, description].some((v) => Buffer.byteLength(v, "utf8") > 65_536)) {
+        throw new Error("Skill exceeds 64 KiB");
+      }
+      const rendered = ensureFrontmatter(raw, name, description);
+      const bytes = Buffer.byteLength(rendered, "utf8");
+      const hash = "sha256:" + createHash("sha256").update(rendered, "utf8").digest("hex");
+      if (bytes > 65_536 || doc.delivery.bytes !== bytes || doc.delivery.artifact_hash !== hash) {
+        throw new Error("Skill artifact hash or byte count mismatch");
+      }
+    }
   } catch (e: unknown) {
     logError("reconcileSkills: catalog query failed", e);
     return summary;
@@ -620,7 +620,7 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   //    to approve such a second skill, and this covers any it never saw.
   const desired = new Map<string, string>();
   const catalogSourceBySlug = new Map<string, string>();
-  const ambiguousSlugs = new Set<string>();
+  const ambiguousSlugs = heldSlugs;
   for (const doc of catalog) {
     const docId = typeof doc.doc_id === "string" ? doc.doc_id : "";
     const slug = filesystemSlugForCatalogId(docId);
@@ -629,11 +629,11 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
       typeof data["content"] === "string" ? (data["content"] as string) : "";
     const description =
       typeof data["description"] === "string"
-        ? (data["description"] as string).trim()
+        ? trimSkillMetadata(data["description"] as string)
         : "";
     const name =
-      typeof data["name"] === "string" && (data["name"] as string).trim()
-        ? (data["name"] as string).trim()
+      typeof data["name"] === "string" && trimSkillMetadata(data["name"] as string)
+        ? trimSkillMetadata(data["name"] as string)
         : (slug ?? "");
     if (!slug || !rawContent || !description) {
       summary.skipped.push(docId || "<missing>");
@@ -673,8 +673,8 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   for (const target of targets) {
     const dirResult =
       target.mode === "additive"
-        ? reconcileAdditiveDir(target.dir, desired, ambiguousSlugs)
-        : reconcileOwnedDir(target.dir, desired, ambiguousSlugs);
+        ? reconcileAdditiveDir(target.dir, desired, ambiguousSlugs, pruneAllowed)
+        : reconcileOwnedDir(target.dir, desired, ambiguousSlugs, pruneAllowed);
     addedAll.push(...dirResult.added);
     removedAll.push(...dirResult.removed);
     protectedAll.push(...dirResult.protected);
@@ -744,7 +744,8 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
 const SAFE_CATALOG_ID_RE = /^(?:(?:forge|agent)\/)?([a-z0-9][a-z0-9._-]{0,99})$/;
 
 function filesystemSlugForCatalogId(docId: string): string | null {
-  return SAFE_CATALOG_ID_RE.exec(docId)?.[1] ?? null;
+  const match = SAFE_CATALOG_ID_RE.exec(docId);
+  return match?.[0] === docId ? match[1] : null;
 }
 
 const FRONTMATTER_FENCE_RE = /^---\r?\n/;

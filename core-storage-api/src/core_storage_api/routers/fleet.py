@@ -76,6 +76,19 @@ async def upsert_node(request: Request) -> dict:
     return {"id": str(node_id)}
 
 
+@router.post("/nodes/get")
+async def get_node(request: Request) -> dict:
+    """Tenant-scoped node binding for the approval and receiver checks."""
+    body = await request.json()
+    node = await _svc.fleet_get_node_by_id(
+        tenant_id=_require(body, "tenant_id"),
+        node_id=_require_uuid(body, "node_id"),
+    )
+    if node is None:
+        raise HTTPException(404, "Node not found")
+    return {"id": str(node.id), "tenant_id": node.tenant_id, "owner_principal": node.owner_principal}
+
+
 @router.post("/nodes/{node_id}/release")
 async def release_node(node_id: UUID, request: Request) -> dict:
     """Clear a node's binding, or bind it straight to ``owner_principal`` (M-85)."""

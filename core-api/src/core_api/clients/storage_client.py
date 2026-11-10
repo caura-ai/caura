@@ -3362,6 +3362,48 @@ class CoreStorageClient:
     async def upsert_node(self, data: dict) -> dict:
         return await self._post("/fleet/nodes", data)  # type: ignore[return-value]
 
+    async def upsert_skill_delivery_record(self, data: dict) -> dict:
+        """Publish only through the reserved approval writer, never generic upsert."""
+        return await self._post(
+            "/skill-delivery/records",
+            {
+                "tenant_id": data["tenant_id"],
+                "doc_id": data["doc_id"],
+                "data": data["data"],
+            },
+        )  # type: ignore[return-value]
+
+    async def read_skill_delivery_records(
+        self,
+        *,
+        tenant_id: str,
+        doc_ids: list[str],
+        node_id: str,
+        owner_principal: str,
+    ) -> list[dict]:
+        """Only active catalog pointers and this receiver, from the primary."""
+        records = await self._post(
+            "/skill-delivery/records/read",
+            {
+                "tenant_id": tenant_id,
+                "doc_ids": doc_ids,
+                "node_id": node_id,
+                "owner_principal": owner_principal,
+            },
+            read=False,
+        )
+        if not isinstance(records, list) or not all(isinstance(row, dict) for row in records):
+            raise RuntimeError("Invalid skill approval lookup response")
+        return records
+
+    async def get_node_binding(self, tenant_id: str, node_id: str) -> dict | None:
+        """Credential binding from the primary; never authorize from a replica."""
+        return await self._post_optional(
+            "/fleet/nodes/get",
+            {"tenant_id": tenant_id, "node_id": node_id},
+            read=False,
+        )
+
     async def list_nodes(self, tenant_id: str, fleet_id: str | None = None) -> list[dict]:
         params: dict[str, Any] = {"tenant_id": tenant_id}
         if fleet_id is not None:

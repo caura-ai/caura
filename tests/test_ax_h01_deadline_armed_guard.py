@@ -70,10 +70,11 @@ from tests.conftest import get_test_auth, new_tenant_id, uid
 # async tests, and the two roster tests at the end are synchronous — a blanket
 # mark makes pytest warn on those.
 
-# Low enough to keep the suite fast, high enough that ordinary scheduling
-# jitter cannot make a hop that never yields look like a timeout. Same value
-# the two sibling attribution files use, for the same reason.
+# The cancellation proof needs a short budget. Arming is a separate property:
+# allow preparation/first-use work to reach the observed storage acquire before
+# checking its recorder. Neither value changes production timeout settings.
 _BUDGET_S = 0.4
+_ARMING_BUDGET_S = 5.0
 
 # How long a surface may take before "the deadline cancelled the wait" stops
 # being the explanation. Twenty times the budget: far enough above scheduler
@@ -277,7 +278,7 @@ def _saturate_storage_slots(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _lower_middleware_budget(monkeypatch) -> None:
+def _lower_middleware_budget(monkeypatch, budget_s: float = _BUDGET_S) -> None:
     """Lower the BLANKET budget on the live middleware instance.
 
     ``RequestTimeoutMiddleware`` captures ``request_timeout_seconds`` at
@@ -294,7 +295,7 @@ def _lower_middleware_budget(monkeypatch) -> None:
     node = app.middleware_stack
     while node is not None:
         if isinstance(node, RequestTimeoutMiddleware):
-            monkeypatch.setattr(node, "timeout_seconds", _BUDGET_S)
+            monkeypatch.setattr(node, "timeout_seconds", budget_s)
             return
         node = getattr(node, "app", None)
     raise AssertionError(
@@ -303,7 +304,7 @@ def _lower_middleware_budget(monkeypatch) -> None:
     )
 
 
-def _lower_setting(monkeypatch, attr: str) -> None:
+def _lower_setting(monkeypatch, attr: str, budget_s: float = _BUDGET_S) -> None:
     from core_api import config as cfg
 
     assert hasattr(cfg.settings, attr), (
@@ -311,11 +312,11 @@ def _lower_setting(monkeypatch, attr: str) -> None:
         "that does not exist, which is the dead-knob defect this file exists "
         "to prevent"
     )
-    monkeypatch.setattr(cfg.settings, attr, _BUDGET_S)
+    monkeypatch.setattr(cfg.settings, attr, budget_s)
 
 
 async def _drive_rest_blanket(ctx) -> dict | None:
-    _lower_middleware_budget(ctx.monkeypatch)
+    _lower_middleware_budget(ctx.monkeypatch, ctx.budget_s)
     # A minted tenant, not the shared ``default``: every surface here leaves
     # rows behind (a recall event, a memory), and ``default`` is the one tenant
     # the end-of-run sweep does NOT reclaim. Tests that measure it — the
@@ -334,7 +335,7 @@ async def _drive_rest_blanket(ctx) -> dict | None:
 async def _drive_memories_bulk(ctx) -> dict | None:
     from core_api import config as cfg
 
-    _lower_setting(ctx.monkeypatch, "bulk_request_timeout_seconds")
+    _lower_setting(ctx.monkeypatch, "bulk_request_timeout_seconds", ctx.budget_s)
     # Above the route budget so the ROUTE deadline is what fires; the storage
     # phase cap is a different deadline with a different owner.
     ctx.monkeypatch.setattr(cfg.settings, "storage_bulk_timeout_seconds", 30.0)
@@ -378,7 +379,7 @@ async def _drive_interview_submit(ctx) -> dict | None:
     assert node.status_code == 200, node.text
     # Lowered AFTER the settings write and the heartbeat, which are themselves
     # requests on this app.
-    _lower_setting(ctx.monkeypatch, "interview_request_timeout_seconds")
+    _lower_setting(ctx.monkeypatch, "interview_request_timeout_seconds", ctx.budget_s)
     base = datetime(2026, 9, 24, 8, 0, tzinfo=UTC)
     resp = await ctx.client.post(
         "/api/v1/interview/submit",
@@ -423,7 +424,7 @@ async def _drive_mcp_tools_call(ctx) -> dict | None:
     from core_api import mcp_server
     from tests._mcp_test_helpers import as_text, is_error_envelope
 
-    _lower_setting(ctx.monkeypatch, "mcp_request_timeout_seconds")
+    _lower_setting(ctx.monkeypatch, "mcp_request_timeout_seconds", ctx.budget_s)
     try:
         result = await mcp_server.mcp.call_tool(
             "caura_recall", {"query": "who runs fleet ops"}
@@ -466,6 +467,7 @@ _DRIVERS = {
 class _Ctx:
     client: object
     monkeypatch: pytest.MonkeyPatch
+    budget_s: float = _BUDGET_S
 
 
 @pytest.fixture
@@ -495,6 +497,9 @@ async def test_a_deadline_is_armed_at_the_unbounded_wait(surface, ctx):
     is that ``_deadline`` holds a number and that number is still ahead of us
     when the wait is entered.
     """
+    # This assertion observes arming, not how quickly an unstalled request can
+    # complete. The separate cancellation proof keeps the 0.4-second budget.
+    ctx.budget_s = _ARMING_BUDGET_S
     seen = _watch_acquires(ctx.monkeypatch)
     await _DRIVERS[surface.name](ctx)
 
@@ -517,6 +522,32 @@ async def test_a_deadline_is_armed_at_the_unbounded_wait(surface, ctx):
             f"{surface.name} armed a deadline that had already passed before "
             "the wait began — a recorder, not a budget"
         )
+
+
+async def test_blanket_arming_witness_survives_delayed_entry(ctx):
+    """A slow pre-storage entry must not turn the arming proof into a race."""
+    from core_api.app import app
+    from core_api.middleware.request_timeout import RequestTimeoutMiddleware
+
+    if app.middleware_stack is None:
+        app.middleware_stack = app.build_middleware_stack()
+    middleware = app.middleware_stack
+    while middleware is not None and not isinstance(
+        middleware, RequestTimeoutMiddleware
+    ):
+        middleware = getattr(middleware, "app", None)
+    assert middleware is not None
+    original = middleware.app
+
+    async def delayed_entry(scope, receive, send):
+        # Model the CI failure: elapsed preparation exceeded the short
+        # cancellation budget before any storage phase had started.
+        await asyncio.sleep(_BUDGET_S * 2)
+        await original(scope, receive, send)
+
+    ctx.monkeypatch.setattr(middleware, "app", delayed_entry)
+    blanket = next(surface for surface in ARMED if surface.name == "rest.blanket")
+    await test_a_deadline_is_armed_at_the_unbounded_wait(blanket, ctx)
 
 
 # ---------------------------------------------------------------------------
