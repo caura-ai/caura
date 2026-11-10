@@ -3,7 +3,8 @@
 The field must place exactly the rows ``GET /memories`` would list to the same
 caller: same tenant check, same visibility scoping (``scope_agent`` rows only
 for their author, every scope for a person), same strict fleet filter, deleted
-rows out, superseded rows in. Plus the shape the map frontend reads.
+rows out, superseded rows in. Plus the shape the map frontend reads, and the
+saved layout it is served from (the section at the end).
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ from core_api.app import app
 from core_api.auth import AuthContext, get_auth_context
 from core_api.constants import VECTOR_DIM
 from core_api.services import memory_field
-from core_api.services.memory_field import field_cache
 from core_api.tenant_context import set_current_tenant
 from core_storage_api.services.postgres_service import get_session
 from tests.conftest import new_tenant_id
@@ -47,18 +47,11 @@ def as_auth():
 
         app.dependency_overrides[get_auth_context] = _dep
 
-    field_cache.clear()
-    memory_field._signature_cache.clear()
-    memory_field._build_started.clear()
+    memory_field._reset_state()
     yield _install
     app.dependency_overrides.pop(get_auth_context, None)
-    field_cache.clear()
-    memory_field._signature_cache.clear()
-    memory_field._build_started.clear()
-    # A build a failed test left running must not hold a slot in the next one.
-    memory_field._builds.clear()
-    memory_field._building_tenants.clear()
-    memory_field._signatures.clear()
+    # A fit or read a failed test left behind must not leak into the next one.
+    memory_field._reset_state()
 
 
 def _vec(axis: int, jitter: float = 0.0) -> list[float]:
@@ -233,7 +226,6 @@ async def test_fleet_filter_and_limit(client, sc, as_auth):
     assert resp.status_code == 200, resp.text
     assert [p["id"] for p in resp.json()["points"]] == [ids["fleet"]]
 
-    memory_field._build_started.clear()  # independent visibility scope; cooldown is tested separately
     limited = await _field(client, ids["tenant"], limit=3)
     assert limited.status_code == 200, limited.text
     body = limited.json()
@@ -269,7 +261,6 @@ async def test_cached_until_the_corpus_changes(client, sc, as_auth):
     assert second["computed_at"] == first["computed_at"]
     await _write(sc, tenant, "one more", embedding=_vec(0, 0.5))
     memory_field._signature_cache.clear()  # the five-second signature TTL has elapsed
-    memory_field._build_started.clear()
     third = (await _field(client, tenant)).json()
     assert third["computed_at"] != first["computed_at"]
     assert len(third["points"]) == len(first["points"]) + 1
@@ -291,7 +282,6 @@ async def test_an_edit_misses_the_cache(client, sc, as_auth):
         id=edited,
     )
     memory_field._signature_cache.clear()  # the five-second signature TTL has elapsed
-    memory_field._build_started.clear()
     second = (await _field(client, tenant)).json()
     assert second["computed_at"] != first["computed_at"]
     point = next(p for p in second["points"] if p["id"] == edited)
@@ -299,79 +289,80 @@ async def test_an_edit_misses_the_cache(client, sc, as_auth):
     assert point["visibility"] == "scope_org"
 
 
-class _HeldBuilds:
-    """The storage client, except that each map build's first page waits.
+class _HeldReads:
+    """The storage client, except that each map read's first page waits.
 
-    A build starts by fetching its first page (no cursor); that fetch counts
-    the build and then holds until ``release`` is set, so a test can line up
-    requests against builds in flight.
+    A read of a saved map starts by fetching its first page (no cursor) with
+    only the unplaced rows' embeddings; that fetch counts the read and then
+    holds until ``release`` is set, so a test can line up requests against
+    reads in flight. A fit's pages carry every embedding and are not held.
     """
 
     def __init__(self, real) -> None:
         self._real = real
         self.release = asyncio.Event()
-        self.builds = 0
+        self.reads = 0
         self._started = asyncio.Condition()
 
     def __getattr__(self, name: str):
         return getattr(self._real, name)
 
     async def memory_field_page(self, body: dict) -> dict:
-        if "cursor_id" not in body:
+        if "cursor_id" not in body and body.get("embeddings") == "unplaced":
             async with self._started:
-                self.builds += 1
+                self.reads += 1
                 self._started.notify_all()
             await self.release.wait()
         return await self._real.memory_field_page(body)
 
-    async def until_builds(self, count: int) -> None:
+    async def until_reads(self, count: int) -> None:
         async with self._started:
-            await self._started.wait_for(lambda: self.builds >= count)
+            await self._started.wait_for(lambda: self.reads >= count)
 
 
 @pytest.fixture
-def held_builds(sc, monkeypatch):
-    held = _HeldBuilds(memory_field.get_storage_client())
+def held_reads(sc, monkeypatch):
+    held = _HeldReads(memory_field.get_storage_client())
     monkeypatch.setattr(memory_field, "get_storage_client", lambda: held)
     yield held
     held.release.set()
 
 
-async def test_requests_for_one_map_share_its_build(client, sc, as_auth, held_builds):
+async def test_requests_for_one_map_share_one_read(client, sc, as_auth, held_reads):
     tenant = (await _seed(sc))["tenant"]
     as_auth(tenant)
     first = asyncio.create_task(_field(client, tenant))
     async with asyncio.timeout(5):
-        await held_builds.until_builds(1)
+        await held_reads.until_reads(1)
     second = asyncio.create_task(_field(client, tenant))
-    # Unshared, the second request starts a build of its own.
+    # Unshared, the second request starts a read of its own.
     with contextlib.suppress(TimeoutError):
         async with asyncio.timeout(2):
-            await held_builds.until_builds(2)
-    held_builds.release.set()
+            await held_reads.until_reads(2)
+    held_reads.release.set()
     one, two = await first, await second
     assert one.status_code == two.status_code == 200
     assert one.json()["computed_at"] == two.json()["computed_at"]
-    assert held_builds.builds == 1
+    assert held_reads.reads == 1
 
 
-async def test_limits_share_one_map_build(client, sc, as_auth, held_builds):
+async def test_every_limit_serves_the_same_saved_positions(client, sc, as_auth):
     tenant = (await _seed(sc))["tenant"]
     as_auth(tenant)
-    first = asyncio.create_task(_field(client, tenant))
-    async with asyncio.timeout(5):
-        await held_builds.until_builds(1)
-        other = asyncio.create_task(_field(client, tenant, limit=5))
-        await asyncio.sleep(0)
-    held_builds.release.set()
-    one, two = await first, await other
-    assert one.status_code == two.status_code == 200
-    assert len(two.json()["points"]) == 5
-    assert one.json()["model_version"] == two.json()["model_version"]
-    assert held_builds.builds == 1
+    full = {p["id"]: p for p in (await _field(client, tenant)).json()["points"]}
+    few = (await _field(client, tenant, limit=5)).json()["points"]
+    assert len(few) == 5
+    for p in few:
+        assert (p["x"], p["y"], p["cluster"]) == (
+            full[p["id"]]["x"],
+            full[p["id"]]["y"],
+            full[p["id"]]["cluster"],
+        )
 
 
-async def test_build_slots_are_independent_per_tenant(client, sc, as_auth, held_builds):
+async def test_maps_of_different_tenants_do_not_wait_on_each_other(
+    client, sc, as_auth, held_reads
+):
     tenants = [(await _seed(sc))["tenant"] for _ in range(3)]
 
     async def _each_its_own_tenant(request: Request) -> AuthContext:
@@ -381,9 +372,9 @@ async def test_build_slots_are_independent_per_tenant(client, sc, as_auth, held_
 
     app.dependency_overrides[get_auth_context] = _each_its_own_tenant
     running = [asyncio.create_task(_field(client, t)) for t in tenants]
-    async with asyncio.timeout(5):
-        await held_builds.until_builds(3)
-    held_builds.release.set()
+    async with asyncio.timeout(10):
+        await held_reads.until_reads(3)
+    held_reads.release.set()
     assert [(await r).status_code for r in running] == [200, 200, 200]
 
 
@@ -461,3 +452,136 @@ async def test_storage_field_routes_require_tenant(storage_http):
         json={"tenant_id": "t", "cursor_ts": "2026-10-01T00:00:00"},
     )
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Saved layouts: one process fits a tenant under a storage claim and saves
+# the model and the positions; a read serves saved positions and places only
+# the memories that have none, with the saved model, without refitting.
+# ---------------------------------------------------------------------------
+
+# The seed's shared, live, embedded rows: two topics of six, the superseded
+# pair and the fleet row. Private, deleted and unembedded rows are not fitted.
+SHARED_EMBEDDED = 15
+
+
+async def _saved_positions(sc, tenant: str, version: str) -> dict[str, tuple]:
+    page = await sc.memory_field_page(
+        {
+            "tenant_id": tenant,
+            "include_scope_agent": True,
+            "model_version": version,
+            "embeddings": "none",
+        }
+    )
+    return {
+        r["id"]: (r["x"], r["y"], r["cluster"])
+        for r in page["rows"]
+        if r["x"] is not None
+    }
+
+
+async def test_the_first_request_fits_and_saves_the_layout(client, sc, as_auth):
+    ids = await _seed(sc)
+    tenant = ids["tenant"]
+    as_auth(tenant)
+    resp = await _field(client, tenant)
+    assert resp.status_code == 200, resp.text
+
+    model = await sc.projection_model_get(tenant)
+    assert model["model_version"]
+    assert model["fitting"] is False
+    assert model["n_fit"] == SHARED_EMBEDDED
+    saved = await _saved_positions(sc, tenant, model["model_version"])
+    assert set(saved) == {
+        p["id"] for p in resp.json()["points"] if p["cluster"] >= 0
+    }, "every placed point is a saved position"
+    for p in resp.json()["points"]:
+        if p["id"] in saved:
+            x, y, cluster = saved[p["id"]]
+            assert (p["x"], p["y"], p["cluster"]) == (round(x, 5), round(y, 5), cluster)
+
+
+async def test_a_new_memory_is_placed_without_a_refit(client, sc, as_auth):
+    ids = await _seed(sc)
+    tenant = ids["tenant"]
+    as_auth(tenant)
+    first = {p["id"]: p for p in (await _field(client, tenant)).json()["points"]}
+    version = (await sc.projection_model_get(tenant))["model_version"]
+
+    added = await _write(
+        sc, tenant, "billing refund note, one more", embedding=_vec(0, 0.03)
+    )
+    memory_field._signature_cache.clear()  # the five-second signature TTL has elapsed
+    second = {p["id"]: p for p in (await _field(client, tenant)).json()["points"]}
+
+    assert (await sc.projection_model_get(tenant))["model_version"] == version
+    assert second[added]["cluster"] == second[ids["topic"][0]]["cluster"]
+    assert added in await _saved_positions(sc, tenant, version)
+    for memory_id, point in first.items():
+        assert (second[memory_id]["x"], second[memory_id]["y"]) == (
+            point["x"],
+            point["y"],
+        ), memory_id
+
+
+async def test_private_memories_are_placed_but_do_not_shape_the_layout(
+    client, sc, as_auth
+):
+    ids = await _seed(sc)
+    tenant = ids["tenant"]
+    as_auth(tenant)
+    assert (await _field(client, tenant)).status_code == 200
+    model = await sc.projection_model_get(tenant)
+    assert model["n_fit"] == SHARED_EMBEDDED
+
+    memory_field._reset_state()
+    as_auth(tenant, agent_id=OWNER)
+    points = {p["id"]: p for p in (await _field(client, tenant)).json()["points"]}
+    assert points[ids["own_private"]]["cluster"] >= 0
+    assert ids["own_private"] in await _saved_positions(
+        sc, tenant, model["model_version"]
+    )
+    assert (await sc.projection_model_get(tenant))["model_version"] == model[
+        "model_version"
+    ]
+
+
+async def test_a_large_tenant_is_prepared_in_the_background(
+    client, sc, as_auth, monkeypatch
+):
+    ids = await _seed(sc)
+    tenant = ids["tenant"]
+    as_auth(tenant)
+    monkeypatch.setattr(memory_field, "FIT_INLINE_MAX", 0)
+    preparing = await _field(client, tenant)
+    assert preparing.status_code == 429, preparing.text
+    assert "prepared" in preparing.json()["detail"]
+    assert preparing.headers["Retry-After"]
+
+    async with asyncio.timeout(30):
+        await asyncio.gather(*memory_field._fits.values())
+    served = await _field(client, tenant)
+    assert served.status_code == 200, served.text
+    assert (await sc.projection_model_get(tenant))["model_version"]
+
+
+async def test_a_failed_fit_gives_its_claim_back(client, sc, as_auth, monkeypatch):
+    ids = await _seed(sc)
+    tenant = ids["tenant"]
+    as_auth(tenant)
+
+    def broken(vectors):
+        raise RuntimeError("fit failed")
+
+    real = memory_field.fit_model
+    monkeypatch.setattr(memory_field, "fit_model", broken)
+    failed = await _field(client, tenant)
+    assert failed.status_code == 429, failed.text
+    model = await sc.projection_model_get(tenant)
+    assert model["fitting"] is False
+    assert model["model_version"] is None
+
+    monkeypatch.setattr(memory_field, "fit_model", real)
+    memory_field._reset_state()
+    assert (await _field(client, tenant)).status_code == 200

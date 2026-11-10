@@ -16,18 +16,21 @@ projection that needs only numpy (no umap / sklearn / numba):
 Deterministic for the same inputs. Rows without an embedding yet still appear,
 with ``cluster = -1``, near the centre with a small jitter derived from their id.
 
-The layout is computed on request and cached in-process (see
-``_FieldCache``). Persisting the fitted model (mean, axes, centroids, local
-axes) so the write path can place new memories inline, and so a refit is a
-background job rather than a request, is the planned next step; no table is
-added here.
+The fit is saved (``FieldModel``, in core-storage's ``/projections``): one
+process fits a tenant under a storage claim and saves the model and every
+memory's position, and a read serves the saved positions. A memory with no
+position yet is placed with the saved model, a few small matrix products, and
+saved, so a new memory appears without fitting again and no point moves. Only
+a tenant with too few embeddings to fit is laid out on each request.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
+import io
 import logging
 import math
 import re
@@ -36,7 +39,8 @@ from collections import Counter, OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NoReturn
+from uuid import uuid4
 
 import httpx
 import numpy as np
@@ -143,30 +147,40 @@ def _project(data: np.ndarray, mean: np.ndarray, axes: np.ndarray) -> np.ndarray
     return out
 
 
-def _local_2d(points: np.ndarray, radius: float) -> np.ndarray:
-    """A cluster's members in its own 2D PCA, filling a disc of ``radius``.
+def _local_fit(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """A cluster's own 2D PCA: ``(mean, axes, std, scale)``, what
+    ``_local_apply`` needs to put a point inside the cluster's disc.
 
     Each local axis is scaled to unit spread so a cluster reads as a blob, not
-    a line, then the cloud is sized so its 90th-percentile point sits on the
-    rim; the few outliers beyond are pulled in to 1.25x the radius.
+    a line, and ``scale`` is the 90th-percentile point's distance after that,
+    which ``_local_apply`` puts on the rim. ``scale`` is 0 for a cluster with
+    no spread (one member, or all alike): its members sit at the anchor.
     """
-    m = points.shape[0]
+    m, p = points.shape
+    mean = points.mean(axis=0)
     if m == 1:
-        return np.zeros((1, 2))
-    centred = points - points.mean(axis=0)
+        return mean, np.zeros((2, p)), np.ones(2), 0.0
+    centred = points - mean
     _, _, vt = np.linalg.svd(centred, full_matrices=False)
     axes = _fix_signs(vt[:2])
+    if axes.shape[0] < 2:
+        axes = np.vstack([axes, np.zeros((2 - axes.shape[0], p))])
     local = centred @ axes.T
-    if local.shape[1] < 2:
-        local = np.hstack([local, np.zeros((m, 2 - local.shape[1]))])
     std = local.std(axis=0)
     std[std < 1e-12] = 1.0
-    local = local / std
-    norms = np.linalg.norm(local, axis=1)
+    norms = np.linalg.norm(local / std, axis=1)
     scale = float(np.percentile(norms, 90)) if m > 2 else float(norms.max())
+    return mean, axes, std, scale if scale >= 1e-12 else 0.0
+
+
+def _local_apply(
+    points: np.ndarray, mean: np.ndarray, axes: np.ndarray, std: np.ndarray, scale: float, radius: float
+) -> np.ndarray:
+    """Points in a cluster's disc of ``radius``, by the cluster's
+    ``_local_fit``; the few beyond the rim are pulled in to 1.25x the radius."""
     if scale < 1e-12:
-        return np.zeros((m, 2))
-    local = local / scale * radius
+        return np.zeros((points.shape[0], 2))
+    local = ((points - mean) @ axes.T) / std / scale * radius
     norms = np.linalg.norm(local, axis=1)
     cap = 1.25 * radius
     over = norms > cap
@@ -273,7 +287,99 @@ def compute_layout(ids: Sequence[str], vectors: np.ndarray, has_vec: np.ndarray)
             cluster[idx] = 0
         return FieldLayout(xs, ys, cluster, [(0.5, 0.5)], [m], [[int(i) for i in placed]])
 
-    data = vectors[placed]
+    model, ordered, coords = _fit_layout(vectors[placed])
+    k = len(ordered)
+
+    def _norm(p: np.ndarray) -> tuple[float, float]:
+        q = np.clip(p * model.norm_scale + model.norm_offset, _CLAMP_LO, _CLAMP_HI)
+        return float(q[0]), float(q[1])
+
+    members: list[list[int]] = []
+    for c, rows in enumerate(ordered):
+        members.append([int(placed[r]) for r in rows])
+        for r in rows:
+            i = int(placed[r])
+            xs[i], ys[i] = _norm(coords[r])
+            cluster[i] = c
+    anchor_xy = [_norm(model.anchors[c]) for c in range(k)]
+    return FieldLayout(xs, ys, cluster, anchor_xy, [len(rows) for rows in ordered], members)
+
+
+# ---------------------------------------------------------------------------
+# The fitted model: what is saved, and how a new embedding is placed with it
+# ---------------------------------------------------------------------------
+
+# The arrays a model is, in the order ``FieldModel`` declares them.
+_MODEL_ARRAYS = (
+    "mean",
+    "axes",
+    "centroids",
+    "local_mean",
+    "local_axes",
+    "local_std",
+    "local_scale",
+    "radii",
+    "anchors",
+    "norm_scale",
+    "norm_offset",
+    "sizes",
+)
+
+
+@dataclass
+class FieldModel:
+    """A fitted layout: enough to place any embedding without fitting again.
+
+    ``mean`` and ``axes`` project an embedding to the PCA space (``(d,)`` and
+    ``(p, d)``); the nearest of the ``k`` ``centroids`` picks its cluster; the
+    cluster's ``local_*`` and ``radii`` put it inside that cluster's disc
+    around its ``anchors`` row; ``norm_scale`` and ``norm_offset`` map the
+    result into ``[0, 1]``. ``sizes`` counts each cluster's members at the fit.
+    Numbers only: no memory text, so a saved model outlives no deleted memory.
+    """
+
+    mean: np.ndarray
+    axes: np.ndarray
+    centroids: np.ndarray
+    local_mean: np.ndarray
+    local_axes: np.ndarray
+    local_std: np.ndarray
+    local_scale: np.ndarray
+    radii: np.ndarray
+    anchors: np.ndarray
+    norm_scale: np.ndarray
+    norm_offset: np.ndarray
+    sizes: np.ndarray
+
+    @property
+    def dim(self) -> int:
+        return int(self.mean.shape[0])
+
+    def to_bytes(self) -> bytes:
+        """The model as an ``.npz`` of float32 arrays, about 210 KB for
+        1,024-dimension embeddings: what storage saves as its parameters."""
+        buf = io.BytesIO()
+        arrays: dict[str, Any] = {
+            name: np.asarray(getattr(self, name), dtype=np.float32) for name in _MODEL_ARRAYS
+        }
+        np.savez(buf, **arrays)
+        return buf.getvalue()
+
+    @classmethod
+    def from_bytes(cls, raw: bytes) -> FieldModel:
+        # ``allow_pickle=False``: parameters are arrays, never objects.
+        with np.load(io.BytesIO(raw), allow_pickle=False) as arrays:
+            return cls(**{name: arrays[name].astype(np.float64) for name in _MODEL_ARRAYS})
+
+
+def _fit_layout(data: np.ndarray) -> tuple[FieldModel, list[list[int]], np.ndarray]:
+    """Fit the layout on ``data`` (four rows or more).
+
+    Returns the model, each cluster's rows as k-means assigned them (largest
+    cluster first, ties by first member), and those rows' 2D coordinates
+    before normalisation, which is what ``compute_layout`` draws.
+    """
+    m = data.shape[0]
     mean, axes = _pca_axes(data, _PCA_DIMS)
     reduced = _project(data, mean, axes)
 
@@ -300,9 +406,17 @@ def compute_layout(ids: Sequence[str], vectors: np.ndarray, has_vec: np.ndarray)
     radii = 0.6 * np.sqrt(sizes / m)
     anchors = _repel(anchors, radii)
 
+    p = reduced.shape[1]
+    local_mean = np.zeros((k, p))
+    local_axes = np.zeros((k, 2, p))
+    local_std = np.ones((k, 2))
+    local_scale = np.zeros(k)
     coords = np.zeros((m, 2))
     for c, rows in enumerate(ordered):
-        coords[rows] = anchors[c] + _local_2d(reduced[rows], float(radii[c]))
+        local_mean[c], local_axes[c], local_std[c], local_scale[c] = _local_fit(reduced[rows])
+        coords[rows] = anchors[c] + _local_apply(
+            reduced[rows], local_mean[c], local_axes[c], local_std[c], float(local_scale[c]), float(radii[c])
+        )
 
     # Normalise each axis by the 3rd-97th percentile of the POINTS, mapped to
     # [pad, 1 - pad], outliers clamped into [0.02, 0.98]. Min/max scaling let
@@ -310,20 +424,58 @@ def compute_layout(ids: Sequence[str], vectors: np.ndarray, has_vec: np.ndarray)
     lo, hi = _robust_range(coords)
     scale = np.where(hi - lo > 1e-12, (1.0 - 2 * _PADDING) / np.maximum(hi - lo, 1e-12), 0.0)
     offset = np.where(hi - lo > 1e-12, _PADDING - lo * scale, 0.5)
+    model = FieldModel(
+        mean=mean,
+        axes=axes,
+        centroids=centroids,
+        local_mean=local_mean,
+        local_axes=local_axes,
+        local_std=local_std,
+        local_scale=local_scale,
+        radii=radii,
+        anchors=anchors,
+        norm_scale=scale,
+        norm_offset=offset,
+        sizes=sizes,
+    )
+    return model, ordered, coords
 
-    def _norm(p: np.ndarray) -> tuple[float, float]:
-        q = np.clip(p * scale + offset, _CLAMP_LO, _CLAMP_HI)
-        return float(q[0]), float(q[1])
 
-    members: list[list[int]] = []
-    for c, rows in enumerate(ordered):
-        members.append([int(placed[r]) for r in rows])
-        for r in rows:
-            i = int(placed[r])
-            xs[i], ys[i] = _norm(coords[r])
-            cluster[i] = c
-    anchor_xy = [_norm(anchors[c]) for c in range(k)]
-    return FieldLayout(xs, ys, cluster, anchor_xy, [len(rows) for rows in ordered], members)
+def fit_model(vectors: np.ndarray) -> FieldModel:
+    """Fit a layout model on ``vectors`` (``(n, d)``, four rows or more)."""
+    data = np.asarray(vectors)
+    if data.shape[0] < MIN_FIT:
+        raise ValueError(f"a layout fit needs at least {MIN_FIT} embeddings, got {data.shape[0]}")
+    return _fit_layout(data)[0]
+
+
+def place(model: FieldModel, vectors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Place ``vectors`` (``(n, d)``) with ``model``: ``(xy, cluster)``, with
+    ``xy`` in ``[0.02, 0.98]`` and each row in the cluster whose centroid is
+    nearest. Pure numpy, a few small matrix products per row."""
+    data = np.asarray(vectors)
+    if data.shape[0] == 0:
+        return np.zeros((0, 2)), np.zeros(0, dtype=np.int64)
+    reduced = _project(data, model.mean, model.axes)
+    distances = (
+        (reduced**2).sum(axis=1)[:, None]
+        - 2.0 * reduced @ model.centroids.T
+        + (model.centroids**2).sum(axis=1)[None, :]
+    )
+    cluster = distances.argmin(axis=1)
+    coords = np.zeros((data.shape[0], 2))
+    for c in np.unique(cluster).tolist():
+        rows = np.flatnonzero(cluster == c)
+        coords[rows] = model.anchors[c] + _local_apply(
+            reduced[rows],
+            model.local_mean[c],
+            model.local_axes[c],
+            model.local_std[c],
+            float(model.local_scale[c]),
+            float(model.radii[c]),
+        )
+    xy = np.clip(coords * model.norm_scale + model.norm_offset, _CLAMP_LO, _CLAMP_HI)
+    return xy, cluster
 
 
 # ---------------------------------------------------------------------------
@@ -485,9 +637,26 @@ def build_field(
     total: int,
     signature: str,
 ) -> dict[str, Any]:
-    """The ``/memories/field`` response body for ``rows`` (newest first)."""
+    """The ``/memories/field`` response body for ``rows`` (newest first), laid
+    out on request: what a tenant with too few embeddings to fit is served."""
     ids = [r["id"] for r in rows]
     layout = compute_layout(ids, vectors, has_vec)
+    version_src = "|".join(
+        [FIELD_KIND, signature, *(f"{rid}:{int(has_vec[i])}" for i, rid in enumerate(ids))]
+    )
+    return _assemble_field(rows, layout, entities, total=total, version_src=version_src)
+
+
+def _assemble_field(
+    rows: Sequence[dict],
+    layout: FieldLayout,
+    entities: dict[str, dict],
+    *,
+    total: int,
+    version_src: str,
+) -> dict[str, Any]:
+    """The response body for ``rows`` placed by ``layout``. A cluster none of
+    the rows falls in (a saved model's, for this caller's rows) is left out."""
     entity_labels = {eid: e.get("label") or "" for eid, e in entities.items()}
     labels = label_clusters(layout.members, rows, entity_labels)
 
@@ -537,10 +706,8 @@ def build_field(
             "size": layout.sizes[c],
         }
         for c in range(len(layout.sizes))
+        if layout.sizes[c]
     ]
-    version_src = "|".join(
-        [FIELD_KIND, signature, *(f"{rid}:{int(has_vec[i])}" for i, rid in enumerate(ids))]
-    )
     return {
         "kind": FIELD_KIND,
         "model_version": hashlib.sha256(version_src.encode()).hexdigest()[:12],
@@ -592,37 +759,102 @@ class _FieldCache:
         while len(self._data) > self._max:
             self._data.popitem(last=False)
 
+    def pop(self, key: tuple) -> None:
+        self._data.pop(key, None)
+
     def clear(self) -> None:
         self._data.clear()
 
 
 field_cache = _FieldCache()
 _signature_cache = _FieldCache(ttl=5.0)
-FIELD_BUILD_TIMEOUT_SECONDS = 40.0
-FIELD_BUILD_COOLDOWN_SECONDS = 5.0
-_build_started: OrderedDict[str, float] = OrderedDict()
 
 
 class FieldBusyError(Exception):
-    """No build slot is free for this map; the route answers 429."""
+    """The map cannot be read or fitted right now; the route answers 429."""
 
 
-# Builds in flight, by cache key, and the tenants running them. Touched only
-# on this process's event loop, so they need no lock.
-_builds: dict[tuple, asyncio.Task[dict]] = {}
-_layouts: dict[str, asyncio.Task[dict]] = {}
-_building_tenants: set[str] = set()
+class FieldPreparingError(Exception):
+    """The tenant's layout is being fitted; the route answers 429 until it is saved."""
+
+
+@dataclass
+class SavedModel:
+    """A tenant's saved fit: the version naming it, and the model itself."""
+
+    version: str
+    model: FieldModel
+
+
+# A fit needs four embeddings; fewer are laid out on each request (``build_field``).
+MIN_FIT = 4
+# A tenant with up to this many embedded memories fits inside its first request,
+# in a few seconds; a larger one fits in the background while requests answer
+# that the map is being prepared.
+FIT_INLINE_MAX = 5000
+# How long a request waits for an inline fit before answering that the map is
+# being prepared. The fit itself goes on and is saved; the next request finds it.
+FIT_INLINE_WAIT_SECONDS = 30.0
+# The layout is fitted on at most this many embeddings, spread evenly over the
+# newest ``FIELD_MAX_LIMIT``; every memory in that window is then placed.
+FIT_SAMPLE = 20000
+# How long a fit's claim holds before another process may take the tenant over.
+FIT_LEASE_SECONDS = 900
+# A read places at most this many memories that have no position yet; the rest
+# are drawn unplaced and placed by the reads that follow.
+PLACE_PER_REQUEST = 4000
+# Positions per save, the storage route's bound.
+POSITIONS_BATCH = 2000
+# How long a fit that failed, or found too few shared embeddings to fit, holds
+# its tenant off fitting again. A fit pages up to ``FIELD_MAX_LIMIT``
+# embeddings, so a failure that would recur must not be retried by every
+# request that follows it, and a tenant with too few shared memories is laid
+# out on request without paging for a fit each time.
+FIT_RETRY_SECONDS = 30.0
+# A tenant whose shared memories are too few to fit, while a caller sees
+# enough of its own private ones, is laid out on request: from at most this
+# many of the caller's newest memories, holding one of the process's layout
+# slots (``_fit_slots``), so it costs no more than an inline fit.
+ON_REQUEST_MAX = FIT_INLINE_MAX
+
+# Fits running in this process, by tenant, and reads in flight, by cache key.
+# Touched only on this process's event loop, so they need no lock.
+_fits: dict[str, asyncio.Task[SavedModel | None]] = {}
+# Each tenant's last fit that saved nothing: ``(until, "failed" | "too_few")``.
+_fit_outcomes: OrderedDict[str, tuple[float, str]] = OrderedDict()
+_serves: dict[tuple, asyncio.Task[dict]] = {}
+_fit_slots = asyncio.Semaphore(settings.memory_field_max_concurrent_builds)
+# Which version each tenant's saved model is, rechecked every five seconds,
+# and the decoded models by version, so a recheck downloads but does not decode.
+_current_model = _FieldCache(ttl=5.0)
+_decoded_models = _FieldCache()
 # Signature reads share in-flight work and cache successful results for five
 # seconds per visibility scope, avoiding a full scan on every payload hit.
 _signatures: dict[tuple, asyncio.Task[dict]] = {}
 
 
+def _reset_state() -> None:
+    """Forget every cache and every fit or read in flight (tests)."""
+    global _fit_slots
+    for cache in (field_cache, _signature_cache, _current_model, _decoded_models):
+        cache.clear()
+    # A semaphore a waiter has used is bound to that event loop; a test's loop
+    # is gone with the test.
+    _fit_slots = asyncio.Semaphore(settings.memory_field_max_concurrent_builds)
+    _fits.clear()
+    _fit_outcomes.clear()
+    _serves.clear()
+    _signatures.clear()
+
+
 def _scope_key(scope: dict) -> tuple:
+    # Storage reads a missing ``caller_tenant_id`` as the tenant itself, so a
+    # tenant credential's scope and the fit's tenant-wide one are one key.
     return (
         scope.get("tenant_id"),
         scope.get("fleet_id"),
         scope.get("caller_agent_id"),
-        scope.get("caller_tenant_id"),
+        scope.get("caller_tenant_id") or scope.get("tenant_id"),
         bool(scope.get("include_scope_agent")),
     )
 
@@ -653,12 +885,9 @@ async def _signature(scope: dict) -> dict:
 
 
 async def get_memory_field(scope: dict, *, limit: int) -> dict:
-    """Rate-limit map requests per tenant and share one bounded full layout.
+    """Rate-limit map requests per tenant, then serve the saved layout.
 
-    Signatures refresh within five seconds. Builds have one slot per tenant,
-    a forty-second wait budget and a tenant-wide cooldown between uncached
-    builds, across visibility scopes. Cooldown responses report the time left.
-    Caller limits slice the shared layout rather than selecting a new build.
+    Signatures refresh within five seconds. See ``_get_memory_field``.
     """
     tenant = scope["tenant_id"]
     if limiter.enabled:
@@ -687,201 +916,424 @@ async def get_memory_field(scope: dict, *, limit: int) -> dict:
     return await _get_memory_field(scope, limit=limit)
 
 
-def _slice_field(payload: dict, limit: int) -> dict:
-    if len(payload["points"]) <= limit:
-        return payload
-    points = payload["points"][:limit]
-    counts = Counter(p["cluster"] for p in points)
-    linked = {eid for p in points for eid in p["entity_ids"]}
-    return {
-        **payload,
-        "points": points,
-        "clusters": [{**c, "size": counts[c["id"]]} for c in payload["clusters"] if counts[c["id"]]],
-        "entities": [e for e in payload["entities"] if e["id"] in linked],
-    }
-
-
 async def _get_memory_field(scope: dict, *, limit: int) -> dict:
-    # Only the signature read occupies a search slot. Waiting for the shared
-    # layout has its own tenant build slot and must leave ordinary searches free.
-    async with per_tenant_slot("search", scope["tenant_id"]):
-        sig = await _signature(scope)
-        # ``revision`` includes edits to the visible rows' displayed columns.
-        signature = f"{sig.get('count')}:{sig.get('embedded')}:{sig.get('newest')}:{sig.get('revision')}"
-        key = (*_scope_key(scope), signature)
-        cached = field_cache.get(key)
-        if cached is not None:
-            return _slice_field(cached, limit)
+    """The caller's map, from the tenant's saved layout.
 
-    build = _builds.get(key)
-    if build is None:
-        tenant = scope["tenant_id"]
-        if tenant in _building_tenants:
-            raise FieldBusyError
-        now = time.monotonic()
-        remaining = FIELD_BUILD_COOLDOWN_SECONDS - (
-            now - _build_started.get(tenant, -FIELD_BUILD_COOLDOWN_SECONDS)
-        )
-        if remaining > 0:
-            # This tenant-wide budget prevents changing visibility scopes from
-            # bypassing the limit on sequential uncached builds.
-            raise HTTPException(
-                status_code=429,
-                detail="The tenant's memory map build cooldown is active; retry shortly.",
-                headers={"Retry-After": str(math.ceil(remaining))},
-            )
-        _build_started[tenant] = now
-        _build_started.move_to_end(tenant)
-        while len(_build_started) > 1024:
-            _build_started.popitem(last=False)
-
-        async def bounded_build():
-            async with asyncio.timeout(FIELD_BUILD_TIMEOUT_SECONDS):
-                return await _build(scope, key, limit=FIELD_MAX_LIMIT, sig=sig, signature=signature)
-
-        build = asyncio.create_task(bounded_build())
-        _builds[key] = build
-        _building_tenants.add(tenant)
-
-        def _release(done: asyncio.Task[dict]) -> None:
-            _builds.pop(key, None)
-            layout = _layouts.get(tenant)
-            if layout is None or layout.done():
-                _building_tenants.discard(tenant)
-            if not done.cancelled():
-                done.exception()  # retrieved, so a build every caller left does not log it
-
-        build.add_done_callback(_release)
-    try:
-        return _slice_field(await asyncio.shield(build), limit)
-    except TimeoutError:
-        # A layout already running keeps going and is cached when it finishes
-        # (``_build``); this request stops waiting for it.
-        logger.warning(
-            "Memory map build for tenant %s passed its %s s deadline; the request stopped waiting",
-            scope["tenant_id"],
-            FIELD_BUILD_TIMEOUT_SECONDS,
-            extra={
-                "path": "memory-field-build-deadline",
-                "tenant_id": scope["tenant_id"],
-                "deadline_s": FIELD_BUILD_TIMEOUT_SECONDS,
-            },
-        )
-        raise FieldBusyError from None
-
-
-async def _build(scope: dict, key: tuple, *, limit: int, sig: dict, signature: str) -> dict:
-    """Page the caller's rows with their embeddings, lay them out and cache it.
-
-    Logs where the time went once the layout finishes: storage, decoding and
-    the layout itself, so a slow map can be told from a busy one.
+    No saved model yet: the request claims the tenant's fit. With at most
+    ``FIT_INLINE_MAX`` shared embedded memories it fits inline and is served,
+    if the fit finishes within ``FIT_INLINE_WAIT_SECONDS``; a larger tenant
+    fits in the background and this answers
+    ``FieldPreparingError`` until the model is saved, as does any request
+    while another process holds the claim. A tenant with fewer than
+    ``MIN_FIT`` embeddings is laid out on each request instead, and so is one
+    whose last fit found too few shared embeddings; after a failed fit,
+    requests answer ``FieldBusyError`` for ``FIT_RETRY_SECONDS`` rather than
+    fitting again.
     """
+    tenant = scope["tenant_id"]
+    # Only the signature read occupies a search slot.
+    async with per_tenant_slot("search", tenant):
+        sig = await _signature(scope)
+    signature = f"{sig.get('count')}:{sig.get('embedded')}:{sig.get('newest')}:{sig.get('revision')}"
+    embedded = int(sig.get("embedded") or 0)
+    saved = await _saved_model(tenant)
+    if saved is None and embedded >= MIN_FIT:
+        outcome = _fit_outcome(tenant)
+        if outcome == "failed":
+            raise FieldBusyError
+        if outcome != "too_few":
+            # Inline or not by the fit's size: it pages the tenant's shared
+            # memories, which a narrow caller (one fleet, one agent) can see
+            # few of. The same five-second signature cache serves it.
+            async with per_tenant_slot("search", tenant):
+                shared = await _signature({"tenant_id": tenant})
+            inline = int(shared.get("embedded") or 0) <= FIT_INLINE_MAX
+            saved = await _fit_or_wait(tenant, inline=inline)
+    # Laid out on request although there are embeddings enough to fit: bound it.
+    bounded = saved is None and embedded >= MIN_FIT
+    if bounded:
+        limit = min(limit, ON_REQUEST_MAX)
+
+    key = (*_scope_key(scope), signature, saved.version if saved else None, limit)
+    cached = field_cache.get(key)
+    if cached is not None:
+        return cached
+    serve = _serves.get(key)
+    if serve is None:
+        serve = asyncio.create_task(
+            _serve(scope, key, saved, limit=limit, total=int(sig.get("count") or 0), bounded=bounded)
+        )
+        _serves[key] = serve
+
+        def _forget(done: asyncio.Task[dict]) -> None:
+            if _serves.get(key) is done:
+                del _serves[key]
+            if not done.cancelled():
+                done.exception()  # retrieved, so a read every caller left does not log it
+
+        serve.add_done_callback(_forget)
+    return await asyncio.shield(serve)
+
+
+async def _saved_model(tenant: str, *, fresh: bool = False) -> SavedModel | None:
+    """The tenant's saved model, or None before its first fit."""
+    hit = None if fresh else _current_model.get((tenant,))
+    if hit is not None:
+        return hit["saved"]
+    got = await get_storage_client().projection_model_get(tenant)
+    saved: SavedModel | None = None
+    version = got.get("model_version")
+    if version and got.get("params_b64"):
+        decoded = _decoded_models.get((tenant, version))
+        if decoded is None:
+            model = FieldModel.from_bytes(base64.b64decode(got["params_b64"]))
+            decoded = {"saved": SavedModel(version=version, model=model)}
+            _decoded_models.put((tenant, version), decoded)
+        saved = decoded["saved"]
+    _current_model.put((tenant,), {"saved": saved})
+    return saved
+
+
+async def _fit_or_wait(tenant: str, *, inline: bool) -> SavedModel | None:
+    """Start the tenant's fit if this process is not already running it, and
+    wait for it when ``inline``. None when the tenant has too few shared
+    embeddings to fit.
+
+    The task is registered before anything is awaited, so concurrent requests
+    in this process share one claim and one fit rather than racing each other
+    for the claim and answering that the map is being prepared.
+    """
+    task = _fits.get(tenant)
+    if task is None:
+        task = asyncio.create_task(_claim_and_fit(tenant))
+        _fits[tenant] = task
+
+        def _done(done: asyncio.Task[SavedModel | None]) -> None:
+            if _fits.get(tenant) is done:
+                del _fits[tenant]
+            _current_model.pop((tenant,))
+            if done.cancelled():
+                return
+            exc = done.exception()  # retrieved; ``_fit`` logged a failure
+            if exc is None:
+                if done.result() is None:
+                    _record_fit_outcome(tenant, "too_few")
+                else:
+                    _fit_outcomes.pop(tenant, None)
+            elif not isinstance(exc, FieldPreparingError):
+                # Not a claim another process holds: this fit itself failed.
+                _record_fit_outcome(tenant, "failed")
+
+        task.add_done_callback(_done)
+    if not inline:
+        raise FieldPreparingError
+    waiting = asyncio.timeout(FIT_INLINE_WAIT_SECONDS)
+    try:
+        async with waiting:
+            return await asyncio.shield(task)
+    except FieldPreparingError:
+        raise
+    except Exception as exc:
+        if waiting.expired():
+            # Stopped waiting; the shielded fit goes on and is saved.
+            raise FieldPreparingError from None
+        raise FieldBusyError from exc
+
+
+def _fit_outcome(tenant: str) -> str | None:
+    """``"failed"`` or ``"too_few"`` while the tenant's last fit holds it off."""
+    hit = _fit_outcomes.get(tenant)
+    if hit is None:
+        return None
+    if hit[0] < time.monotonic():
+        _fit_outcomes.pop(tenant, None)
+        return None
+    return hit[1]
+
+
+def _record_fit_outcome(tenant: str, outcome: str) -> None:
+    _fit_outcomes[tenant] = (time.monotonic() + FIT_RETRY_SECONDS, outcome)
+    _fit_outcomes.move_to_end(tenant)
+    while len(_fit_outcomes) > 1024:
+        _fit_outcomes.popitem(last=False)
+
+
+async def _claim_and_fit(tenant: str) -> SavedModel | None:
+    """Claim the tenant's fit in storage and run it. ``FieldPreparingError``
+    when another process holds the claim."""
     sc = get_storage_client()
-    rows: list[dict] = []
-    entities: dict[str, dict] = {}
-    chunks: list[np.ndarray] = []
-    flags: list[bool] = []
-    dim = 0
+    token = uuid4().hex
+    claim = await sc.projection_claim(tenant, token, FIT_LEASE_SECONDS)
+    if not claim.get("claimed"):
+        raise FieldPreparingError
+    if claim.get("model_version"):
+        # Saved since this process read the model (a replica behind the
+        # primary): serve that one rather than fitting again.
+        await sc.projection_release(tenant, token)
+        saved = await _saved_model(tenant, fresh=True)
+        if saved is None:
+            raise FieldPreparingError
+        return saved
+    return await _fit(tenant, token)
+
+
+@dataclass
+class _Pages:
+    rows: list[dict]
+    entities: dict[str, dict]
+    # Each row's embedding as float16, or None when the page did not carry one.
+    vectors: list[np.ndarray | None]
+    dim: int
+    pages: int
+    storage_s: float
+    decode_s: float
+
+
+def _stack(vectors: list[np.ndarray | None], rows: list[int]) -> np.ndarray:
+    """The embeddings of ``rows``, every one of which has one, as a matrix."""
+    picked = [vectors[i] for i in rows]
+    return np.stack([v for v in picked if v is not None])
+
+
+async def _page(body: dict, *, limit: int) -> _Pages:
+    """Up to ``limit`` rows of the field page for ``body``, newest first."""
+    sc = get_storage_client()
+    out = _Pages(rows=[], entities={}, vectors=[], dim=0, pages=0, storage_s=0.0, decode_s=0.0)
     cursor: dict | None = None
-    started = time.monotonic()
-    storage_s = decode_s = 0.0
-    pages = 0
-    while len(rows) < limit:
-        body = {**scope, "limit": min(FIELD_PAGE_SIZE, limit - len(rows))}
+    while len(out.rows) < limit:
+        page_body = {**body, "limit": min(FIELD_PAGE_SIZE, limit - len(out.rows))}
         if cursor:
-            body["cursor_ts"] = cursor["ts"]
-            body["cursor_id"] = cursor["id"]
+            page_body["cursor_ts"] = cursor["ts"]
+            page_body["cursor_id"] = cursor["id"]
         asked = time.monotonic()
-        page = await sc.memory_field_page(body)
+        page = await sc.memory_field_page(page_body)
         decoding = time.monotonic()
-        storage_s += decoding - asked
-        pages += 1
+        out.storage_s += decoding - asked
+        out.pages += 1
         page_rows = page.get("rows") or []
-        page_vecs: list[np.ndarray | None] = []
         for r in page_rows:
             vec = decode_embedding(r.pop("embedding_b64", None))
-            if vec is not None and dim == 0:
-                dim = int(vec.shape[0])
-            page_vecs.append(vec if vec is not None and vec.shape[0] == dim else None)
-        rows.extend(page_rows)
+            if vec is not None and out.dim == 0:
+                out.dim = int(vec.shape[0])
+            # float16 holds the working set at half size (50k x 1024 = 100 MB);
+            # the PCA itself runs in float64 chunk by chunk.
+            out.vectors.append(
+                vec.astype(np.float16) if vec is not None and vec.shape[0] == out.dim else None
+            )
+        out.rows.extend(page_rows)
         for e in page.get("entities") or []:
-            entities.setdefault(e["id"], e)
-        # float16 holds the working set at half size (50k x 1024 = 100 MB);
-        # the PCA itself runs in float64 chunk by chunk.
-        width = dim or 1
-        block = np.zeros((len(page_vecs), width), dtype=np.float16)
-        for t, vec in enumerate(page_vecs):
-            if vec is not None:
-                block[t] = vec.astype(np.float16)
-            flags.append(vec is not None)
-        chunks.append(block)
-        decode_s += time.monotonic() - decoding
+            out.entities.setdefault(e["id"], e)
+        out.decode_s += time.monotonic() - decoding
         cursor = page.get("next_cursor")
         if not cursor or not page_rows:
             break
+    return out
 
-    width = dim or 1
-    chunks = [c if c.shape[1] == width else np.zeros((c.shape[0], width), dtype=np.float16) for c in chunks]
-    # A page fetched before the first embedding was seen has width 1; its rows
-    # carry no vector, so zero-filling it is exact.
-    vectors = np.concatenate(chunks) if chunks else np.zeros((0, width), dtype=np.float16)
-    has_vec = np.array(flags, dtype=bool)
 
-    tenant = scope["tenant_id"]
-    laying_out = time.monotonic()
-    layout = asyncio.create_task(
-        asyncio.to_thread(
-            build_field,
-            rows,
-            vectors,
-            has_vec,
-            entities,
-            total=int(sig.get("count") or len(rows)),
-            signature=signature,
-        )
+def _lost_claim(tenant: str) -> NoReturn:
+    """A fit whose claim has gone stops: another process is fitting the
+    tenant, so the map is being prepared. Never a failure, never too few."""
+    logger.warning(
+        "Memory map fit for tenant %s lost its claim before saving",
+        tenant,
+        extra={"path": "memory-field-fit-lost", "tenant_id": tenant},
     )
-    _layouts[tenant] = layout
+    raise FieldPreparingError
 
-    def release_layout(done: asyncio.Task[dict]) -> None:
-        if not done.cancelled() and done.exception() is None:
-            # The request may have timed out while its shielded layout kept
-            # running. Save that work before releasing the tenant's build slot.
-            field_cache.put(key, done.result())
+
+async def _fit(tenant: str, token: str) -> SavedModel | None:
+    """Fit the tenant's layout under ``token``'s claim and save it.
+
+    Pages the newest ``FIELD_MAX_LIMIT`` of the tenant's shared memories with
+    their embeddings (agent-private memories do not shape the layout; they
+    are placed when read), fits on a sample, places every row, and saves the
+    positions and then the model. Logs one line saying where the time went.
+    Gives the claim back on any failure, so the next request can fit again.
+    """
+    sc = get_storage_client()
+    started = time.monotonic()
+    try:
+        async with _fit_slots:
+            version = f"{FIELD_KIND}-{uuid4().hex[:12]}"
+            got = await _page(
+                {"tenant_id": tenant, "model_version": version, "embeddings": "all"}, limit=FIELD_MAX_LIMIT
+            )
+            embedded = np.array([i for i, v in enumerate(got.vectors) if v is not None], dtype=np.int64)
+            if embedded.size < MIN_FIT:
+                await sc.projection_release(tenant, token)
+                return None
+            vectors = _stack(got.vectors, embedded.tolist())
+            sample = (
+                np.arange(embedded.size)
+                if embedded.size <= FIT_SAMPLE
+                else np.unique(np.linspace(0, embedded.size - 1, FIT_SAMPLE).astype(np.int64))
+            )
+            laying_out = time.monotonic()
+            model = await asyncio.to_thread(fit_model, vectors[sample])
+            xy, cluster = await asyncio.to_thread(place, model, vectors)
+            layout_s = time.monotonic() - laying_out
+
+            saving = time.monotonic()
+            items = [
+                {
+                    "memory_id": got.rows[i]["id"],
+                    "x": float(xy[t, 0]),
+                    "y": float(xy[t, 1]),
+                    "cluster": int(cluster[t]),
+                    "row_version": got.rows[i]["row_version"],
+                }
+                for t, i in enumerate(embedded.tolist())
+            ]
+            for start in range(0, len(items), POSITIONS_BATCH):
+                batch = items[start : start + POSITIONS_BATCH]
+                if await sc.projection_positions_save(tenant, version, batch, claim_token=token) is None:
+                    # Refused: the claim has gone, so another process holds
+                    # the tenant. The rows saved so far go with its model save.
+                    _lost_claim(tenant)
+            stored = await sc.projection_model_save(
+                tenant,
+                token,
+                model_version=version,
+                kind=FIELD_KIND,
+                dim=model.dim,
+                n_fit=int(sample.size),
+                params=model.to_bytes(),
+            )
+            if not stored and (await sc.projection_model_get(tenant)).get("model_version") != version:
+                # A fit that outlived its lease: another process took the
+                # tenant over. Its positions go with the next model save.
+                _lost_claim(tenant)
             finished = time.monotonic()
             ms = {
-                "storage_ms": round(storage_s * 1000),
-                "decode_ms": round(decode_s * 1000),
-                "layout_ms": round((finished - laying_out) * 1000),
+                "storage_ms": round(got.storage_s * 1000),
+                "decode_ms": round(got.decode_s * 1000),
+                "layout_ms": round(layout_s * 1000),
+                "save_ms": round((finished - saving) * 1000),
                 "total_ms": round((finished - started) * 1000),
             }
             logger.info(
-                "Memory map built for tenant %s: %d points (%d embedded) in %d ms "
-                "(storage %d ms over %d pages, decode %d ms, layout %d ms)",
+                "Memory map fitted for tenant %s: %d points (%d embedded, %d sampled) in %d ms "
+                "(storage %d ms over %d pages, decode %d ms, layout %d ms, save %d ms)",
                 tenant,
-                len(rows),
-                int(has_vec.sum()),
+                len(got.rows),
+                int(embedded.size),
+                int(sample.size),
                 ms["total_ms"],
                 ms["storage_ms"],
-                pages,
+                got.pages,
                 ms["decode_ms"],
                 ms["layout_ms"],
+                ms["save_ms"],
                 extra={
-                    "path": "memory-field-build",
+                    "path": "memory-field-fit",
                     "tenant_id": tenant,
-                    "points": len(rows),
-                    "embedded": int(has_vec.sum()),
-                    "pages": pages,
+                    "model_version": version,
+                    "points": len(got.rows),
+                    "embedded": int(embedded.size),
+                    "sample": int(sample.size),
+                    "pages": got.pages,
                     **ms,
                 },
             )
-        if _layouts.get(tenant) is done:
-            del _layouts[tenant]
-        if key not in _builds:
-            _building_tenants.discard(tenant)
+            return SavedModel(version=version, model=model)
+    except FieldPreparingError:
+        raise
+    except Exception:
+        logger.warning("Memory map fit for tenant %s failed", tenant, exc_info=True)
+        with contextlib.suppress(Exception):
+            await sc.projection_release(tenant, token)
+        raise
 
-    layout.add_done_callback(release_layout)
-    # Cancelling an await cannot stop the worker thread. Keep its slot until
-    # release_layout observes completion, even after the build's deadline.
-    payload = await asyncio.shield(layout)
+
+async def _serve(
+    scope: dict, key: tuple, saved: SavedModel | None, *, limit: int, total: int, bounded: bool = False
+) -> dict:
+    """Read the caller's newest ``limit`` rows and assemble their map.
+
+    With a saved model, rows carry their saved positions and only rows with
+    none carry an embedding: up to ``PLACE_PER_REQUEST`` of those are placed
+    with the model and saved, so the next read finds them placed. Without one,
+    the rows are laid out on this request (``build_field``); ``bounded`` (a
+    tenant with embeddings enough to fit, but too few of them shared) holds
+    one of the process's layout slots while it does.
+    """
+    if saved is None:
+        async with _fit_slots if bounded else contextlib.nullcontext():
+            got = await _page({**scope, "embeddings": "all"}, limit=limit)
+            width = got.dim or 1
+            vectors = np.zeros((len(got.rows), width), dtype=np.float16)
+            for i, vec in enumerate(got.vectors):
+                if vec is not None:
+                    vectors[i] = vec
+            has_vec = np.array([v is not None for v in got.vectors], dtype=bool)
+            payload = await asyncio.to_thread(
+                build_field, got.rows, vectors, has_vec, got.entities, total=total, signature=str(key[-3])
+            )
+        field_cache.put(key, payload)
+        return payload
+
+    got = await _page({**scope, "model_version": saved.version, "embeddings": "unplaced"}, limit=limit)
+    n = len(got.rows)
+    xs = [0.5] * n
+    ys = [0.5] * n
+    clusters = [-1] * n
+    for i, r in enumerate(got.rows):
+        if r.get("x") is not None:
+            xs[i], ys[i], clusters[i] = float(r["x"]), float(r["y"]), int(r["cluster"])
+    todo = [
+        i
+        for i, r in enumerate(got.rows)
+        if r.get("x") is None and (vec := got.vectors[i]) is not None and vec.shape[0] == saved.model.dim
+    ][:PLACE_PER_REQUEST]
+    if todo:
+        xy, cluster = await asyncio.to_thread(place, saved.model, _stack(got.vectors, todo))
+        items = []
+        for t, i in enumerate(todo):
+            xs[i], ys[i], clusters[i] = float(xy[t, 0]), float(xy[t, 1]), int(cluster[t])
+            items.append(
+                {
+                    "memory_id": got.rows[i]["id"],
+                    "x": xs[i],
+                    "y": ys[i],
+                    "cluster": clusters[i],
+                    "row_version": got.rows[i]["row_version"],
+                }
+            )
+        sc = get_storage_client()
+        for start in range(0, len(items), POSITIONS_BATCH):
+            # None: a refit saved a new model since this read began, and the
+            # next read places these under it.
+            await sc.projection_positions_save(
+                scope["tenant_id"], saved.version, items[start : start + POSITIONS_BATCH]
+            )
+    for i, r in enumerate(got.rows):
+        if clusters[i] < 0:
+            xs[i], ys[i] = _jitter(r["id"])
+
+    k = int(saved.model.centroids.shape[0])
+    members: list[list[int]] = [[] for _ in range(k)]
+    for i, c in enumerate(clusters):
+        if 0 <= c < k:
+            members[c].append(i)
+    anchors = np.clip(
+        saved.model.anchors * saved.model.norm_scale + saved.model.norm_offset, _CLAMP_LO, _CLAMP_HI
+    )
+    layout = FieldLayout(
+        x=xs,
+        y=ys,
+        cluster=clusters,
+        anchors=[(float(a[0]), float(a[1])) for a in anchors],
+        sizes=[len(m) for m in members],
+        members=members,
+    )
+    version_src = "|".join(
+        [
+            FIELD_KIND,
+            str(key[-3]),
+            saved.version,
+            *(f"{r['id']}:{c}" for r, c in zip(got.rows, clusters, strict=True)),
+        ]
+    )
+    payload = _assemble_field(got.rows, layout, got.entities, total=total, version_src=version_src)
     field_cache.put(key, payload)
     return payload

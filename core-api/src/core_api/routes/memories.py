@@ -133,6 +133,7 @@ from core_api.services.memory_field import (
     FIELD_DEFAULT_LIMIT,
     FIELD_MAX_LIMIT,
     FieldBusyError,
+    FieldPreparingError,
     get_memory_field,
 )
 from core_api.services.memory_service import (
@@ -990,11 +991,16 @@ async def memory_field(
 
     Same tenant check, fleet-read gate and visibility scoping as
     ``GET /memories``, so the map never places a memory the caller's list would
-    not show. Results are cached in-process for a few minutes and recomputed
-    when a memory is written, edited, embedded, deleted or changes status.
-    A build is costly, so a process runs only a few at once and one per
-    tenant; requests for a map being built wait for it, and any other
-    answers 429 with ``Retry-After``. Declared before
+    not show.
+
+    Positions come from the tenant's saved layout, fitted once and placed
+    with the saved model as memories arrive, so a new memory appears without
+    a rebuild and no point moves. A tenant's first request fits it: inline
+    for a tenant with up to a few thousand embedded memories, and in the
+    background for a larger one, when requests answer 429 with
+    ``Retry-After`` until the layout is saved. Responses are cached
+    in-process for a few minutes and rebuilt when a memory is written,
+    edited, embedded, deleted or changes status. Declared before
     ``/memories/{memory_id}`` so ``field`` is not parsed as an id.
     """
     auth.enforce_readable_tenant(tenant_id)
@@ -1013,6 +1019,12 @@ async def memory_field(
     }
     try:
         return await get_memory_field(scope_body, limit=limit)
+    except FieldPreparingError:
+        raise HTTPException(
+            status_code=429,
+            detail="The memory map is being prepared; retry shortly.",
+            headers={"Retry-After": "5"},
+        ) from None
     except FieldBusyError:
         raise HTTPException(
             status_code=429,
