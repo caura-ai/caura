@@ -305,6 +305,8 @@ ADMIN_PLANE_ROUTERS = frozenset(
         "lifecycle",
         "skills_inbox",
         "scheduler_lease",
+        # Internal, read-only matching uses the system-admin credential.
+        "keystone_fetches",
         # POST /telemetry/rotate resets the install's anonymous heartbeat
         # identity: an operator concern, refused to agent credentials.
         "telemetry",

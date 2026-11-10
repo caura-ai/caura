@@ -4978,6 +4978,22 @@ async def caura_keystones(
     except Exception as e:
         logger.exception("Unhandled error in caura_keystones")
         return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
+    from core_api.services.keystone_fetches import get_fetch_recorder
+
+    await get_fetch_recorder().record(
+        storage=sc,
+        auth=AuthContext(
+            tenant_id=tenant_id,
+            is_install_credential=_is_install_credential(),
+            install_uuid=_get_install_uuid(),
+            credential_id=(audit_principal.get() or {}).get("credential_id"),
+        ),
+        tenant_id=tenant_id,
+        principal=agent_id_effective if fleet_id else None,
+        fleet_id=fleet_id,
+        rows=rows,
+        truncated=truncated,
+    )
     payload: dict = {"count": len(rows), "truncated": truncated, "rules": rows}
     if not rows:
         payload["hint"] = KEYSTONES_EMPTY_HINT

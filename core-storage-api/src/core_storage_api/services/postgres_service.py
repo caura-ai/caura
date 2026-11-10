@@ -1975,6 +1975,8 @@ _PURGE_TENANT_TABLES: tuple[str, ...] = (
     # Every version's snapshot holds the tenant's keystone text (migration 061),
     # so the history goes with the documents it copies.
     "keystone_versions",
+    # Install-bound rule fetch records (079) carry tenant and fleet ids.
+    "keystone_fetches",
     "analysis_reports",
     "dedup_reviews",
     "background_task_log",
@@ -2057,6 +2059,7 @@ _PURGE_ORG_KEYED_TABLES: tuple[str, ...] = (
 # fleet-scoped run data.
 _PURGE_FLEET_TABLES: tuple[str, ...] = (
     "relations",
+    "keystone_fetches",
     # Carries its own ``fleet_id``, so once it joined the tenant purge it had
     # to join this one: a fleet teardown that skipped it would leave the
     # fleet's conflict rows behind in a SHARED tenant, which is the one thing

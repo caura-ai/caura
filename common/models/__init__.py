@@ -12,6 +12,7 @@ from common.models.document import Document
 from common.models.entity import Entity, MemoryEntityLink, Relation, RelationEvidence
 from common.models.fleet import FleetCommand, FleetNode
 from common.models.idempotency import IdempotencyResponse
+from common.models.keystone_fetch import KeystoneFetch
 from common.models.keystone_version import KeystoneVersion
 from common.models.lifecycle_audit import LifecycleAudit
 from common.models.memory import Memory
@@ -53,6 +54,7 @@ __all__ = [
     "FleetNode",
     "ForgeRejectedFingerprint",
     "IdempotencyResponse",
+    "KeystoneFetch",
     "KeystoneVersion",
     "LifecycleAudit",
     "LlmUsageMinute",

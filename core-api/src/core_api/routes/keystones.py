@@ -81,6 +81,7 @@ from core_api.errors import (
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.agent_service import enforce_broker_agent_ownership, lookup_agent
 from core_api.services.audit_service import log_action
+from core_api.services.keystone_fetches import get_fetch_recorder
 from core_api.services.pii_update_gate import apply_pii_policy_to_fields
 from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
@@ -437,6 +438,15 @@ async def list_keystones(
         raise _surface_storage_error(exc) from exc
     if truncated:
         response.headers["X-Truncated"] = "true"
+    await get_fetch_recorder().record(
+        storage=sc,
+        auth=auth,
+        tenant_id=tenant_id,
+        principal=agent_id,
+        fleet_id=fleet_id,
+        rows=rows,
+        truncated=truncated,
+    )
     # C30 / wire-contract D1 (ratified 2026-08-25): opt-in envelope. The bare
     # array remains the default response shape — existing consumers (plugin
     # session-start fetch included) see zero change unless they ask.

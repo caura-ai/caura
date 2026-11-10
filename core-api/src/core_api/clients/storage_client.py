@@ -3564,6 +3564,37 @@ class CoreStorageClient:
     # Audit
     # =====================================================================
 
+    async def record_keystone_fetch(self, data: dict) -> dict:
+        """A bounded direct write; the caller coalesces attempts and sets its deadline."""
+        return await self._post("/keystone-fetches", data)  # type: ignore[return-value]
+
+    async def match_keystone_fetches(self, data: dict) -> dict:
+        """Read the writer for immediate evidence; this POST never mutates rows."""
+        from common.keystone_fetches import MAX_CHECKS
+
+        checks = data["checks"]
+        if not 1 <= len(checks) <= MAX_CHECKS:
+            raise ValueError("expected 1 to 100 checks")
+        groups: dict[str, list[tuple[int, dict]]] = {}
+        for i, check in enumerate(checks):
+            groups.setdefault(check["tenant_id"], []).append((i, check))
+        results: list[dict] = [{} for _ in checks]
+        for tenant_id, group in groups.items():
+            response = await self._post(
+                "/keystone-fetches/match",
+                {"tenant_id": tenant_id, "checks": [check for _, check in group]},
+                idempotent=True,
+            )
+            if not isinstance(response, dict) or not isinstance(response.get("results"), list):
+                raise ValueError("invalid storage match response")
+            if len(response["results"]) != len(group):
+                raise ValueError("incomplete storage match response")
+            if any(not isinstance(result, dict) for result in response["results"]):
+                raise ValueError("invalid storage match result")
+            for (i, _), result in zip(group, response["results"], strict=True):
+                results[i] = result
+        return {"results": results}
+
     async def create_audit_log(self, data: dict) -> dict:
         return await self._post("/audit-logs", data)  # type: ignore[return-value]
 
