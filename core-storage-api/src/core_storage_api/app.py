@@ -65,6 +65,7 @@ from core_storage_api.routers import (
     memories_router,
     organization_settings_router,
     preview_router,
+    projections_router,
     purge_router,
     reports_router,
     skill_factory_router,
@@ -437,6 +438,9 @@ def create_app() -> FastAPI:
     # Handoff batons (migration 076): which agents a baton is waiting on.
     # Every route is bound to one tenant.
     app.include_router(batons_router, prefix=prefix)
+    # Saved field layouts (migration 078): fit claims, models and positions.
+    # Every route is bound to one tenant.
+    app.include_router(projections_router, prefix=prefix)
 
     return app
 

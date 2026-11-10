@@ -122,6 +122,8 @@ from common.models import (
     Memory,
     MemoryConflict,
     MemoryEntityLink,
+    MemoryProjection,
+    ProjectionModel,
     Relation,
     RelationEvidence,
 )
@@ -731,6 +733,18 @@ def _scored_search_row_filters(
         # an over-eager enrichment date can't silently hide a semantically
         # strong memory from historical-question queries.
     return row_filters
+
+
+# Which rows of a field page ship their embedding (``memory_field_page``).
+FIELD_PAGE_EMBEDDINGS = frozenset({"all", "unplaced", "none"})
+
+# A memory row's version: PostgreSQL's ``xmin``, which every UPDATE of the row
+# changes and a physical replica reports unchanged. ``memories`` has no column
+# that moves exactly when the embedding does, so a saved field position names
+# the row version it was computed from, and is skipped if the row has changed
+# since (``projection_positions_save``). Any update counts, so a recall bump in
+# between skips a position too; the memory is placed again on the next read.
+_MEMORY_ROW_VERSION: ColumnElement[Any] = literal_column("memories.xmin::text").label("row_version")
 
 
 def _encode_embedding_f32(embedding: Any) -> str | None:
@@ -1940,11 +1954,16 @@ _PURGE_TENANT_TABLES: tuple[str, ...] = (
     "memory_correction",
     # Handoff batons (migration 076): their own tenant_id and no parent here.
     "baton_recipient",
+    # Saved field positions (migration 078): same reasoning as the value
+    # metering tables above.
+    "memory_projections",
     "memories",
     "entities",
     "agents",
     # Deleted agents' ids (migration 077): no foreign key, ids only.
     "agent_tombstones",
+    # The tenant's saved field-layout fit (migration 078): numbers only.
+    "projection_models",
     "fleet_nodes",
     "audit_log",
     # The tamper-evident chain head for ``audit_log`` (migration 025). Listed
@@ -3299,6 +3318,8 @@ class PostgresService:
                     )
                     .values(**values)
                 )
+                if "embedding" in values:
+                    await self._drop_projections(session, tenant_id=tenant_id, memory_id=memory_id)
             if metadata_patch:
                 # Single-statement JSONB merge — concurrent merges are
                 # last-writer-wins per key but never corrupt the doc.
@@ -3884,7 +3905,24 @@ class PostgresService:
                 .where(Memory.id == memory_id, Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None))
                 .values(**values)
             )
-            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
+            updated = (result.rowcount or 0) > 0  # type: ignore[attr-defined]
+            if updated:
+                await self._drop_projections(session, tenant_id=tenant_id, memory_id=memory_id)
+            return updated
+
+    @staticmethod
+    async def _drop_projections(session: AsyncSession, *, tenant_id: str, memory_id: UUID) -> None:
+        """Forget a memory's saved field positions, in the caller's transaction.
+
+        A position was computed from the vector the memory had then; once the
+        vector changes, the field must place it again rather than show it where
+        its old embedding put it.
+        """
+        await session.execute(
+            delete(MemoryProjection).where(
+                MemoryProjection.tenant_id == tenant_id, MemoryProjection.memory_id == memory_id
+            )
+        )
 
     # ------------------------------------------------------------------
     # B) Content hash / dedup
@@ -9715,6 +9753,8 @@ class PostgresService:
         limit: int = 2000,
         cursor_ts: datetime | None = None,
         cursor_id: UUID | None = None,
+        model_version: str | None = None,
+        embeddings: str = "all",
     ) -> dict:
         """One keyset page (newest first) of compact rows for the field layout.
 
@@ -9726,7 +9766,17 @@ class PostgresService:
         carries id/label/type for the entities linked from this page.
         ``next_cursor`` is ``{ts, id}`` of the last row when a further page may
         exist, else null.
+
+        With ``model_version``, each row also carries its saved position under
+        that version (``x``, ``y``, ``cluster``; null when it has none) and its
+        ``row_version``, which a position computed from this read must name
+        when it is saved (``projection_positions_save``). ``embeddings`` picks
+        which rows ship their vector: ``all`` (the default), ``unplaced`` (only
+        rows with no position under ``model_version``, the ones a reader still
+        has to place) or ``none``.
         """
+        if embeddings not in FIELD_PAGE_EMBEDDINGS:
+            raise ValueError(f"embeddings must be one of {sorted(FIELD_PAGE_EMBEDDINGS)}")
         filters = self._field_scope_filters(
             tenant_id=tenant_id,
             caller_agent_id=caller_agent_id,
@@ -9736,31 +9786,54 @@ class PostgresService:
         )
         if cursor_ts is not None and cursor_id is not None:
             filters.append(tuple_(Memory.created_at, Memory.id) < tuple_(cursor_ts, cursor_id))  # type: ignore[arg-type]
-        stmt = (
-            select(
-                Memory.id,
-                Memory.agent_id,
-                Memory.fleet_id,
-                Memory.memory_type,
-                Memory.weight,
-                Memory.title,
-                func.substr(Memory.content, 1, 240).label("preview"),
-                func.char_length(Memory.content).label("content_chars"),
-                Memory.created_at,
-                Memory.recall_count,
-                Memory.last_recalled_at,
-                Memory.status,
-                Memory.visibility,
-                Memory.supersedes_id,
-                Memory.embedding,
+        columns: list[Any] = [
+            Memory.id,
+            Memory.agent_id,
+            Memory.fleet_id,
+            Memory.memory_type,
+            Memory.weight,
+            Memory.title,
+            func.substr(Memory.content, 1, 240).label("preview"),
+            func.char_length(Memory.content).label("content_chars"),
+            Memory.created_at,
+            Memory.recall_count,
+            Memory.last_recalled_at,
+            Memory.status,
+            Memory.visibility,
+            Memory.supersedes_id,
+        ]
+        if embeddings == "all":
+            columns.append(Memory.embedding)
+        if model_version is not None:
+            columns += [MemoryProjection.x, MemoryProjection.y, MemoryProjection.cluster, _MEMORY_ROW_VERSION]
+        stmt = select(*columns).where(*filters)
+        if model_version is not None:
+            stmt = stmt.outerjoin(
+                MemoryProjection,
+                and_(
+                    MemoryProjection.tenant_id == tenant_id,
+                    MemoryProjection.memory_id == Memory.id,
+                    MemoryProjection.model_version == model_version,
+                ),
             )
-            .where(*filters)
-            .order_by(Memory.created_at.desc(), Memory.id.desc())
-            .limit(limit)
-        )
+        stmt = stmt.order_by(Memory.created_at.desc(), Memory.id.desc()).limit(limit)
         async with get_read_session() as session:
             rows = (await session.execute(stmt)).all()
             ids = [r.id for r in rows]
+            vectors: dict[UUID, Any] = {}
+            if embeddings == "all":
+                vectors = {r.id: r.embedding for r in rows}
+            elif embeddings == "unplaced":
+                # Only the rows the reader still has to place, in a second
+                # statement so a placed row's vector never leaves the database.
+                unplaced = [r.id for r in rows if model_version is None or r.x is None]
+                if unplaced:
+                    found = await session.execute(
+                        select(Memory.id, Memory.embedding).where(
+                            Memory.tenant_id == tenant_id, Memory.id.in_(unplaced)
+                        )
+                    )
+                    vectors = dict(found.tuples().all())
             links: dict[UUID, list[str]] = defaultdict(list)
             entities: dict[str, dict] = {}
             if ids:
@@ -9790,31 +9863,257 @@ class PostgresService:
                     entities.setdefault(eid, {"id": eid, "label": name, "type": etype})
         out_rows = []
         for r in rows:
-            out_rows.append(
-                {
-                    "id": str(r.id),
-                    "agent_id": r.agent_id,
-                    "fleet_id": r.fleet_id,
-                    "memory_type": r.memory_type,
-                    "weight": r.weight,
-                    "title": r.title,
-                    "preview": r.preview or "",
-                    "content_chars": int(r.content_chars or 0),
-                    "created_at": r.created_at.isoformat() if r.created_at else None,
-                    "recall_count": r.recall_count or 0,
-                    "last_recalled_at": r.last_recalled_at.isoformat() if r.last_recalled_at else None,
-                    "status": r.status,
-                    "visibility": r.visibility,
-                    "supersedes_id": str(r.supersedes_id) if r.supersedes_id else None,
-                    "entity_ids": links.get(r.id, []),
-                    "embedding_b64": _encode_embedding_f32(r.embedding),
-                }
-            )
+            out = {
+                "id": str(r.id),
+                "agent_id": r.agent_id,
+                "fleet_id": r.fleet_id,
+                "memory_type": r.memory_type,
+                "weight": r.weight,
+                "title": r.title,
+                "preview": r.preview or "",
+                "content_chars": int(r.content_chars or 0),
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "recall_count": r.recall_count or 0,
+                "last_recalled_at": r.last_recalled_at.isoformat() if r.last_recalled_at else None,
+                "status": r.status,
+                "visibility": r.visibility,
+                "supersedes_id": str(r.supersedes_id) if r.supersedes_id else None,
+                "entity_ids": links.get(r.id, []),
+                "embedding_b64": _encode_embedding_f32(vectors.get(r.id)),
+            }
+            if model_version is not None:
+                out["x"] = r.x
+                out["y"] = r.y
+                out["cluster"] = r.cluster
+                out["row_version"] = r.row_version
+            out_rows.append(out)
         next_cursor = None
         if len(rows) == limit and rows:
             last = rows[-1]
             next_cursor = {"ts": last.created_at.isoformat(), "id": str(last.id)}
         return {"rows": out_rows, "entities": list(entities.values()), "next_cursor": next_cursor}
+
+    # ------------------------------------------------------------------
+    # Saved field layouts (``common/models/memory_projection.py``)
+    # ------------------------------------------------------------------
+
+    async def projection_claim(self, *, tenant_id: str, claim_token: str, lease_seconds: int) -> dict:
+        """Claim the tenant's next field-layout fit for ``lease_seconds``.
+
+        A compare-and-set on the tenant's ``projection_models`` row, created by
+        the first claim. It succeeds when no claim is live, when the live one
+        has passed its lease (its holder died mid-fit), or when ``claim_token``
+        is the holder's own: the storage client retries on a timeout, and a
+        claim that landed but lost its response must not read as a rival's.
+        Returns ``{claimed, model_version, fitted_at}``, the last two naming the
+        model saved so far.
+        """
+        expires = func.now() + timedelta(seconds=lease_seconds)
+        stmt = (
+            pg_insert(ProjectionModel)
+            .values(tenant_id=tenant_id, claim_token=claim_token, claim_expires_at=expires)
+            .on_conflict_do_update(
+                index_elements=[ProjectionModel.tenant_id],
+                set_={"claim_token": claim_token, "claim_expires_at": expires},
+                where=or_(
+                    ProjectionModel.claim_token.is_(None),
+                    ProjectionModel.claim_expires_at < func.now(),
+                    ProjectionModel.claim_token == claim_token,
+                ),
+            )
+            .returning(ProjectionModel.tenant_id)
+        )
+        async with get_session() as session:
+            claimed = (await session.execute(stmt)).first() is not None
+            saved = (
+                await session.execute(
+                    select(ProjectionModel.model_version, ProjectionModel.fitted_at).where(
+                        ProjectionModel.tenant_id == tenant_id
+                    )
+                )
+            ).first()
+        return {
+            "claimed": claimed,
+            "model_version": saved.model_version if saved else None,
+            "fitted_at": saved.fitted_at.isoformat() if saved and saved.fitted_at else None,
+        }
+
+    async def projection_release(self, *, tenant_id: str, claim_token: str) -> bool:
+        """Give up a claim without saving a model (the fit failed). Only the
+        holder's token releases it; returns whether it did."""
+        async with get_session() as session:
+            result = await session.execute(
+                sql_update(ProjectionModel)
+                .where(ProjectionModel.tenant_id == tenant_id, ProjectionModel.claim_token == claim_token)
+                .values(claim_token=None, claim_expires_at=None)
+            )
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
+
+    async def projection_model_get(self, *, tenant_id: str) -> dict:
+        """The tenant's saved model, with ``fitting`` true while a claim is
+        live. Every model field is null for a tenant never fitted."""
+        fitting = and_(ProjectionModel.claim_token.isnot(None), ProjectionModel.claim_expires_at > func.now())
+        async with get_read_session() as session:
+            row = (
+                await session.execute(
+                    select(
+                        ProjectionModel.model_version,
+                        ProjectionModel.kind,
+                        ProjectionModel.dim,
+                        ProjectionModel.n_fit,
+                        ProjectionModel.params,
+                        ProjectionModel.fitted_at,
+                        fitting.label("fitting"),
+                    ).where(ProjectionModel.tenant_id == tenant_id)
+                )
+            ).first()
+        return {
+            "tenant_id": tenant_id,
+            "model_version": row.model_version if row else None,
+            "kind": row.kind if row else None,
+            "dim": row.dim if row else None,
+            "n_fit": row.n_fit if row else None,
+            "params_b64": base64.b64encode(row.params).decode("ascii") if row and row.params else None,
+            "fitted_at": row.fitted_at.isoformat() if row and row.fitted_at else None,
+            "fitting": bool(row.fitting) if row else False,
+        }
+
+    async def projection_model_save(
+        self,
+        *,
+        tenant_id: str,
+        claim_token: str,
+        model_version: str,
+        kind: str,
+        dim: int,
+        n_fit: int,
+        params: bytes,
+    ) -> bool:
+        """Save a fit, if ``claim_token`` holds the tenant's live claim.
+
+        Clears the claim in the same statement, and deletes every position
+        saved under another version: those were computed by a model no reader
+        will ask for again. Returns False, saving nothing, when the claim was
+        never this token's, has expired or has moved on.
+        """
+        async with get_session() as session:
+            result = await session.execute(
+                sql_update(ProjectionModel)
+                .where(
+                    ProjectionModel.tenant_id == tenant_id,
+                    ProjectionModel.claim_token == claim_token,
+                    ProjectionModel.claim_expires_at > func.now(),
+                )
+                .values(
+                    model_version=model_version,
+                    kind=kind,
+                    dim=dim,
+                    n_fit=n_fit,
+                    params=params,
+                    fitted_at=func.now(),
+                    claim_token=None,
+                    claim_expires_at=None,
+                )
+            )
+            if not result.rowcount:  # type: ignore[attr-defined]
+                return False
+            await session.execute(
+                delete(MemoryProjection).where(
+                    MemoryProjection.tenant_id == tenant_id, MemoryProjection.model_version != model_version
+                )
+            )
+            return True
+
+    async def projection_positions_save(
+        self,
+        *,
+        tenant_id: str,
+        model_version: str,
+        items: list[dict],
+        claim_token: str | None = None,
+    ) -> int | None:
+        """Upsert positions under ``model_version`` for the tenant's live memories.
+
+        ``model_version`` must be the tenant's saved model, or ``claim_token``
+        must hold the live claim (a fit writing the version it is about to
+        save); otherwise nothing is saved and this returns None. The model row
+        is share-locked, so a model save cannot land in between: a position
+        either lands first and is deleted with its version by that save, or
+        sees the new version and is refused. Nothing is left that no reader
+        will ask for.
+
+        ``items`` are ``{memory_id: UUID, x, y, cluster, row_version}``, where
+        ``row_version`` is what the field page returned for the memory when
+        the position was computed. An item is skipped, not an error, when its
+        memory is no longer a live memory of ``tenant_id`` (deleted while the
+        position was computed) or its row has changed since: the embedding may
+        have, and ``_drop_projections`` only deletes positions that already
+        exist. The memory rows are share-locked, so neither can change between
+        the check and the insert. A repeated id keeps its last position.
+        Returns how many were saved.
+        """
+        latest = {item["memory_id"]: item for item in items}
+        holds_claim = (
+            and_(ProjectionModel.claim_token == claim_token, ProjectionModel.claim_expires_at > func.now())
+            if claim_token is not None
+            else false()
+        )
+        async with get_session() as session:
+            model = (
+                await session.execute(
+                    select(ProjectionModel.model_version, holds_claim.label("holds_claim"))
+                    .where(ProjectionModel.tenant_id == tenant_id)
+                    .with_for_update(read=True)
+                )
+            ).first()
+            if model is None or not (model.model_version == model_version or model.holds_claim):
+                return None
+            current: dict[UUID, str] = dict(
+                (
+                    await session.execute(
+                        select(Memory.id, _MEMORY_ROW_VERSION)
+                        .where(
+                            Memory.tenant_id == tenant_id,
+                            Memory.id.in_(list(latest)),
+                            Memory.deleted_at.is_(None),
+                        )
+                        .with_for_update(read=True)
+                    )
+                )
+                .tuples()
+                .all()
+            )
+            rows = [
+                {
+                    "tenant_id": tenant_id,
+                    "memory_id": memory_id,
+                    "model_version": model_version,
+                    "x": item["x"],
+                    "y": item["y"],
+                    "cluster": item["cluster"],
+                }
+                for memory_id, item in latest.items()
+                if current.get(memory_id) == item["row_version"]
+            ]
+            if not rows:
+                return 0
+            stmt = pg_insert(MemoryProjection).values(rows)
+            await session.execute(
+                stmt.on_conflict_do_update(
+                    index_elements=[
+                        MemoryProjection.tenant_id,
+                        MemoryProjection.memory_id,
+                        MemoryProjection.model_version,
+                    ],
+                    set_={
+                        "x": stmt.excluded.x,
+                        "y": stmt.excluded.y,
+                        "cluster": stmt.excluded.cluster,
+                        "placed_at": func.now(),
+                    },
+                )
+            )
+            return len(rows)
 
     async def memory_stats_breakdown(
         self,

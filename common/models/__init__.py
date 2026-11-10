@@ -19,6 +19,7 @@ from common.models.memory_conflict import MemoryConflict
 from common.models.memory_correction import MemoryCorrection, MemoryCorrectionRecipient
 from common.models.memory_derivation import MemoryDerivation
 from common.models.memory_exposure import MemoryExposure
+from common.models.memory_projection import MemoryProjection, ProjectionModel
 from common.models.organization_settings import (
     OrganizationSettings,
     OrganizationSettingsAudit,
@@ -63,9 +64,11 @@ __all__ = [
     "MemoryEntityLink",
     "MemoryExposure",
     "MemoryOrigin",
+    "MemoryProjection",
     "MemoryReuse",
     "OrganizationSettings",
     "OrganizationSettingsAudit",
+    "ProjectionModel",
     "RecallCandidate",
     "RecallEvent",
     "Relation",

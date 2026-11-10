@@ -37,6 +37,7 @@ the token. It may remain only where this table says **Kept** for that step.
 | `memory_origins` | The session a memory was written in (ids) | **No text** | **Cleared** with the memory | **Deleted** |
 | `memory_reuse` | Which session read which memory (ids) | **No text** | **Cleared** with the memory | **Deleted** |
 | `memory_exposure` | Which agents read which memory, how often and when (ids and counts) | **No text** | **Cleared** with the memory | **Deleted** |
+| `memory_projections` | Where each memory sits on the field layout (ids and coordinates) | **No text** | **Cleared** with the memory | **Deleted** |
 | `memory_correction` | Corrections of a memory: who made each and when, and for a content edit or a conflict review the text before and after, up to 280 characters each. A conflict review's record also quotes the other memory of the pair | **Kept**. A recall notice of the correction is still owed, but shows none of the text once the memory it quotes is deleted. The delete adds a record of its own, with only the old and new status | **Cleared** with the corrected memory. A conflict review's quote of the other memory stays until the corrected memory is purged | **Deleted** |
 | `memory_correction_recipient` | Which agents a correction is for, and whether each was told (ids and delivery states) | **No text** | **Cleared** with its correction | **Deleted** |
 | `baton_recipient` | Which agents a handoff baton waits on, with the baton's goal as its sender wrote it (up to 2,000 characters) and each receiver's state. A goal quotes no memory | **No text** | **No text** | **Deleted** |
@@ -59,6 +60,7 @@ the token. It may remain only where this table says **Kept** for that step.
 | `forge_rejected_fingerprints` | Skill clusters a reviewer rejected, with the reason | **No text** | **No text** | **Deleted** |
 | `agents` | Registered agents and their profiles | **No text** | **No text** | **Deleted** |
 | `agent_tombstones` | The ids of agents deleted from the tenant, and when | **No text** | **No text** | **Deleted** |
+| `projection_models` | The tenant's fitted field layout: numbers derived from its embeddings, no text | **No text** | **No text** | **Deleted** |
 | `fleet_nodes` | Plugin nodes and what they report about themselves | **No text** | **No text** | **Deleted** |
 | `fleet_commands` | Commands sent to plugin nodes, and their results | **No text** | **No text** | **Deleted** |
 | `capability_usage` | Counts of which capabilities were used | **No text** | **No text** | **Deleted** |
