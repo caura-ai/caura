@@ -53,9 +53,9 @@ from datetime import datetime
 from functools import partial
 from types import SimpleNamespace
 
-import httpx
 from pydantic import ValidationError
 
+from common.background_work import BackgroundWorkDeferred
 from common.embedding import call_embedding_gated, get_platform_embedding
 from common.enrichment import EnrichmentResult, enrich_memory
 from common.events.base import Event
@@ -75,6 +75,7 @@ from common.events.topics import Topics
 from common.usage import scoped
 from core_worker.backfill import run_embedding_backfill
 from core_worker.clients.storage_client import (
+    BackgroundStorageClient,
     find_embedding_by_content_hash,
     get_storage_client,
     record_memory_correction,
@@ -92,7 +93,7 @@ logger = logging.getLogger(__name__)
 # every event. The storage_client module reads its own Settings on
 # first call (singleton). Tests inject a stub by overriding this
 # variable directly via ``configure``.
-StorageClientFactory = Callable[[], httpx.AsyncClient]
+StorageClientFactory = Callable[[], BackgroundStorageClient]
 
 _storage_client_factory: StorageClientFactory | None = None
 
@@ -681,6 +682,7 @@ def _build_patch(
 
 @scoped(
     "enrichment",
+    background=True,
     tenant=lambda a: (a["event"].payload or {}).get("tenant_id"),
     fleet=lambda a: (a["event"].payload or {}).get("fleet_id"),
 )
@@ -726,11 +728,40 @@ async def handle_enrich_request(event: Event) -> None:
     # ``enrich_memory`` never raises — it falls through to the keyword
     # heuristic (``fake_enrich``) on every error path. So a transient
     # provider failure can't nack-loop the subscription.
-    result = await enrich_memory(
-        request.content,
-        tenant_config,
-        reference_datetime=request.reference_datetime,
-    )
+    try:
+        result = await enrich_memory(
+            request.content,
+            tenant_config,
+            reference_datetime=request.reference_datetime,
+        )
+    except BackgroundWorkDeferred as exc:
+        try:
+            ack = await asyncio.wait_for(
+                storage.defer_background_work(
+                    {
+                        "tenant_id": request.tenant_id,
+                        "memory_id": str(request.memory_id),
+                        "kind": "enrichment",
+                        "retry_after_seconds": exc.retry_after_seconds,
+                    }
+                ),
+                timeout=2,
+            )
+            if not isinstance(ack, dict) or ack.get("queued") is not True:
+                raise RuntimeError("retry was not acknowledged")
+        except Exception:
+            logger.error(
+                "background retry could not be persisted",
+                extra={
+                    "tenant_id": request.tenant_id,
+                    "kind": "enrichment",
+                    "reason": "retry_unavailable",
+                },
+            )
+            # The event remains the durable retry source until storage acks a
+            # reference. Propagate a content-free failure so delivery retries.
+            raise RuntimeError("background retry unavailable") from None
+        return
 
     patch = _build_patch(
         result,

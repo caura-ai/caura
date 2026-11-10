@@ -9,7 +9,7 @@ core-storage-api per the "no DB outside core-storage-api" rule. All reads
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from core_storage_api.services.postgres_service import PostgresService
@@ -31,9 +31,17 @@ class OrgIdsResponse(BaseModel):
 
 
 @router.get("/active")
-async def list_active_tenants() -> TenantIdsResponse:
+async def list_active_tenants(
+    background_due: bool = False,
+    after_tenant: str | None = Query(default=None, min_length=1, max_length=200),
+    limit: int = Query(default=32, ge=1, le=32),
+) -> TenantIdsResponse:
     """Orgs with at least one live (non-soft-deleted) memory, less suppressed
     ones. Archive/lifecycle fanout target."""
+    if background_due:
+        from core_storage_api.routers.background_work import due_tenants
+
+        return TenantIdsResponse(tenant_ids=await due_tenants(after_tenant, limit))
     return TenantIdsResponse(tenant_ids=await _svc.tenants_list_active())
 
 

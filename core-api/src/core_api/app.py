@@ -437,6 +437,12 @@ async def lifespan(app):
 
     # Validate before initializing providers or accepting any request.
     _validate_startup_settings(app_settings)
+    from common.background_work import set_background_reserver
+
+    set_background_reserver(
+        lambda **payload: get_storage_client().reserve_background_attempt(**payload),
+        lambda **payload: get_storage_client().release_background_attempt(**payload),
+    )
 
     # Increase default thread pool for concurrent LLM calls via asyncio.to_thread()
     import asyncio as _aio
@@ -741,7 +747,15 @@ async def lifespan(app):
 
         invalidation_listener = settings_cache_relay.start_listener(invalidate_cache, clear_cache)
 
-        yield
+        from core_api.services.background_retry import retry_loop
+
+        retry_task = asyncio.create_task(retry_loop(), name="background-model-retries")
+        try:
+            yield
+        finally:
+            retry_task.cancel()
+            await asyncio.gather(retry_task, return_exceptions=True)
+            set_background_reserver(None)
 
         await settings_cache_relay.stop_listener(invalidation_listener)
         await _shut_down(

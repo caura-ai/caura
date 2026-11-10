@@ -665,6 +665,30 @@ def _keeping_off_the_database(nodeid: str, fixturenames=()):
 
 
 @pytest.fixture(autouse=True)
+def _background_budget_authority(request, _patch_storage_client):
+    from common import background_work
+    from core_api.clients.storage_client import get_storage_client
+
+    previous = background_work._reserver, background_work._releaser
+    if _needs_no_database(request.node):
+        authority = AsyncMock(return_value={"allowed": True, "retry_after_seconds": 0})
+        releaser = AsyncMock()
+    else:
+
+        def authority(**payload):
+            return get_storage_client().reserve_background_attempt(**payload)
+
+        def releaser(**payload):
+            return get_storage_client().release_background_attempt(**payload)
+
+    background_work.set_background_reserver(authority, releaser)
+    try:
+        yield
+    finally:
+        background_work.set_background_reserver(*previous)
+
+
+@pytest.fixture(autouse=True)
 async def _patch_storage_client(_engine, _schema_unless_database_free):
     """Replace the storage client's httpx transport with an ASGI bridge.
 

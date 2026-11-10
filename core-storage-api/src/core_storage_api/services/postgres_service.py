@@ -2008,6 +2008,9 @@ _PURGE_TENANT_TABLES: tuple[str, ...] = (
     # Usage metering (migration 066): counts only, but keyed by the tenant and
     # its agents, so they go with it.
     "llm_usage_minutes",
+    "background_model_work",
+    "background_model_reservations",
+    "background_model_budgets",
     "value_usage_minutes",
     # Value metering (migration 067); ``memory_origins`` and ``memory_reuse``
     # are listed ahead of ``memories`` above.

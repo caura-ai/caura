@@ -23,7 +23,13 @@ from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, TypeVar
+from uuid import uuid4
 
+from common.background_work import (
+    BackgroundWorkDeferred,
+    release_background_attempt,
+    reserve_background_attempt,
+)
 from common.llm.call_context import llm_call_label
 from common.llm.constants import (
     LLM_MAX_RETRY_AFTER_S,
@@ -33,7 +39,7 @@ from common.llm.constants import (
 )
 from common.llm.providers._unsupported import UnsupportedStructuredOutputError
 from common.provider_names import ProviderName
-from common.usage import record_model_call
+from common.usage import current_scope, record_model_call
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +52,100 @@ _ALWAYS_NON_RETRYABLE: tuple[type[BaseException], ...] = (
 )
 
 T = TypeVar("T")
+
+
+async def _release_background_reservation(reservation: dict) -> None:
+    try:
+        async with asyncio.timeout(2):
+            for attempt in range(2):
+                try:
+                    await asyncio.wait_for(
+                        release_background_attempt(**reservation), timeout=0.9
+                    )
+                    return
+                except Exception:
+                    if attempt:
+                        raise
+                    await asyncio.sleep(0.1)
+    except Exception:
+        # A failed cleanup never becomes another provider attempt. Storage's
+        # released tombstone also closes a reserve that commits after cleanup.
+        logger.warning(
+            "background model slot release delayed",
+            extra={
+                "tenant_id": reservation["tenant_id"],
+                "reason": "release_unavailable",
+            },
+        )
+
+
+async def _admit_background_attempt() -> dict | None:
+    scope = current_scope()
+    if scope is None or not scope.background:
+        return None
+    reason, delay = "budget_unavailable", 60
+    if not scope.tenant_id or not scope.tenant_id.strip():
+        reason = "missing_tenant"
+    else:
+        reservation = {"tenant_id": scope.tenant_id, "attempt_id": str(uuid4())}
+        try:
+            decision = await asyncio.wait_for(
+                reserve_background_attempt(
+                    **reservation,
+                    operation=scope.operation or "background",
+                ),
+                timeout=5,
+            )
+            if (
+                not isinstance(decision, dict)
+                or type(decision.get("allowed")) is not bool
+            ):
+                raise ValueError("invalid reservation decision")
+            if decision["allowed"]:
+                return reservation
+            delay = decision.get("retry_after_seconds", 60)
+            if type(delay) is not int or not 1 <= delay <= 3600:
+                raise ValueError("invalid retry interval")
+            reason = (
+                decision["reason"]
+                if decision.get("reason")
+                in {"tenant_slots_busy", "reservation_released"}
+                else "budget_exhausted"
+            )
+        except asyncio.CancelledError:
+            await _release_background_reservation(reservation)
+            raise
+        except Exception:
+            await _release_background_reservation(reservation)
+            reason, delay = "budget_unavailable", 60
+    # Never include provider/storage bodies or raw exception tracebacks here.
+    logger.info(
+        "background model work deferred",
+        extra={
+            "reason": reason,
+            "tenant_id": scope.tenant_id,
+            "operation": scope.operation,
+            "retry_after_seconds": delay,
+        },
+    )
+    raise BackgroundWorkDeferred(reason, delay) from None
+
+
+async def _run_reserved_attempt(
+    coro_fn, reservation: dict | None, timeout: float | None
+):
+    try:
+        if timeout is not None and timeout <= 0:
+            raise TimeoutError("model attempt deadline spent during admission")
+        coro = coro_fn()
+        return (
+            await coro
+            if timeout is None
+            else await asyncio.wait_for(coro, timeout=timeout)
+        )
+    finally:
+        if reservation is not None:
+            await _release_background_reservation(reservation)
 
 
 def retry_after_seconds(exc: BaseException) -> float | None:
@@ -260,20 +360,15 @@ async def _call_with_retry_impl(
                     "attempt could start"
                 )
             break
+        reservation = await _admit_background_attempt()
         try:
-            coro = coro_fn()
-            # The budget binds each attempt too, not just the loop. Without
-            # this an attempt could start with 2 s left and run for its full
-            # ``timeout``, so the budget would be advisory — enforced only by
-            # whoever cancels us from outside.
             attempt_timeout = timeout
-            if remaining is not None:
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
                 attempt_timeout = (
                     remaining if timeout is None else min(timeout, remaining)
                 )
-            if attempt_timeout is not None:
-                return await asyncio.wait_for(coro, timeout=attempt_timeout)
-            return await coro
+            return await _run_reserved_attempt(coro_fn, reservation, attempt_timeout)
         except Exception as exc:
             last_exc = exc
             # ``isinstance(exc, ())`` is False, so an empty tuple makes this a
@@ -540,6 +635,8 @@ async def call_with_fallback(
             label,
             primary_provider_name,
         )
+    except BackgroundWorkDeferred:
+        raise
     except Exception:
         logger.warning(
             "%s primary provider '%s' failed after retries",
@@ -562,7 +659,10 @@ async def call_with_fallback(
     fallback_skipped: tuple[str, str] | None = None
     try:
         if tenant_config is None or not hasattr(tenant_config, "resolve_fallback"):
-            fallback_skipped = ("no_tenant_config", "no tenant config exposing resolve_fallback()")
+            fallback_skipped = (
+                "no_tenant_config",
+                "no tenant config exposing resolve_fallback()",
+            )
         else:
             fb_provider_name, fb_model = tenant_config.resolve_fallback()
             if not fb_provider_name:
@@ -610,6 +710,8 @@ async def call_with_fallback(
                         non_retryable=non_retryable,
                         budget_s=budget_s,
                     )
+    except BackgroundWorkDeferred:
+        raise
     except Exception:
         # Left as-is: this path is already loud, so it needs no skip reason.
         logger.warning(

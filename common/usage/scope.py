@@ -32,6 +32,7 @@ class UsageScope:
     #: The provider-level label (``llm_call_label``) is more specific and
     #: wins for model calls; this names value records and unlabelled calls.
     operation: str | None = None
+    background: bool = False
 
 
 _scope: ContextVar[UsageScope | None] = ContextVar("usage_scope", default=None)
@@ -48,6 +49,7 @@ def usage_scope(
     agent_id: str | None = None,
     fleet_id: str | None = None,
     operation: str | None = None,
+    background: bool | None = None,
 ) -> Iterator[UsageScope]:
     """Name whom the enclosed work is for.
 
@@ -55,8 +57,14 @@ def usage_scope(
     only says what it adds.
     """
     outer = _scope.get() or UsageScope()
-    given = {"tenant_id": tenant_id, "agent_id": agent_id, "fleet_id": fleet_id, "operation": operation}
-    scope = replace(outer, **{k: v for k, v in given.items() if v is not None})
+    scope = replace(
+        outer,
+        tenant_id=outer.tenant_id if tenant_id is None else tenant_id,
+        agent_id=outer.agent_id if agent_id is None else agent_id,
+        fleet_id=outer.fleet_id if fleet_id is None else fleet_id,
+        operation=outer.operation if operation is None else operation,
+        background=outer.background if background is None else background,
+    )
     token = _scope.set(scope)
     try:
         yield scope
@@ -80,7 +88,10 @@ def scoped(
     tenant: _Pick = None,
     agent: _Pick = None,
     fleet: _Pick = None,
-) -> Callable[[Callable[P, Coroutine[Any, Any, R]]], Callable[P, Coroutine[Any, Any, R]]]:
+    background: bool | None = None,
+) -> Callable[
+    [Callable[P, Coroutine[Any, Any, R]]], Callable[P, Coroutine[Any, Any, R]]
+]:
     """Run an async function inside a :func:`usage_scope` taken from its arguments.
 
     Each of ``tenant``, ``agent`` and ``fleet`` names a parameter, or is a
@@ -88,7 +99,9 @@ def scoped(
     line on an entry point, instead of re-indenting its body under ``with``.
     """
 
-    def wrap(fn: Callable[P, Coroutine[Any, Any, R]]) -> Callable[P, Coroutine[Any, Any, R]]:
+    def wrap(
+        fn: Callable[P, Coroutine[Any, Any, R]],
+    ) -> Callable[P, Coroutine[Any, Any, R]]:
         sig = inspect.signature(fn)
 
         @functools.wraps(fn)
@@ -104,7 +117,7 @@ def scoped(
                 }
             except Exception:  # metering never breaks the call
                 names = {"tenant_id": None, "agent_id": None, "fleet_id": None}
-            with usage_scope(operation=operation, **names):
+            with usage_scope(operation=operation, background=background, **names):
                 return await fn(*args, **kwargs)
 
         # The coroutine ``run`` produces carries ITS code object's name, which

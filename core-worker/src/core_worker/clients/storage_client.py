@@ -37,7 +37,25 @@ from core_worker.config import settings
 
 logger = logging.getLogger(__name__)
 
-_client: httpx.AsyncClient | None = None
+
+class BackgroundStorageClient(httpx.AsyncClient):
+    async def reserve_background_attempt(self, **payload) -> dict:
+        response = await _signed_call(self.post, f"{_PREFIX}/background-work/reserve", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    async def release_background_attempt(self, **payload) -> dict:
+        response = await _signed_call(self.post, f"{_PREFIX}/background-work/release", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    async def defer_background_work(self, payload: dict) -> dict:
+        response = await _signed_call(self.post, f"{_PREFIX}/background-work/defer", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+
+_client: BackgroundStorageClient | None = None
 # Audience for the writer ID token — set alongside the singleton in
 # ``get_storage_client()``. Mirrors core-api's ``self._base_url``: the
 # rstrip'd ``core_storage_api_url`` from settings, used both as the
@@ -47,7 +65,7 @@ _storage_shared_secret: str | None = None
 _PREFIX = "/api/v1/storage"
 
 
-def get_storage_client() -> httpx.AsyncClient:
+def get_storage_client() -> BackgroundStorageClient:
     """Return the singleton :class:`httpx.AsyncClient` used by the consumer.
 
     Configuration comes from the module singleton; the HTTP client itself is
@@ -59,7 +77,7 @@ def get_storage_client() -> httpx.AsyncClient:
         # produce a different audience string than Cloud Run validates.
         _audience = settings.core_storage_api_url.rstrip("/")
         _storage_shared_secret = settings.core_storage_shared_secret.get_secret_value()
-        _client = httpx.AsyncClient(
+        _client = BackgroundStorageClient(
             base_url=_audience,
             timeout=httpx.Timeout(settings.storage_http_timeout_s),
         )

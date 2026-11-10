@@ -885,8 +885,8 @@ async def test_sweep_bounded_concurrency_completes_all_jobs(
 ):
     """Fix 2 (#667 round 6): a sweep over MORE jobs than the fan-out bound
     (7 pending jobs across 2 tenants > INTERVIEW_SWEEP_CONCURRENCY=5)
-    completes every job with the same summary semantics as the old
-    sequential drain, while never exceeding the bound in flight."""
+    eventually completes every job, while never exceeding the bound in
+    flight. A tenant-slot deferral leaves the job for a later sweep."""
     tenant_a, headers_a = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_a, headers_a)
     tenant_b, headers_b = get_test_auth(new_tenant_id())
@@ -917,12 +917,19 @@ async def test_sweep_bounded_concurrency_completes_all_jobs(
             gauge["now"] -= 1
 
     monkeypatch.setattr(interview_service, "process_interview_job", _tracking_process)
-    summary = await process_pending_interview_jobs()
+    done = 0
+    for _ in range(len(seeded)):
+        summary = await process_pending_interview_jobs()
+        done += summary["jobs_done"]
+        states = [
+            (await _job_doc(tenant, doc))["data"]["status"] for tenant, doc in seeded
+        ]
+        if all(status == "done" for status in states):
+            break
 
     # >= not ==: the sweep is global, so leftover jobs from other tests'
     # tenants may ride along (same as the other sweep tests here).
-    assert summary["jobs_processed"] >= 7
-    assert summary["jobs_done"] >= 7
+    assert done >= 7
     assert gauge["max"] <= interview_service.INTERVIEW_SWEEP_CONCURRENCY
     for tenant_id, doc_id in seeded:
         assert (await _job_doc(tenant_id, doc_id))["data"]["status"] == "done"

@@ -128,6 +128,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Usage metering (common.usage): per-minute totals of the embedding and
     # enrichment calls this worker makes, flushed through its storage client.
     # The handlers name their tenant (``@scoped`` in consumer.py).
+    from common.background_work import set_background_reserver
+
+    set_background_reserver(
+        lambda **payload: get_storage_client().reserve_background_attempt(**payload),
+        lambda **payload: get_storage_client().release_background_attempt(**payload),
+    )
     usage = UsageAggregator(lambda batch: flush_usage(get_storage_client(), batch))
     set_usage_sink(usage)
     usage.start()
@@ -141,6 +147,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # After the bus, so work it settled is counted; before the client closes.
     await usage.stop()
     set_usage_sink(None)
+    set_background_reserver(None)
     await close_storage_client()
 
 
