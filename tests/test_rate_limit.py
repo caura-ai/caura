@@ -282,7 +282,10 @@ async def test_every_rate_limited_route_survives_header_injection(client):
         ),
         (
             "/api/v1/ingest/commit",
-            {"tenant_id": "default", "facts": []},
+            {
+                "tenant_id": "default",
+                "facts": [{"content": f"header injection probe fact {nonce}"}],
+            },
         ),
         (
             "/api/v1/search",

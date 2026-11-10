@@ -64,3 +64,25 @@ class Agent(Base):
     __table_args__ = (
         Index("uq_agents_tenant_agent", "tenant_id", "agent_id", unique=True),
     )
+
+
+class AgentTombstone(Base):
+    """An agent deleted from its tenant, by ``DELETE /agents/{agent_id}``.
+
+    The delete removes the agent's row and leaves this one, so the id does not
+    come back at the trust a new agent gets when a heartbeat, a write or a read
+    next names it. While it stands, storage creates the id at trust 0, awaiting
+    an admin's approval, whatever trust its caller asked for, and never changes
+    the trust of a row that already exists for it (``_agent_add``). An admin
+    raising that trust above 0 (``PATCH /agents/{agent_id}/trust``) is the
+    approval, and removes this row (``agent_update_trust_level``). Ids only.
+    The organization purge deletes it with the tenant.
+    """
+
+    __tablename__ = "agent_tombstones"
+
+    tenant_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    deleted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )

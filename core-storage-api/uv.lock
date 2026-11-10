@@ -387,12 +387,13 @@ wheels = [
 
 [[package]]
 name = "core-storage-api"
-version = "3.37.7"
+version = "3.47.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
     { name = "asyncpg" },
     { name = "fastapi" },
+    { name = "google-auth" },
     { name = "greenlet" },
     { name = "httpx" },
     { name = "httpx2" },
@@ -400,6 +401,7 @@ dependencies = [
     { name = "pgvector" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "requests" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "structlog" },
     { name = "uvicorn", extra = ["standard"] },
@@ -435,6 +437,7 @@ requires-dist = [
     { name = "core-storage-api", extras = ["test", "pubsub"], marker = "extra == 'dev'" },
     { name = "ddtrace", marker = "extra == 'datadog'", specifier = ">=4.12.2" },
     { name = "fastapi", specifier = ">=0.141.1,<1" },
+    { name = "google-auth", specifier = ">=2.30,<3" },
     { name = "google-cloud-pubsub", marker = "extra == 'pubsub'", specifier = ">=2.39.1,<3" },
     { name = "greenlet", specifier = "<3.6.0" },
     { name = "httpx", specifier = ">=0.27,<1" },
@@ -448,6 +451,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = ">=9.1.1,<10.0" },
     { name = "pytest-asyncio", marker = "extra == 'test'", specifier = ">=0.24,<2.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=6.0,<8.0" },
+    { name = "requests", specifier = ">=2.32,<3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.2,<1.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.51,<2.2" },
     { name = "structlog", specifier = ">=25.4,<27" },

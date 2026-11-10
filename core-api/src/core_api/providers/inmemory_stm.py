@@ -45,8 +45,8 @@ class InMemorySTM:
         # on the old constant while the write response reported the new value.
         # A backend that ignores the configured TTL and a response that quotes
         # it are the same defect seen from two ends.
-        self._notes: dict[str, list[tuple[dict[str, Any], float]]] = {}
-        self._bulletins: dict[str, list[tuple[dict[str, Any], float]]] = {}
+        self._notes: dict[tuple[str, str], list[tuple[dict[str, Any], float]]] = {}
+        self._bulletins: dict[tuple[str, str], list[tuple[dict[str, Any], float]]] = {}
         self._notes_max = notes_max_entries
         self._bulletin_max = bulletin_max_entries
         self._notes_ttl = notes_ttl if notes_ttl is not None else settings.stm_notes_ttl
@@ -54,8 +54,10 @@ class InMemorySTM:
         self._last_sweep = time.monotonic()
 
     @staticmethod
-    def _key(tenant_id: str, scope_id: str) -> str:
-        return f"{tenant_id}:{scope_id}"
+    def _key(tenant_id: str, scope_id: str) -> tuple[str, str]:
+        # A pair, not ``f"{tenant_id}:{scope_id}"``: neither id is restricted, so
+        # a joined string could not say which tenant a key belongs to.
+        return (tenant_id, scope_id)
 
     def _prune(
         self, store: list[tuple[dict[str, Any], float]], ttl: int
@@ -148,4 +150,10 @@ class InMemorySTM:
     async def clear_bulletin(self, tenant_id: str, fleet_id: str) -> bool:
         key = self._key(tenant_id, fleet_id)
         self._bulletins.pop(key, None)
+        return True
+
+    async def clear_tenant(self, tenant_id: str) -> bool:
+        for store in (self._notes, self._bulletins):
+            for key in [key for key in store if key[0] == tenant_id]:
+                del store[key]
         return True

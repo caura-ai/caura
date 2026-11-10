@@ -362,4 +362,11 @@ class OpenAILLMProvider:
             tokens_reasoning,
             llm_call_label.get() or "-",
         )
+        raise_if_truncated(
+            response,
+            provider="OpenAI-compatible",
+            model=self._model,
+            max_tokens=max_tokens,
+            kind="text",
+        )
         return response.choices[0].message.content or ""

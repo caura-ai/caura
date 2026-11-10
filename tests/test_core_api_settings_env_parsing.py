@@ -11,6 +11,7 @@ _CONCURRENCY_CAPS = [
     "per_tenant_search_concurrency",
     "per_tenant_write_concurrency",
     "per_tenant_embed_concurrency",
+    "per_tenant_llm_concurrency",
     "per_tenant_storage_write_concurrency",
     "per_tenant_storage_search_concurrency",
     "contradiction_detection_concurrency",

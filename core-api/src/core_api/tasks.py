@@ -82,6 +82,19 @@ async def let_tracked_tasks_start() -> None:
         await asyncio.sleep(0)
 
 
+async def wait_for_tracked_tasks(at_most: int = 0) -> None:
+    """Wait until no more than ``at_most`` tracked tasks are still running.
+
+    For a one-off process (``core_api.maintenance``), where the server would
+    cancel them at shutdown (``cancel_all_tasks``): with the default it does not
+    exit under a task its work started, and with ``at_most`` it holds off new
+    work until the tasks earlier work started catch up. Tasks those tasks start
+    are waited for too.
+    """
+    while len(_background_tasks) > at_most:
+        await asyncio.wait(set(_background_tasks), return_when=asyncio.FIRST_COMPLETED)
+
+
 async def cancel_all_tasks() -> None:
     """Let tracked background tasks finish within a grace, then cancel the rest.
 

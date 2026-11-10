@@ -18,6 +18,7 @@ import logging
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.contradiction.diagnosis import ClassifyResult, classify
 from core_api.services.contradiction.resolution import resolve
+from core_api.services.source_trust import row_trust
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,8 @@ async def record_conflict(
     fleet_id: str | None,
     tenant_config=None,
     result: ClassifyResult | None = None,
+    by_author: dict[str, int] | None = None,
+    outranked: bool = False,
 ) -> dict | None:
     """Classify + resolve a candidate pair and persist the ``memory_conflicts``
     record. Best-effort: returns None (logged) if the write fails.
@@ -49,6 +52,11 @@ async def record_conflict(
     ``result`` lets a caller that already classified the pair skip the (possibly
     LLM-backed) ``classify()`` — used by ``record_conflict_from_verdict`` to avoid
     a second LLM call on the detector's semantic path.
+
+    ``outranked`` marks a dispute: the newer row's author is trusted less than
+    the older row's, so the detector applied nothing. The record's metadata says
+    whether the verdict was applied (``effect_applied``) and, given the authors'
+    levels (``by_author``), how far each row is trusted (``author_trust``).
     """
     if result is None:
         result = await classify(new_memory, candidate, tenant_config=tenant_config)
@@ -61,7 +69,14 @@ async def record_conflict(
         result.diagnosis,
         is_inferred=is_inferred,
         confidence=gate_confidence,
+        outranked=outranked,
     )
+    metadata: dict = {"effect_applied": not outranked}
+    if by_author is not None:
+        metadata["author_trust"] = {
+            "new_memory": row_trust(new_memory, by_author),
+            "old_memory": row_trust(candidate, by_author),
+        }
 
     payload = {
         "tenant_id": tenant_id,
@@ -76,6 +91,7 @@ async def record_conflict(
         "action": resolution.action,
         "audit_reason": resolution.audit_reason,
         "created_by": _CREATED_BY,
+        "metadata": metadata,
     }
 
     try:
@@ -98,6 +114,8 @@ async def record_conflict_from_verdict(
     tenant_id: str,
     fleet_id: str | None,
     confidence: float | None = None,
+    by_author: dict[str, int] | None = None,
+    outranked: bool = False,
 ) -> dict | None:
     """Record a conflict the detector already CONFIRMED (semantic / Path C)
     WITHOUT a second LLM call. The detector's effect is a supersede, so the
@@ -105,7 +123,15 @@ async def record_conflict_from_verdict(
     L1/L2 classification of confirmed conflicts is a follow-up."""
     conf = confidence if confidence is not None else 0.5
     result = ClassifyResult("exact_value", conf, "temporal_change", conf)
-    return await record_conflict(new_memory, candidate, tenant_id=tenant_id, fleet_id=fleet_id, result=result)
+    return await record_conflict(
+        new_memory,
+        candidate,
+        tenant_id=tenant_id,
+        fleet_id=fleet_id,
+        result=result,
+        by_author=by_author,
+        outranked=outranked,
+    )
 
 
 async def record_detected_conflicts(
@@ -115,10 +141,13 @@ async def record_detected_conflicts(
     tenant_id: str,
     fleet_id: str | None,
     tenant_config=None,
+    by_author: dict[str, int] | None = None,
+    outranked: bool = False,
 ) -> None:
     """Write a memory_conflicts record for each ``(candidate, kind, confidence)``
     the detector confirmed. ``rdf`` pairs classify deterministically (no LLM);
-    ``semantic`` / Path-C pairs reuse the detector's verdict (no second LLM)."""
+    ``semantic`` / Path-C pairs reuse the detector's verdict (no second LLM).
+    ``by_author`` and ``outranked`` are passed to ``record_conflict``."""
     for candidate, kind, confidence in pairs:
         if kind == "rdf":
             await record_conflict(
@@ -127,6 +156,8 @@ async def record_detected_conflicts(
                 tenant_id=tenant_id,
                 fleet_id=fleet_id,
                 tenant_config=tenant_config,
+                by_author=by_author,
+                outranked=outranked,
             )
         else:
             await record_conflict_from_verdict(
@@ -135,4 +166,6 @@ async def record_detected_conflicts(
                 tenant_id=tenant_id,
                 fleet_id=fleet_id,
                 confidence=confidence,
+                by_author=by_author,
+                outranked=outranked,
             )

@@ -448,7 +448,7 @@ wheels = [
 
 [[package]]
 name = "core-api"
-version = "3.37.7"
+version = "3.47.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
@@ -458,6 +458,7 @@ dependencies = [
     { name = "croniter" },
     { name = "cryptography" },
     { name = "fastapi" },
+    { name = "google-auth" },
     { name = "google-cloud-aiplatform" },
     { name = "google-genai" },
     { name = "greenlet" },
@@ -475,6 +476,7 @@ dependencies = [
     { name = "python-dateutil" },
     { name = "python-multipart" },
     { name = "redis", extra = ["hiredis"] },
+    { name = "requests" },
     { name = "sentry-sdk", extra = ["fastapi"] },
     { name = "slowapi" },
     { name = "sqlalchemy", extra = ["asyncio"] },
@@ -524,6 +526,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=42.0" },
     { name = "ddtrace", marker = "extra == 'datadog'", specifier = ">=4.12.2" },
     { name = "fastapi", specifier = ">=0.141.1,<1" },
+    { name = "google-auth", specifier = ">=2.30,<3" },
     { name = "google-cloud-aiplatform", specifier = ">=1.163.0,<3" },
     { name = "google-cloud-pubsub", marker = "extra == 'pubsub'", specifier = ">=2.39.1,<3" },
     { name = "google-genai", specifier = ">=2.17.0" },
@@ -549,6 +552,7 @@ requires-dist = [
     { name = "python-dateutil", specifier = ">=2.8,<3" },
     { name = "python-multipart", specifier = ">=0.0.20,<1" },
     { name = "redis", extras = ["hiredis"], specifier = ">=8.0.1,<9" },
+    { name = "requests", specifier = ">=2.32,<3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.2,<1.0" },
     { name = "sentry-sdk", extras = ["fastapi"], specifier = ">=2.66.0,<3" },
     { name = "slowapi", specifier = ">=0.1.9,<1.0" },

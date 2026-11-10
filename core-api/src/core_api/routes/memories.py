@@ -64,12 +64,15 @@ from core_api.middleware.idempotency import (
     release_claim_on_error,
 )
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot
-from core_api.middleware.rate_limit import search_limit, write_bulk_limit, write_limit
+from core_api.middleware.rate_limit import llm_limit, search_limit, write_bulk_limit, write_limit
 from core_api.pagination import cursor_sortable, decode_cursor, encode_cursor
 from core_api.schemas import (
+    BatonNotice,
     BulkMemoryCreate,
     BulkMemoryItem,
     BulkMemoryResponse,
+    CorrectionNotice,
+    EmptyRecallHint,
     HeldMemoryPage,
     IngestCommitRequest,
     IngestRequest,
@@ -90,6 +93,7 @@ from core_api.schemas import (
     STMWriteResponse,
     UsageSummary,
 )
+from core_api.services import baton_notices
 from core_api.services.agent_identity import reserved_write_refusal
 from core_api.services.agent_scope import explain_agent_scope
 from core_api.services.agent_service import (
@@ -100,6 +104,7 @@ from core_api.services.agent_service import (
     enforce_fleet_read_many,
     enforce_fleet_write,
     enforce_transition,
+    enforce_verify,
     enforce_visibility_write,
     get_or_create_agent,
     lookup_agent,
@@ -110,6 +115,7 @@ from core_api.services.agent_service import (
 )
 from core_api.services.audit_service import log_action, log_cross_tenant_read
 from core_api.services.caller_identity import enforce_named_agent_ownership, missing_agent_id_error
+from core_api.services.correction_notices import finish_notices, start_notices
 from core_api.services.ingest_service import (
     ALLOWED_INGEST_MIME_TYPES,
     BINARY_INGEST_MIME_TYPES,
@@ -121,6 +127,8 @@ from core_api.services.ingest_service import (
     ingest_commit,
     ingest_preview,
 )
+from core_api.services.memory_corrections import on_status_corrected
+from core_api.services.memory_exposure import schedule_exposure
 from core_api.services.memory_field import (
     FIELD_DEFAULT_LIMIT,
     FIELD_MAX_LIMIT,
@@ -148,6 +156,7 @@ from core_api.services.usage_service import (
     recall_operation,
     set_usage_headers,
 )
+from core_api.services.verification import change_verification, verifier_id
 from core_api.tasks import track_task
 
 logger = logging.getLogger(__name__)
@@ -498,6 +507,14 @@ async def list_memories(
         ),
     ),
     run_id: str | None = Query(default=None),
+    baton_id: str | None = Query(
+        default=None,
+        max_length=128,
+        description=(
+            "Only memories linked to this handoff baton (`metadata.baton_id`). "
+            "Narrows the caller's visibility; never widens it."
+        ),
+    ),
     weight_min: float | None = Query(default=None, ge=0, le=1),
     weight_max: float | None = Query(default=None, ge=0, le=1),
     cursor: str | None = Query(default=None),
@@ -652,6 +669,8 @@ async def list_memories(
         "created_before": created_before.isoformat() if created_before else None,
         "status": status,
         "run_id": run_id,
+        # Handoff batons (HB-10) — narrowing, ANDed after the scoping predicate.
+        "baton_id": baton_id,
         "weight_min": weight_min,
         "weight_max": weight_max,
         "include_deleted": await _effective_include_deleted(auth, include_deleted),
@@ -1379,6 +1398,9 @@ async def get_memory(
             raise HTTPException(status_code=404, detail="Memory not found")
 
         hit = True
+        # Correction propagation: this agent now holds the memory (or, for a
+        # chunk, its parent). Skipped for a person or a credential naming no agent.
+        schedule_exposure([memory], agent_id=auth.agent_id, tenant_id=tenant_id)
     except HTTPException:
         # 404 (and any other HTTPException) is an expected outcome — not an
         # observability-level error. `hit=False` already signals the miss.
@@ -1405,12 +1427,20 @@ async def get_memory(
         "fleet_id": memory["fleet_id"],
         "agent_id": memory["agent_id"],
         "agent_display_name": memory.get("agent_display_name"),
+        "agent_trust_level": memory.get("agent_trust_level"),
         "memory_type": memory["memory_type"],
         "title": memory["title"],
         "content": memory["content"],
         "weight": float(memory["weight"]) if memory["weight"] is not None else None,
         "source_uri": memory["source_uri"],
         "run_id": memory["run_id"],
+        # Evidence contract v1 (migration 071).
+        "observed_at": memory.get("observed_at"),
+        "trace_id": memory.get("trace_id"),
+        "tool_call_id": memory.get("tool_call_id"),
+        "verification_status": memory.get("verification_status") or "unverified",
+        "verified_by": memory.get("verified_by"),
+        "verified_at": memory.get("verified_at"),
         # Storage serialises the JSONB column under ``metadata_``; the API
         # response exposes it as ``metadata``.
         "metadata": memory.get("metadata_"),
@@ -1433,6 +1463,40 @@ async def get_memory(
         "entity_links": detail["entity_links"],
         "embedding_preview": detail["embedding_preview"],
         "embedding_stats": detail["embedding_stats"],
+    }
+
+
+@router.get("/memories/{memory_id}/exposure", responses={200: {"model": _oar.MemoryExposureResponse}})
+async def get_memory_exposure(
+    memory_id: UUID,
+    tenant_id: str = Query(...),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Which agents this memory was handed to: every read that returned it, or a chunk of it, to an agent.
+
+    Correction propagation (``docs/plans/correction-propagation.md``): the
+    agents to tell when the memory is corrected. The same access rule as
+    ``GET /memories/{id}``; a memory the caller cannot read is a 404.
+    """
+    auth.enforce_readable_tenant(tenant_id)
+    sc = get_storage_client()
+    memory = await sc.get_memory(str(memory_id), tenant_id, include_held=auth.is_person)
+    if memory is None or not await authorize_memory_access(
+        tenant_id,
+        auth.agent_id,
+        visibility=memory.get("visibility"),
+        owner_agent_id=memory.get("agent_id"),
+        fleet_id=memory.get("fleet_id"),
+        caller_tenant_id=auth.tenant_id,
+        is_install_credential=auth.is_install_credential,
+        install_uuid=auth.install_uuid,
+    ):
+        raise HTTPException(status_code=404, detail="Memory not found")
+    agents = await sc.get_memory_exposure(tenant_id, str(memory_id))
+    return {
+        "memory_id": str(memory_id),
+        "agents": agents,
+        "total_reads": sum(int(a.get("count") or 0) for a in agents),
     }
 
 
@@ -2310,7 +2374,7 @@ async def delete_memory(
                 )
     # ``soft_delete_memory`` already routes the fetch + delete through the
     # storage client (and logs its own ``soft_delete`` audit row).
-    await soft_delete_memory(memory_id, tenant_id)
+    deleted = await soft_delete_memory(memory_id, tenant_id)
     await log_action(
         tenant_id=tenant_id,
         # Attribute to the effective identity (gateway X-Agent-ID wins over
@@ -2322,6 +2386,15 @@ async def delete_memory(
         resource_id=memory_id,
         detail=auth.audit_actor(),
     )
+    # CP-08: a delete is the status ``deleted`` by another verb.
+    if deleted:
+        on_status_corrected(
+            tenant_id=tenant_id,
+            memory=deleted,
+            old_status=deleted.get("status"),
+            new_status="deleted",
+            agent_id=attribution_agent_id,
+        )
 
 
 @router.patch(
@@ -2441,6 +2514,16 @@ async def update_memory_status(
             **(auth.audit_actor() if held else {}),
         },
     )
+    if not held:
+        # CP-08. A held row was never served to an agent, so rejecting it
+        # corrects nothing anyone read.
+        on_status_corrected(
+            tenant_id=tenant_id,
+            memory=memory,
+            old_status=old_status,
+            new_status=status,
+            agent_id=auth.agent_id,
+        )
     if held and status == "active":
         # g2.8 — the work the held write skipped (enrichment, governance, its
         # atomic facts, the near-duplicate merge, entities, contradictions)
@@ -2449,6 +2532,99 @@ async def update_memory_status(
             tracked_task(replay_released_write(str(memory_id), tenant_id), REPLAY_TASK, memory_id, tenant_id)
         )
     return {"memory_id": str(memory_id), "old_status": old_status, "new_status": status}
+
+
+async def _change_verification(memory_id: UUID, tenant_id: str, auth: AuthContext, *, verify: bool) -> dict:
+    """Shared body of ``POST /memories/{id}/verify`` and ``/unverify`` (EC-14).
+
+    Who may: a signed-in person, the admin key, a tenant key (the OSS contract:
+    tenant key = tenant admin), and an agent at ``trust_level >= 3`` that may
+    write the row (``enforce_verify``, then the cross-fleet check transitions
+    use). An install or cross-tenant credential may not: those are machine
+    credentials of a fleet, not the tenant's own. A ``disputed`` memory is
+    verified by a person or an admin credential only.
+    """
+    auth.enforce_read_only()
+    auth.enforce_tenant(tenant_id)
+    auth.enforce_tenant_admin_credential("verify memories" if verify else "unverify memories")
+    sc = get_storage_client()
+    memory = await sc.get_memory(str(memory_id), tenant_id)
+    if not memory:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    if auth.agent_id:
+        await enforce_verify(
+            tenant_id,
+            auth.agent_id,
+            disputed=memory.get("verification_status") == "disputed",
+            verify=verify,
+        )
+        allowed = await authorize_memory_access(
+            tenant_id,
+            auth.agent_id,
+            visibility=memory.get("visibility"),
+            owner_agent_id=memory.get("agent_id"),
+            fleet_id=memory.get("fleet_id"),
+            write=True,
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    AUTH_FLEET_SCOPE_FORBIDDEN,
+                    f"Agent '{auth.agent_id}' cannot modify memory in fleet '{memory.get('fleet_id')}'.",
+                ),
+            )
+    result = await change_verification(
+        tenant_id=tenant_id,
+        memory=memory,
+        verify=verify,
+        verified_by=verifier_id(
+            agent_id=auth.agent_id, user_id=auth.user_id, credential_kind=auth.actor_kind
+        ),
+        audit_agent_id=auth.agent_id,
+        audit_detail={"via": "rest", **auth.audit_actor()},
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return result
+
+
+@router.post(
+    "/memories/{memory_id}/verify",
+    responses={200: {"model": _oar.MemoryVerificationResponse}},
+)
+async def verify_memory(
+    memory_id: UUID,
+    tenant_id: str = Query(...),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Mark a memory ``human_verified`` (evidence contract v1, EC-14).
+
+    Sets ``verified_by`` to the caller (a person's user id, ``agent:<id>``, or
+    the credential kind) and ``verified_at`` to now, and writes an audit entry.
+    Open to a signed-in person, an admin or tenant key, and an agent at
+    ``trust_level >= 3``; anyone else gets 403. Only a person or an admin
+    credential may verify a ``disputed`` memory.
+    """
+    return await _change_verification(memory_id, tenant_id, auth, verify=True)
+
+
+@router.post(
+    "/memories/{memory_id}/unverify",
+    responses={200: {"model": _oar.MemoryVerificationResponse}},
+)
+async def unverify_memory(
+    memory_id: UUID,
+    tenant_id: str = Query(...),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Withdraw a memory's verification (EC-14).
+
+    Clears ``verified_by``/``verified_at``. The state returns to what the row's
+    own evidence says (``tool_observed`` or ``unverified``); a ``disputed``
+    memory stays ``disputed``. Same callers as ``/verify``, audited the same way.
+    """
+    return await _change_verification(memory_id, tenant_id, auth, verify=False)
 
 
 @router.patch("/memories/{memory_id}", response_model=MemoryOut)
@@ -2953,6 +3129,13 @@ async def _search_inner(
     # does not read — the same silent-drop that hid ``limit`` on /recall is live
     # on /search, which shares this body.
     search_warnings: list = _unknown_param_warnings(body, route="memory-search")
+    # EC-05 — the closest below-cut-off memory, filled only on an empty result.
+    empty_hint_ctx: dict = {}
+    # CP-13 — corrections this agent has not confirmed, looked up beside the
+    # search: the same identity exposure records as the reader.
+    notices_task = start_notices(body.tenant_id, eff_agent_id, surface="rest")
+    # HB-09 — handoff batons waiting on this agent, the same way.
+    batons_task = baton_notices.start_notices(body.tenant_id, eff_agent_id, surface="rest")
     try:
         config = await resolve_config(body.tenant_id)
         # Widen the read predicate when the caller authenticated with
@@ -3009,6 +3192,9 @@ async def _search_inner(
             # the FIELD name in ``model_fields_set`` for either spelling.
             top_k_explicit="top_k" in body.model_fields_set,
             retrieval_ctx=retrieval_ctx,
+            empty_hint_ctx=empty_hint_ctx,
+            verified_only=body.verified_only,
+            baton_id=body.baton_id,
         )
     except HTTPException:
         # Auth / tenant errors raised downstream are expected outcomes,
@@ -3072,13 +3258,26 @@ async def _search_inner(
     _set_retrieval_headers(response, retrieval_ctx)
     # A28 — null when empty (matches ``diagnostic``); purely additive.
     warn_out = [SearchWarning(**w) for w in search_warnings] or None
+    hint_out = EmptyRecallHint(**empty_hint_ctx["hint"]) if "hint" in empty_hint_ctx else None
+    notices_out = [CorrectionNotice(**n) for n in await finish_notices(notices_task)] or None
+    batons_out = [BatonNotice(**n) for n in await baton_notices.finish_notices(batons_task)] or None
     if not body.diagnostic:
-        return SearchResponse(items=results, recall_tracked=recall_tracked, warnings=warn_out)
+        return SearchResponse(
+            items=results,
+            recall_tracked=recall_tracked,
+            warnings=warn_out,
+            empty_hint=hint_out,
+            correction_notices=notices_out,
+            baton_notices=batons_out,
+        )
     counts = diagnostic_ctx.get("counts", {}) or {}
     return SearchResponse(
         items=results,
         recall_tracked=recall_tracked,
         warnings=warn_out,
+        empty_hint=hint_out,
+        correction_notices=notices_out,
+        baton_notices=batons_out,
         diagnostic=SearchDiagnostic(
             retrieval_strategy=diagnostic_ctx.get("retrieval_strategy"),
             top_k_requested=diagnostic_ctx.get("diagnostic_original_top_k"),
@@ -3118,9 +3317,26 @@ async def _ingest_preview_agent_id(auth: AuthContext, tenant_id: str, claimed_id
     return agent_id
 
 
+async def _run_preview(auth: AuthContext, body: IngestRequest) -> dict:
+    """Run a preview in one of the tenant's model slots and meter its model calls.
+
+    One ``ingest`` unit per extraction call, which is one per section; a cached
+    or too-short preview makes none. Skipped for the admin key, as every other
+    meter in this module is.
+    """
+    async with per_tenant_slot("llm", body.tenant_id):
+        result = await ingest_preview(body)
+    if auth.tenant_id and (calls := result.get("sections")):
+        await check_and_increment(body.tenant_id, "ingest", calls)
+    return result
+
+
 @router.post("/ingest/preview", responses={200: {"model": _oar.IngestPreviewResponse}})
+@llm_limit
 async def ingest_preview_endpoint(
+    request: Request,
     body: IngestRequest,
+    response: Response,
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Extract facts from a URL or text for preview (no writes).
@@ -3131,11 +3347,11 @@ async def ingest_preview_endpoint(
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
     body.agent_id = await _ingest_preview_agent_id(auth, body.tenant_id, body.agent_id)
-    return await ingest_preview(body)
+    return await _run_preview(auth, body)
 
 
 @router.post("/ingest/commit", responses={200: {"model": _oar.IngestCommitResponse}})
-@write_limit
+@write_bulk_limit
 async def ingest_commit_endpoint(
     request: Request,
     body: IngestCommitRequest,
@@ -3210,7 +3426,10 @@ async def ingest_commit_endpoint(
 
 
 @router.post("/ingest/file", responses={200: {"model": _oar.IngestPreviewResponse}})
+@llm_limit
 async def ingest_file_endpoint(
+    request: Request,
+    response: Response,
     file: UploadFile = File(...),
     tenant_id: str = Form(...),
     focus: str | None = Form(None),
@@ -3267,7 +3486,7 @@ async def ingest_file_endpoint(
     kwargs["source_uri"] = f"upload:{filename}" if filename else "upload"
     req = IngestRequest(**kwargs)
     req.agent_id = await _ingest_preview_agent_id(auth, tenant_id, req.agent_id)
-    return await ingest_preview(req)
+    return await _run_preview(auth, req)
 
 
 @router.post("/ingest/undo/{run_id}", responses={200: {"model": _oar.IngestUndoResponse}})
@@ -3404,6 +3623,13 @@ async def recall_endpoint(
     diagnostic_ctx: dict = {}
     # A28 / CAURA-723 — same collect-then-serialize shape /search uses.
     recall_warnings: list = []
+    # EC-05 — same channel /search uses; filled only on an empty recall.
+    empty_hint_ctx: dict = {}
+
+    # CP-13 — same lookup /search runs beside its search.
+    notices_task = start_notices(body.tenant_id, eff_agent_id, surface="rest")
+    # HB-09 — likewise for handoff batons.
+    batons_task = baton_notices.start_notices(body.tenant_id, eff_agent_id, surface="rest")
 
     # ── Phase 1: DB-bound — config + search ──────────────────────
     config = await resolve_config(body.tenant_id)
@@ -3460,6 +3686,9 @@ async def recall_endpoint(
         include_derived=body.include_derived,
         # SIDE-57 — same body as /search, same rule: a named top_k is honoured.
         top_k_explicit="top_k" in body.model_fields_set,
+        empty_hint_ctx=empty_hint_ctx,
+        verified_only=body.verified_only,
+        baton_id=body.baton_id,
     )
 
     # CAURA-723 — same shape as /search, and before the LLM brief so a
@@ -3494,6 +3723,7 @@ async def recall_endpoint(
         top_k=body.top_k,
         t0=t0,
         items_alias=body.items_alias,
+        tenant_id=body.tenant_id,
     )
     # ax-0917-h-05 — same A28 channel /search uses, and the reason this route
     # needed it most: ``limit`` is now an alias of ``top_k`` (schemas.py), but
@@ -3512,6 +3742,15 @@ async def recall_endpoint(
     recall_warnings.extend(_unknown_param_warnings(body, route="memory-recall"))
     if recall_warnings:
         brief["warnings"] = recall_warnings
+    # EC-05 — added only when present, for the same plain-dict reason as above.
+    if "hint" in empty_hint_ctx:
+        brief["empty_hint"] = empty_hint_ctx["hint"]
+    # CP-13 — added only when present, for the same plain-dict reason as above.
+    if notices := await finish_notices(notices_task):
+        brief["correction_notices"] = notices
+    # HB-09 — likewise.
+    if batons := await baton_notices.finish_notices(batons_task):
+        brief["baton_notices"] = batons
     return brief
 
 

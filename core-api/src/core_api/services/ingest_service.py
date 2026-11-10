@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import HTTPException
 
+from common.constants import INGEST_DOCUMENTS_COLLECTION
 from common.embedding import get_embedding
 from common.enrichment.constants import DEFAULT_MEMORY_TYPE
 from common.provider_names import ProviderName
@@ -40,6 +41,7 @@ from core_api.services.ingest_chunking import (
 )
 from core_api.services.memory_service import _content_hash, create_memories_bulk
 from core_api.services.organization_settings import resolve_config
+from core_api.services.pii_update_gate import apply_pii_policy_to_fields
 
 # Document extraction (PDF / Office / EPUB / …) is an optional ``ingest`` extra:
 # kreuzberg is ~64MB and is excluded from the default image to cut cold-start
@@ -129,18 +131,17 @@ _CLOUD_METADATA_IPS = frozenset({"169.254.169.254", "fd00:ec2::254"})
 # latency.
 _PREVIEW_CONCURRENCY = 4
 
+# Most sections a preview extracts from, one model call each. A document that
+# chunks into more is refused with 413 before any call, as an oversized one is.
+# At the chunker's ~2,000-token section target, 32 sections is ~64,000 tokens.
+INGEST_MAX_SECTIONS = 32
+
 # Minimum content length before we'll even call the LLM. Whitespace-only
 # inputs and trivially short ones ("hi") used to burn a real LLM call
 # producing useless meta-facts ("The content begins with the greeting
 # 'hi'"). We short-circuit instead and return ``skipped_reason``.
 _INGEST_MIN_CONTENT_CHARS = 20
 
-
-# Parent-Document collection name. Each successful ingest_commit writes ONE
-# row into ``documents`` with this collection and ``doc_id=<run_id>`` so the
-# batch of memories has a queryable, embeddable parent record. Each memory
-# joins back via the top-level ``memories.run_id`` column.
-INGEST_DOCUMENTS_COLLECTION = "ingest-sources"
 
 # Max chars from joined fact contents to put in the parent Document's
 # ``data["summary"]`` (which gets embedded for semantic search). Keeps the
@@ -1082,6 +1083,18 @@ async def ingest_preview(request: IngestRequest) -> dict:
     else:
         raise HTTPException(status_code=400, detail="Either url or content is required")
 
+    # The tenant's PII policy applies before the text is hashed or any of it
+    # is sent to the extraction model, as it does before a memory write's hash
+    # and enrichment: ``drop`` refuses the ingest, ``mask`` sends the redacted
+    # text. URL and file ingest arrive here as text, so this covers all three.
+    content = await apply_pii_policy_to_fields(
+        tenant_id=request.tenant_id,
+        agent_id=request.agent_id,
+        data=content,
+        write_mode="ingest",
+        subject="Content",
+    )
+
     # ---- A2: doc-hash idempotency ----
     # Hash the full content (post-PR#7 there's no more truncate-to-50k cap
     # — the chunker handles arbitrarily large docs up to ``DOC_HARD_TOKEN_LIMIT``).
@@ -1202,6 +1215,14 @@ async def ingest_preview(request: IngestRequest) -> dict:
             "doc_hash": doc_hash,
             "sections": 0,
         }
+    if len(sections) > INGEST_MAX_SECTIONS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Document too large: {len(sections)} sections "
+                f"(max {INGEST_MAX_SECTIONS}). Split the doc and ingest in pieces."
+            ),
+        )
 
     # Extract facts from every section in parallel. Each section gets
     # its own LLM call with its breadcrumb threaded into the prompt as
@@ -1650,11 +1671,12 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
                 )
             )
         # H-07: chunked, because ``BulkMemoryCreate.items`` carries
-        # ``max_length=BULK_MAX_ITEMS`` (100) and nothing upstream caps the
-        # fact count — not ``IngestCommitRequest.facts``, not preview. Preview
-        # accepts documents up to 100k tokens, sections them at ~2k tokens, and
-        # asks the extractor for 5-20 facts per section, so a ~40k-token
-        # document routinely clears 100 facts.
+        # ``max_length=BULK_MAX_ITEMS`` (100) and nothing upstream capped the
+        # fact count. Preview sections a document at ~2k tokens and asks the
+        # extractor for 5-20 facts per section, so a ~40k-token document
+        # routinely clears 100 facts. ``IngestCommitRequest.facts`` now takes
+        # at most ``BULK_MAX_ITEMS``, so a commit is one batch; the loop stays
+        # so that raising that cap cannot bring back what is below.
         #
         # Building one oversized model raised ``pydantic.ValidationError`` —
         # and it was constructed OUTSIDE the try below, which catches only

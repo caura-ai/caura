@@ -40,11 +40,6 @@ import {
   markUnreachable,
 } from "./health.js";
 
-const FLUSH_PATH_RE = new RegExp(`^${FROZEN_PLUGIN_ID}/flush-\\d{4}-\\d{2}-\\d{2}\\.md$`);
-const FLUSH_YEAR_PATH_RE = new RegExp(
-  `^${FROZEN_PLUGIN_ID}/flush-(\\d{4})-\\d{2}-\\d{2}\\.md$`,
-);
-
 type RegisteredRuntime = {
   getMemorySearchManager: (p: Record<string, unknown>) => Promise<{
     manager: unknown;
@@ -257,201 +252,46 @@ describe("memory-runtime contract (OpenClaw MemoryPluginRuntime)", () => {
   });
 });
 
-// ─── MemoryFlushPlan contract (added 2026-05-21) ────────────────────────────
-// OpenClaw's ``memory-state.d.ts`` defines MemoryFlushPlan with SIX required
-// fields. The agent-runner calls ``resolver(...).relativePath`` and passes it
-// to ``ensureMemoryFlushTargetFile``, which throws "Invalid memory flush
-// target path" on any falsy / absolute value. Pre-fix our resolver returned
-// ``{instructions, softThresholdTokens}`` and the error only surfaced on
-// long sessions that crossed the compaction threshold — making it look
-// intermittent. These tests lock the entire required shape.
-
-type _FlushPlanResolver = (params?: {
-  cfg?: unknown;
-  nowMs?: number;
-}) => Record<string, unknown> | null;
+// The supported flush callback has config/time, but no per-call conversation
+// identity. A global plan could capture a group chat, so it must fail closed.
+type _FlushPlanResolver = (params?: { cfg?: unknown; nowMs?: number }) => Record<string, unknown> | null;
 
 function _loadFlushPlanResolver(): _FlushPlanResolver {
   let captured: _FlushPlanResolver | undefined;
-  const api = {
+  cauraPlugin.register({
     registerTool: () => {},
     registerGatewayMethod: () => {},
     registerMemoryPromptSection: () => {},
-    registerMemoryFlushPlan: (r: _FlushPlanResolver) => {
-      captured = r;
-    },
+    registerMemoryFlushPlan: (resolver: _FlushPlanResolver) => { captured = resolver; },
     registerMemoryRuntime: () => {},
     registerContextEngine: () => {},
     on: () => {},
-  };
-  cauraPlugin.register(api);
+  });
   if (!captured) throw new Error("registerMemoryFlushPlan was not called");
   return captured;
 }
 
-describe("MemoryFlushPlan contract (OpenClaw agent-runner.runtime)", () => {
-  test("plan has every required field with the right primitive type", () => {
-    const plan = _loadFlushPlanResolver()({
-      nowMs: Date.UTC(2026, 4, 21, 12, 0, 0),
+describe("MemoryFlushPlan without trusted conversation context", () => {
+  const cases: Array<[string, unknown]> = [
+    ["normal supported parameters", { nowMs: Date.UTC(2026, 10, 9, 12) }],
+    ["no parameters", undefined],
+    ["null", null],
+    ["NaN", { nowMs: Number.NaN }],
+    ["Infinity", { nowMs: Number.POSITIVE_INFINITY }],
+    ["negative Infinity", { nowMs: Number.NEGATIVE_INFINITY }],
+    ["negative timestamp", { nowMs: -1 }],
+    ["zero timestamp", { nowMs: 0 }],
+    ["non-number timestamp", { nowMs: "oops" }],
+    ["direct-looking config is not per-call context", { cfg: { sessionKey: "agent:writer:telegram:dm:42" } }],
+    ["unsupported direct-looking parameter", { sessionKey: "agent:writer:telegram:dm:42" }],
+    ["unsupported group parameter", { sessionKey: "agent:writer:whatsapp:group:7" }],
+  ];
+  for (const [label, params] of cases) {
+    test("returns no plan for " + label, () => {
+      const resolve = _loadFlushPlanResolver() as (value: unknown) => Record<string, unknown> | null;
+      assert.equal(resolve(params), null, "no automatic flush without a trusted conversation key");
     });
-    assert.ok(plan, "resolver must return a plan, not null");
-    assert.equal(typeof plan.softThresholdTokens, "number");
-    assert.equal(typeof plan.forceFlushTranscriptBytes, "number");
-    assert.equal(typeof plan.reserveTokensFloor, "number");
-    assert.equal(typeof plan.prompt, "string");
-    assert.equal(typeof plan.systemPrompt, "string");
-    assert.equal(typeof plan.relativePath, "string");
-  });
-
-  test("relativePath is non-empty, workspace-relative, no absolute / parent-escape", () => {
-    const plan = _loadFlushPlanResolver()({
-      nowMs: Date.UTC(2026, 4, 21, 12, 0, 0),
-    });
-    assert.ok(plan && typeof plan.relativePath === "string");
-    const rp = plan.relativePath as string;
-    assert.ok(rp.length > 0);
-    assert.equal(rp.startsWith("/"), false);
-    assert.equal(rp.startsWith("../"), false);
-    assert.equal(rp.includes("/../"), false);
-    assert.ok(rp.startsWith(`${FROZEN_PLUGIN_ID}/`));
-  });
-
-  test("relativePath embeds the provided nowMs date stamp deterministically", () => {
-    const r = _loadFlushPlanResolver();
-    const a = r({ nowMs: Date.UTC(2026, 4, 21, 23, 59, 0) });
-    const b = r({ nowMs: Date.UTC(2026, 4, 22, 0, 1, 0) });
-    assert.ok(a && b);
-    assert.match(a.relativePath as string, /2026-05-21/);
-    assert.match(b.relativePath as string, /2026-05-22/);
-    const c1 = r({ nowMs: Date.UTC(2026, 4, 21, 12, 0, 0) });
-    const c2 = r({ nowMs: Date.UTC(2026, 4, 21, 12, 0, 0) });
-    assert.equal(
-      (c1 as Record<string, unknown>).relativePath,
-      (c2 as Record<string, unknown>).relativePath,
-    );
-  });
-
-  test("resolver tolerates being called with no args (legacy OpenClaw callers)", () => {
-    const plan = _loadFlushPlanResolver()();
-    assert.ok(plan, "resolver() with no args must still return a plan");
-    assert.equal(typeof (plan as Record<string, unknown>).relativePath, "string");
-  });
-});
-
-describe("MemoryFlushPlan resolver — input-hardening (regression: review 2026-05-21)", () => {
-  // The resolver runs in OpenClaw's agent-runner stack, outside the
-  // registration-time try/catch. A throw here crashes the flush turn.
-  // These tests pin the defensive contract: null input, non-finite
-  // nowMs, and any inner failure must still yield a valid plan.
-
-  test("resolver(null) returns a valid plan (destructure-null TypeError regression)", () => {
-    const r = _loadFlushPlanResolver();
-    // Cast to call with null — pre-fix the ``= {}`` default did NOT fire
-    // for null (only undefined), so destructuring threw TypeError.
-    const plan = (r as unknown as (p: unknown) => Record<string, unknown> | null)(null);
-    assert.ok(plan, "resolver(null) must still return a plan");
-    assert.equal(typeof (plan as Record<string, unknown>).relativePath, "string");
-    assert.match(
-      (plan as Record<string, unknown>).relativePath as string,
-      FLUSH_PATH_RE,
-    );
-  });
-
-  test("resolver({nowMs: NaN}) falls back to Date.now() (RangeError regression)", () => {
-    const r = _loadFlushPlanResolver();
-    const plan = r({ nowMs: Number.NaN });
-    assert.ok(plan);
-    const rp = (plan as Record<string, unknown>).relativePath as string;
-    assert.match(rp, FLUSH_PATH_RE, `bad rp=${rp}`);
-  });
-
-  test("resolver({nowMs: Infinity}) falls back to Date.now()", () => {
-    const r = _loadFlushPlanResolver();
-    const plan = r({ nowMs: Number.POSITIVE_INFINITY });
-    assert.ok(plan);
-    const rp = (plan as Record<string, unknown>).relativePath as string;
-    assert.match(rp, FLUSH_PATH_RE);
-  });
-
-  test("resolver({nowMs: -Infinity}) falls back to Date.now()", () => {
-    const r = _loadFlushPlanResolver();
-    const plan = r({ nowMs: Number.NEGATIVE_INFINITY });
-    assert.ok(plan);
-    const rp = (plan as Record<string, unknown>).relativePath as string;
-    assert.match(rp, FLUSH_PATH_RE);
-  });
-
-  test("resolver({nowMs: 'oops' as any}) ignores non-number and falls back", () => {
-    const r = _loadFlushPlanResolver();
-    // Real OpenClaw versions only pass number | undefined, but the gate is
-    // structural — string / object / boolean inputs all must degrade
-    // gracefully rather than crash.
-    const plan = (r as unknown as (p: { nowMs: unknown }) => Record<string, unknown> | null)({
-      nowMs: "oops",
-    });
-    assert.ok(plan);
-    const rp = (plan as Record<string, unknown>).relativePath as string;
-    assert.match(rp, FLUSH_PATH_RE);
-  });
-});
-
-describe("MemoryFlushPlan resolver — negative-timestamp guard (review 2026-05-24)", () => {
-  // ``Number.isFinite(-1) === true``, so without an explicit positive
-  // lower bound a negative ``nowMs`` (test mock, time-travel scenario,
-  // accidental ``-Date.now()``) would produce a ``relativePath`` like
-  // ``memclaw/flush-1969-12-31.md``. The path-shape check would still // legacy-name-floor: historical workspace path
-  // pass (it's just a valid YYYY-MM-DD) but the file name is meaningless
-  // and confuses operators reading the workspace. Lock the lower bound.
-
-  test("resolver({nowMs: -1}) falls back to Date.now() instead of pre-epoch", () => {
-    const r = _loadFlushPlanResolver();
-    const plan = r({ nowMs: -1 });
-    assert.ok(plan);
-    const rp = (plan as Record<string, unknown>).relativePath as string;
-    const yearMatch = rp.match(FLUSH_YEAR_PATH_RE);
-    assert.ok(yearMatch, `unexpected path shape: ${rp}`);
-    const yearInPath = Number.parseInt(yearMatch[1], 10);
-    const currentYear = new Date().getUTCFullYear();
-    assert.equal(
-      yearInPath,
-      currentYear,
-      `negative nowMs must fall back to current year, got ${yearInPath} for path ${rp}`,
-    );
-  });
-
-  test("resolver({nowMs: -Date.now()}) falls back to Date.now()", () => {
-    const r = _loadFlushPlanResolver();
-    const plan = r({ nowMs: -Date.now() });
-    assert.ok(plan);
-    const rp = (plan as Record<string, unknown>).relativePath as string;
-    const yearMatch = rp.match(FLUSH_YEAR_PATH_RE);
-    assert.ok(yearMatch);
-    assert.equal(Number.parseInt(yearMatch[1], 10), new Date().getUTCFullYear());
-  });
-
-  test("resolver({nowMs: 0}) falls back to Date.now() (epoch is also rejected)", () => {
-    const r = _loadFlushPlanResolver();
-    const plan = r({ nowMs: 0 });
-    assert.ok(plan);
-    const rp = (plan as Record<string, unknown>).relativePath as string;
-    const yearMatch = rp.match(FLUSH_YEAR_PATH_RE);
-    assert.ok(yearMatch);
-    assert.notEqual(
-      Number.parseInt(yearMatch[1], 10),
-      1970,
-      "nowMs=0 must NOT produce a 1970-stamped path",
-    );
-  });
-
-  test("resolver still accepts a real positive nowMs (no regression)", () => {
-    const r = _loadFlushPlanResolver();
-    const plan = r({ nowMs: Date.UTC(2026, 4, 24, 12, 0, 0) });
-    assert.ok(plan);
-    assert.equal(
-      (plan as Record<string, unknown>).relativePath,
-      `${FROZEN_PLUGIN_ID}/flush-2026-05-24.md`,
-    );
-  });
+  }
 });
 
 // --- ContextEngine.assemble() contract (CAURA-000 WhatsApp keystones) ---

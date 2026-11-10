@@ -13,6 +13,7 @@ from uuid import UUID
 from fastapi import HTTPException
 
 from common import duplicate_memory
+from common.llm.untrusted import UNTRUSTED_DATA_RULE, data_block
 from common.usage import scoped
 from core_api.constants import (
     EVOLVE_FAILURE_DELTA,
@@ -26,6 +27,7 @@ from core_api.constants import (
     EVOLVE_WEIGHT_FLOOR,
     VALID_SCOPES,
 )
+from core_api.services.source_trust import SOURCE_TRUST_KEY, author_trust, row_trust
 from core_api.utils.sanitize import sanitize_content as _sanitize_content
 
 logger = logging.getLogger(__name__)
@@ -119,10 +121,16 @@ _SCOPE_TO_VISIBILITY = {
 
 # -- Rule generation prompt ---------------------------------------------------
 
-_RULE_GENERATION_PROMPT = """\
+_RULE_GENERATION_PROMPT = (
+    """\
 You are analyzing a {outcome_type} outcome to generate a preventive rule.
 
-OUTCOME: {outcome}
+"""
+    + UNTRUSTED_DATA_RULE
+    + """
+
+OUTCOME:
+{outcome}
 
 RELATED MEMORIES ({count} memories the agent used before this outcome):
 {memories}
@@ -141,6 +149,7 @@ Respond with JSON:
   "reasoning": "brief explanation of why this rule would help"
 }}
 """
+)
 
 
 # -- Weight adjustment --------------------------------------------------------
@@ -504,12 +513,13 @@ async def _generate_rule(
     # for fields), so outcome/memories must NOT be brace-escaped — escaping would
     # corrupt literal {word} / JSON / code in agent input or DB content. A
     # substituted value never raises KeyError. Still cap the outcome to bound
-    # prompt tokens.
+    # prompt tokens. Both go in data blocks: the outcome is the caller's text and
+    # the memories are any fleet member's, so neither may steer the rule.
     safe_outcome = _sanitize_content(outcome, max_len=2000)
     prompt = _RULE_GENERATION_PROMPT.format(
-        outcome=safe_outcome,
+        outcome=data_block(safe_outcome),
         outcome_type=outcome_type,
-        memories=memories_text,
+        memories=data_block(memories_text),
         count=len(memories_text_lines),
     )
 
@@ -550,6 +560,8 @@ async def _generate_rule(
             "action": str(raw.get("action", ""))[:500],
             "confidence": confidence,
             "reasoning": str(raw.get("reasoning", ""))[:500],
+            # For ``_persist_rule``'s ``source_trust``; never sent to a client.
+            "source_rows": [mem for _mid, mem in fetched if mem],
         },
     )
 
@@ -690,6 +702,10 @@ async def _persist_rule(
     `scope` controls the persisted rule's visibility so a rule generated from
     scope='agent' evolve stays private to the reporting agent, while a
     scope='all' rule is visible tenant-wide.
+
+    The rule records ``source_trust``: the lowest trust among the reporter and
+    the memories it was drawn from (``rule["source_rows"]``), so a reader can see
+    when a rule rests on a less trusted agent's text than its reporter's own.
     """
     from core_api.schemas import MemoryCreate
     from core_api.services.memory_service import create_memory
@@ -726,8 +742,11 @@ async def _persist_rule(
     # Rule persistence is best-effort: create_memory commits independently via
     # the storage client, so a failure here is logged and swallowed (returns
     # None) without blocking the weight adjustments and outcome write.
+    sources = rule.get("source_rows") or []
     try:
-        result = await create_memory(data)
+        by_author = await author_trust(tenant_id, [agent_id, *(row.get("agent_id") for row in sources)])
+        trust = min([by_author.get(agent_id, 0), *(row_trust(row, by_author) for row in sources)])
+        result = await create_memory(data, system_values={SOURCE_TRUST_KEY: trust})
         return str(result.id)
     except Exception:
         logger.exception("evolve: failed to persist rule")

@@ -146,7 +146,45 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # cannot pass a key the schema does not list. About +47 counted by hand on top
 # of L-119's unmeasured +55; tiktoken was again not available, so the next
 # entry should measure the fixture. Ceiling 5570 -> 5620.
-CEILING_TOKENS = 5620
+#
+# 2026-11-04 (evidence contract v1, EC-08): 5691 cl100k, measured with tiktoken
+# from the fixture; main measured 5592 before it, so the earlier hand counts
+# overshot by 28. ``caura_write`` gained ``observed_at``, ``trace_id`` and
+# ``tool_call_id``, which REST ``POST /memories`` takes in the same change: an
+# MCP caller cannot record which tool call a memory came from unless the schema
+# lists it. +99, nearly all of it the ``anyOf`` string|null boilerplate each
+# optional parameter costs; the descriptions are three to five words. Ceiling
+# 5620 -> 5720, leaving 29.
+#
+# 2026-11-04 (evidence contract v1, EC-14): 5743 cl100k (+23 over main's 5720,
+# where EC-10/11/12 left it at the ceiling), measured with tiktoken from the
+# fixture. ``caura_manage`` gained ``verify`` and ``unverify`` as ops rather
+# than a new tool: two words in the ``op`` roll-call, one clause naming the
+# trust bar, and the plugin-gap clause naming them, since the plugin dispatches
+# neither. Ceiling 5720 -> 5743, raised by exactly the delta, leaving 0.
+#
+# 2026-11-05 (correction propagation, CP-11): 5811 cl100k (+68), measured with
+# tiktoken from the fixture. ``caura_manage`` gained ``send_correction`` and
+# ``confirm_correction`` as ops rather than a new tool, and one ``correction_id``
+# parameter: the two names in the ``op`` roll-call, one sentence on what each
+# does (send's trust bar included), and the plugin-gap clause, since the plugin
+# dispatches neither. Ceiling 5743 -> 5811, raised by exactly the delta, leaving 0.
+#
+# 2026-11-05 (handoff batons, HB-10): 5884 cl100k (+73), measured with tiktoken
+# from the fixture. ``caura_list`` and ``caura_recall`` each gained an optional
+# ``baton_id`` filter (memories a receiver linked to a handoff baton). Almost
+# all of it is the ``anyOf`` string|null boilerplate per optional parameter; the
+# description is seven words. Ceiling 5811 -> 5884, raised by exactly the
+# delta, leaving 0.
+#
+# 2026-11-05 (handoff batons, HB-09): 5945 cl100k (+61), measured with tiktoken
+# from the fixture. ``caura_manage`` gained ``read_baton`` and ``accept_baton``
+# as ops rather than a new tool, and one ``baton_id`` parameter: an agent told
+# about a baton on recall (``baton_notices``) and not on the bus has no other
+# way to read or accept it. Two names in the ``op`` roll-call, one sentence,
+# and the plugin-gap clause naming read_baton (the plugin renders the baton
+# itself). Ceiling 5884 -> 5945, raised by exactly the delta, leaving 0.
+CEILING_TOKENS = 5945
 
 
 def _count(path: Path) -> int:

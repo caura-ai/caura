@@ -26,7 +26,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from core_api.schemas import MemoryOut, SearchWarning
+from core_api.schemas import BatonNotice, CorrectionNotice, EmptyRecallHint, SearchHitOut, SearchWarning
 
 # --------------------------------------------------------------------------
 # memories / recall / health / version
@@ -191,10 +191,152 @@ class MemoryContradictionsResponse(BaseModel):
     contradictions: list[ContradictionEntry]
 
 
+class MemoryExposureAgent(BaseModel):
+    agent_id: str
+    count: int = Field(description="Reads that returned this memory (or a chunk of it) to the agent.")
+    first_seen: str
+    last_seen: str
+    last_trace_id: str | None = Field(description="The server trace of the latest such read.")
+
+
+class MemoryExposureResponse(BaseModel):
+    memory_id: str
+    agents: list[MemoryExposureAgent] = Field(
+        description="Every agent the memory was handed to, latest read first."
+    )
+    total_reads: int
+
+
+class MemoryCorrectionRecipientOut(BaseModel):
+    agent_id: str
+    reads: int = Field(description="Reads of the memory by this agent when the correction was recorded.")
+    first_seen: str
+    last_seen: str
+    last_trace_id: str | None
+    channel: str | None = Field(
+        default=None, description="``bus``, or ``recall`` (told on its next recall); null until sent."
+    )
+    notice_state: str = Field(
+        description=(
+            "pending | sent | delivered | confirmed | late | failed | unreachable (legacy, read as"
+            " pending on the recall channel). On ``recall``: pending until a recall hands the agent"
+            " the notice, then delivered."
+        )
+    )
+    confirmed_at: str | None = None
+    notified_at: str | None = Field(
+        default=None,
+        description="When the bus accepted the notice, or (recall channel) when a recall first handed it over.",
+    )
+    next_attempt_at: str | None = Field(default=None, description="A throttled send waits until then.")
+    attempts: int = 0
+
+
+class MemoryCorrectionActorOut(BaseModel):
+    kind: str = Field(description="``user``, ``agent``, or the credential kind.")
+    id: str | None
+
+
+class MemoryCorrectionCounts(BaseModel):
+    recipients: int = Field(description="Agents listed (at most 50).")
+    truncated: int = Field(description="Readers of the old version past the cap, not listed.")
+    readers: int = Field(description="recipients + truncated.")
+    pending: int
+    sent: int = 0
+    delivered: int = 0
+    confirmed: int = 0
+    late: int = 0
+    failed: int = 0
+    unreachable: int = Field(default=0, description="Legacy rows only; no longer written.")
+
+
+class MemoryCorrectionOut(BaseModel):
+    id: str
+    tenant_id: str
+    memory_id: str
+    event_id: str
+    kind: str = Field(description="content_edit | status | unverify | conflict_resolve")
+    actor: MemoryCorrectionActorOut
+    corrected_at: str
+    old_summary: str | None = Field(
+        description="The text before the correction; null for an agent that did not read it."
+    )
+    new_summary: str | None
+    detail: dict
+    status: str = Field(
+        description="``preview`` until sent; ``sending`` while the bus throttles a recipient; ``sent``; "
+        "``closed`` once every recipient confirmed or failed."
+    )
+    created_at: str
+    sent_at: str | None = None
+    sent_by: str | None = None
+    recipients: list[MemoryCorrectionRecipientOut] = Field(
+        description="Agents that read the memory before the correction, latest read first; the corrector excluded."
+    )
+    counts: MemoryCorrectionCounts
+
+
+class CorrectionConfirmResponse(BaseModel):
+    correction_id: str
+    memory_id: str
+    agent_id: str
+    notice_state: str | None = Field(description="``confirmed``.")
+    confirmed_at: str | None
+
+
+class BatonLink(BaseModel):
+    memory_id: str
+    title: str = Field(description="The memory's title, or the start of its content.")
+
+
+class BatonOut(BaseModel):
+    """``GET /batons/{id}`` (handoff batons, HB-09): the baton as this agent got or cited it."""
+
+    model_config = {"extra": "allow"}
+
+    type: str = Field(description="``handoff_baton``.")
+    v: int
+    baton_id: str
+    from_agent: str
+    goal: str
+    decisions: list[str] = []
+    failed_approaches: list[dict] = []
+    open_questions: list[str] = []
+    memory_ids: list[str] = Field(
+        description="The linked memories this agent may read today (a receiver: of those delivered to it)."
+    )
+    linked: list[BatonLink] = Field(description="The same memories, with titles.")
+    doc_ids: list[dict] = []
+    created_at: str | None = None
+
+
+class BatonAcceptResponse(BaseModel):
+    baton_id: str
+    agent_id: str
+    from_agent: str
+    state: str = Field(description="``accepted``, or ``replied`` when it was answered on the bus.")
+    accepted_at: str | None
+
+
+class MemoryCorrectionListResponse(BaseModel):
+    memory_id: str
+    corrections: list[MemoryCorrectionOut] = Field(description="Newest first.")
+
+
 class MemoryStatusPatchResponse(BaseModel):
     memory_id: str
     old_status: str | None
     new_status: str
+
+
+class MemoryVerificationResponse(BaseModel):
+    """``POST /memories/{id}/verify`` and ``/unverify`` (evidence contract v1, EC-14)."""
+
+    memory_id: str
+    old_verification_status: str
+    verification_status: str | None
+    verified_by: str | None
+    verified_at: str | None
 
 
 class RecallDiagnostic(BaseModel):
@@ -205,8 +347,20 @@ class RecallDiagnostic(BaseModel):
         description="Unfiltered LLM completion (reasoning scaffold + answer marker) that summary "
         "was extracted from; null when no LLM ran (no matches, or summarization disabled)."
     )
-    recall_model: str | None
-    recall_provider: str | None
+    recall_model: str | None = Field(
+        description="Model that wrote recall_raw; null when no LLM ran. Can differ from "
+        "recall_configured_model, because a provider with no key falls back to the platform LLM."
+    )
+    recall_provider: str | None = Field(
+        description="Provider that wrote recall_raw: the configured one, the fallback provider, the "
+        "platform LLM, or 'fake' for the unsynthesized fallback; null when no LLM ran."
+    )
+    recall_configured_model: str | None = Field(
+        default=None, description="The tenant's resolved recall model setting."
+    )
+    recall_configured_provider: str | None = Field(
+        default=None, description="The tenant's resolved recall provider setting."
+    )
     all_candidates: list
     top_k_used: int | None = Field(
         description="Row budget the search ran with, after the agent and tenant search profiles and any "
@@ -224,7 +378,7 @@ class RecallResponse(BaseModel):
     query: str
     summary: str
     memory_count: int
-    memories: list[MemoryOut] = Field(
+    memories: list[SearchHitOut] = Field(
         description="The matched rows in rank order, as /search returns them; the summary reads them by date."
     )
     # ax-0917-h-03 — DEPRECATED, and deliberately still emitted by default here.
@@ -242,7 +396,7 @@ class RecallResponse(BaseModel):
     # ``memories`` first and only fall back (clients/python .../models.py,
     # clients/typescript/src/index.ts), and the plugin's items reader is only
     # ever fed /search.
-    items: list[MemoryOut] | None = Field(
+    items: list[SearchHitOut] | None = Field(
         default=None,
         deprecated=True,
         description=(
@@ -273,6 +427,29 @@ class RecallResponse(BaseModel):
             "'filter_agent_unknown' when the agent filter names an id this "
             "tenant has never seen."
         ),
+    )
+    # EC-05 — absent unless the recall found nothing; same object /search sends.
+    empty_hint: EmptyRecallHint | None = Field(
+        default=None,
+        description=(
+            "Only when no memory was recalled: the closest memory that scored below "
+            "the similarity cut-off, so an empty recall is not mistaken for 'nothing saved'."
+        ),
+    )
+    # CP-13 — absent unless this agent has an unconfirmed correction; same
+    # objects /search sends.
+    correction_notices: list[CorrectionNotice] | None = Field(
+        default=None,
+        description=(
+            "Only when a memory this agent read was corrected and the agent has not "
+            "confirmed it: at most 3, newest first."
+        ),
+    )
+    # HB-09 — absent unless a handoff baton waits on this agent; same objects
+    # /search sends.
+    baton_notices: list[BatonNotice] | None = Field(
+        default=None,
+        description="Only when a handoff baton is waiting on this agent: at most 2, newest first.",
     )
 
 

@@ -340,16 +340,22 @@ class TestCrystallizeCluster:
         mock_llm = AsyncMock()
         mock_llm.is_fake = False
         mock_llm.complete_json = AsyncMock(
-            return_value=[
-                {"content": "valid fact", "memory_type": "fact", "weight": 0.7},
-                {"content": "bad type", "memory_type": "INVALID", "weight": 0.5},
-                {"content": "clamped weight", "memory_type": "decision", "weight": 5.0},
-                {
-                    "content": "",
-                    "memory_type": "fact",
-                    "weight": 0.5,
-                },  # empty — skipped
-            ]
+            return_value={
+                "facts": [
+                    {"content": "valid fact", "memory_type": "fact", "weight": 0.7},
+                    {"content": "bad type", "memory_type": "INVALID", "weight": 0.5},
+                    {
+                        "content": "clamped weight",
+                        "memory_type": "decision",
+                        "weight": 5.0,
+                    },
+                    {
+                        "content": "",
+                        "memory_type": "fact",
+                        "weight": 0.5,
+                    },  # empty — skipped
+                ]
+            }
         )
 
         with patch(

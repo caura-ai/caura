@@ -422,6 +422,9 @@ class _FakeSTM:
     async def clear_bulletin(self, tenant_id, fleet_id):
         pass
 
+    async def clear_tenant(self, tenant_id):
+        pass
+
 
 class TestInfraProtocolConformance:
     """Verify that a minimal fake satisfies the runtime-checkable protocol."""

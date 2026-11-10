@@ -1,10 +1,13 @@
 from core_storage_api.routers.agents import router as agents_router
 from core_storage_api.routers.audit import router as audit_router
+from core_storage_api.routers.batons import router as batons_router
 from core_storage_api.routers.capability_usage import router as capability_usage_router
+from core_storage_api.routers.corrections import router as corrections_router
 from core_storage_api.routers.debug import router as debug_router
 from core_storage_api.routers.documents import router as documents_router
 from core_storage_api.routers.entities import router as entities_router
 from core_storage_api.routers.evolve import router as evolve_router
+from core_storage_api.routers.exposure import router as exposure_router
 from core_storage_api.routers.fleet import router as fleet_router
 from core_storage_api.routers.health import router as health_router
 from core_storage_api.routers.idempotency import router as idempotency_router
@@ -27,12 +30,15 @@ from core_storage_api.routers.value import router as value_router
 __all__ = [
     "agents_router",
     "audit_router",
+    "batons_router",
     "capability_usage_router",
     "tenant_usage_router",
     "debug_router",
+    "corrections_router",
     "documents_router",
     "entities_router",
     "evolve_router",
+    "exposure_router",
     "fleet_router",
     "health_router",
     "idempotency_router",

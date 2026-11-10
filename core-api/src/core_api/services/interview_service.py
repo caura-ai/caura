@@ -65,7 +65,18 @@ JOBS_COLLECTION = "interview_jobs"
 # interviews; a planted pending job's events are written as memories under the
 # agent it names. Storage refuses only ``_``-prefixed collections, and these
 # predate that convention, so the public document routes refuse them.
-SYSTEM_COLLECTIONS = frozenset({WATERMARK_COLLECTION, JOBS_COLLECTION})
+# Handoff batons (docs/plans/handoff-batons.md): the Caura bus stores each baton
+# here, and it is readable by its sender and receivers only, through the bus's
+# ``GET /api/v1/bus/batons/{id}``. The document routes cannot apply that rule
+# (they gate by tenant and fleet, not by named agents), so they refuse it.
+BATON_COLLECTION = "batons"
+SYSTEM_COLLECTIONS = frozenset({WATERMARK_COLLECTION, JOBS_COLLECTION, BATON_COLLECTION})
+# Named in the refusal, so a caller knows where the collection is served.
+_SYSTEM_COLLECTION_OWNERS = {
+    WATERMARK_COLLECTION: "the interview service",
+    JOBS_COLLECTION: "the interview service",
+    BATON_COLLECTION: "the Caura bus",
+}
 
 
 def refuse_system_collection(collection: str) -> None:
@@ -77,7 +88,7 @@ def refuse_system_collection(collection: str) -> None:
     if collection in SYSTEM_COLLECTIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"Collection '{collection}' is system-managed; the interview service writes it.",
+            detail=f"Collection '{collection}' is system-managed; {_SYSTEM_COLLECTION_OWNERS[collection]} writes it.",
         )
 
 
@@ -86,25 +97,27 @@ def refuse_system_collection(collection: str) -> None:
 # synthesis commits; the service reads it through storage, and no caller
 # needs it. The watermark stays readable: ``caura-interviewer`` reads its
 # cursor there, and it holds sequence numbers, not content.
-SYSTEM_READ_REFUSED_COLLECTIONS = frozenset({JOBS_COLLECTION})
+# A baton names the memories each receiver may read and is for its sender and
+# receivers only; the bus serves it to them.
+SYSTEM_READ_REFUSED_COLLECTIONS = frozenset({JOBS_COLLECTION, BATON_COLLECTION})
 
 
 def refuse_system_read(collection: str | None) -> None:
-    """Refuse a public document read (get, list, query, search) of a job.
+    """Refuse a public document read (get, list, query, search) of a job or a baton.
 
     Every credential is refused, as for writes, with the same 400.
     """
     if collection in SYSTEM_READ_REFUSED_COLLECTIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"Collection '{collection}' is system-managed; the interview service reads it.",
+            detail=f"Collection '{collection}' is system-managed; {_SYSTEM_COLLECTION_OWNERS[collection]} reads it.",
         )
 
 
 def without_system_rows(rows: list) -> list:
-    """Drop job documents from a document search that named no collection.
+    """Drop job and baton documents from a document search that named no collection.
 
-    Search ranks only embedded rows and jobs are written without an embedding,
+    Search ranks only embedded rows and both are written without an embedding,
     so none is returned today; this keeps it so if that ever changes.
     """
 

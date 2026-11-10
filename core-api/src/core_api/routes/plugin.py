@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import os
 import shlex
 from pathlib import Path
 from typing import Literal
@@ -19,12 +20,25 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["System"])
 
-# Resolve plugin/src relative to the repo root.
-# In Docker: /app/plugin/src. Locally: ../../plugin/src from core-api/src/core_api/routes/
-_plugin_dir = Path(__file__).resolve().parent.parent.parent.parent / "plugin" / "src"
-if not _plugin_dir.is_dir():
-    # Docker layout: /app/core-api/src/... → /app/plugin/src
-    _plugin_dir = Path(__file__).resolve().parent.parent.parent.parent.parent / "plugin" / "src"
+
+def _resolve_asset_root() -> Path:
+    """The directory holding the repo's ``plugin/`` and ``static/`` trees.
+
+    By default that is the repo root, five levels up from this file
+    (core-api/src/core_api/routes/): the checkout locally, ``/app`` in this
+    repo's image. A build that installs core-api as a regular package puts
+    this file under ``site-packages``, where that walk lands inside the
+    virtualenv and every plugin and skill file reads as missing. Such a
+    build copies the two trees somewhere and sets ``CAURA_ASSET_ROOT`` to
+    that directory.
+    """
+    if override := os.environ.get("CAURA_ASSET_ROOT", "").strip():
+        return Path(override)
+    return Path(__file__).resolve().parents[4]
+
+
+_asset_root = _resolve_asset_root()
+_plugin_dir = _asset_root / "plugin" / "src"
 _plugin_src = _plugin_dir / "index.ts"
 _plugin_files = [
     "index.ts",
@@ -56,6 +70,8 @@ _plugin_files = [
     "task-trail.ts",
     "user-agent.ts",
     "origin-usage.ts",
+    "correction-notices.ts",
+    "baton-notices.ts",
 ]
 
 
@@ -94,10 +110,9 @@ _plugin_install_files = {"package-lock.json"}
 # Direct-MCP skill adapter. Lives under the repo-root ``static/`` tree
 # rather than ``plugin/`` — it is NOT an OpenClaw plugin artifact; it is
 # served to Claude Code / Codex users who connect to Caura directly via
-# MCP. Resolved from app.py's position: core-api/src/core_api/routes/ →
-# five ``.parent``s up land on the repo root.
+# MCP. Resolved under ``_asset_root``, like the plugin tree.
 _skill_md_path = (
-    Path(__file__).resolve().parent.parent.parent.parent.parent
+    _asset_root
     / "static"
     / "skills"
     / "memclaw"  # legacy-name-ok: default installer serves the established skill path
@@ -469,7 +484,7 @@ fi
 
 if [ -z "$SRC_FILES" ] || [ -z "$ROOT_FILES" ]; then
   echo "WARNING: Could not fetch/parse /api/v1/plugin-manifest (python3 missing or endpoint unreachable). Falling back to hardcoded file list."
-  SRC_FILES="index.ts prompt-section.ts tools.ts tool-specs.ts version.ts env.ts transport.ts validation.ts config.ts paths.ts logger.ts resolve-agent.ts tool-definitions.ts deploy.ts heartbeat.ts educate.ts context-engine.ts context-engine.internal.ts agent-auth.ts health.ts install-id.ts identity.ts reconcile-skills.ts keystones.ts openclaw-sdk-bridge.ts interview-buffer.ts task-trail.ts user-agent.ts origin-usage.ts"
+  SRC_FILES="index.ts prompt-section.ts tools.ts tool-specs.ts version.ts env.ts transport.ts validation.ts config.ts paths.ts logger.ts resolve-agent.ts tool-definitions.ts deploy.ts heartbeat.ts educate.ts context-engine.ts context-engine.internal.ts agent-auth.ts health.ts install-id.ts identity.ts reconcile-skills.ts keystones.ts openclaw-sdk-bridge.ts interview-buffer.ts task-trail.ts user-agent.ts origin-usage.ts correction-notices.ts baton-notices.ts"
   ROOT_FILES="openclaw.plugin.json tools.json skills/memclaw/SKILL.md skills/caura/SKILL.md"  # legacy-name-ok: fallback preserves the shipped dual-path skill manifest
 fi
 
@@ -794,7 +809,7 @@ _SKILL_LABELS = {
     "company-brain": "Company Brain",
 }
 _VALID_SKILLS = frozenset(_SKILL_LABELS)
-_static_skills_dir = Path(__file__).resolve().parent.parent.parent.parent.parent / "static" / "skills"
+_static_skills_dir = _asset_root / "static" / "skills"
 # Precomputed name → SKILL.md path map. Keys are the constant allowlist, so
 # the request's ``skill`` value is only ever a dict KEY (membership / lookup),
 # never a path segment — the served path is always one of these fixed

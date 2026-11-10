@@ -112,17 +112,28 @@ describe("agent identity is resolved, never invented", () => {
     assert.equal(req.body?.agent_id, EXPECTED_AGENT_ID);
   });
 
-  test("an explicit agent_id always wins over the default", async () => {
+  test("the agent's own id, passed explicitly, is kept", async () => {
     const req = await run("caura_tune", {
-      agent_id: "explicit-agent",
+      agent_id: EXPECTED_AGENT_ID,
       min_similarity: 0.4,
     });
-    assert.equal(req.url.pathname, "/api/v1/agents/explicit-agent/tune");
+    assert.equal(req.url.pathname, `/api/v1/agents/${EXPECTED_AGENT_ID}/tune`);
     assert.deepEqual(req.body, { min_similarity: 0.4 });
   });
 
-  test("document writes preserve explicit and defaulted authors", async () => {
-    for (const agent_id of [undefined, "document-author"]) {
+  test("another agent's id is refused before any request", async () => {
+    captured = [];
+    await assert.rejects(
+      createToolFromSpec("caura_tune").execute(
+        "test-call", { agent_id: "explicit-agent", min_similarity: 0.4 }, undefined as never,
+      ),
+      /not the agent running this call/,
+    );
+    assert.deepEqual(captured, []);
+  });
+
+  test("document writes carry their author, named or defaulted", async () => {
+    for (const agent_id of [undefined, EXPECTED_AGENT_ID]) {
       const req = await run("caura_doc", {
         op: "write", collection: "runbooks", doc_id: "doc-1",
         data: { title: "Runbook" }, agent_id,
@@ -190,10 +201,24 @@ describe("agent identity is resolved, never invented", () => {
   test("caura_recall translates the caller identity to the REST field", async () => {
     const req = await run("caura_recall", {
       query: "anything",
-      agent_id: "explicit-agent",
+      agent_id: EXPECTED_AGENT_ID,
     });
-    assert.equal(req.body?.caller_agent_id, "explicit-agent");
+    assert.equal(req.body?.caller_agent_id, EXPECTED_AGENT_ID);
     assert.equal(req.body?.agent_id, undefined);
+  });
+
+  test("caura_recall refuses another agent's caller identity", async () => {
+    for (const key of ["agent_id", "caller_agent_id"]) {
+      captured = [];
+      await assert.rejects(
+        createToolFromSpec("caura_recall").execute(
+          "test-call", { query: "anything", [key]: "explicit-agent" }, undefined as never,
+        ),
+        /not the agent running this call/,
+        key,
+      );
+      assert.deepEqual(captured, [], key);
+    }
   });
 
   test("caura_recall turns the configured fleet default into fleet_ids", async () => {

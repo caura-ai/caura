@@ -10,6 +10,358 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.47.0](https://github.com/caura-ai/caura/compare/backend-v3.46.2...backend-v3.47.0) (2026-11-09)
+
+
+### Features
+
+* **batons:** tag handoff findings with baton_id on the write path ([#2365](https://github.com/caura-ai/caura/issues/2365)) ([ff17f39](https://github.com/caura-ai/caura/commit/ff17f39f3692f1049a7e4264b858ed86b7aa0fd6))
+
+## [3.46.2](https://github.com/caura-ai/caura/compare/backend-v3.46.1...backend-v3.46.2) (2026-11-09)
+
+
+### Dependencies
+
+* **core-worker:** move torch to 2.15.0 so setuptools can reach 84.2.1 ([#2408](https://github.com/caura-ai/caura/issues/2408)) ([375f80d](https://github.com/caura-ai/caura/commit/375f80d1f1b7e61457c7f442c012702718b80217))
+
+## [3.46.1](https://github.com/caura-ai/caura/compare/backend-v3.46.0...backend-v3.46.1) (2026-11-09)
+
+
+### Dependencies
+
+* **core-worker:** bump filelock to 4.2.9 and fsspec to 2026.9.0 ([#2405](https://github.com/caura-ai/caura/issues/2405)) ([4986d9f](https://github.com/caura-ai/caura/commit/4986d9f7dacaf525f37393eee4c87692520fe27e))
+
+## [3.46.0](https://github.com/caura-ai/caura/compare/backend-v3.45.4...backend-v3.46.0) (2026-11-09)
+
+
+### Features
+
+* **llm:** PLATFORM_LLM_BASE_URL points OpenAI chat calls at a compatible endpoint ([#2400](https://github.com/caura-ai/caura/issues/2400)) ([5af00de](https://github.com/caura-ai/caura/commit/5af00de07831843194ff0ec00372a3b66faecb28))
+
+
+### Bug Fixes
+
+* **entities:** in "V as the S", S is the subject, named with its attribute ([#2399](https://github.com/caura-ai/caura/issues/2399)) ([ddd8281](https://github.com/caura-ai/caura/commit/ddd828171c4bde6f316a1fcdfe5270807e76f1db))
+
+## [3.45.4](https://github.com/caura-ai/caura/compare/backend-v3.45.3...backend-v3.45.4) (2026-11-09)
+
+
+### Dependencies
+
+* **docker:** bump datadog/serverless-init from `30c3fcf` to `6cb81a6` in /core-storage-api ([#2391](https://github.com/caura-ai/caura/issues/2391)) ([0f440cb](https://github.com/caura-ai/caura/commit/0f440cbee1658fbf4755bd2402abe81074d02bc1))
+
+## [3.45.3](https://github.com/caura-ai/caura/compare/backend-v3.45.2...backend-v3.45.3) (2026-11-09)
+
+
+### Bug Fixes
+
+* **contradiction:** the reporter of a fact is not its subject ([#2396](https://github.com/caura-ai/caura/issues/2396)) ([920ce3b](https://github.com/caura-ai/caura/commit/920ce3be80dff40d76ce4db6dcfa51c14ba3b30b))
+* **entities:** an abbreviation a memory defines is an alias of its entity ([#2398](https://github.com/caura-ai/caura/issues/2398)) ([d9c65ab](https://github.com/caura-ai/caura/commit/d9c65ab6d36516c1ead759ffd83aa0d03e48f6a0))
+
+## [3.45.2](https://github.com/caura-ai/caura/compare/backend-v3.45.1...backend-v3.45.2) (2026-11-09)
+
+
+### Dependencies
+
+* **actions:** bump the actions group with 4 updates ([#2388](https://github.com/caura-ai/caura/issues/2388)) ([da1c9a7](https://github.com/caura-ai/caura/commit/da1c9a7add76ca6b332aacdc0c21f386a05b1ed3))
+* update cachetools requirement from &lt;8,&gt;=7.2.4 to &gt;=7.3.0,&lt;8 ([#2383](https://github.com/caura-ai/caura/issues/2383)) ([1e5b56d](https://github.com/caura-ai/caura/commit/1e5b56d89efaebc32732a8f348fb23cc752033a6))
+* update openai requirement from &lt;4,&gt;=3.41.0 to &gt;=3.46.0,&lt;4 ([#2384](https://github.com/caura-ai/caura/issues/2384)) ([710fd5f](https://github.com/caura-ai/caura/commit/710fd5fea7062990f3c1ce7853a460e57db39722))
+* update pydantic requirement from &lt;3,&gt;=2.14.2 to &gt;=2.14.3,&lt;3 ([#2385](https://github.com/caura-ai/caura/issues/2385)) ([9baf5e2](https://github.com/caura-ai/caura/commit/9baf5e22eb36ee7cf88b5c06a6f6eb436dc0af3b))
+* update sentry-sdk requirement from &lt;3,&gt;=2.73.0 to &gt;=2.74.0,&lt;3 ([#2386](https://github.com/caura-ai/caura/issues/2386)) ([71a1a2d](https://github.com/caura-ai/caura/commit/71a1a2db54105c4bdc761c985b9a6bebfecaef02))
+* update sqlalchemy requirement from &lt;2.2,&gt;=2.1.6 to &gt;=2.1.8,&lt;2.2 ([#2387](https://github.com/caura-ai/caura/issues/2387)) ([0c16481](https://github.com/caura-ai/caura/commit/0c1648178e1e94513bba959a2dd41aaa93de2598))
+
+## [3.45.1](https://github.com/caura-ai/caura/compare/backend-v3.45.0...backend-v3.45.1) (2026-11-09)
+
+
+### Dependencies
+
+* **docker:** bump datadog/serverless-init from `30c3fcf` to `6cb81a6` in /core-api ([#2389](https://github.com/caura-ai/caura/issues/2389)) ([f935fad](https://github.com/caura-ai/caura/commit/f935fad9f31c521e3113430829f208de87200326))
+* **docker:** bump datadog/serverless-init from `30c3fcf` to `6cb81a6` in /core-operations ([#2390](https://github.com/caura-ai/caura/issues/2390)) ([9329245](https://github.com/caura-ai/caura/commit/9329245123ee010c9f6d11bd7168ad252ffa006e))
+* **docker:** bump datadog/serverless-init from `30c3fcf` to `6cb81a6` in /core-worker ([#2392](https://github.com/caura-ai/caura/issues/2392)) ([e34fc01](https://github.com/caura-ai/caura/commit/e34fc0106007fd7ffe208a4b03008729a3a19a5e))
+
+## [3.45.0](https://github.com/caura-ai/caura/compare/backend-v3.44.1...backend-v3.45.0) (2026-11-08)
+
+
+### Features
+
+* **audit:** the web app can name the console place a write came from ([#2379](https://github.com/caura-ai/caura/issues/2379)) ([e539b0a](https://github.com/caura-ai/caura/commit/e539b0a8265f391097fbddc02961b2f390d0f8d3))
+
+
+### Bug Fixes
+
+* **core-api:** take a re-extraction's outcome from the worker, not the graph ([#2380](https://github.com/caura-ai/caura/issues/2380)) ([d72a3dc](https://github.com/caura-ai/caura/commit/d72a3dcae5253c816ecfa6677fd01c4266070216))
+
+## [3.44.1](https://github.com/caura-ai/caura/compare/backend-v3.44.0...backend-v3.44.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* **search:** stop serving conflicted (stale) rows next to their correction ([#2373](https://github.com/caura-ai/caura/issues/2373)) ([db914c0](https://github.com/caura-ai/caura/commit/db914c053a686b3aa876d40971f95f4f334138ea))
+
+## [3.44.0](https://github.com/caura-ai/caura/compare/backend-v3.43.0...backend-v3.44.0) (2026-11-08)
+
+
+### Features
+
+* **common:** send a Cloud Run identity token to listed model backends ([#2375](https://github.com/caura-ai/caura/issues/2375)) ([f4b0940](https://github.com/caura-ai/caura/commit/f4b09401b0e6cd847ff6477b7a4c0faa049c130d))
+* **core-operations:** send a Cloud Run identity token when calling core-api ([#2374](https://github.com/caura-ai/caura/issues/2374)) ([0a60e8d](https://github.com/caura-ai/caura/commit/0a60e8d2470d3eb5e18f6f8b9e4046f8693a3021))
+
+## [3.43.0](https://github.com/caura-ai/caura/compare/backend-v3.42.1...backend-v3.43.0) (2026-11-08)
+
+
+### Features
+
+* **core-api:** a command to extract again the entity graphs the heuristic made ([#2371](https://github.com/caura-ai/caura/issues/2371)) ([393f713](https://github.com/caura-ai/caura/commit/393f713d7fcb588fbe21df5c8b782a0a97d70dea))
+
+
+### Bug Fixes
+
+* **core-api:** record extractions that fell back for a failure asking again would repeat ([#2369](https://github.com/caura-ai/caura/issues/2369)) ([de65225](https://github.com/caura-ai/caura/commit/de65225aa63bdee00b9f45ff093cc4bd7bdcbf57))
+
+## [3.42.1](https://github.com/caura-ai/caura/compare/backend-v3.42.0...backend-v3.42.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* **core-api:** one admission policy for REST and MCP calls ([#2363](https://github.com/caura-ai/caura/issues/2363)) ([6ab3c29](https://github.com/caura-ai/caura/commit/6ab3c29adf8a759ee1c2f5e12c428f958edc364f))
+* **llm:** fit the seed to Vertex and Gemini's int32 field ([#2367](https://github.com/caura-ai/caura/issues/2367)) ([7d6041e](https://github.com/caura-ai/caura/commit/7d6041ec28be309b76466bf3f319b18d39fd4b4f))
+
+## [3.42.0](https://github.com/caura-ai/caura/compare/backend-v3.41.4...backend-v3.42.0) (2026-11-06)
+
+
+### Features
+
+* **core-api:** a command to enrich again memories that fell back to the heuristic ([#2359](https://github.com/caura-ai/caura/issues/2359)) ([4f9315a](https://github.com/caura-ai/caura/commit/4f9315a6e17309462f34d35e7fd31462d8ca0d4f))
+
+
+### Bug Fixes
+
+* **agents:** tombstone deleted agents; tools act as their own agent ([#2354](https://github.com/caura-ai/caura/issues/2354)) ([13ba4d9](https://github.com/caura-ai/caura/commit/13ba4d9e5872663d6115119fae2ebf27127f2941))
+* **crystallizer:** ask for the facts inside an object, as complete_json returns ([#2357](https://github.com/caura-ai/caura/issues/2357)) ([ea3b905](https://github.com/caura-ai/caura/commit/ea3b905aff79a0206eaaa69a9b0a75924949003a))
+
+
+### Documentation
+
+* name the OpenClaw fleets tab the app has ([#2360](https://github.com/caura-ai/caura/issues/2360)) ([e77b5b4](https://github.com/caura-ai/caura/commit/e77b5b40f58b5fb4b2b3115fefd2aaea25fd54ad))
+
+## [3.41.4](https://github.com/caura-ai/caura/compare/backend-v3.41.3...backend-v3.41.4) (2026-11-06)
+
+
+### Bug Fixes
+
+* **enrichment:** ask for one object when the memory content is a list ([#2355](https://github.com/caura-ai/caura/issues/2355)) ([de171f6](https://github.com/caura-ai/caura/commit/de171f60e668dea8a53a00fa71e153b17ad2af0c))
+
+## [3.41.3](https://github.com/caura-ai/caura/compare/backend-v3.41.2...backend-v3.41.3) (2026-11-06)
+
+
+### Bug Fixes
+
+* **api:** take the tenant from a tenant-bound credential on baton accept and correction confirm ([#2349](https://github.com/caura-ai/caura/issues/2349)) ([5ef839b](https://github.com/caura-ai/caura/commit/5ef839bf982726731e75f84b8e6b5f04aa5019da))
+
+## [3.41.2](https://github.com/caura-ai/caura/compare/backend-v3.41.1...backend-v3.41.2) (2026-11-06)
+
+
+### Bug Fixes
+
+* **corrections:** a recall notice shows no text of a deleted memory ([#2351](https://github.com/caura-ai/caura/issues/2351)) ([7dfe83e](https://github.com/caura-ai/caura/commit/7dfe83e4b049636e1a9b4a5d27ecfd05ce856bd5))
+
+## [3.41.1](https://github.com/caura-ai/caura/compare/backend-v3.41.0...backend-v3.41.1) (2026-11-06)
+
+
+### Performance
+
+* **storage:** keep the report's corpus counts for five minutes (Prism v2 N035) ([#2346](https://github.com/caura-ai/caura/issues/2346)) ([f012625](https://github.com/caura-ai/caura/commit/f012625a53d0ee8496ce1e5b57fe788a40285eb2))
+
+## [3.41.0](https://github.com/caura-ai/caura/compare/backend-v3.40.0...backend-v3.41.0) (2026-11-05)
+
+
+### Features
+
+* **clients:** hand work over as a baton and show received batons in peer wait ([#2344](https://github.com/caura-ai/caura/issues/2344)) ([ea2e8e4](https://github.com/caura-ai/caura/commit/ea2e8e4dcd1896d6b527ca567aa490b800a16f63))
+* **memory:** tell a baton receiver on its next recall, and let it accept (HB-09) ([#2345](https://github.com/caura-ai/caura/issues/2345)) ([2235fe1](https://github.com/caura-ai/caura/commit/2235fe148ccabd63a23d101db3861bede96e726d))
+
+
+### Bug Fixes
+
+* **memory:** send a Cloud Run ID token with correction bus calls ([#2342](https://github.com/caura-ai/caura/issues/2342)) ([76b2cc1](https://github.com/caura-ai/caura/commit/76b2cc15019d2a014f452303022e1aa9f9be11fe))
+* **memory:** show a correction notice on recall to every unconfirmed recipient ([#2343](https://github.com/caura-ai/caura/issues/2343)) ([5b978d3](https://github.com/caura-ai/caura/commit/5b978d3841044e89b840f41054e4a0d7b60decf1))
+
+## [3.40.0](https://github.com/caura-ai/caura/compare/backend-v3.39.3...backend-v3.40.0) (2026-11-05)
+
+
+### Features
+
+* **clients:** show memory correction notices to agents and let them confirm ([#2336](https://github.com/caura-ai/caura/issues/2336)) ([ec82502](https://github.com/caura-ai/caura/commit/ec82502f2c4ebe0bf906a0e4c419bcd599067462))
+* **core-api:** publish caura.memory.corrected when a person corrects a memory ([#2331](https://github.com/caura-ai/caura/issues/2331)) ([c07de1c](https://github.com/caura-ai/caura/commit/c07de1c4b0fe8df6d48c3ca7b253c30638928a68))
+* **documents:** handoff batons spec; batons collection is system-managed ([#2341](https://github.com/caura-ai/caura/issues/2341)) ([4193f86](https://github.com/caura-ai/caura/commit/4193f86c937632c5231d17a156287d6fab4785f9))
+* **memory:** baton_id read filter on list, search and recall ([#2339](https://github.com/caura-ai/caura/issues/2339)) ([cf0bf30](https://github.com/caura-ai/caura/commit/cf0bf30933d0328e4e1f01b318d6f3476a8c3d31))
+* **memory:** record which agents read each memory (memory_exposure) ([#2332](https://github.com/caura-ai/caura/issues/2332)) ([0f6a0e0](https://github.com/caura-ai/caura/commit/0f6a0e00504425c4beb3dfb66e0b413825f5c2a3))
+* **memory:** record who to tell when a person corrects a memory ([#2335](https://github.com/caura-ai/caura/issues/2335)) ([61f7905](https://github.com/caura-ai/caura/commit/61f7905c21d653c33d2507bbfc6ca328b97e1d0d))
+* **memory:** send a correction's notices and show who confirmed ([#2338](https://github.com/caura-ai/caura/issues/2338)) ([614a9c7](https://github.com/caura-ai/caura/commit/614a9c7c058d55ac6c952a335b410a821dcfa9aa))
+* **memory:** tell an agent about a correction on its next recall ([#2337](https://github.com/caura-ai/caura/issues/2337)) ([cf7fddb](https://github.com/caura-ai/caura/commit/cf7fddb29ae45ebd21fdc5a0b8990da7d935efd4))
+* **observability:** turn MCP recall logging on by default ([#2329](https://github.com/caura-ai/caura/issues/2329)) ([98b113c](https://github.com/caura-ai/caura/commit/98b113cc8e7223c130032df136f19073e301e857))
+
+
+### Bug Fixes
+
+* **core-api:** a PATCH that loses a race with a DELETE answers 404 ([#2334](https://github.com/caura-ai/caura/issues/2334)) ([275e30c](https://github.com/caura-ai/caura/commit/275e30cee438739b8d102595f34dac271b15decc))
+* **core-api:** let a packaged install find plugin/ and static/ ([#2333](https://github.com/caura-ai/caura/issues/2333)) ([7de46d4](https://github.com/caura-ai/caura/commit/7de46d4491019f995c6cd8a0a18935db983266f5))
+* **memory:** record when a recall hands an agent its correction notice ([#2340](https://github.com/caura-ai/caura/issues/2340)) ([d6e0114](https://github.com/caura-ai/caura/commit/d6e0114be62a1d4a18acdd78d535fedcbb6cc19a))
+
+
+### Documentation
+
+* **deletion:** a matrix of where a memory's text is kept ([#2328](https://github.com/caura-ai/caura/issues/2328)) ([69ca121](https://github.com/caura-ai/caura/commit/69ca121eca20ba58f577912e59dae08d320efd89))
+
+## [3.39.3](https://github.com/caura-ai/caura/compare/backend-v3.39.2...backend-v3.39.3) (2026-11-04)
+
+
+### Bug Fixes
+
+* **stm:** short-term memory goes with its agent and its tenant ([#2325](https://github.com/caura-ai/caura/issues/2325)) ([7da7eba](https://github.com/caura-ai/caura/commit/7da7eba7afe0395fbaec0c79e5eab863ca9d61ea))
+
+## [3.39.2](https://github.com/caura-ai/caura/compare/backend-v3.39.1...backend-v3.39.2) (2026-11-04)
+
+
+### Bug Fixes
+
+* **lifecycle:** recall logs and spent replays age out with the purge ([#2320](https://github.com/caura-ai/caura/issues/2320)) ([cd050c0](https://github.com/caura-ai/caura/commit/cd050c04da0cc0695fe386184ac04ff11a400db5))
+
+## [3.39.1](https://github.com/caura-ai/caura/compare/backend-v3.39.0...backend-v3.39.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **recall:** say "often recalled" only after repeated recalls ([#2323](https://github.com/caura-ai/caura/issues/2323)) ([b672ddc](https://github.com/caura-ai/caura/commit/b672ddcde9c3c2f18921641e9c794b64239eaca7))
+
+## [3.39.0](https://github.com/caura-ai/caura/compare/backend-v3.38.2...backend-v3.39.0) (2026-11-04)
+
+
+### Features
+
+* **search:** optional ranking boost for verified memories, off by default ([#2313](https://github.com/caura-ai/caura/issues/2313)) ([2fb266f](https://github.com/caura-ai/caura/commit/2fb266f06f5c4d8fd2fca360a2c4fba83b23df4c))
+
+
+### Bug Fixes
+
+* **memory:** a deleted memory's text leaves no copies beside it ([#2318](https://github.com/caura-ai/caura/issues/2318)) ([1ad7efe](https://github.com/caura-ai/caura/commit/1ad7efe86ad2687feaa66fb14f3c1ccda3abe181))
+
+## [3.38.2](https://github.com/caura-ai/caura/compare/backend-v3.38.1...backend-v3.38.2) (2026-11-04)
+
+
+### Bug Fixes
+
+* **llm:** a text completion cut at max_tokens raises instead of returning ([#2319](https://github.com/caura-ai/caura/issues/2319)) ([936778f](https://github.com/caura-ai/caura/commit/936778f86db701d7ba3e9158b332d6abcde5176d))
+
+## [3.38.1](https://github.com/caura-ai/caura/compare/backend-v3.38.0...backend-v3.38.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **lifecycle:** skip suppressed tenants, purge on each org's window ([#2315](https://github.com/caura-ai/caura/issues/2315)) ([c0809b6](https://github.com/caura-ai/caura/commit/c0809b68eccaa4c6f674bfb6f648010eb68938ab))
+
+
+### Documentation
+
+* name Connect › Keys, and say who mints agent keys (Prism v2 R9) ([#2316](https://github.com/caura-ai/caura/issues/2316)) ([70f026a](https://github.com/caura-ai/caura/commit/70f026a49e6536c30feda317abf6ec2528547b97))
+
+## [3.38.0](https://github.com/caura-ai/caura/compare/backend-v3.37.15...backend-v3.38.0) (2026-11-04)
+
+
+### Features
+
+* **evidence:** clients send real evidence on writes (EC-15) ([#2311](https://github.com/caura-ai/caura/issues/2311)) ([3786c21](https://github.com/caura-ai/caura/commit/3786c21bea5ebc51373be0aa35d6cc29d0375b29))
+* **memory:** automatic verification states and the verify operation ([#2312](https://github.com/caura-ai/caura/issues/2312)) ([1aff27d](https://github.com/caura-ai/caura/commit/1aff27d3f2bb95d4de116702ada643e7f9c19fc1))
+* **memory:** evidence fields and server-stamped trace_id ([#2307](https://github.com/caura-ai/caura/issues/2307)) ([cc263af](https://github.com/caura-ai/caura/commit/cc263affb2993c30df3abe1ea61f1c3d3818db27))
+* **recall:** a deployment can give listed tenants their own recall model ([#2303](https://github.com/caura-ai/caura/issues/2303)) ([7592573](https://github.com/caura-ai/caura/commit/7592573d9d2a3aabbbb4a0c9c199c50e414c090a))
+* **recall:** evidence object, verified_only filter and why phrase on every hit ([#2310](https://github.com/caura-ai/caura/issues/2310)) ([c272e36](https://github.com/caura-ai/caura/commit/c272e368478362d9e06a580a3903e09f5883332d))
+* **recall:** explain an empty recall with the closest result ([#2305](https://github.com/caura-ai/caura/issues/2305)) ([2aee60a](https://github.com/caura-ai/caura/commit/2aee60a1782e1f5b1036b52c81361d51d099f982))
+* **reports:** evidence coverage report per tenant ([#2309](https://github.com/caura-ai/caura/issues/2309)) ([25dbaaf](https://github.com/caura-ai/caura/commit/25dbaafc58c5402c45c08474a900c6cce4c04ec2))
+* **search:** explain why a memory was not found ([#2308](https://github.com/caura-ai/caura/issues/2308)) ([fc6d9f0](https://github.com/caura-ai/caura/commit/fc6d9f06ae156cf8397e158ddc36c83fde8e03ab))
+
+
+### Bug Fixes
+
+* **contradictions:** a less-trusted writer cannot overturn a row ([#2304](https://github.com/caura-ai/caura/issues/2304)) ([1720a5e](https://github.com/caura-ai/caura/commit/1720a5ed30b70b0b0e2fe64f10abb6d3d0fab955))
+* **prompts:** frame stored text as data in the contradiction judges ([#2306](https://github.com/caura-ai/caura/issues/2306)) ([584c9f7](https://github.com/caura-ai/caura/commit/584c9f7f1c4fdaa10bf6151dd7500043672de758))
+* **recall:** restate the memory hierarchy rule after the memories ([#2301](https://github.com/caura-ai/caura/issues/2301)) ([68a5046](https://github.com/caura-ai/caura/commit/68a5046d1a060bd057310a51b3e8ade18f6f7f6e))
+* **recall:** the diagnostic names the model that wrote the brief ([#2300](https://github.com/caura-ai/caura/issues/2300)) ([c25096b](https://github.com/caura-ai/caura/commit/c25096b681685c24d2f622e1897ba41cbdae6a60))
+
+## [3.37.15](https://github.com/caura-ai/caura/compare/backend-v3.37.14...backend-v3.37.15) (2026-11-04)
+
+
+### Bug Fixes
+
+* **derived:** keep source trust on crystals, rules and insights ([#2295](https://github.com/caura-ai/caura/issues/2295)) ([0789760](https://github.com/caura-ai/caura/commit/0789760f42c4d3040467a200ee7eaad2abd0475c))
+
+## [3.37.14](https://github.com/caura-ai/caura/compare/backend-v3.37.13...backend-v3.37.14) (2026-11-03)
+
+
+### Bug Fixes
+
+* **prompts:** frame stored content as data in model prompts ([#2293](https://github.com/caura-ai/caura/issues/2293)) ([d813251](https://github.com/caura-ai/caura/commit/d813251649214ec5c31e35c070fe037e64d41c10))
+* **recall:** show readers each memory's author trust level ([#2294](https://github.com/caura-ai/caura/issues/2294)) ([6ff5089](https://github.com/caura-ai/caura/commit/6ff50894a6f135a0340f2744a5c3febeadf38086))
+* **search:** an open validity window far ahead does not pin freshness ([#2296](https://github.com/caura-ai/caura/issues/2296)) ([fa583e9](https://github.com/caura-ai/caura/commit/fa583e91d975e65895372e8edcb9700bbaf5eebb))
+
+## [3.37.13](https://github.com/caura-ai/caura/compare/backend-v3.37.12...backend-v3.37.13) (2026-11-03)
+
+
+### Bug Fixes
+
+* **governance:** mark and retry fast-mode rows no model judged ([#2291](https://github.com/caura-ai/caura/issues/2291)) ([4c56d0a](https://github.com/caura-ai/caura/commit/4c56d0abc90a676a221ca9bae55f45e5cd54133a))
+
+## [3.37.12](https://github.com/caura-ai/caura/compare/backend-v3.37.11...backend-v3.37.12) (2026-11-03)
+
+
+### Bug Fixes
+
+* **ingest:** apply the PII policy before extraction ([#2289](https://github.com/caura-ai/caura/issues/2289)) ([0ecad59](https://github.com/caura-ai/caura/commit/0ecad59f9769840c714bcd732e821dbd7d2a7403))
+* **recall:** memory text is evidence, not instruction ([#1706](https://github.com/caura-ai/caura/issues/1706)) ([0d48c96](https://github.com/caura-ai/caura/commit/0d48c9629656d38e9b7c9fa75f1c5267c21a20dc))
+
+## [3.37.11](https://github.com/caura-ai/caura/compare/backend-v3.37.10...backend-v3.37.11) (2026-11-03)
+
+
+### Bug Fixes
+
+* **governance:** apply the PII policy to documents and keystones ([#2287](https://github.com/caura-ai/caura/issues/2287)) ([e03ee04](https://github.com/caura-ai/caura/commit/e03ee04ea07f3ef83144345ec8f16e402373d355))
+
+## [3.37.10](https://github.com/caura-ai/caura/compare/backend-v3.37.9...backend-v3.37.10) (2026-11-02)
+
+
+### Bug Fixes
+
+* **governance:** run the business/personal pre-gate on every write ([#2283](https://github.com/caura-ai/caura/issues/2283)) ([9c00308](https://github.com/caura-ai/caura/commit/9c00308c921bd9e36cbc4b082309b110db9a5691))
+
+## [3.37.9](https://github.com/caura-ai/caura/compare/backend-v3.37.8...backend-v3.37.9) (2026-11-02)
+
+
+### Bug Fixes
+
+* **forge:** distil only the rows a tenant shares ([#2281](https://github.com/caura-ai/caura/issues/2281)) ([b61662e](https://github.com/caura-ai/caura/commit/b61662efaa4b5c177b54f0bf936fd3e535975257))
+* **governance:** a policy drop clears the row's text ([#2282](https://github.com/caura-ai/caura/issues/2282)) ([0974013](https://github.com/caura-ai/caura/commit/097401318ea4339e3a3be6874f5d786b8c0ce0bc))
+
+## [3.37.8](https://github.com/caura-ai/caura/compare/backend-v3.37.7...backend-v3.37.8) (2026-11-02)
+
+
+### Bug Fixes
+
+* **common:** name both IAM grants in the broadcast subscription error ([#2280](https://github.com/caura-ai/caura/issues/2280)) ([19f45d8](https://github.com/caura-ai/caura/commit/19f45d8228c5b720a5fb9dea9251d3d2fc1650bb))
+
+
+### Dependencies
+
+* bump pyasn1 to 0.6.5 for four DoS advisories ([#2267](https://github.com/caura-ai/caura/issues/2267)) ([bfd9dc8](https://github.com/caura-ai/caura/commit/bfd9dc800b6baa6f8c189b3a89dfa6c841748620))
+* **ci:** bump pytest from 9.1.1 to 9.2.0 in /.github/legacy-name-ratchet in the legacy-name-ratchet-minor-patch group ([#2277](https://github.com/caura-ai/caura/issues/2277)) ([2343c8a](https://github.com/caura-ai/caura/commit/2343c8af365bfdd6c3310ea1ea0b93d859119060))
+* **clients:** bump @types/node from 26.6.5 to 26.6.6 in /clients/typescript in the clients-npm-minor-patch group across 1 directory ([#2276](https://github.com/caura-ai/caura/issues/2276)) ([5c9b7d2](https://github.com/caura-ai/caura/commit/5c9b7d2b4c731018762c99bb256263c63e4c26f3))
+* **dependabot:** stop proposing new Python minors for the images ([#2278](https://github.com/caura-ai/caura/issues/2278)) ([e4ac29e](https://github.com/caura-ai/caura/commit/e4ac29e4081c307f4902b06788ca980a955e2776))
+* **plugin:** bump @types/node from 26.6.5 to 26.6.6 in /plugin in the npm-minor-patch group across 1 directory ([#2269](https://github.com/caura-ai/caura/issues/2269)) ([ca0898d](https://github.com/caura-ai/caura/commit/ca0898de496dcaf321f3bd5e99b16365b03ddf32))
+* update google-cloud-aiplatform requirement from &lt;3,&gt;=2.6.0 to &gt;=2.7.0,&lt;3 ([#2274](https://github.com/caura-ai/caura/issues/2274)) ([1ba92b7](https://github.com/caura-ai/caura/commit/1ba92b7e1c96f13849322bbbdcf6138caeb8ac75))
+* update google-genai requirement from &gt;=2.33.0 to &gt;=2.34.0 ([#2270](https://github.com/caura-ai/caura/issues/2270)) ([e13277a](https://github.com/caura-ai/caura/commit/e13277a1489bb11921ebf397c1107a75243bdf5f))
+* update mcp requirement from &lt;3,&gt;=2.2.0 to &gt;=2.3.0,&lt;3 ([#2279](https://github.com/caura-ai/caura/issues/2279)) ([09e3556](https://github.com/caura-ai/caura/commit/09e355668e8a634343d4ec33afb5ead8cbdb041a))
+* update openai requirement from &lt;4,&gt;=3.37.0 to &gt;=3.41.0,&lt;4 ([#2272](https://github.com/caura-ai/caura/issues/2272)) ([4e9b2d4](https://github.com/caura-ai/caura/commit/4e9b2d4cc81fa8346272797f5247aa746130e5f5))
+* update pydantic requirement from &lt;3,&gt;=2.14.1 to &gt;=2.14.2,&lt;3 ([#2271](https://github.com/caura-ai/caura/issues/2271)) ([61c9f9e](https://github.com/caura-ai/caura/commit/61c9f9ecffe3e2d9aa7892cccb2c55e6c5e90564))
+* update uvicorn requirement from &lt;1,&gt;=0.53.0 to &gt;=0.54.0,&lt;1 ([#2273](https://github.com/caura-ai/caura/issues/2273)) ([53e4046](https://github.com/caura-ai/caura/commit/53e40461d27075a36b596482463b7ef97ec70f2a))
+
 ## [3.37.7](https://github.com/caura-ai/caura/compare/backend-v3.37.6...backend-v3.37.7) (2026-10-28)
 
 

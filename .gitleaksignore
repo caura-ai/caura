@@ -4,3 +4,71 @@
 12860af951539ea2b097f2f2dd9ee7615b1c9464:tests/test_governance_patterns.py:jwt:76
 12860af951539ea2b097f2f2dd9ee7615b1c9464:tests/test_governance_patterns.py:jwt:125
 e7f6f1c6d32b218dfac71843efe906ee8d0316af:tests/test_governance_patterns.py:generic-api-key:199
+
+# Exact historical test fixtures: made-up mc_test… keys, alphabet-run strings and a
+# base64 "Bootstrap-token" phrase. None is a real credential.
+79e50d87d4153325f91b2c27576469967ba861a0:clients/collaboration/tests/test_setup_command.py:generic-api-key:21
+79e50d87d4153325f91b2c27576469967ba861a0:clients/collaboration/tests/test_setup_command.py:generic-api-key:160
+9579772fc88b99f0cae4dd4c5f2ccff910575a74:clients/collaboration/tests/test_setup_command.py:generic-api-key:21
+9579772fc88b99f0cae4dd4c5f2ccff910575a74:clients/collaboration/tests/test_setup_command.py:generic-api-key:179
+5e27687b5cd06d38af0dda2a8331d9c7d44719b7:clients/python/tests/test_interviewer_scrub.py:generic-api-key:52
+5e27687b5cd06d38af0dda2a8331d9c7d44719b7:clients/python/tests/test_interviewer_scrub.py:generic-api-key:55
+5e27687b5cd06d38af0dda2a8331d9c7d44719b7:clients/python/tests/test_interviewer_scrub.py:generic-api-key:59
+5e27687b5cd06d38af0dda2a8331d9c7d44719b7:clients/python/tests/test_interviewer_scrub.py:generic-api-key:62
+5e27687b5cd06d38af0dda2a8331d9c7d44719b7:clients/python/tests/test_interviewer_scrub.py:generic-api-key:63
+5e27687b5cd06d38af0dda2a8331d9c7d44719b7:clients/python/tests/test_interviewer_scrub.py:generic-api-key:73
+90b48da1e0f0cd9a77c1030fb936a823a0b4581a:clients/python/tests/test_interviewer_scrub.py:generic-api-key:52
+90b48da1e0f0cd9a77c1030fb936a823a0b4581a:clients/python/tests/test_interviewer_scrub.py:generic-api-key:55
+90b48da1e0f0cd9a77c1030fb936a823a0b4581a:clients/python/tests/test_interviewer_scrub.py:generic-api-key:59
+90b48da1e0f0cd9a77c1030fb936a823a0b4581a:clients/python/tests/test_interviewer_scrub.py:generic-api-key:62
+90b48da1e0f0cd9a77c1030fb936a823a0b4581a:clients/python/tests/test_interviewer_scrub.py:generic-api-key:63
+90b48da1e0f0cd9a77c1030fb936a823a0b4581a:clients/python/tests/test_interviewer_scrub.py:generic-api-key:73
+b58759f0da0b2a6921a070723c25f6c353a5a7bf:clients/python/tests/test_interviewer_scrub.py:generic-api-key:52
+b58759f0da0b2a6921a070723c25f6c353a5a7bf:clients/python/tests/test_interviewer_scrub.py:generic-api-key:55
+b58759f0da0b2a6921a070723c25f6c353a5a7bf:clients/python/tests/test_interviewer_scrub.py:generic-api-key:59
+b58759f0da0b2a6921a070723c25f6c353a5a7bf:clients/python/tests/test_interviewer_scrub.py:generic-api-key:62
+b58759f0da0b2a6921a070723c25f6c353a5a7bf:clients/python/tests/test_interviewer_scrub.py:generic-api-key:63
+b58759f0da0b2a6921a070723c25f6c353a5a7bf:clients/python/tests/test_interviewer_scrub.py:generic-api-key:73
+bef753ccbd9f2071f52e5fd0af9613c10f54a5ca:clients/python/tests/test_interviewer_scrub.py:generic-api-key:21
+bef753ccbd9f2071f52e5fd0af9613c10f54a5ca:clients/python/tests/test_interviewer_scrub.py:generic-api-key:44
+ab039acec84932acc1aef32b78c7623403d0bef3:clients/typescript/src/index.test.ts:generic-api-key:733
+7a091f30a74b6d4c98affc63993724791c5752f4:tests/test_env_write_new_names.py:generic-api-key:38
+94cd4f1d5a2fbfb72dea157a49a5212990bdabf7:tests/test_env_write_new_names.py:generic-api-key:43
+7456e233b7b91c916aec21defabcfcbff831ec82:tests/test_install_skill_endpoint.py:generic-api-key:76
+7456e233b7b91c916aec21defabcfcbff831ec82:tests/test_install_skill_endpoint.py:generic-api-key:82
+7a091f30a74b6d4c98affc63993724791c5752f4:tests/test_install_skill_endpoint.py:generic-api-key:81
+25cab700f7973210641a05c9cdda2669a28fc5db:tests/test_rate_limit.py:generic-api-key:63
+5e27687b5cd06d38af0dda2a8331d9c7d44719b7:tests/test_rate_limit.py:generic-api-key:63
+7456e233b7b91c916aec21defabcfcbff831ec82:tests/test_rate_limit.py:generic-api-key:45
+90b48da1e0f0cd9a77c1030fb936a823a0b4581a:tests/test_rate_limit.py:generic-api-key:63
+5e27687b5cd06d38af0dda2a8331d9c7d44719b7:tests/test_security_tenant_isolation.py:generic-api-key:299
+7456e233b7b91c916aec21defabcfcbff831ec82:tests/test_security_tenant_isolation.py:generic-api-key:173
+7456e233b7b91c916aec21defabcfcbff831ec82:tests/test_security_tenant_isolation.py:generic-api-key:186
+7456e233b7b91c916aec21defabcfcbff831ec82:tests/test_security_tenant_isolation.py:generic-api-key:207
+7456e233b7b91c916aec21defabcfcbff831ec82:tests/test_security_tenant_isolation.py:generic-api-key:260
+7456e233b7b91c916aec21defabcfcbff831ec82:tests/test_security_tenant_isolation.py:generic-api-key:285
+7456e233b7b91c916aec21defabcfcbff831ec82:tests/test_security_tenant_isolation.py:generic-api-key:304
+90b48da1e0f0cd9a77c1030fb936a823a0b4581a:tests/test_security_tenant_isolation.py:generic-api-key:299
+f96768c7fe1fd46c903c130946b841ba5fe07a33:tests/test_security_tenant_isolation.py:generic-api-key:299
+
+# Exact historical docs examples: the standalone-mode "X-API-Key: standalone" value
+# and the mc_your_key placeholder.
+7456e233b7b91c916aec21defabcfcbff831ec82:README.md:curl-auth-header:121
+7456e233b7b91c916aec21defabcfcbff831ec82:README.md:curl-auth-header:127
+91ee613c46cdf9e0f81c7249ab2b3c75601c110a:README.md:curl-auth-header:65
+91ee613c46cdf9e0f81c7249ab2b3c75601c110a:README.md:curl-auth-header:70
+80fadf20d8ff125e88161542521978a0407c3e7f:docs/local-embedder.md:curl-auth-header:47
+80fadf20d8ff125e88161542521978a0407c3e7f:docs/local-embedder.md:curl-auth-header:51
+72129a4ccf2ef2b1b826cd97e94f51c60fc2c239:docs/self-hosting.md:curl-auth-header:152
+72129a4ccf2ef2b1b826cd97e94f51c60fc2c239:docs/self-hosting.md:curl-auth-header:158
+7456e233b7b91c916aec21defabcfcbff831ec82:static/docs/integration-guide.md:curl-auth-header:96
+
+# Exact historical test lines that hold no key: idempotency keys and Pub/Sub
+# subscription names the generic rule reads as assignments.
+16aa3f6108698c61cf99671fb1b53325667e6006:clients/collaboration/tests/test_mcp_reclaim_before_reply.py:generic-api-key:41
+16aa3f6108698c61cf99671fb1b53325667e6006:clients/collaboration/tests/test_mcp_reclaim_before_reply.py:generic-api-key:43
+9579772fc88b99f0cae4dd4c5f2ccff910575a74:clients/collaboration/tests/test_mcp_reclaim_before_reply.py:generic-api-key:41
+9579772fc88b99f0cae4dd4c5f2ccff910575a74:clients/collaboration/tests/test_mcp_reclaim_before_reply.py:generic-api-key:43
+3c8d93b0baceb58c81e7626d45c5922725ecca21:tests/test_events/test_pubsub_bus.py:generic-api-key:1231
+9a8a9627542cc704a1929ad705a7b3b524a9fdf7:tests/test_events/test_topic_rename_cutover.py:generic-api-key:166
+9a8a9627542cc704a1929ad705a7b3b524a9fdf7:tests/test_events/test_topic_rename_cutover.py:generic-api-key:189

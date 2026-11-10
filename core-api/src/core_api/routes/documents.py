@@ -26,7 +26,8 @@ from core_api.middleware.idempotency import (
     idempotency_for,
     release_claim_on_error,
 )
-from core_api.middleware.rate_limit import write_limit
+from core_api.middleware.per_tenant_concurrency import per_tenant_slot
+from core_api.middleware.rate_limit import search_limit, write_limit
 from core_api.request_bounds import bounded_json
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.agent_service import (
@@ -50,6 +51,7 @@ from core_api.services.organization_settings import (
     get_settings_for_display,
     resolve_config,
 )
+from core_api.services.pii_update_gate import apply_pii_policy_to_fields
 from core_api.services.skill_lifecycle import (
     SKILL_WRITE_MIN_TRUST,
     SkillWriteContext,
@@ -544,6 +546,12 @@ async def _upsert_document_claimed(
             ),
         )
 
+    # The tenant's PII policy, as a memory write gets it: before the skills
+    # validator hashes the body, and before anything is embedded or stored.
+    body.data = await apply_pii_policy_to_fields(
+        tenant_id=body.tenant_id, agent_id=author, data=body.data, write_mode="document", subject="Document"
+    )
+
     # ── Skill Factory SF-002: 7 adjustments on every skills-collection
     # write, whatever ``org_settings.skills_factory.enabled`` says: the
     # flag turns the Forge on, not the review. A write lands ``staged``
@@ -980,8 +988,11 @@ async def delete_document(
 
 
 @router.post("/documents/search", responses={200: {"model": _oar.DocumentSearchResponse}})
+@search_limit
 async def search_documents(
+    request: Request,
     body: DocSearchRequest,
+    response: Response,
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Vector search over indexed documents. Mirror of MCP ``caura_doc op=search``.
@@ -1013,8 +1024,10 @@ async def search_documents(
         )
         tenant_config = None
     # A user is waiting on this search: keep it off the background budget
-    # so a bulk-ingest flood can't throttle it into the 503 below.
-    query_embedding = await get_embedding(body.query, tenant_config, background=False)
+    # so a bulk-ingest flood can't throttle it into the 503 below. The call
+    # takes the tenant's embed slot, as an uncached recall query does.
+    async with per_tenant_slot("embed", body.tenant_id):
+        query_embedding = await get_embedding(body.query, tenant_config, background=False)
     if query_embedding is None:
         if not embedding_configured(tenant_config):
             # No provider at all (L-224): permanent until an operator sets one,

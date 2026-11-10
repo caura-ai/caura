@@ -33,6 +33,10 @@ def build_enrichment_pipeline() -> Pipeline:
             # Deterministic PII gate BEFORE the content hash so mask/drop act on
             # — and the hash/dedup see — the redacted content (eToro governance).
             GovernanceScanContent(),
+            # Where the fast and strong compositions have it, so a long document
+            # that auto-chunks is refused before the enrichment and chunking it
+            # would pay for. An extract-only preview stores nothing and skips it.
+            BusinessPersonalPregate(),
             ComputeContentHash(),
             # L-183: as on the inline pipelines (see
             # ``build_strong_write_pipeline``), so a re-submitted long document

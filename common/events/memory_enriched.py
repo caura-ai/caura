@@ -50,3 +50,9 @@ class MemoryEnriched(BaseModel):
     # Empty string when the enricher produced no useful hint —
     # back-channel consumers should short-circuit on falsy.
     retrieval_hint: str = ""
+    # Whether a model judged the text: ``False`` when every provider failed and
+    # the run fell back to the keyword heuristic, which gives no PII or
+    # business verdict. core-api's governance needs to know, since the
+    # heuristic's defaults read like a clean verdict. ``None`` from a worker
+    # that predates the field.
+    llm_verdict: bool | None = None

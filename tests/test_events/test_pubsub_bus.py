@@ -1429,10 +1429,10 @@ async def test_ensure_broadcast_subscription_already_exists_is_ok(
 
 
 async def test_ensure_broadcast_subscription_failure_degrades(
-    bus: PubSubEventBus,
+    bus: PubSubEventBus, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Missing IAM (pubsub.subscriptions.create) must NOT crash startup — the
-    # process degrades to no fan-out (invalidation falls back to the cache TTL).
+    # Missing IAM must NOT crash startup — the process degrades to no fan-out
+    # (invalidation falls back to the cache TTL).
     fake_sub = MagicMock()
     fake_sub.subscription_path = (
         lambda proj, name: f"projects/{proj}/subscriptions/{name}"
@@ -1441,9 +1441,19 @@ async def test_ensure_broadcast_subscription_failure_degrades(
         side_effect=RuntimeError("permission denied")
     )
     bus._subscriber = fake_sub
-    ok = await bus._ensure_broadcast_subscription(Topics.Org.SETTINGS_CHANGED, "sub-x")
+    with caplog.at_level("ERROR", logger="common.events.pubsub"):
+        ok = await bus._ensure_broadcast_subscription(
+            Topics.Org.SETTINGS_CHANGED, "sub-x"
+        )
     assert ok is False
     assert bus._broadcast_sub_paths == []
+    # The create needs two grants in two places, and a denied topic attach was
+    # once misread as a missing project role. The hint names both, with the
+    # project and the topic each one is checked on.
+    (rec,) = [r for r in caplog.records if "broadcast subscription" in r.message]
+    topic_path = f"projects/proj/topics/{bus._topic_name(Topics.Org.SETTINGS_CHANGED)}"
+    assert "pubsub.subscriptions.create on project proj" in rec.message
+    assert f"pubsub.topics.attachSubscription on {topic_path}" in rec.message
 
 
 async def test_stop_deletes_broadcast_subscriptions(bus: PubSubEventBus) -> None:

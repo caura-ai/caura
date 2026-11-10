@@ -746,6 +746,36 @@ class TestForgeRunOrchestration:
         assert d["domain"] == "devops"
 
     @pytest.mark.asyncio
+    async def test_cites_only_memories_the_fetch_returned(self, monkeypatch):
+        # Storage's content read leaves out a member that is private to its
+        # author, deleted or held. A trace built before that happened still
+        # lists it, and the candidate must not name it.
+        traces = _passing_traces(4)
+        self._patch_build(monkeypatch, traces)
+        withheld = {"m0-2", "m2-1"}
+
+        async def fetcher(memory_ids: list[str]) -> dict[str, str]:
+            return {
+                mid: f"content of {mid}" for mid in memory_ids if mid not in withheld
+            }
+
+        captured, writer = _capture_writer()
+        await run_forge_distill(
+            run_label="test-run",
+            tenant_id="acme",
+            fleet_id="ops",
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
+            llm_fn=_llm_returns_golden,
+            memory_fetcher=fetcher,
+            poison_checker=_poison_never,
+            candidate_writer=writer,
+        )
+        assert len(captured) == 1
+        members = {mid for t in traces for mid in t.memory_ids}
+        assert captured[0]["data"]["cites"] == sorted(members - withheld)
+
+    @pytest.mark.asyncio
     async def test_unlabeled_traces_dropped(self, monkeypatch):
         # 4 unknown-outcome traces → nothing to distill.
         traces = [

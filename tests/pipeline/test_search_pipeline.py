@@ -309,6 +309,12 @@ async def test_load_and_serialize_uses_preloaded_entity_links():
     mem.weight = 0.5
     mem.source_uri = None
     mem.run_id = None
+    mem.observed_at = None
+    mem.trace_id = None
+    mem.tool_call_id = None
+    mem.verification_status = "unverified"
+    mem.verified_by = None
+    mem.verified_at = None
     mem.metadata_ = None
     mem.created_at = datetime.now(UTC)
     mem.expires_at = None

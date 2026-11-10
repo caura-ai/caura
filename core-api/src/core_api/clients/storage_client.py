@@ -887,6 +887,21 @@ class CoreStorageClient:
         """
         return await self._delete(f"/memories/{memory_id}", tenant_id=tenant_id)
 
+    async def drop_memory(self, memory_id: str, tenant_id: str) -> bool:
+        """A governance drop: soft-delete one memory and clear its text.
+
+        Unlike ``soft_delete_memory``, nothing is kept for an undo window (see
+        ``PostgresService.memory_drop``). False when nothing matched: no such
+        memory, another tenant's, or held for review. ``idempotent=True``: a
+        replay finds the text already cleared and clears nothing more.
+        """
+        result = await self._post(
+            "/memories/drop",
+            {"tenant_id": tenant_id, "memory_id": memory_id},
+            idempotent=True,
+        )
+        return isinstance(result, dict) and bool(result.get("dropped"))
+
     async def set_subject_entity_if_null(
         self, memory_id: str, tenant_id: str, subject_entity_id: str, *, content: str | None = None
     ) -> bool:
@@ -1315,6 +1330,14 @@ class CoreStorageClient:
 
     async def scored_search(self, data: dict) -> list[dict]:
         return await self._post("/memories/scored-search", data, read=True)  # type: ignore[return-value]
+
+    async def explain_scored_search_filters(self, data: dict) -> dict:
+        """EC-06: which ``/scored-search`` filter removes ``data["memory_id"]``.
+
+        ``data`` is a scored-search body plus ``memory_id``; storage evaluates
+        the search's own row filters against that one row.
+        """
+        return await self._post("/memories/scored-search/explain", data, read=True)  # type: ignore[return-value]
 
     async def load_memories_by_ids(self, data: dict) -> list[dict]:
         """ENTITY_LOOKUP short-circuit endpoint (CAURA-687).
@@ -1920,6 +1943,168 @@ class CoreStorageClient:
             f"/value/query?tenant_id={quote(tenant_id, safe='')}", body, read=True, idempotent=True
         )
         return result or {}  # type: ignore[return-value]
+
+    async def evidence_coverage(self, tenant_id: str, body: dict) -> dict:
+        """One tenant's evidence coverage counts (``{"start", "end"}``)."""
+        result = await self._post(
+            f"/value/evidence-coverage?tenant_id={quote(tenant_id, safe='')}",
+            body,
+            read=True,
+            idempotent=True,
+        )
+        return result or {}  # type: ignore[return-value]
+
+    async def record_exposure(self, tenant_id: str, body: dict) -> int:
+        """One read by one agent of some memories (migration 072); returns the rows written.
+
+        ``body`` is ``{agent_id, memory_ids, seen_at, trace_id}``, JSON-safe.
+        Not idempotent: each call adds a read to the counts, so it is not
+        retried after an ambiguous failure.
+        """
+        result = await self._post(f"/memory-exposure?tenant_id={quote(tenant_id, safe='')}", body)
+        return (result or {}).get("recorded", 0)  # type: ignore[union-attr]
+
+    async def get_memory_exposure(self, tenant_id: str, memory_id: str) -> list[dict]:
+        """The agents ``memory_id`` was handed to in this tenant, latest read first."""
+        result = await self._get(f"/memory-exposure/{memory_id}", tenant_id=tenant_id)
+        return (result or {}).get("agents", [])
+
+    async def record_memory_correction(self, tenant_id: str, body: dict) -> dict:
+        """Record one correction and the agents to tell (migration 073).
+
+        ``body`` is :func:`common.events.correction_handlers.correction_body`.
+        Idempotent on its ``event_id``, so a retry after an ambiguous failure
+        returns the first record instead of writing a second.
+        """
+        result = await self._post(
+            f"/memory-corrections?tenant_id={quote(tenant_id, safe='')}", body, idempotent=True
+        )
+        return result or {}  # type: ignore[return-value]
+
+    async def get_memory_correction(self, tenant_id: str, correction_id: str) -> dict | None:
+        """One correction of this tenant with its recipients; ``None`` when it is not the tenant's."""
+        return await self._get(f"/memory-corrections/{correction_id}", tenant_id=tenant_id)
+
+    async def list_memory_corrections(self, tenant_id: str, memory_id: str, *, limit: int = 20) -> list[dict]:
+        """The memory's corrections in this tenant, newest first, each with its recipients."""
+        result = await self._get(
+            f"/memory-corrections/by-memory/{memory_id}", tenant_id=tenant_id, limit=limit
+        )
+        return (result or {}).get("corrections", [])
+
+    async def begin_correction_send(self, tenant_id: str, correction_id: str, *, sent_by: str) -> dict | None:
+        """Move a ``preview`` correction to ``sending`` (migration 074); the record, ``None`` when not the tenant's.
+
+        Idempotent: a correction past ``preview`` comes back unchanged.
+        """
+        return await self._post_optional(
+            f"/memory-corrections/{correction_id}/send?tenant_id={quote(tenant_id, safe='')}",
+            {"sent_by": sent_by},
+            retry=with_retry,
+        )
+
+    async def apply_correction_states(
+        self,
+        tenant_id: str,
+        correction_id: str,
+        *,
+        recipients: list[dict],
+        status: str | None = None,
+        bus_checked_at: str | None = None,
+    ) -> dict | None:
+        """Write each recipient's delivery state and the correction's status; the record.
+
+        Each write sets the recipient's whole state, so a retry writes the same
+        thing again.
+        """
+        return await self._post_optional(
+            f"/memory-corrections/{correction_id}/states?tenant_id={quote(tenant_id, safe='')}",
+            {"recipients": recipients, "status": status, "bus_checked_at": bus_checked_at},
+            retry=with_retry,
+        )
+
+    async def confirm_correction(self, tenant_id: str, correction_id: str, *, agent_id: str) -> dict | None:
+        """``agent_id`` confirms its notice; the record, ``None`` when it is not a recipient."""
+        return await self._post_optional(
+            f"/memory-corrections/{correction_id}/confirm?tenant_id={quote(tenant_id, safe='')}",
+            {"agent_id": agent_id},
+            retry=with_retry,
+        )
+
+    async def list_correction_notices(self, tenant_id: str, agent_id: str, *, limit: int = 3) -> list[dict]:
+        """Corrections ``agent_id`` still has to hear about on its next recall (CP-13), newest first."""
+        result = await self._get(
+            "/memory-corrections/notices", tenant_id=tenant_id, agent_id=agent_id, limit=limit
+        )
+        return (result or {}).get("notices", [])
+
+    async def mark_correction_notices_delivered(
+        self, tenant_id: str, agent_id: str, correction_ids: list[str]
+    ) -> int:
+        """A recall handed ``agent_id`` these notices: ``delivered`` once (CP-13); the rows changed.
+
+        Idempotent (only rows not yet notified move), so a retry is safe.
+        """
+        result = await self._post(
+            f"/memory-corrections/notices/delivered?tenant_id={quote(tenant_id, safe='')}",
+            {"agent_id": agent_id, "correction_ids": correction_ids},
+            idempotent=True,
+        )
+        return (result or {}).get("delivered", 0)  # type: ignore[union-attr]
+
+    async def record_baton_recipients(
+        self,
+        tenant_id: str,
+        baton_id: str,
+        *,
+        from_agent: str,
+        goal: str,
+        created_at: str,
+        recipients: list[dict],
+    ) -> int:
+        """The bus sent a handoff baton to ``recipients`` (``{agent_id, message_id}``); the new rows.
+
+        Called by the bus (enterprise, in the core-api process) after a baton
+        send. Idempotent: a retried send keeps the rows and states it wrote.
+        """
+        result = await self._post(
+            f"/batons/{baton_id}/recipients?tenant_id={quote(tenant_id, safe='')}",
+            {"from_agent": from_agent, "goal": goal, "created_at": created_at, "recipients": recipients},
+            idempotent=True,
+        )
+        return (result or {}).get("recorded", 0)  # type: ignore[union-attr]
+
+    async def list_baton_recipients(self, tenant_id: str, baton_id: str) -> list[dict]:
+        """One baton's receiver rows (``agent_id, from_agent, state, accepted_at, accepted_via``).
+
+        For the bus's status read, and for checking who may tag a memory with the baton.
+        """
+        result = await self._get(f"/batons/{baton_id}/recipients", tenant_id=tenant_id)
+        return (result or {}).get("recipients", [])
+
+    async def list_baton_notices(self, tenant_id: str, agent_id: str, *, limit: int = 2) -> list[dict]:
+        """Handoff batons still waiting on ``agent_id`` (not accepted, < 7 days), newest first."""
+        result = await self._get("/batons/notices", tenant_id=tenant_id, agent_id=agent_id, limit=limit)
+        return (result or {}).get("notices", [])
+
+    async def accept_baton(
+        self, tenant_id: str, baton_id: str, *, agent_id: str, via: str = "recall", state: str = "accepted"
+    ) -> dict | None:
+        """``agent_id`` took the baton up; its row, ``None`` when it is not a receiver."""
+        return await self._post_optional(
+            f"/batons/{baton_id}/accept?tenant_id={quote(tenant_id, safe='')}",
+            {"agent_id": agent_id, "via": via, "state": state},
+            retry=with_retry,
+        )
+
+    async def mark_baton_notices_checked(self, tenant_id: str, agent_id: str, baton_ids: list[str]) -> int:
+        """core-api just read the bus state of these rows; the rows changed."""
+        result = await self._post(
+            f"/batons/notices/checked?tenant_id={quote(tenant_id, safe='')}",
+            {"agent_id": agent_id, "baton_ids": baton_ids},
+            idempotent=True,
+        )
+        return (result or {}).get("checked", 0)  # type: ignore[union-attr]
 
     async def increment_tenant_usage(self, rows: list[dict]) -> int:
         """ADD to per-tenant, per-period counters in ``tenant_usage_counters``.
@@ -3693,14 +3878,14 @@ class CoreStorageClient:
     # than degrade to [] — a silent empty list would make the lifecycle fanout
     # publish zero messages and report success, hiding the misconfiguration.
     async def list_active_tenants(self) -> list[str]:
-        """Orgs with at least one live (non-soft-deleted) memory."""
+        """Orgs with at least one live (non-soft-deleted) memory, less suppressed ones."""
         result = await self._get("/tenants/active")
         if result is None:
             raise RuntimeError("core-storage-api /tenants/active returned 404")
         return result.get("tenant_ids", [])
 
     async def list_purgeable_tenants(self) -> list[str]:
-        """Orgs with soft-deleted memories older than the max retention window."""
+        """Orgs with anything for the purge: see storage ``tenants_list_purgeable``."""
         result = await self._get("/tenants/purgeable")
         if result is None:
             raise RuntimeError("core-storage-api /tenants/purgeable returned 404")

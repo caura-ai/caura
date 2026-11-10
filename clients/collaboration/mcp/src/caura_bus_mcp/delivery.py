@@ -12,6 +12,9 @@ from caura_bus_core.bus import PlatformError
 from caura_bus_core.consult import PresentedResponses
 from caura_bus_core.protocol import Claim, WaitRequest
 
+from .batons import BATON_NOTE, baton_block, received_baton
+from .corrections import CONFIRM_NOTE, correction_notice
+
 log = logging.getLogger(__name__)
 
 # wait sends no lease length, so Caura grants its request default.
@@ -51,6 +54,10 @@ class DeliverySession:
         self.surfaced: set[str] = set()
         # Request message IDs this session sent; correlates responses returned by wait.
         self.sent_requests: set[str] = set()
+        # Thread ID -> baton ID of handoff batons this session received or sent;
+        # memory_context for that thread adds baton_id, so the receiver's findings
+        # and the sender's own record of the handover link back to it.
+        self.baton_threads: dict[str, str] = {}
 
     @staticmethod
     def public(claim):
@@ -88,7 +95,38 @@ class DeliverySession:
                     delivery["note"] = ALREADY_PRESENTED
                 elif not delivery["correlation"]["matches_sent_request"]:
                     delivery["note"] = UNMATCHED_RESPONSE
+            elif claim and (notice := correction_notice(claim.envelope)):
+                # A person corrected a memory this agent read: one line, and how to
+                # confirm once the agent has checked its work (reply or ack).
+                delivery["correction"] = notice
+                delivery["note"] = CONFIRM_NOTE
+            elif claim and (baton := received_baton(claim.envelope)):
+                # A peer handed work over: one framed block, titles from the body
+                # (no memory reads, so showing it is not reading the links).
+                self.baton_threads[claim.envelope.thread_id] = baton["baton_id"]
+                delivery["baton"] = {
+                    "baton_id": baton["baton_id"],
+                    "from_agent": baton["from_agent"],
+                    "memory_ids": baton["memory_ids"],
+                    "untrusted": True,
+                    "block": baton_block(baton),
+                }
+                delivery["note"] = BATON_NOTE
             return {"delivery": delivery, "notices": notices}
+
+    def baton_sent(self, receipt: dict) -> None:
+        """Remember the thread of a baton this session handed off (every part's thread)."""
+        if not receipt.get("baton_id"):
+            return
+        parts = receipt.get("messages") or [receipt]
+        for thread_id in {receipt.get("thread_id"), *(p.get("thread_id") for p in parts)}:
+            if thread_id:
+                self.baton_threads[thread_id] = receipt["baton_id"]
+
+    def baton_context(self, context: dict) -> dict:
+        """``memory_context`` for a received baton's thread, with its ``baton_id`` added."""
+        baton_id = self.baton_threads.get(context.get("thread_id")) if isinstance(context, dict) else None
+        return {**context, "baton_id": baton_id} if baton_id else context
 
     async def _settle_presented(self, claim):
         """ACK a claimed response this session already presented, so the inbox drains.

@@ -1,6 +1,6 @@
 [project]
 name = "core-storage-api"
-version = "3.37.7"
+version = "3.47.0"
 description = "Caura Core Storage API — PostgreSQL CRUD service"
 license = "Apache-2.0"
 requires-python = ">=3.12"
@@ -38,6 +38,12 @@ dependencies = [
     # wired up correctly"). Pin matches ``core-worker``'s pin so the
     # OpenAI SDK version is consistent across services.
     "openai>=3,<4",
+    # Same reason as ``openai`` above: the backfill CLI's embedder fetches a
+    # Cloud Run ID token through ``common.cloud_run_identity`` when its
+    # backend's origin is listed in CLOUD_RUN_ID_TOKEN_ORIGINS. This image
+    # installed neither otherwise.
+    "google-auth>=2.30,<3",
+    "requests>=2.32,<3",
 ]
 
 [project.optional-dependencies]

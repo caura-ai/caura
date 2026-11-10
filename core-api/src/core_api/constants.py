@@ -25,6 +25,7 @@ from common.constants import (  # noqa: F401
     SQL_SCORING_PARAM_KEYS,
     TYPE_DECAY_DAYS,
     VECTOR_DIM,
+    VERIFIED_BOOST_DEFAULT_FACTORS,
 )
 
 # The embedding concurrency-gate timeout, which the bulk strong-embed budget
@@ -151,6 +152,18 @@ EXPIRES_AT_DESCRIPTION = (
     "from ts_valid_end, which closes a temporal-validity interval rather than "
     "expressing retention."
 )
+
+# Evidence contract v1 (docs/plans/evidence-contract-v1.md): where a memory came
+# from, on every write surface that accepts it.
+OBSERVED_AT_DESCRIPTION = (
+    "When the fact was observed, if earlier than the write (e.g. when a tool returned it). "
+    "Leave unset when unknown; created_at is the write time."
+)
+TRACE_ID_DESCRIPTION = (
+    "Session or trace this write belongs to. Omit it and the server stamps the MCP session "
+    "id, the X-Caura-Session-Id header, or an id for this request. Distinct from run_id."
+)
+TOOL_CALL_ID_DESCRIPTION = "Id of the tool call whose result this memory records."
 
 # oss-0814-l-08. The C25 caller/platform metadata boundary, stated on the surface
 # a caller actually reads.
@@ -442,6 +455,11 @@ ANN_POOL_SHADOW = 0
 # every row the same age, so the time signal is uniform noise and "last month"
 # resolves against the ingest date rather than the question's.
 FRESHNESS_REFERENCE = 0
+# EC-19 verified-memory ranking boost (``common.constants.SEARCH_KNOBS
+# ["verified_boost"]``). Off by default; enable per tenant via
+# ``default_search_profile.verified_boost`` once the EC-18 A/B clears it. The
+# factor defaults live in ``common.constants.VERIFIED_BOOST_DEFAULT_FACTORS``.
+VERIFIED_BOOST = 0
 FRESHNESS_DECAY_DAYS = 90
 FRESHNESS_FLOOR = 0.7
 ENTITY_TOKEN_MIN_LENGTH = 2  # A7: was 3; lowered to retain 2-char acronym
@@ -872,6 +890,8 @@ MEMORY_RECALL_SUMMARY_TEMPERATURE = 0.3
 # rather than lower because RECALL_PROMPT still emits step-by-step reasoning BEFORE
 # the answer, so too tight a cap would truncate the answer itself. If that
 # chain-of-thought is later trimmed from the prompt, this can drop toward ~400.
+# A thinking model's thoughts count against this cap too, and a completion cut at
+# it raises in ``complete_text``, so recall falls back rather than serving it.
 MEMORY_RECALL_SUMMARY_MAX_TOKENS = 500
 
 # ── Insights ──

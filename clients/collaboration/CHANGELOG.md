@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.7.0](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.6.0...collaboration-clients-v0.7.0) (2026-11-09)
+
+
+### Features
+
+* **batons:** tag handoff findings with baton_id on the write path ([#2365](https://github.com/caura-ai/caura/issues/2365)) ([ff17f39](https://github.com/caura-ai/caura/commit/ff17f39f3692f1049a7e4264b858ed86b7aa0fd6))
+
+## [0.6.0](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.5.0...collaboration-clients-v0.6.0) (2026-11-05)
+
+
+### Features
+
+* **clients:** hand work over as a baton and show received batons in peer wait ([#2344](https://github.com/caura-ai/caura/issues/2344)) ([ea2e8e4](https://github.com/caura-ai/caura/commit/ea2e8e4dcd1896d6b527ca567aa490b800a16f63))
+
+## [0.5.0](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.4.1...collaboration-clients-v0.5.0) (2026-11-05)
+
+
+### Features
+
+* **clients:** show memory correction notices to agents and let them confirm ([#2336](https://github.com/caura-ai/caura/issues/2336)) ([ec82502](https://github.com/caura-ai/caura/commit/ec82502f2c4ebe0bf906a0e4c419bcd599067462))
+
+## [0.4.1](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.4.0...collaboration-clients-v0.4.1) (2026-11-04)
+
+
+### Documentation
+
+* name Connect › Keys, and say who mints agent keys (Prism v2 R9) ([#2316](https://github.com/caura-ai/caura/issues/2316)) ([70f026a](https://github.com/caura-ai/caura/commit/70f026a49e6536c30feda317abf6ec2528547b97))
+
+## [0.4.0](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.3.5...collaboration-clients-v0.4.0) (2026-11-04)
+
+
+### Features
+
+* **evidence:** clients send real evidence on writes (EC-15) ([#2311](https://github.com/caura-ai/caura/issues/2311)) ([3786c21](https://github.com/caura-ai/caura/commit/3786c21bea5ebc51373be0aa35d6cc29d0375b29))
+
 ## [0.3.5](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.3.4...collaboration-clients-v0.3.5) (2026-10-28)
 
 

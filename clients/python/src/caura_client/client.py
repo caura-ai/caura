@@ -166,6 +166,10 @@ class Caura:
         fleet_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         origin: dict[str, int] | None = None,
+        source_uri: str | None = None,
+        tool_call_id: str | None = None,
+        observed_at: datetime | str | None = None,
+        trace_id: str | None = None,
         **extra: Any,
     ) -> Memory:
         """Persist a memory. Returns the enriched ``Memory`` (POST /api/v1/memories).
@@ -174,6 +178,16 @@ class Caura:
         usage since the session's previous write — ``tokens_in``,
         ``tokens_out``, ``turns``. Read it from the provider's responses; leave
         it out rather than estimate.
+
+        Evidence — where the memory came from. ``source_uri``: the URL, file or
+        record it was read from. ``tool_call_id``: the id of the tool call
+        whose result it records (e.g. the ``tool_use`` id). ``observed_at``:
+        when the fact was observed, if earlier than this write. ``trace_id``:
+        the session or trace it belongs to; leave it out and the server uses
+        the client's session (``session_id``), else an id for the request.
+        Each is sent only when given. ``tool_call_id``, ``observed_at`` and
+        ``trace_id`` need a server with the evidence fields (caura#2307);
+        an older one answers 422 naming the field.
         """
         body: dict[str, Any] = {"tenant_id": self.tenant_id, "content": content}
         resolved_agent = agent_id or self.agent_id
@@ -190,6 +204,16 @@ class Caura:
                 **{k: origin[k] for k in ("tokens_in", "tokens_out", "turns") if k in origin},
                 "source": "sdk",
             }
+        if source_uri:
+            body["source_uri"] = source_uri
+        if tool_call_id:
+            body["tool_call_id"] = tool_call_id
+        if observed_at:
+            body["observed_at"] = (
+                observed_at.isoformat() if isinstance(observed_at, datetime) else observed_at
+            )
+        if trace_id:
+            body["trace_id"] = trace_id
         body.update(extra)
         data = self._post("/api/v1/memories", body)
         if not isinstance(data, dict):

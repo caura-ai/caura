@@ -27,7 +27,6 @@ import { getOpenClawBaseDir, getPluginEnvPath } from "./paths.js";
 import {
   CAURA_API_URL,
   CAURA_API_KEY,
-  CAURA_AUTO_WRITE_TURNS,
   CAURA_FLEET_ID,
   CAURA_TENANT_ID,
   CAURA_NODE_NAME,
@@ -196,8 +195,14 @@ const cauraPlugin = {
     // Register tools from the SoT (plugin/tools.json), in the order
     // declared by CAURA_TOOLS. The factory pulls name/description from
     // tools.json; drift between the two sets throws at import time.
+    // As factories, so each tool is built for the run that calls it and a
+    // write carries that run's session (the trace its memory belongs to).
     for (const name of CAURA_TOOLS) {
-      api.registerTool(createToolFromSpec(name), { names: [name] });
+      api.registerTool(
+        (ctx: { sessionKey?: string; sessionId?: string }) =>
+          createToolFromSpec(name, { sessionKey: ctx?.sessionKey, sessionId: ctx?.sessionId }),
+        { names: [name] },
+      );
     }
 
     // --- Gateway methods ---
@@ -521,94 +526,13 @@ const cauraPlugin = {
       }
     }
 
-    // --- Memory flush plan ---
-    //
-    // OpenClaw's MemoryFlushPlan contract (see memory-state.d.ts)
-    // requires SIX fields:
-    //
-    //   softThresholdTokens, forceFlushTranscriptBytes, reserveTokensFloor,
-    //   prompt, systemPrompt, relativePath
-    //
-    // Pre-fix we returned {instructions, softThresholdTokens} — wrong
-    // field name (instructions vs prompt) AND missing the four
-    // other fields. relativePath is the load-bearing omission: when
-    // compaction crosses softThresholdTokens, OpenClaw's
-    // agent-runner.runtime reads activeMemoryFlushPlan.relativePath
-    // and passes it to ensureMemoryFlushTargetFile, which throws
-    // "Invalid memory flush target path" on any falsy / absolute
-    // value. The error only surfaces on long sessions that actually hit
-    // the compaction threshold, so it looked intermittent — but the bug
-    // is unconditional. Customer report 2026-05-21.
-    //
-    // relativePath is the workspace-relative scratch file the
-    // compaction sub-agent has append-only write access to during the
-    // flush turn. Caura's server-side persistence is orthogonal — the
-    // sub-agent still calls caura_write to capture salient
-    // context, but it ALSO needs the file to exist because that's the
-    // only filesystem write surface OpenClaw exposes to it. Mirror
-    // memory-core's memory/YYYY-MM-DD.md layout but namespace under
-    // memclaw/ so we don't collide on hosts running both plugins. // legacy-name-floor: frozen workspace namespace
-    // The outer try here only catches REGISTRATION-time failure. The
-    // resolver itself runs later in OpenClaw's agent-runner stack — any
-    // throw there propagates up and crashes the flush turn. Pre-fix two
-    // input shapes did exactly that:
-    //   1. resolver(null) — destructuring null, = {} default
-    //      only fires for undefined, so we'd hit
-    //      TypeError: Cannot destructure property 'nowMs' of 'null'.
-    //   2. resolver({ nowMs: NaN }) — typeof NaN === "number" so
-    //      the fallback didn't fire, then new Date(NaN).toISOString()
-    //      throws RangeError: Invalid time value.
-    // The defensive resolver below: (a) reads nowMs via optional
-    // chaining so null/non-object inputs degrade silently, (b) gates
-    // with Number.isFinite so NaN / Infinity fall through to
-    // Date.now(), (c) wraps the body in its own try/catch so
-    // unforeseen failure modes still hand OpenClaw a valid plan (using
-    // a same-day fallback path) rather than crashing the flush turn.
-    const buildPlan = (dateStamp: string) => ({
-      softThresholdTokens: 4000,
-      forceFlushTranscriptBytes: 2 * 1024 * 1024,
-      reserveTokensFloor: 20000,
-      prompt:
-        "Before this conversation is compacted, save any important context to Caura. " +
-        "Call caura_write with a summary of: decisions made, tasks completed, bugs found, " +
-        "configuration changes, and any commitments or deadlines discovered in this session. " +
-        "Include your agent_id, specific names, dates, paths, and outcomes. " +
-        "Use memory_type 'episode', visibility 'scope_agent', and tag with 'pre-compaction'. " +
-        "Do NOT reply to the user from this turn.",
-      systemPrompt:
-        "You are running inside an OpenClaw memory-flush turn. Your only job is to " +
-        "persist salient context to Caura via caura_write before this conversation " +
-        "is compacted. Do not call any other tools. Do not produce a user-visible reply.",
-      relativePath: `memclaw/flush-${dateStamp}.md`, // legacy-name-ok: existing workspaces use this frozen plugin-owned flush namespace
-    });
+    // The supported flush resolver receives config/time, not a per-call
+    // conversation key. A global flush could persist a group chat. Returning
+    // null makes OpenClaw skip this automatic turn; normal compaction and
+    // deliberate memory tools remain available.
     try {
       if (typeof api.registerMemoryFlushPlan === "function") {
-        api.registerMemoryFlushPlan(
-          (params?: { cfg?: unknown; nowMs?: number } | null) => {
-            // M-106: the flush turn asks the agent to caura_write a session
-            // summary, an automatic write like the three the context engine
-            // gates on this flag. OpenClaw runs no flush turn for a null plan.
-            if (!CAURA_AUTO_WRITE_TURNS) return null;
-            try {
-              const candidate = params?.nowMs;
-              // Number.isFinite(-1) === true, so a negative nowMs
-              // would slip through and produce a 1969-era relativePath.
-              // Add a positive-lower-bound guard so test-time mocks or
-              // time-travel scenarios degrade to Date.now() rather
-              // than silently writing into pre-epoch-named files.
-              const ts =
-                typeof candidate === "number" &&
-                Number.isFinite(candidate) &&
-                candidate > 0
-                  ? candidate
-                  : Date.now();
-              return buildPlan(new Date(ts).toISOString().slice(0, 10));
-            } catch (e: unknown) {
-              logError("MemoryFlushPlan resolver failed", e);
-              return buildPlan(new Date().toISOString().slice(0, 10));
-            }
-          },
-        );
+        api.registerMemoryFlushPlan(() => null);
       }
     } catch (e: unknown) {
       logError("registerMemoryFlushPlan failed", e);
@@ -643,10 +567,9 @@ const cauraPlugin = {
           resolveMemoryBackendConfig(_params: Record<string, unknown>) {
             // memoryFlushWritePath is NOT on this contract — that field
             // name was a 2026-04 misunderstanding. The actual flush-time
-            // file lives on the MemoryFlushPlan.relativePath returned
-            // by registerMemoryFlushPlan above (different code path,
-            // different contract). Returning it here was inert but
-            // misleading; removed so future readers don't think disabling
+            // file belongs to registerMemoryFlushPlan (a different contract,
+            // disabled above without conversation context). Returning it here
+            // was inert and misleading; removed so nobody thinks disabling
             // local-file persistence happens here.
             return { backend: "memclaw" }; // legacy-name-ok: OpenClaw resolves this backend by the frozen plugin id
           },

@@ -46,6 +46,11 @@ async def clear_bulletin(tenant_id: str, fleet_id: str) -> bool:
     return await stm.clear_bulletin(tenant_id, fleet_id)
 
 
+async def clear_tenant(tenant_id: str) -> bool:
+    stm = get_stm_backend_instance()
+    return await stm.clear_tenant(tenant_id)
+
+
 async def promote(
     content: str,
     tenant_id: str,

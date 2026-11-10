@@ -123,7 +123,7 @@ async def _run(
 
     sc.create_memory = AsyncMock(side_effect=_create)
 
-    async def _remediate(_row, _cfg_arg):
+    async def _remediate(_row, _cfg_arg, **_kw):
         calls.append("remediate")
         if isinstance(outcome, Exception):
             raise outcome

@@ -24,9 +24,9 @@ from common.llm.constants import (
     ATLASCLOUD_DEFAULT_MODEL,
     GEMINI_DEFAULT_MODEL,
     LLM_FALLBACK_MODEL_OPENAI,
-    OPENAI_CHAT_BASE_URL,
     OPENROUTER_CHAT_BASE_URL,
     OPENROUTER_DEFAULT_MODEL,
+    openai_chat_base_url,
 )
 from common.provider_names import ProviderName
 
@@ -197,7 +197,7 @@ def resolve_openai_compatible(
         model = _model_for_provider(
             provider, tenant_config, model_attr, LLM_FALLBACK_MODEL_OPENAI
         )
-        return key, OPENAI_CHAT_BASE_URL, model
+        return key, openai_chat_base_url(), model
 
     if provider == ProviderName.ANTHROPIC:
         key = (

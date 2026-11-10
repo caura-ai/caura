@@ -1,6 +1,6 @@
 """Unit tests for LogRecallEvent — gating + candidate construction (no DB).
 
-Two independent, per-tenant opt-in modes:
+Two independent, per-tenant modes (mcp_recall on by default, search opt-in):
   - source == "mcp_recall" + recall_logging_enabled
       → FULL log: returned candidates + capped below-floor near-misses.
   - source == "search" + search_recall_logging_enabled
@@ -216,6 +216,25 @@ async def test_search_keeps_near_misses_when_sampled(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_the_logged_query_has_pii_masked(monkeypatch):
+    """The log keeps the query's text, so it keeps it masked; the search
+    itself still sees the query as asked."""
+    captured = _capture(monkeypatch)
+    returned = [_row(0.60, 0.58)]
+    ctx = _ctx("mcp_recall", _cfg(recall=True), returned, returned)
+    query = "when is dana.levi@example.com back from leave"
+    ctx.data["query"] = query
+
+    await LogRecallEvent().execute(ctx)
+
+    logged = captured[0][0]["query_text"]
+    assert "dana.levi@example.com" not in logged
+    assert logged.startswith("when is ")
+    assert logged.endswith(" back from leave")
+    assert ctx.data["query"] == query
+
+
+@pytest.mark.asyncio
 async def test_persist_routes_to_storage_client():
     """``_persist`` posts the event + candidates through the storage client
     (no direct DB session) and swallows failures."""
@@ -230,3 +249,49 @@ async def test_persist_routes_to_storage_client():
         await mod._persist(event, candidates)
 
     sc.log_recall.assert_awaited_once_with(event, candidates)
+
+
+@pytest.mark.parametrize(
+    ("observability", "expected"),
+    [
+        # A tenant with no settings logs agent recalls; /search stays opt-in.
+        ({}, (True, False)),
+        # An explicit False is an opt-out the default never overrides.
+        ({"recall_logging_enabled": False}, (False, False)),
+        ({"search_recall_logging_enabled": True}, (True, True)),
+    ],
+    ids=["unset", "recall-off", "search-on"],
+)
+def test_recall_logging_is_on_by_default_search_is_opt_in(observability, expected):
+    from core_api.services.organization_settings import ResolvedConfig
+
+    cfg = ResolvedConfig({"observability": observability} if observability else None)
+    assert (cfg.recall_logging_enabled, cfg.search_recall_logging_enabled) == expected
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_tenant_logs_mcp_recall_only(monkeypatch):
+    """A tenant with no settings row: ``mcp_recall`` logs, ``search`` does not."""
+    from core_api.services.organization_settings import ResolvedConfig
+
+    captured = _capture(monkeypatch)
+    cfg = ResolvedConfig()
+    for source in ("mcp_recall", "search"):
+        await LogRecallEvent().execute(
+            _ctx(source, cfg, [_row(0.6, 0.55)], [_row(0.6, 0.55)])
+        )
+
+    assert [ev["source"] for ev, _ in captured] == ["mcp_recall"]
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_search_opt_in_still_logs_search(monkeypatch):
+    from core_api.services.organization_settings import ResolvedConfig
+
+    captured = _capture(monkeypatch)
+    cfg = ResolvedConfig({"observability": {"search_recall_logging_enabled": True}})
+    await LogRecallEvent().execute(
+        _ctx("search", cfg, [_row(0.6, 0.55)], [_row(0.6, 0.55)])
+    )
+
+    assert [ev["source"] for ev, _ in captured] == ["search"]

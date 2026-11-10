@@ -42,6 +42,7 @@ import time
 from typing import Any
 
 from common.constants import SINGLE_VALUE_PREDICATES
+from common.llm.untrusted import UNTRUSTED_DATA_RULE, data_block, quote_untrusted
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.providers._retry import call_with_fallback
@@ -59,11 +60,17 @@ MIN_BRIDGE_CONFIDENCE = 0.5
 # topic-overlap-is-not-enough clause are what keep precision up
 # (BUCKET_BRIDGE_PROPOSER_PROMPT). The menu is a hard gate — an off-menu
 # predicate is dropped, the analog of CUP-Mem's ``is_valid_bucket_track``.
-BASIS_BRIDGE_PROMPT = """\
+BASIS_BRIDGE_PROMPT = (
+    """\
 A memory store tracks facts about a subject as (predicate, value) pairs. A new \
 memory about this subject just arrived.
 
-New memory: "{new_content}"
+"""
+    + UNTRUSTED_DATA_RULE
+    + """
+
+New memory:
+{new_content}
 Its predicate (if any): {new_predicate}
 
 MENU of other single-value predicates the store can track:
@@ -83,14 +90,20 @@ an empty list is the common, correct answer.
 
 Return JSON only: {{"affected": [{{"predicate": "<from menu>", \
 "broken_basis": "<one sentence>", "confidence": <0..1>}}]}}"""
+)
 
 # Ported INVALIDATION_JUDGE_PROMPT semantics. The enum is kept verbatim for
 # comparability with the paper; in caura terms every non-NO_OP verdict would
 # map to the future ``unsafe`` status (A59).
-BASIS_JUDGE_PROMPT = """\
-New evidence about a subject: "{new_content}"
+BASIS_JUDGE_PROMPT = (
+    UNTRUSTED_DATA_RULE
+    + """
 
-Old stored memory (predicate "{predicate}" of the same subject): "{old_content}"
+New evidence about a subject:
+{new_content}
+
+Old stored memory (predicate {predicate} of the same subject):
+{old_content}
 
 Question: does the new evidence BREAK THE PRACTICAL BASIS that made the old \
 memory safe to use as the subject's current default? This is NOT a \
@@ -110,6 +123,7 @@ Decisions:
 
 Return JSON only: {{"decision": "<one of the four>", "reason": "<one \
 sentence naming the basis>", "confidence": <0..1>}}"""
+)
 
 _DECISIONS = {"INDIRECT_INVALIDATE", "WEAK_CHALLENGE", "SET_UNKNOWN_CURRENT", "NO_OP"}
 
@@ -125,8 +139,8 @@ def _parse_json(raw: Any) -> dict:
 
 async def _bridge(new_content: str, new_predicate: str | None, menu: list[str], tenant_config) -> list[dict]:
     prompt = BASIS_BRIDGE_PROMPT.format(
-        new_content=new_content[:500],
-        new_predicate=new_predicate or "(none)",
+        new_content=data_block(new_content[:500]),
+        new_predicate=quote_untrusted(new_predicate) if new_predicate else "(none)",
         menu=", ".join(menu),
         max_n=MAX_BRIDGE_PREDICATES,
     )
@@ -161,9 +175,9 @@ async def _bridge(new_content: str, new_predicate: str | None, menu: list[str], 
 
 async def _judge(new_content: str, candidate: dict, tenant_config) -> dict:
     prompt = BASIS_JUDGE_PROMPT.format(
-        new_content=new_content[:500],
-        predicate=candidate.get("predicate", ""),
-        old_content=(candidate.get("content") or "")[:500],
+        new_content=data_block(new_content[:500]),
+        predicate=quote_untrusted(candidate.get("predicate") or ""),
+        old_content=data_block((candidate.get("content") or "")[:500]),
     )
     provider_name = (
         tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider

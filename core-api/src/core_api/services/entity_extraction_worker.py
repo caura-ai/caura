@@ -26,10 +26,12 @@ from core_api.constants import (
     MIN_ENTITY_NAME_LENGTH,
 )
 from core_api.schemas import RelationUpsert
+from core_api.services.abbreviations import defined_abbreviations, initials, looks_like_abbreviation
 from core_api.services.audit_service import log_action
 from core_api.services.entity_extraction import (
     ExtractedGraph,
     ProvidersUnavailableError,
+    UnretryableProviderFailureError,
     degraded_graph,
     extract_entities_from_content,
 )
@@ -147,6 +149,87 @@ def _merge_alias_into(item: dict, *names: str) -> None:
         if name and name not in aliases:
             aliases.append(name)
     attrs["_aliases"] = aliases
+
+
+def _apply_defined_abbreviations(
+    content: str, filtered: list[tuple[str, str, str]]
+) -> tuple[list[tuple[str, str, str]], dict[str, str]]:
+    """Fold an abbreviation the memory defines into the name it abbreviates.
+
+    Returns the entities with a trailing "(abbr)" dropped from the name and any
+    separately extracted bare abbreviation removed (its role passes to the full
+    name when it was the subject), plus ``{full_name: abbreviation}`` for the
+    alias write. See ``core_api.services.abbreviations``.
+    """
+    found = defined_abbreviations(content, [name for name, _type, _role in filtered])
+    if not found:
+        return filtered, {}
+    abbrs = {abbr for _full, abbr in found.values()}
+    bare_subject = {name for name, _type, role in filtered if name in abbrs and role == "subject"}
+    out: list[tuple[str, str, str]] = []
+    alias_of: dict[str, str] = {}
+    seen: set[str] = set()
+    for name, entity_type, role in filtered:
+        if name in abbrs and name not in found:
+            continue
+        if name in found:
+            full, abbr = found[name]
+            if abbr in bare_subject:
+                role = "subject"
+            name = full
+            alias_of[full] = abbr
+        key = canonical_match_key(name)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((name, entity_type, role))
+    if len([1 for _n, _t, r in out if r == "subject"]) > 1 and bare_subject:
+        # The bare abbreviation was the subject and the full name was too: keep one.
+        first = next(i for i, (_n, _t, r) in enumerate(out) if r == "subject")
+        out = [(n, t, "mentioned" if r == "subject" and i != first else r) for i, (n, t, r) in enumerate(out)]
+    return out, alias_of
+
+
+async def _resolve_abbreviations(
+    sc: Any,
+    tenant_id: str,
+    fleet_id: str | None,
+    content: str,
+    filtered: list[tuple[str, str, str]],
+    resolved: list[dict | None],
+) -> None:
+    """Resolve an unmatched bare abbreviation ("rep") to the one entity of the
+    fleet that carries it as an alias and whose name it abbreviates.
+
+    Best effort and conservative: exactly one such entity, or nothing changes
+    and the name goes on to similarity resolution as before.
+    """
+    for i, (name, _type, _role) in enumerate(filtered):
+        if resolved[i] is not None or not looks_like_abbreviation(name, content):
+            continue
+        try:
+            ids = await sc.fts_search_entities(
+                {
+                    "tokens": [name],
+                    "tenant_id": tenant_id,
+                    "fleet_ids": [fleet_id] if fleet_id else None,
+                    # As name resolution: only this fleet's own entities.
+                    "strict_fleet_scoping": True,
+                }
+            )
+            rows = await sc.get_entities_by_ids(list(ids)[:20], tenant_id) if ids else {}
+        except Exception:
+            logger.warning("abbreviation lookup failed for tenant %s", tenant_id, exc_info=True)
+            continue
+        hits = [
+            (eid, row)
+            for eid, row in (rows or {}).items()
+            if name in [str(a).lower() for a in ((row.get("attributes") or {}).get("_aliases") or [])]
+            and initials(row.get("canonical_name") or "").endswith(name)
+        ]
+        if len(hits) == 1:
+            eid, row = hits[0]
+            resolved[i] = {"entity_id": eid, "canonical_name": row.get("canonical_name")}
 
 
 async def _discover_cross_links_for_memory(
@@ -372,6 +455,30 @@ async def _recheck_row_after_writes(
 # retries. Apart from ``entity_extraction``: the run did not fail, it wrote the
 # heuristic's graph (which may be empty), and that is what an operator counts.
 _DEGRADED_TASK = "entity_extraction_degraded"
+# The same, for an extraction that settled for the heuristic at once because
+# every provider failed in a way asking again would repeat
+# (``UnretryableProviderFailureError``). A task of its own so that the hourly
+# re-run sweep, which reads ``entity_extraction_degraded``, does not ask again a
+# request that fails the same way every hour; an operator still counts these,
+# and re-runs them by hand once the cause is fixed.
+_DEGRADED_UNRETRYABLE_TASK = "entity_extraction_degraded_unretryable"
+
+# What ``_extract_asking_again`` hands back for a graph the heuristic made.
+_ProviderFailure = ProvidersUnavailableError | UnretryableProviderFailureError
+
+# What ``process_entity_extraction`` did:
+#   * ``heuristic``: it settled for the heuristic's graph after a provider failure;
+#   * ``model``: it kept the extractor's graph. With no usable provider the
+#     extractor degrades by itself and nothing is handed back (see
+#     ``_extract_asking_again``), so that graph is the heuristic's too;
+#   * ``skipped``: the row was gone, held or edited before its graph was written,
+#     or while it was, so what this extracted is not the memory's graph;
+#   * ``failed``: it raised, and logged and recorded the failure.
+# Either graph may be empty. The schedulers that fire it and forget ignore this.
+# ``maintenance.reextract_heuristic_graphs`` reads it, because a model graph that
+# names no subject has the heuristic's shape and the graph alone cannot tell them
+# apart.
+ExtractionOutcome = Literal["model", "heuristic", "skipped", "failed"]
 
 
 async def _still_wants_extraction(memory_id: UUID, tenant_id: str, content: str) -> bool:
@@ -401,7 +508,7 @@ async def _still_wants_extraction(memory_id: UUID, tenant_id: str, content: str)
 
 async def _extract_asking_again(
     memory_id: UUID, tenant_id: str, content: str, memory_type: str, tenant_cfg: Any
-) -> tuple[ExtractedGraph, ProvidersUnavailableError | None] | None:
+) -> tuple[ExtractedGraph, _ProviderFailure | None] | None:
     """Extract, and if every provider fails, ask again later before the heuristic.
 
     A provider failure is usually brief. On staging (2026-10-07) a Vertex 429
@@ -409,9 +516,10 @@ async def _extract_asking_again(
     nothing, and the memory kept no entities with nothing to retry it. So the
     whole provider chain runs again after each of
     ``ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S``, and only then does this
-    settle for the heuristic. A failure asking again cannot fix (output that
-    does not parse, no usable provider) is not retried: the extractor degrades
-    it at once, as before.
+    settle for the heuristic. A failure asking again cannot fix (a rejected
+    request, output that does not parse) is not retried: this settles for the
+    heuristic at once, as before, and hands back that failure too. With no
+    usable provider the extractor degrades by itself, and nothing is handed back.
 
     This runs in a background task, so the waits cost no request anything.
 
@@ -432,10 +540,14 @@ async def _extract_asking_again(
     the providers were failing.
     """
 
-    async def _extract() -> ExtractedGraph:
-        return await extract_entities_from_content(
-            content, memory_type, tenant_config=tenant_cfg, raise_on_provider_failure=True
-        )
+    async def _extract() -> tuple[ExtractedGraph, UnretryableProviderFailureError | None]:
+        try:
+            graph = await extract_entities_from_content(
+                content, memory_type, tenant_config=tenant_cfg, raise_on_provider_failure=True
+            )
+        except UnretryableProviderFailureError as exc:
+            return degraded_graph(content, tenant_cfg), exc
+        return graph, None
 
     async def _wanted() -> bool:
         if await _still_wants_extraction(memory_id, tenant_id, content):
@@ -448,7 +560,7 @@ async def _extract_asking_again(
 
     for delay in ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S:
         try:
-            return await _extract(), None
+            return await _extract()
         except ProvidersUnavailableError as exc:
             if not await _wanted():
                 return None
@@ -464,29 +576,31 @@ async def _extract_asking_again(
             )
             await asyncio.sleep(wait)
     try:
-        return await _extract(), None
+        return await _extract()
     except ProvidersUnavailableError as exc:
         if not await _wanted():
             return None
         return degraded_graph(content, tenant_cfg), exc
 
 
-async def _record_degraded(memory_id: UUID, tenant_id: str, exc: ProvidersUnavailableError) -> None:
+async def _record_degraded(memory_id: UUID, tenant_id: str, exc: _ProviderFailure) -> None:
     """One ``background_task_log`` row for an extraction the heuristic finished.
 
     The provider's own error goes in the message. The traceback prints it first,
     and ``record_task_failure`` keeps only the traceback's tail, so behind a deep
     SDK stack it would be cut off.
     """
-    tries = len(ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S) + 1
+    if isinstance(exc, UnretryableProviderFailureError):
+        task, tried = _DEGRADED_UNRETRYABLE_TASK, "which asking again would repeat"
+    else:
+        task, tried = _DEGRADED_TASK, f"on all {len(ENTITY_EXTRACTION_PROVIDER_RETRY_DELAYS_S) + 1} tries"
     cause = exc.__cause__ or exc
     await record_task_failure(
-        _DEGRADED_TASK,
+        task,
         memory_id,
         tenant_id,
         RuntimeError(
-            f"{exc}, on all {tries} tries; the regex heuristic was used. "
-            f"Last error: {type(cause).__name__}: {cause}"
+            f"{exc}, {tried}; the regex heuristic was used. Last error: {type(cause).__name__}: {cause}"
         ),
         tb="".join(traceback.format_exception(exc)),
     )
@@ -583,7 +697,7 @@ async def process_entity_extraction(
     agent_id: str,
     content: str,
     memory_type: str,
-) -> None:
+) -> ExtractionOutcome:
     # CAURA-595: today this runs in-process in core-api (every scheduler
     # in the codebase wraps it in `track_task`). That satisfies the
     # literal "off the hot path" framing but not the original intent of
@@ -616,8 +730,9 @@ async def process_entity_extraction(
 
         extracted = await _extract_asking_again(memory_id, tenant_id, content, memory_type, tenant_cfg)
         if extracted is None:
-            return
+            return "skipped"
         graph, degraded_by = extracted
+        made_by: ExtractionOutcome = "heuristic" if degraded_by is not None else "model"
         # Only an extraction the heuristic finished is marked, so the audit
         # entries of every other run read as they always have.
         degraded = {"degraded": True} if degraded_by is not None else {}
@@ -636,7 +751,7 @@ async def process_entity_extraction(
                     resource_id=memory_id,
                     detail={"entities_count": 0, "relations_count": 0, **degraded},
                 )
-            return
+            return made_by
 
         sc = get_storage_client()
 
@@ -665,7 +780,7 @@ async def process_entity_extraction(
                 memory_id,
                 len(graph.entities),
             )
-            return
+            return "skipped"
         # M-39: the same check for an edit. Nothing is written yet, so there is
         # nothing to reset, and the edit scheduled its own extraction of the new
         # text.
@@ -676,7 +791,7 @@ async def process_entity_extraction(
                 memory_id,
                 len(graph.entities),
             )
-            return
+            return "skipped"
 
         blocklist = tenant_cfg.entity_blocklist
 
@@ -710,6 +825,8 @@ async def process_entity_extraction(
             seen_names.add(match_key)
             filtered.append((ent.canonical_name, ent.entity_type, ent.role))
 
+        filtered, alias_of = _apply_defined_abbreviations(content, filtered)
+
         if not filtered:
             # Nothing to persist; skip the bulk flow but keep the
             # downstream audit-log + contradiction-trigger paths so a
@@ -730,6 +847,9 @@ async def process_entity_extraction(
             # vector it has: ``entity_merge`` only fills a row with none, and
             # the nightly ``BackfillEntityEmbeddings`` fills the rest.
             resolved = await _resolve_entities(sc, tenant_id, fleet_id, filtered, [None] * len(filtered))
+
+            # ---- Step 1b: a bare abbreviation resolves through the aliases ----
+            await _resolve_abbreviations(sc, tenant_id, fleet_id, content, filtered, resolved)
 
             # ---- Step 2a: embed what that left, then resolve it by similarity ----
             #
@@ -897,6 +1017,12 @@ async def process_entity_extraction(
                     item["attributes"] = {}
                 upsert_items.append(item)
                 upsert_names.append([name])
+
+            # An abbreviation this memory defines becomes an alias of its entity.
+            for j, names in enumerate(upsert_names):
+                for n in names:
+                    if n in alias_of:
+                        _merge_alias_into(upsert_items[j], alias_of[n])
 
             # ---- Step 2c: bulk upsert ----
             #
@@ -1075,7 +1201,7 @@ async def process_entity_extraction(
                 # below would write the old text's graph back.
                 recheck = await _recheck_row_after_writes(sc, memory_id, tenant_id, content)
                 if recheck in ("dropped", "edited"):
-                    return
+                    return "skipped"
                 # Surface any FK violations from the per-item path
                 # (storage-side reports ``error="fk_violation"`` for rows
                 # whose memory_id or entity_id no longer exists). Same
@@ -1411,12 +1537,16 @@ async def process_entity_extraction(
         # "the persistence block ran". Cross-link discovery sets it too, and
         # gating on the narrower reading would leak exactly the links it creates.
         #
-        # The result is not branched on: nothing follows this, so ``live`` and
-        # ``unknown`` are the same instruction — do nothing — and ``dropped`` has
-        # already purged by the time it returns, as ``edited`` has reset and
-        # re-extracted.
-        if wrote_graph_rows:
-            await _recheck_row_after_writes(sc, memory_id, tenant_id, content)
+        # Only the outcome branches on the result. ``live`` and ``unknown`` mean
+        # do nothing; ``dropped`` has already purged by the time it returns, and
+        # ``edited`` has reset and re-extracted, so the graph written above is no
+        # longer this memory's.
+        if wrote_graph_rows and await _recheck_row_after_writes(sc, memory_id, tenant_id, content) in (
+            "dropped",
+            "edited",
+        ):
+            return "skipped"
+        return made_by
 
     except Exception as exc:
         logger.exception("Entity extraction failed for memory %s (non-fatal)", memory_id)
@@ -1467,3 +1597,4 @@ async def process_entity_extraction(
         # alternative was losing the audit record outright.
         if wrote_graph_rows:
             await _recheck_row_after_writes(sc, memory_id, tenant_id, content)
+        return "failed"

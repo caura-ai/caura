@@ -13,7 +13,9 @@ skip the search.
 """
 
 import pytest
+from sqlalchemy import delete
 
+from common.models import AgentTombstone
 from core_api.config import settings
 from core_api.services import memory_service
 from core_api.services.agent_scope import (
@@ -21,6 +23,7 @@ from core_api.services.agent_scope import (
     FILTER_AGENT_EMPTY,
     FILTER_AGENT_UNKNOWN,
 )
+from core_storage_api.services.postgres_service import get_session
 from tests._legacy_contracts import LEGACY_API_KEY_FIELD
 from tests.conftest import get_test_auth, new_tenant_id
 
@@ -77,6 +80,31 @@ async def _search(client, headers, tenant_id, filter_agent_id=None, **extra):
     if filter_agent_id is not None:
         body["filter_agent_id"] = filter_agent_id
     return await client.post("/api/v1/search", headers=headers, json=body)
+
+
+async def _deregister(client, headers, tenant_id, agent_id):
+    """Leave ``agent_id``'s memories with no agent row and no tombstone, as an
+    agent deleted before tombstones existed (migration 077) was.
+
+    Deleted through the route rather than raw SQL on the ``db`` fixture: that
+    fixture runs in ``join_transaction_mode="create_savepoint"`` and rolls back,
+    so its ``commit()`` is invisible to the storage service's own connection and
+    the probe would still see the agent row. The tombstone goes through a
+    storage session that commits. With it, the search would register the id
+    again at trust 0 and refuse it
+    (``test_a_search_as_a_deleted_agent_is_refused_until_it_is_approved``).
+    """
+    dropped = await client.delete(
+        f"/api/v1/agents/{agent_id}", headers=headers, params={"tenant_id": tenant_id}
+    )
+    assert dropped.status_code == 204, dropped.text
+    async with get_session() as session:
+        await session.execute(
+            delete(AgentTombstone).where(
+                AgentTombstone.tenant_id == tenant_id,
+                AgentTombstone.agent_id == agent_id,
+            )
+        )
 
 
 def _codes(body) -> list[str]:
@@ -138,19 +166,11 @@ async def test_a_deregistered_agent_still_returns_its_memories(
     searchable while the agent row is gone. Skipping the search on "not in
     agents" would throw away real results, which is why ``has_memories``
     decides the skip and ``agent_registered`` only picks the wording.
-
-    Deleted through the route rather than raw SQL on the ``db`` fixture: that
-    fixture runs in ``join_transaction_mode="create_savepoint"`` and rolls back,
-    so its ``commit()`` is invisible to the storage service's own connection and
-    the probe would still see the agent row.
     """
     tenant_id, headers = get_test_auth(new_tenant_id())
     mem_id = await _write(client, headers, tenant_id, REAL)
 
-    dropped = await client.delete(
-        f"/api/v1/agents/{REAL}", headers=headers, params={"tenant_id": tenant_id}
-    )
-    assert dropped.status_code == 204, dropped.text
+    await _deregister(client, headers, tenant_id, REAL)
 
     # Searched as a tenant-scoped caller: that is the shape the warning serves,
     # and the only one with a free pre-existence signal (see ``tenant_scoped``).
@@ -162,6 +182,41 @@ async def test_a_deregistered_agent_still_returns_its_memories(
         "the search MUST still run — the memories outlive the agent row"
     )
     assert FILTER_AGENT_DEREGISTERED in _codes(body)
+
+
+@pytest.mark.integration
+async def test_a_search_as_a_deleted_agent_is_refused_until_it_is_approved(
+    client, pipeline_search, tenant_scoped
+):
+    """A deleted agent leaves a tombstone, so this search registers its id
+    again at trust 0 and refuses it, as it refuses any restricted agent, until
+    an admin raises its trust. A caller that does not read as it still finds
+    its memories."""
+    tenant_id, headers = get_test_auth(new_tenant_id())
+    mem_id = await _write(client, headers, tenant_id, REAL)
+    dropped = await client.delete(
+        f"/api/v1/agents/{REAL}", headers=headers, params={"tenant_id": tenant_id}
+    )
+    assert dropped.status_code == 204, dropped.text
+
+    refused = await _search(client, tenant_scoped(tenant_id), tenant_id, REAL)
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["error"]["code"] == "AGENT_TRUST_TOO_LOW"
+
+    as_admin = await _search(client, headers, tenant_id, REAL)
+    assert as_admin.status_code == 200, as_admin.text
+    assert [i["id"] for i in as_admin.json()["items"]] == [mem_id]
+
+    approved = await client.patch(
+        f"/api/v1/agents/{REAL}/trust",
+        headers=headers,
+        params={"tenant_id": tenant_id},
+        json={"trust_level": 1},
+    )
+    assert approved.status_code == 200, approved.text
+    resp = await _search(client, tenant_scoped(tenant_id), tenant_id, REAL)
+    assert resp.status_code == 200, resp.text
+    assert [i["id"] for i in resp.json()["items"]] == [mem_id]
 
 
 @pytest.mark.integration
@@ -555,10 +610,7 @@ async def test_a_filtered_search_may_still_report_deregistration(
     tenant_id, headers = get_test_auth(new_tenant_id())
     mem_id = await _write(client, headers, tenant_id, REAL)
 
-    dropped = await client.delete(
-        f"/api/v1/agents/{REAL}", headers=headers, params={"tenant_id": tenant_id}
-    )
-    assert dropped.status_code == 204, dropped.text
+    await _deregister(client, headers, tenant_id, REAL)
 
     body = (await _search(client, tenant_scoped(tenant_id), tenant_id, REAL)).json()
     assert [i["id"] for i in body["items"]] == [mem_id]
@@ -635,10 +687,7 @@ async def test_an_empty_result_never_asserts_that_memories_exist(
     )
     assert r.status_code == 201, r.text
 
-    dropped = await client.delete(
-        f"/api/v1/agents/{REAL}", headers=headers, params={"tenant_id": tenant_id}
-    )
-    assert dropped.status_code == 204, dropped.text
+    await _deregister(client, headers, tenant_id, REAL)
 
     # A query that matches nothing, so the empty path runs.
     resp = await client.post(

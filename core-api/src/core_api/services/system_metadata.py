@@ -93,6 +93,9 @@ PLATFORM_ONLY_KEYS: frozenset[str] = frozenset(
         "parent_memory_id",  # auto-chunk + atomic-fact children
         "auto_chunked",
         "child_count",
+        # The lowest trust among the rows a crystal, insight or evolve rule was
+        # built from (``source_trust``). A forged one would vouch for its sources.
+        "source_trust",
         # Enrichment output.
         "retrieval_hint",
         # Facts awaiting their fan-out into child rows: the enrichment worker

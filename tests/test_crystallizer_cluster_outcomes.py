@@ -64,7 +64,9 @@ def _env(sc, *, extracted, create_memory=None, clusters=None):
         stack.enter_context(
             patch(
                 "core_api.services.organization_settings.resolve_config",
-                AsyncMock(return_value=SimpleNamespace()),
+                AsyncMock(
+                    return_value=SimpleNamespace(quarantine_below_trust=lambda _f: 0)
+                ),
             )
         )
         stack.enter_context(
@@ -246,7 +248,13 @@ _CONFIG = SimpleNamespace(enrichment_provider="openai")
 
 @pytest.mark.parametrize(
     "raw",
-    [{"content": "not a list"}, "not json", [{"memory_type": "fact"}], [None]],
+    [
+        {"content": "no facts key"},
+        {"facts": "not a list"},
+        "not json",
+        {"facts": [{"memory_type": "fact"}]},
+        {"facts": [None]},
+    ],
 )
 async def test_an_unusable_answer_decides_nothing(raw):
     """Not the model saying "nothing to keep": the cluster must come back."""
@@ -256,7 +264,7 @@ async def test_an_unusable_answer_decides_nothing(raw):
 
 
 async def test_an_empty_list_is_the_models_verdict():
-    with _answering([]):
+    with _answering({"facts": []}):
         out = await cs._crystallize_cluster([_row(uuid4())], _CONFIG)
     assert out == []
 

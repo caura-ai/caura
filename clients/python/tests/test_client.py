@@ -78,6 +78,41 @@ def test_write_per_call_agent_overrides_default():
     make_client(handler, agent_id="default").write("x", agent_id="override")
 
 
+def test_write_sends_the_evidence_it_is_given():
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": "m1", "content": "x"})
+
+    make_client(handler).write(
+        "x",
+        source_uri="https://example.test/runbook",
+        tool_call_id="toolu_01ABC",
+        observed_at=datetime(2026, 11, 1, 9, 30, tzinfo=timezone.utc),
+        trace_id="own-trace",
+    )
+    assert seen["body"]["source_uri"] == "https://example.test/runbook"
+    assert seen["body"]["tool_call_id"] == "toolu_01ABC"
+    assert seen["body"]["observed_at"] == "2026-11-01T09:30:00+00:00"
+    assert seen["body"]["trace_id"] == "own-trace"
+
+
+def test_write_without_evidence_sends_none_of_its_fields():
+    # An older server refuses a field it does not declare, so none go out unasked.
+    # The session still reaches the server, as the header it stamps trace_id from.
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        seen["session"] = request.headers.get("X-Caura-Session-Id")
+        return httpx.Response(201, json={"id": "m1", "content": "x"})
+
+    make_client(handler, session_id="sess-1").write("x")
+    assert not {"source_uri", "tool_call_id", "observed_at", "trace_id"} & set(seen["body"])
+    assert seen["session"] == "sess-1"
+
+
 def test_search_returns_list():
     def handler(request):
         assert request.url.path == "/api/v1/search"

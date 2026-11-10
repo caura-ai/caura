@@ -26,7 +26,7 @@ import time
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -47,6 +47,8 @@ from core_api.errors import (
     REQUEST_BUDGET_EXCEEDED,
     coded_detail,
 )
+from core_api.middleware.per_tenant_concurrency import per_tenant_slot
+from core_api.middleware.rate_limit import llm_limit
 from core_api.routes.memories import _resolve_rest_write_agent_id
 from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.agent_service import enforce_fleet_write, resolve_write_agent
@@ -149,8 +151,11 @@ class InterviewSubmitOut(BaseModel):
 
 
 @router.post("/interview/submit", response_model=InterviewSubmitOut)
+@llm_limit
 async def submit_interview(
+    request: Request,
     body: InterviewSubmitIn,
+    response: Response,
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Interview one node's event window and persist the report as memories.
@@ -375,21 +380,24 @@ async def submit_interview(
     interview_budget = app_settings.interview_request_timeout_seconds
     started_at = time.monotonic()
     try:
-        with request_phase.own_deadline(interview_budget) as phases:
-            result = await asyncio.wait_for(
-                run_interview(
-                    tenant_id=tenant_id,
-                    fleet_id=body.fleet_id,
-                    agent_id=body.agent_id,
-                    node_id=body.node_id,
-                    command_id=body.command_id,
-                    cursor_from=body.cursor_from,
-                    cursor_to=body.cursor_to,
-                    events=[ev.model_dump(mode="json") for ev in body.events],
-                    node_name=node_name,
-                ),
-                timeout=interview_budget,
-            )
+        # The tenant's model slot covers the synthesis, which runs here only on
+        # this inline path; the accepted path above leaves it to a task.
+        async with per_tenant_slot("llm", tenant_id):
+            with request_phase.own_deadline(interview_budget) as phases:
+                result = await asyncio.wait_for(
+                    run_interview(
+                        tenant_id=tenant_id,
+                        fleet_id=body.fleet_id,
+                        agent_id=body.agent_id,
+                        node_id=body.node_id,
+                        command_id=body.command_id,
+                        cursor_from=body.cursor_from,
+                        cursor_to=body.cursor_to,
+                        events=[ev.model_dump(mode="json") for ev in body.events],
+                        node_name=node_name,
+                    ),
+                    timeout=interview_budget,
+                )
     except TimeoutError:
         attribution = phases.snapshot()
         elapsed = round(time.monotonic() - started_at, 3)

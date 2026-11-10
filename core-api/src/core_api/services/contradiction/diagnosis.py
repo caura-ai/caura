@@ -23,10 +23,10 @@ from core_api.services.contradiction.relationship import (
     _CONF_MODEL,
     _CONF_RDF,
     _RELATIONSHIP_INSTRUCTION,
-    CONTRADICTION_PROMPT,
     _is_rdf_exact_value,
     _llm_raw,
     extract_relationship,
+    render_contradiction_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -127,7 +127,7 @@ async def classify(
     new_content = str(new_memory.get("content", ""))[:500]
     old_content = str(candidate.get("content", ""))[:500]
     prompt = (
-        CONTRADICTION_PROMPT.format(new_content=new_content, old_content=old_content)
+        render_contradiction_prompt(new_content, old_content)
         + _RELATIONSHIP_INSTRUCTION
         + _DIAGNOSIS_INSTRUCTION
     )

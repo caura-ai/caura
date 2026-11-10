@@ -383,7 +383,7 @@ Add Caura to any MCP client with one config block.
 }
 ```
 
-> For team or production use, swap the tenant-scoped key for an **agent-scoped credential** — on the managed platform (caura.ai), atomic provisioning via `POST /api/v1/admin/agent-keys/provision` (or **Create agent key** under Connect › Keys in the Caura app) mints the credential + Agent row + initial trust + fleet membership in one round trip. Both kinds use the `mc_` prefix; scope is set at mint time on the credential. See [`docs/integration-without-plugin.md`](docs/integration-without-plugin.md). Using a tenant-scoped credential? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-scoped path.
+> For team or production use, swap the tenant-scoped key for an **agent-scoped credential** — on the managed platform (caura.ai), atomic provisioning via `POST /api/v1/admin/agent-keys/provision` mints the credential + Agent row + initial trust + fleet membership in one round trip. It needs the **Manage API credentials** permission; without it, ask an organization admin. **Connect › Keys** in the Caura app makes only tenant-scoped keys. Both kinds use the `mc_` prefix; scope is set at mint time on the credential. See [`docs/integration-without-plugin.md`](docs/integration-without-plugin.md). Using a tenant-scoped credential? Pass an explicit `agent_id` on every MCP tool call — the gateway refuses the reserved default (`mcp-agent`) on the tenant-scoped path.
 
 **Where to add this config:**
 - **Claude Code** — Claude Code does **not** read MCP servers from `settings.json`. Register the server with `claude mcp add` instead. Use `-s user` so it's available in **every** working directory — the default scope (`local`) only registers it for the current directory, which bites when you run agents from multiple folders:
@@ -758,15 +758,25 @@ not part of the self-hosted runtime.
 
 ## Rate limiting
 
-Rate limiting is enforced in-process by [slowapi](https://github.com/laurentS/slowapi), keyed by
-API key where one is present and by remote IP otherwise. It is applied per route, not globally —
-`/health`, `/version`, and `/mcp` are never throttled:
+Rate limiting is enforced in-process by [slowapi](https://github.com/laurentS/slowapi). Each limit
+is per credential (the key auth verified; behind a gateway, the credential it accepted), or per
+remote IP when none was verified. Each also has a tenant-wide budget, at five times its rate by
+default, shared by all the tenant's credentials. It is applied per route and per MCP tool, not
+globally, so `/health` and `/version` are never throttled:
 
-| Route | Default | Setting |
-|---|---|---|
-| `POST /memories`, `POST /documents`, `POST /ingest/commit`, `POST /stm/promote` | 10/second | `RATE_LIMIT_WRITE` |
-| `POST /memories/bulk` | 2/second | `RATE_LIMIT_WRITE_BULK` |
-| `POST /search`, `POST /recall` | 30/second | `RATE_LIMIT_SEARCH` |
+| Route | MCP tool | Default | Setting |
+|---|---|---|---|
+| `POST /memories`, `POST /documents`, `POST /stm/promote` | `caura_write`, `caura_doc` write | 10/second | `RATE_LIMIT_WRITE` |
+| `POST /memories/bulk`, `POST /ingest/commit` | `caura_write` with `items` | 2/second, one budget across these | `RATE_LIMIT_WRITE_BULK` |
+| `POST /search`, `POST /recall`, `GET /memories`, `POST /documents/search` | `caura_recall`, `caura_list`, `caura_doc` search | 30/second | `RATE_LIMIT_SEARCH` |
+| `POST /ingest/preview`, `/ingest/file`, `/interview/submit`, `/insights/generate`, `/evolve/report` | `caura_insights`, `caura_evolve` | 10/minute, one budget across these | `RATE_LIMIT_LLM` |
+
+The tenant-wide budgets are `RATE_LIMIT_WRITE_TENANT`, `RATE_LIMIT_WRITE_BULK_TENANT`,
+`RATE_LIMIT_SEARCH_TENANT` and `RATE_LIMIT_LLM_TENANT`. A bulk write or ingest commit takes at most
+100 items, and a preview at most 32 sections (one model call each). Beside the rate limits, each
+tenant has a cap on requests in flight per process, answered with 429 and `Retry-After: 1`: 16
+writes, 32 searches and 2 model-calling requests (`PER_TENANT_LLM_CONCURRENCY`). An MCP call
+refused by either gets a `RATE_LIMITED` error with `retry_after_seconds`.
 
 Every response from a rate-limited route carries `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and
 `X-RateLimit-Reset`; a rejected request gets HTTP 429 with `Retry-After`. Counters live in Redis when

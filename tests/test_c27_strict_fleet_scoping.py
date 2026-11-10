@@ -134,7 +134,9 @@ FROM_TENANT_SWITCH = object()
 
 FLEET_SCOPED_READS: dict[str, dict[str, object]] = {
     # SCOPE reads — D4 applies and ``strict`` is the tenant's choice.
-    "memory_scored_search": {"strict": FROM_TENANT_SWITCH},
+    # The scored search's predicate is built in ``_scored_search_row_filters``,
+    # shared with the EC-06 explain read so the two cannot scope differently.
+    "_scored_search_row_filters": {"strict": FROM_TENANT_SWITCH},
     "memory_load_by_ids": {"strict": FROM_TENANT_SWITCH},
     "memory_find_successors": {"strict": FROM_TENANT_SWITCH},
     # A scope read that is nonetheless org-blind, for a STRUCTURAL reason and

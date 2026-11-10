@@ -118,6 +118,7 @@ _SPEC = ToolSpec(
         "NOT_FOUND",
         "ORG_ADMIN_REQUIRED",
         "PLAN_LIMIT_READ_ONLY",
+        "RATE_LIMITED",
         "REQUEST_BUDGET_EXCEEDED",
         "UNAUTHORIZED",
         "UNAVAILABLE",

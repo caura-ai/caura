@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import itertools
 import math
+from collections.abc import AsyncGenerator
 
 import httpx2 as httpx
 import openai
 
+from common import cloud_run_identity
 from common.constants import VECTOR_DIM
 from common.embedding.constants import (
     EMBEDDING_HOSTED_MAX_BATCH,
@@ -29,6 +31,17 @@ from common.usage import record_model_call
 # flags), and the scope is a fixed shape that cannot collide. Same device, same
 # reasoning, as ``common/ranking/providers/remote.py``.
 _instance_seq = itertools.count()
+
+
+class _CloudRunIdentity(httpx.Auth):
+    """``common.cloud_run_identity`` for the SDK's httpx2 client."""
+
+    async def async_auth_flow(
+        self, request: httpx.Request
+    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        request.headers.update(await cloud_run_identity.headers_for(str(request.url)))
+        response = yield request
+        cloud_run_identity.refused(str(request.url), response.status_code)
 
 
 class OpenAIEmbeddingProvider:
@@ -161,6 +174,10 @@ class OpenAIEmbeddingProvider:
                     max_connections=EMBEDDING_HTTPX_MAX_CONNECTIONS,
                     max_keepalive_connections=EMBEDDING_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
                 ),
+                # A self-hosted backend on Cloud Run listed in
+                # CLOUD_RUN_ID_TOKEN_ORIGINS gets an identity token; no
+                # other request changes.
+                auth=_CloudRunIdentity(),
             ),
         }
         if base_url:

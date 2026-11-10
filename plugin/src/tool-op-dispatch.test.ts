@@ -206,6 +206,10 @@ const ROUTES: {
     expect: `DELETE /api/v1/memories/${MEMORY_ID}` },
   { tool: "caura_manage", op: "update", params: { memory_id: MEMORY_ID, content: "x" },
     expect: `PATCH /api/v1/memories/${MEMORY_ID}` },
+  { tool: "caura_manage", op: "confirm_correction", params: { correction_id: MEMORY_ID },
+    expect: `POST /api/v1/corrections/${MEMORY_ID}/confirm` },
+  { tool: "caura_manage", op: "accept_baton", params: { baton_id: MEMORY_ID },
+    expect: `POST /api/v1/batons/${MEMORY_ID}/accept` },
   // caura_doc
   { tool: "caura_doc", op: "write", params: { collection: "c-1", doc_id: "doc-1", data: { a: 1 } },
     expect: "POST /api/v1/documents" },
@@ -227,13 +231,16 @@ const ROUTES: {
  * `mutations()` cannot serve here — half these ops are GETs. Same path filter
  * and the same reason: `apiCall` provisions an agent-scoped credential with
  * its own request when a call carries an `agent_id`, and that route is
- * neither `/memories` nor `/documents`.
+ * none of `/memories`, `/documents` or `/corrections`.
  */
 function resourceCalls(): string[] {
   return captured
     .filter(
       (c) =>
-        c.url.pathname.includes("/memories") || c.url.pathname.includes("/documents"),
+        c.url.pathname.includes("/memories") ||
+        c.url.pathname.includes("/documents") ||
+        c.url.pathname.includes("/corrections") ||
+        c.url.pathname.includes("/batons"),
     )
     .map((c) => `${c.method} ${c.url.pathname}`);
 }

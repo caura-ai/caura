@@ -26,7 +26,12 @@ class InjectSTMContext:
         # L-14 — an STM row has memory_type ``stm`` and no status, so a search
         # filtered on either matches none of them. They were prepended anyway.
         memory_type_filter = ctx.data.get("memory_type_filter")
-        if (memory_type_filter and memory_type_filter != "stm") or ctx.data.get("status_filter"):
+        # EC-11 — STM notes carry no verification, so verified_only matches none.
+        if (
+            (memory_type_filter and memory_type_filter != "stm")
+            or ctx.data.get("status_filter")
+            or ctx.data.get("verified_only")
+        ):
             return StepResult(outcome=StepOutcome.SKIPPED)
 
         from core_api.constants import DEFAULT_SEARCH_TOP_K

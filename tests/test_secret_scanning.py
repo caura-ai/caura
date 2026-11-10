@@ -29,6 +29,22 @@ class CommitSafeguards(unittest.TestCase):
         self.assertNotIn("continue-on-error: true", job)
         self.assertIn("schedule:", workflow)
 
+    def test_gitleaks_archive_comes_from_the_cache_and_is_checked_either_way(self):
+        # A GitHub release-asset outage (504s to anonymous downloads on 9 Nov
+        # 2026) failed the download. The cached archive carries the scan through
+        # one, and the checksum, not the cache, still decides what runs.
+        workflow = (ROOT / ".github/workflows/security-scan.yml").read_text()
+        job = workflow.split("  secret-scan:", 1)[1].split("\n  npm-audit:", 1)[0]
+        self.assertIn("uses: actions/cache/restore@", job)
+        self.assertIn("-${{ env.GITLEAKS_SHA256 }}", job)
+        install_at = job.index("name: Install checksum-pinned Gitleaks")
+        self.assertLess(job.index("uses: actions/cache/restore@"), install_at)
+        self.assertGreater(job.index("uses: actions/cache/save@"), install_at)
+        install = job[install_at:].split("- name:", 1)[0]
+        download, _, after = install.rpartition("fi\n")
+        self.assertIn("curl", download)
+        self.assertIn("sha256sum --check", after)
+
     def test_pre_commit_has_all_three_secret_hooks(self):
         hooks = (ROOT / ".pre-commit-config.yaml").read_text()
         for hook in ("gitleaks", "detect-private-key", "detect-aws-credentials"):

@@ -32,15 +32,16 @@ class OrgIdsResponse(BaseModel):
 
 @router.get("/active")
 async def list_active_tenants() -> TenantIdsResponse:
-    """Orgs with at least one live (non-soft-deleted) memory. Archive/lifecycle
-    fanout target."""
+    """Orgs with at least one live (non-soft-deleted) memory, less suppressed
+    ones. Archive/lifecycle fanout target."""
     return TenantIdsResponse(tenant_ids=await _svc.tenants_list_active())
 
 
 @router.get("/purgeable")
 async def list_purgeable_tenants() -> TenantIdsResponse:
-    """Orgs with soft-deleted memories older than the max retention window
-    (CAURA-656 purge fanout target)."""
+    """Orgs with soft-deleted memories or recall events older than the shortest
+    retention window, or expired idempotency responses (CAURA-656 purge fanout
+    target)."""
     return TenantIdsResponse(tenant_ids=await _svc.tenants_list_purgeable())
 
 

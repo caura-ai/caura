@@ -58,10 +58,13 @@ from core_api.middleware.request_timeout import (
 )
 from core_api.routes.agents import router as agents_router
 from core_api.routes.audit import router as audit_router
+from core_api.routes.batons import router as batons_router
 from core_api.routes.conflicts import router as conflicts_router
+from core_api.routes.corrections import router as corrections_router
 from core_api.routes.crystallizer import router as crystallizer_router
 from core_api.routes.documents import router as documents_router
 from core_api.routes.entities import router as entities_router
+from core_api.routes.evidence_coverage import router as evidence_coverage_router
 from core_api.routes.evolve import router as evolve_router
 from core_api.routes.fleet import router as fleet_router
 from core_api.routes.health import router as health_router
@@ -77,6 +80,7 @@ from core_api.routes.plugin import plugin_bootstrap_router
 from core_api.routes.plugin import router as plugin_router
 from core_api.routes.reports import router as reports_router
 from core_api.routes.scheduler_lease import router as scheduler_lease_router
+from core_api.routes.search_explain import router as search_explain_router
 from core_api.routes.settings import router as settings_router
 from core_api.routes.skills_inbox import router as skills_inbox_router
 from core_api.routes.stats import router as stats_router
@@ -297,8 +301,8 @@ async def _flush_one_tenant(tid: str, tevs: list[dict]) -> None:
         # an httpx error, not ``TimeoutError``.
         logger.error(
             "audit batch flush for tenant=%s (events=%d) could not acquire a "
-            "storage_write slot within %ss; events lost from this tenant's "
-            "slice so the other tenants' flush is not held behind it",
+            "storage_write slot within %ss; deferring this tenant's slice "
+            "to the queue's retry policy",
             tid,
             len(tevs),
             budget,
@@ -306,7 +310,7 @@ async def _flush_one_tenant(tid: str, tevs: list[dict]) -> None:
         raise
     except Exception:
         logger.exception(
-            "audit batch flush failed for tenant=%s (events=%d); events lost from this tenant's slice",
+            "audit batch flush failed for tenant=%s (events=%d); deferring to the queue's retry policy",
             tid,
             len(tevs),
         )
@@ -547,9 +551,9 @@ async def lifespan(app):
                 # Per-tenant failures don't abort sibling tenants;
                 # ``return_exceptions=True`` lets every group's outcome land,
                 # then we re-raise the last error and attach the actually-failed
-                # event count via ``failed_event_count`` so ``_drain_and_flush``
-                # can credit the surviving tenants to ``_flushed_count`` instead
-                # of marking the whole chunk lost.
+                # events via ``failed_events`` so ``_drain_and_flush`` retries
+                # only those tenants and credits the surviving tenants once.
+                # Keep ``failed_event_count`` for interruption accounting.
                 by_tenant: dict[str | object, list[dict]] = {}
                 for ev in events:
                     # ``.get()`` so a malformed event missing tenant_id can't
@@ -614,16 +618,16 @@ async def lifespan(app):
                     and not isinstance(r, asyncio.CancelledError)
                 ]
 
-                # Count actually-lost events across all failure buckets.
-                # ``_drain_and_flush`` reads ``failed_event_count`` from the
-                # raised exception to keep ``_flushed_count`` /
-                # ``_failed_count`` accounting accurate when only some
-                # tenants in the chunk fail.
-                total_failed_events = sum(
-                    len(tevs)
+                # Preserve the exact failed subset, including stable write
+                # keys, across the queue boundary. A count alone cannot tell
+                # the queue which tenants have already committed.
+                failed_events = [
+                    ev
                     for (_tid, tevs), r in zip(tasks, results, strict=True)
                     if isinstance(r, BaseException)
-                )
+                    for ev in tevs
+                ]
+                total_failed_events = len(failed_events)
 
                 # Priority order: cancel → other_base → errors. Cancellation
                 # wins so shutdown signals propagate even if a co-occurring
@@ -633,10 +637,12 @@ async def lifespan(app):
                 if cancel_errors:
                     e_cancel = cancel_errors[-1]
                     e_cancel.failed_event_count = total_failed_events  # type: ignore[attr-defined]
+                    e_cancel.failed_events = failed_events  # type: ignore[attr-defined]
                     raise e_cancel
                 if other_base:
                     e_base = other_base[-1]
                     e_base.failed_event_count = total_failed_events  # type: ignore[attr-defined]
+                    e_base.failed_events = failed_events  # type: ignore[attr-defined]
                     raise e_base
                 if errors:
                     # Single-tenant failure: re-raise the underlying error
@@ -650,12 +656,14 @@ async def lifespan(app):
                     if len(errors) == 1:
                         last_error = errors[-1]
                         last_error.failed_event_count = total_failed_events  # type: ignore[attr-defined]
+                        last_error.failed_events = failed_events  # type: ignore[attr-defined]
                         raise last_error
                     eg = ExceptionGroup(
                         f"audit batch flush failed for {len(errors)} tenants",
                         errors,
                     )
                     eg.failed_event_count = total_failed_events  # type: ignore[attr-defined]
+                    eg.failed_events = failed_events  # type: ignore[attr-defined]
                     raise eg
 
             audit_queue = AuditEventQueue(
@@ -714,6 +722,12 @@ async def lifespan(app):
         register_pipeline_consumers(lifecycle_adapter)
         if isinstance(event_bus, InProcessEventBus):
             register_archive_consumers(lifecycle_adapter)
+            # Correction propagation (CP-10): core-worker records who to tell on
+            # SaaS; with no worker process, core-api does.
+            from common.events.correction_handlers import register_correction_consumer
+            from core_api.services.correction_recipients import make_correction_adapter
+
+            register_correction_consumer(make_correction_adapter())
 
         await event_bus.start()
 
@@ -1238,6 +1252,7 @@ async def upstream_http_error_handler(request: Request, exc: httpx.HTTPStatusErr
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(memories_router, prefix="/api/v1")
 app.include_router(admin_memories_router, prefix="/api/v1")
+app.include_router(search_explain_router, prefix="/api/v1")
 app.include_router(entities_router, prefix="/api/v1")
 app.include_router(audit_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
@@ -1271,11 +1286,14 @@ app.include_router(insights_router, prefix="/api/v1")
 app.include_router(interview_router, prefix="/api/v1")
 app.include_router(evolve_router, prefix="/api/v1")
 app.include_router(conflicts_router, prefix="/api/v1")
+app.include_router(corrections_router, prefix="/api/v1")
+app.include_router(batons_router, prefix="/api/v1")
 app.include_router(lifecycle_router, prefix="/api/v1")
 app.include_router(scheduler_lease_router, prefix="/api/v1")
 app.include_router(org_deletion_router, prefix="/api/v1")
 app.include_router(usage_router, prefix="/api/v1")
 app.include_router(value_router, prefix="/api/v1")
+app.include_router(evidence_coverage_router, prefix="/api/v1")
 
 # Test-only endpoints (time-warp, etc.) — only registered when TESTING=1
 if _os.getenv("TESTING") == "1":
