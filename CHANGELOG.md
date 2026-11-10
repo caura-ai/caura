@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.48.0](https://github.com/caura-ai/caura/compare/backend-v3.47.0...backend-v3.48.0) (2026-11-10)
+
+
+### Features
+
+* **core-api:** log where a memory map build spends its time ([#2414](https://github.com/caura-ai/caura/issues/2414)) ([0a4341f](https://github.com/caura-ai/caura/commit/0a4341f987f78b9d65c73a3a006514ce7b1898d9))
+
 ## [3.47.0](https://github.com/caura-ai/caura/compare/backend-v3.46.2...backend-v3.47.0) (2026-11-09)
 
 
