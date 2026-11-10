@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.49.0](https://github.com/caura-ai/caura/compare/backend-v3.48.0...backend-v3.49.0) (2026-11-10)
+
+
+### Features
+
+* **storage:** save field layouts and positions ([#2416](https://github.com/caura-ai/caura/issues/2416)) ([f300e23](https://github.com/caura-ai/caura/commit/f300e23b51e9df253b6b33bb641691f341a947b7))
+
 ## [3.48.0](https://github.com/caura-ai/caura/compare/backend-v3.47.0...backend-v3.48.0) (2026-11-10)
 
 
