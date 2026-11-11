@@ -12,7 +12,7 @@ bounded() {
   local limit=$1 what=$2
   shift 2
   if ! timeout -k 15 "$limit" "$@"; then
-    echo "::error::${what} failed or ran past ${limit}s; the runner's package mirror is probably unreachable. Re-run the job."
+    echo "::warning::${what} failed or ran past ${limit}s."
     return 1
   fi
 }
@@ -27,15 +27,40 @@ fi
 # Match the runner image's short acquire bounds so retries cannot consume the
 # whole outer download budget before apt can try another mirror.
 APT=(sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
-bounded 180 "apt-get update" "${APT[@]}" update
-bounded 180 "apt-get install" "${APT[@]}" install -y bubblewrap apparmor-utils
+
+# On 2026-11-11 the runners stopped resolving azure.archive.ubuntu.com and then
+# archive.ubuntu.com as well (actions/runner-images#15297), so pruning to the
+# official mirror no longer helped. If the runner's mirrors fail, install from a
+# mirror outside ubuntu.com instead. It only carries the files: apt still checks
+# every index against Ubuntu's archive key. The list replaces the runner's
+# sources for these calls only, and List-Cleanup=0 keeps the runner's indexes.
+FALLBACK_MIRROR=https://mirrors.edge.kernel.org/ubuntu
+FALLBACK_LIST=$(mktemp)
+PROFILE=$(mktemp)
+trap 'rm -f -- "$FALLBACK_LIST" "$PROFILE"' EXIT
+for suite in noble noble-updates noble-security; do
+  echo "deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] $FALLBACK_MIRROR $suite main"
+done > "$FALLBACK_LIST"
+FALLBACK=(-o "Dir::Etc::SourceList=$FALLBACK_LIST" -o Dir::Etc::SourceParts=- -o APT::Get::List-Cleanup=0)
+
+# 90 s per download: healthy, each takes seconds, and a hung mirror plus the
+# fallback and the CLI install below then fit in the callers' 10-minute step.
+install_packages() {
+  bounded 90 "apt-get update" "${APT[@]}" "$@" update &&
+    bounded 90 "apt-get install" "${APT[@]}" "$@" install -y bubblewrap apparmor-utils
+}
+if ! install_packages; then
+  echo "::warning::The runner's Ubuntu mirrors failed. Installing bubblewrap and apparmor-utils from the fallback mirror, $FALLBACK_MIRROR."
+  if ! install_packages "${FALLBACK[@]}"; then
+    echo "::error::Could not install bubblewrap and apparmor-utils from the runner's mirrors or from $FALLBACK_MIRROR. Re-run the job."
+    exit 1
+  fi
+fi
 
 # Ubuntu restricts unprivileged user namespaces. Grant them to this named
 # launcher profile, rather than disabling that restriction system-wide or
 # running the reviewer as root. The filesystem policy is enforced by bwrap.
 # No executable attachment: only our explicit aa-exec invocation selects it.
-PROFILE=$(mktemp)
-trap 'rm -f -- "$PROFILE"' EXIT
 cat > "$PROFILE" <<'APPARMOR'
 abi <abi/4.0>,
 profile caura-review-bwrap flags=(unconfined) {
@@ -44,6 +69,9 @@ profile caura-review-bwrap flags=(unconfined) {
 APPARMOR
 sudo apparmor_parser -r "$PROFILE"
 
-bounded 180 "npm install of the Claude CLI" npm install -g @anthropic-ai/claude-code@2.1.159
+if ! bounded 180 "npm install of the Claude CLI" npm install -g @anthropic-ai/claude-code@2.1.159; then
+  echo "::error::Could not install the Claude CLI. Re-run the job."
+  exit 1
+fi
 REVIEW_PROXY_TOKEN=sandbox-smoke-test REVIEW_PROXY_URL=http://127.0.0.1:1 \
   bash "$(dirname "$0")/claude_review_sandbox.sh" --version
