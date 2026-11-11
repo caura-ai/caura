@@ -23,12 +23,14 @@ from dataclasses import dataclass
 from common.llm.constants import PREGATE_CLASSIFIER_TIMEOUT_SECONDS
 from common.llm.protocols import LLMProvider
 from common.llm.retry import call_with_fallback
+from common.llm.untrusted import UNTRUSTED_DATA_RULE, data_block
 from common.provider_names import ProviderName
 
 logger = logging.getLogger(__name__)
 
 # Kept deliberately short and structured: one classification, low token cost.
-_PROMPT = """Classify whether the following content is BUSINESS-relevant or PERSONAL.
+_PROMPT = (
+    """Classify whether the following content is BUSINESS-relevant or PERSONAL.
 
 BUSINESS: work, projects, customers, code, decisions, operations — anything an
 organization would keep in shared memory.
@@ -37,8 +39,13 @@ opinions or plans).
 
 Return ONLY JSON: {{"business_relevance": "business" | "personal", "confidence": 0.0-1.0}}
 
+"""
+    + UNTRUSTED_DATA_RULE
+    + """
+
 Content:
 {content}"""
+)
 
 
 @dataclass(frozen=True)
@@ -64,8 +71,9 @@ def _build_prompt(content: str) -> str:
     """Build the classifier prompt. ``str.format`` only parses the TEMPLATE for
     fields — the substituted ``content`` value is inserted literally — so the
     content must NOT be brace-escaped (escaping would corrupt JSON / code / any
-    braces in it). The template's own JSON example is escaped with ``{{ }}``."""
-    return _PROMPT.format(content=content)
+    braces in it). The template's own JSON example is escaped with ``{{ }}``.
+    The content goes in a data block: it is stored text, never instructions."""
+    return _PROMPT.format(content=data_block(content))
 
 
 async def classify_business_personal(

@@ -29,7 +29,7 @@ from tests.conftest import get_admin_headers, uid
 # ``+00:00``, NOT ``Z`` — see the module docstring.
 _ISO_OFFSET = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?\+00:00$")
 
-# The 29 keys this endpoint emits, in the order it emits them — WRITTEN OUT, not
+# The 37 keys this endpoint emits, in the order it emits them — WRITTEN OUT, not
 # derived from ``MemoryDetailResponse``. Deriving it would make the assertion
 # tautological: FastAPI builds the response order FROM the model, so a comparison
 # between the two moves together and passes for any reordering. Verified by
@@ -41,12 +41,21 @@ _WIRE_KEY_ORDER = [
     "fleet_id",
     "agent_id",
     "agent_display_name",
+    # The author's current trust level, from the same agents join (additive).
+    "agent_trust_level",
     "memory_type",
     "title",
     "content",
     "weight",
     "source_uri",
     "run_id",
+    # Evidence contract v1 (additive, 2026-11-04).
+    "observed_at",
+    "trace_id",
+    "tool_call_id",
+    "verification_status",
+    "verified_by",
+    "verified_at",
     "metadata",
     # C25 — platform-written view added 2026-08-25 (additive; a new key is a
     # deliberate wire change, which is exactly what this list exists to notice).
@@ -78,6 +87,8 @@ _TIMESTAMP_FIELDS = (
     "ts_valid_start",
     "ts_valid_end",
     "last_recalled_at",
+    "observed_at",
+    "verified_at",
 )
 
 

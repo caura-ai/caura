@@ -37,10 +37,18 @@ class FakeServer:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if path == "/api/v1/interview/cursor":
+            body = json.loads(request.content)
+            doc_id = watermark_doc_id(body["node_id"])
+            return httpx.Response(200, json={"last_seq": self.watermarks.get(doc_id, -1)})
+        # Keep legacy fixture support; dedicated cursor transport tests forbid
+        # the migrated runner from falling back to this generic route.
         if path.startswith("/api/v1/documents/"):
             doc_id = path.rsplit("/", 1)[-1]
             if doc_id in self.watermarks:
-                return httpx.Response(200, json={"doc_id": doc_id, "data": {"last_seq": self.watermarks[doc_id]}})
+                return httpx.Response(
+                    200, json={"doc_id": doc_id, "data": {"last_seq": self.watermarks[doc_id]}}
+                )
             return httpx.Response(404, json={"detail": "Document not found"})
         if path == "/api/v1/interview/submit":
             body = json.loads(request.content)

@@ -65,17 +65,17 @@ async def test_insights_closes_first_session_before_llm(mcp_env, monkeypatch):
     )
     monkeypatch.setattr(mcp_server, "check_and_increment", AsyncMock())
 
-    # Phase-1 dispatch — return one fake "memory" with the .id attribute
-    # the format helpers expect. The downstream synthesize_insights is
-    # patched, so the format helpers never actually run on this stub.
-    fake_memory = SimpleNamespace(
-        id="m1",
-        content="x",
-        memory_type="fact",
-        title=None,
-        status="active",
-        ts_valid_start=None,
-    )
+    # Phase-1 dispatch — return one fake "memory" shaped like the dict rows
+    # the storage-routed queries return. The downstream synthesize_insights
+    # is patched, so the format helpers never actually run on this stub.
+    fake_memory = {
+        "id": "m1",
+        "content": "x",
+        "memory_type": "fact",
+        "title": None,
+        "status": "active",
+        "ts_valid_start": None,
+    }
     fake_query = AsyncMock(return_value=[fake_memory])
     monkeypatch.setattr(
         "core_api.services.insights_service._QUERY_DISPATCH",

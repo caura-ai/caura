@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import Field, field_validator, model_validator
@@ -11,6 +11,8 @@ from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.constants import EVOLVE_MAX_RELATED_IDS, EVOLVE_OUTCOME_TYPES, VALID_SCOPES
 from core_api.middleware.idempotency import IDEMPOTENCY_HEADER, idempotency_for, release_claim_on_error
+from core_api.middleware.per_tenant_concurrency import per_tenant_slot
+from core_api.middleware.rate_limit import llm_limit
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.audit_service import log_action
 from core_api.services.caller_identity import resolve_caller_and_gate
@@ -98,9 +100,11 @@ class EvolveRequest(TenantScopedBody):
 
 
 @router.post("/evolve/report", responses={200: {"model": _oar.EvolveReportResponse}})
+@llm_limit
 async def report_outcome_endpoint(
     body: EvolveRequest,
     request: Request,
+    response: Response,
     auth: AuthContext = Depends(get_auth_context),
     idempotency_key: str | None = Header(None, alias=IDEMPOTENCY_HEADER),
 ):
@@ -159,7 +163,8 @@ async def report_outcome_endpoint(
     if _idem and (_replay := _idem.cached_replay):
         _body, _status = _replay
         return JSONResponse(content=_body, status_code=_status)
-    async with release_claim_on_error(_idem):
+    # A refusal for want of a model slot releases the claim and charges nothing.
+    async with release_claim_on_error(_idem), per_tenant_slot("llm", body.tenant_id):
         await check_and_increment(body.tenant_id, "evolve")
 
         from core_api.services.evolve_service import report_outcome

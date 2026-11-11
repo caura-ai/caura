@@ -7,7 +7,8 @@ loadtest harness flagged.
 
 Two caps compose:
 
-1. **Route-entry slot** (``"write"`` / ``"search"``, PR #33). Held for
+1. **Route-entry slot** (``"write"`` / ``"search"``, PR #33, and
+   ``"llm"`` for the routes and tools that call a model). Held for
    the whole request lifecycle — embed + enrich + storage. Acquire
    timeout is short (``per_tenant_acquire_timeout_seconds`` ≈ 50ms);
    fails fast with 429 so a saturated tenant can't queue forever.
@@ -45,7 +46,7 @@ from core_api.request_phase import phase
 
 logger = logging.getLogger(__name__)
 
-Scope = Literal["write", "search", "embed", "storage_write", "storage_search"]
+Scope = Literal["write", "search", "embed", "llm", "storage_write", "storage_search"]
 
 # Per-(scope, tenant) state. Read-modify-write of ``_TENANT_SEMAPHORES``
 # in ``_get_semaphore`` is safe without a lock because asyncio runs one
@@ -69,6 +70,8 @@ def _cap_for(scope: Scope) -> int:
         return settings.per_tenant_search_concurrency
     if scope == "embed":
         return settings.per_tenant_embed_concurrency
+    if scope == "llm":
+        return settings.per_tenant_llm_concurrency
     if scope == "storage_write":
         return settings.per_tenant_storage_write_concurrency
     if scope == "storage_search":
@@ -99,21 +102,21 @@ def _get_semaphore(scope: Scope, tenant_id: str) -> asyncio.Semaphore:
 
 @asynccontextmanager
 async def per_tenant_slot(
-    scope: Literal["write", "search", "embed"],
+    scope: Literal["write", "search", "embed", "llm"],
     tenant_id: str,
 ) -> AsyncIterator[None]:
     """Acquire one of the per-tenant slots for ``scope``, or raise 429
     fast.
 
     Cap is read from ``Settings`` (``per_tenant_write_concurrency`` /
-    ``per_tenant_search_concurrency`` / ``per_tenant_embed_concurrency``)
-    at semaphore-creation time. Use as a context manager around the
+    ``per_tenant_search_concurrency`` / ``per_tenant_embed_concurrency`` /
+    ``per_tenant_llm_concurrency``) at semaphore-creation time. Use as a context manager around the
     request handler body (or, for ``"embed"``, around the embedding
     backend call). Releases on exit (success or exception) so a handler
     raising 5xx still frees the slot.
 
     The ``scope`` parameter is narrowed to the fast-fail-429 scopes
-    (``"write"`` / ``"search"`` / ``"embed"``) — the deeper ``"storage_*"``
+    (``"write"`` / ``"search"`` / ``"embed"`` / ``"llm"``) — the deeper ``"storage_*"``
     scopes have different semantics (unbounded queue) and live behind
     :func:`per_tenant_storage_slot`. Passing a storage scope here would
     create a fast-fail 429 semaphore against the same ``(scope,

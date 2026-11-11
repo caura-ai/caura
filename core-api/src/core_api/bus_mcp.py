@@ -41,7 +41,7 @@ def register_peer(app=None, server=None, *, api_url="https://caura.internal"):
 
     @target.tool(name="peer")
     async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> dict:
-        """Caura peer: discover, agents, send, recent, threads, status, human, memory_context.
+        """Caura peer: discover, agents, send, handoff, recent, threads, status, human, memory_context.
 
         Uses current authenticated gateway identity and the REST argument contract.
         wait/ack/reply/progress/checkpoint require caura-bus-mcp over stdio, which

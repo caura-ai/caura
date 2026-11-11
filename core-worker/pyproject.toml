@@ -1,6 +1,6 @@
 [project]
 name = "core-worker"
-version = "3.37.7"
+version = "3.49.0"
 description = "Caura core async worker — consumes embedding requests and backfills embeddings"
 license = "Apache-2.0"
 requires-python = ">=3.12"
@@ -33,6 +33,11 @@ dependencies = [
     # ``_fetch_blocking`` would silently catch ``ImportError`` and all
     # Cloud Run requests would go unauthenticated with no WARNING log.
     "requests>=2.32,<3",
+    # ``common.cloud_run_identity`` fetches ID tokens for the self-hosted
+    # embedding backend listed in CLOUD_RUN_ID_TOKEN_ORIGINS through
+    # google.auth. Declared for the same reason as ``requests`` above: the
+    # [pubsub] and [vertex] extras bring it today, the base install does not.
+    "google-auth>=2.30,<3",
 ]
 
 [project.optional-dependencies]

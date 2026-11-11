@@ -4,6 +4,67 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.28.2](https://github.com/caura-ai/caura/compare/plugin-v2.28.1...plugin-v2.28.2) (2026-11-08)
+
+
+### Bug Fixes
+
+* **core-api:** one admission policy for REST and MCP calls ([#2363](https://github.com/caura-ai/caura/issues/2363)) ([6ab3c29](https://github.com/caura-ai/caura/commit/6ab3c29adf8a759ee1c2f5e12c428f958edc364f))
+
+## [2.28.1](https://github.com/caura-ai/caura/compare/plugin-v2.28.0...plugin-v2.28.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **agents:** tombstone deleted agents; tools act as their own agent ([#2354](https://github.com/caura-ai/caura/issues/2354)) ([13ba4d9](https://github.com/caura-ai/caura/commit/13ba4d9e5872663d6115119fae2ebf27127f2941))
+
+## [2.28.0](https://github.com/caura-ai/caura/compare/plugin-v2.27.0...plugin-v2.28.0) (2026-11-05)
+
+
+### Features
+
+* **memory:** tell a baton receiver on its next recall, and let it accept (HB-09) ([#2345](https://github.com/caura-ai/caura/issues/2345)) ([2235fe1](https://github.com/caura-ai/caura/commit/2235fe148ccabd63a23d101db3861bede96e726d))
+
+## [2.27.0](https://github.com/caura-ai/caura/compare/plugin-v2.26.0...plugin-v2.27.0) (2026-11-05)
+
+
+### Features
+
+* **clients:** show memory correction notices to agents and let them confirm ([#2336](https://github.com/caura-ai/caura/issues/2336)) ([ec82502](https://github.com/caura-ai/caura/commit/ec82502f2c4ebe0bf906a0e4c419bcd599067462))
+* **memory:** baton_id read filter on list, search and recall ([#2339](https://github.com/caura-ai/caura/issues/2339)) ([cf0bf30](https://github.com/caura-ai/caura/commit/cf0bf30933d0328e4e1f01b318d6f3476a8c3d31))
+* **memory:** send a correction's notices and show who confirmed ([#2338](https://github.com/caura-ai/caura/issues/2338)) ([614a9c7](https://github.com/caura-ai/caura/commit/614a9c7c058d55ac6c952a335b410a821dcfa9aa))
+
+## [2.26.0](https://github.com/caura-ai/caura/compare/plugin-v2.25.9...plugin-v2.26.0) (2026-11-04)
+
+
+### Features
+
+* **evidence:** clients send real evidence on writes (EC-15) ([#2311](https://github.com/caura-ai/caura/issues/2311)) ([3786c21](https://github.com/caura-ai/caura/commit/3786c21bea5ebc51373be0aa35d6cc29d0375b29))
+* **memory:** automatic verification states and the verify operation ([#2312](https://github.com/caura-ai/caura/issues/2312)) ([1aff27d](https://github.com/caura-ai/caura/commit/1aff27d3f2bb95d4de116702ada643e7f9c19fc1))
+* **memory:** evidence fields and server-stamped trace_id ([#2307](https://github.com/caura-ai/caura/issues/2307)) ([cc263af](https://github.com/caura-ai/caura/commit/cc263affb2993c30df3abe1ea61f1c3d3818db27))
+* **recall:** evidence object, verified_only filter and why phrase on every hit ([#2310](https://github.com/caura-ai/caura/issues/2310)) ([c272e36](https://github.com/caura-ai/caura/commit/c272e368478362d9e06a580a3903e09f5883332d))
+
+## [2.25.9](https://github.com/caura-ai/caura/compare/plugin-v2.25.8...plugin-v2.25.9) (2026-11-03)
+
+
+### Bug Fixes
+
+* **recall:** show readers each memory's author trust level ([#2294](https://github.com/caura-ai/caura/issues/2294)) ([6ff5089](https://github.com/caura-ai/caura/commit/6ff50894a6f135a0340f2744a5c3febeadf38086))
+
+## [2.25.8](https://github.com/caura-ai/caura/compare/plugin-v2.25.7...plugin-v2.25.8) (2026-11-02)
+
+
+### Bug Fixes
+
+* **governance:** run the business/personal pre-gate on every write ([#2283](https://github.com/caura-ai/caura/issues/2283)) ([9c00308](https://github.com/caura-ai/caura/commit/9c00308c921bd9e36cbc4b082309b110db9a5691))
+
+## [2.25.7](https://github.com/caura-ai/caura/compare/plugin-v2.25.6...plugin-v2.25.7) (2026-11-02)
+
+
+### Dependencies
+
+* **plugin:** bump @types/node from 26.6.5 to 26.6.6 in /plugin in the npm-minor-patch group across 1 directory ([#2269](https://github.com/caura-ai/caura/issues/2269)) ([ca0898d](https://github.com/caura-ai/caura/commit/ca0898de496dcaf321f3bd5e99b16365b03ddf32))
+
 ## [2.25.6](https://github.com/caura-ai/caura/compare/plugin-v2.25.5...plugin-v2.25.6) (2026-10-27)
 
 

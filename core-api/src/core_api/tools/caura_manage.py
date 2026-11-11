@@ -1,7 +1,8 @@
 """ToolSpec for caura_manage — per-memory lifecycle (op-dispatched).
 
-Ops: read (by id), update, transition, delete, bulk_delete, lineage — the
-same six the handler accepts.
+Ops: read (by id), update, transition, delete, bulk_delete, lineage, verify,
+unverify, send_correction, confirm_correction, read_baton, accept_baton — the
+same twelve the handler accepts.
 """
 
 from core_api import mcp_server
@@ -22,11 +23,16 @@ from ._types import OpSpec, ToolSpec
 # (tests/test_mcp_token_budget.py records the arithmetic), so say only what the
 # inputSchema does not already carry.
 _DESCRIPTION = (
-    "Per-memory lifecycle. bulk_delete and lineage are not in the plugin; lineage returns "
-    "the supersession chain. "
+    "Per-memory lifecycle. bulk_delete, lineage, verify, unverify, send_correction and read_baton "
+    "are not in the plugin; "
+    "lineage returns the supersession chain. "
     "update patches fields and re-embeds if content changes. "
     "transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). "
-    "delete and bulk_delete are soft (prefer transition to outdated)."
+    "delete and bulk_delete are soft (prefer transition to outdated). "
+    "verify sets human_verified (trust 3), unverify clears it. "
+    "send_correction notifies the agents that read a corrected memory (trust 3); "
+    "confirm_correction acks a notice sent to you. "
+    "read_baton and accept_baton act on a handoff baton handed to you."
 )
 
 _SPEC = ToolSpec(
@@ -49,7 +55,7 @@ _SPEC = ToolSpec(
     # >= 3 write) on cross-fleet rows. Nothing corroborates per-op attribution —
     # invariant 3 asks only whether a tool declaring a threshold reaches SOME
     # trust gate — so this claims no more than the two ``enforce_delete``
-    # calls visible in the handler.
+    # calls and the ``enforce_verify`` call visible in the handler.
     ops=(
         OpSpec(name="read", description="Fetch a memory by id.", required_params=("memory_id",)),
         OpSpec(name="update", description="Patch memory fields.", required_params=("memory_id",)),
@@ -75,8 +81,45 @@ _SPEC = ToolSpec(
             description="Walk the supersession chain for a memory.",
             required_params=("memory_id",),
         ),
+        # EC-14. ``enforce_verify`` is the gate (>= 3, agent credentials only).
+        OpSpec(
+            name="verify",
+            description="Mark a memory human_verified.",
+            required_params=("memory_id",),
+            trust_required=3,
+        ),
+        OpSpec(
+            name="unverify",
+            description="Withdraw a memory's verification.",
+            required_params=("memory_id",),
+            trust_required=3,
+        ),
+        # CP-11. ``enforce_send_correction`` is the gate (>= 3, agent credentials only).
+        OpSpec(
+            name="send_correction",
+            description="Send a correction's notices to the agents that read the old version.",
+            required_params=("correction_id",),
+            trust_required=3,
+        ),
+        OpSpec(
+            name="confirm_correction",
+            description="Confirm a correction notice sent to you.",
+            required_params=("correction_id",),
+        ),
+        # HB-09. The receiver or sender only (``baton_notices.read_as_agent``).
+        OpSpec(
+            name="read_baton",
+            description="Read a handoff baton handed to you.",
+            required_params=("baton_id",),
+        ),
+        OpSpec(
+            name="accept_baton",
+            description="Accept a handoff baton handed to you.",
+            required_params=("baton_id",),
+        ),
     ),
     error_codes=(
+        "AGENT_CREDENTIAL_FORBIDDEN",
         "AGENT_IDENTITY_MISMATCH",
         "AGENT_NOT_REGISTERED",
         "AGENT_TRUST_TOO_LOW",
@@ -94,6 +137,7 @@ _SPEC = ToolSpec(
         "PLAN_LIMIT_READ_ONLY",
         "REQUEST_BUDGET_EXCEEDED",
         "UNAUTHORIZED",
+        "UNAVAILABLE",
     ),
 )
 register(_SPEC)

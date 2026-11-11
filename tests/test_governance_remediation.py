@@ -40,7 +40,7 @@ def emitted(monkeypatch):
 
 @pytest.fixture
 def storage(monkeypatch):
-    """Stub the storage client; record soft-delete / update calls.
+    """Stub the storage client; record drop / update calls.
 
     ``actions.children`` seeds what ``find_children_by_parent_id`` returns, so a
     test can put derived rows behind a parent without a database. Empty by
@@ -56,8 +56,8 @@ def storage(monkeypatch):
     actions.children = []
 
     class _SC:
-        async def soft_delete_memory(self, mid, tenant_id):
-            actions.append(("soft_delete", mid, tenant_id))
+        async def drop_memory(self, mid, tenant_id):
+            actions.append(("drop", mid, tenant_id))
 
         async def update_memory(self, mid, tenant_id, patch):
             actions.append(("update", mid, tenant_id, patch))
@@ -111,12 +111,12 @@ async def test_missing_id_skips_without_side_effects(emitted, storage):
     assert emitted == []
 
 
-async def test_pii_drop_soft_deletes_and_audits(emitted, storage):
+async def test_pii_drop_drops_the_row_and_audits(emitted, storage):
     cfg = _cfg(pii={"enabled": True, "action": "drop"})
     mem = _mem(metadata={"contains_pii": True, "pii_types": ["health"]})
     outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
     assert outcome.dropped is True
-    assert ("soft_delete", "m1", "t1") in storage
+    assert ("drop", "m1", "t1") in storage
     assert any(c["action"] == "pii_drop" for c in emitted)
 
 
@@ -169,8 +169,8 @@ async def test_a_failed_purge_does_not_abort_the_handler(
     """
 
     class _SC:
-        async def soft_delete_memory(self, mid, tenant_id):
-            storage.append(("soft_delete", mid, tenant_id))
+        async def drop_memory(self, mid, tenant_id):
+            storage.append(("drop", mid, tenant_id))
 
         async def purge_entity_artifacts(self, tenant_id, memory_id):
             raise RuntimeError("storage refused the purge")
@@ -185,7 +185,7 @@ async def test_a_failed_purge_does_not_abort_the_handler(
 
     # The parent's verdict still reaches the caller.
     assert outcome.dropped is True
-    assert ("soft_delete", "m1", "t1") in storage
+    assert ("drop", "m1", "t1") in storage
     # And the failure is not silent.
     assert any("were NOT" in r.getMessage() for r in caplog.records), [
         r.getMessage()[:80] for r in caplog.records
@@ -254,7 +254,7 @@ async def test_a_drop_cascades_to_the_children_that_already_exist(emitted, stora
     outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
 
     assert outcome.dropped is True
-    deleted = {mid for kind, mid, *_ in storage if kind == "soft_delete"}
+    deleted = {mid for kind, mid, *_ in storage if kind == "drop"}
     assert deleted == {"m1", "c1", "c2"}, (
         f"the dropped content survives in the children: {deleted}"
     )
@@ -343,7 +343,7 @@ async def test_pii_drop_cascades_too(emitted, storage):
     outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
 
     assert outcome.dropped is True
-    deleted = {mid for kind, mid, *_ in storage if kind == "soft_delete"}
+    deleted = {mid for kind, mid, *_ in storage if kind == "drop"}
     assert deleted == {"m1", "c1"}, deleted
 
 
@@ -363,10 +363,10 @@ async def test_one_failing_child_does_not_abandon_the_rest(
     storage.children = [_child("c1"), _child("c2"), _child("c3")]
 
     class _SC:
-        async def soft_delete_memory(self, mid, tenant_id):
+        async def drop_memory(self, mid, tenant_id):
             if mid == "c1":
                 raise RuntimeError("storage blipped on the first child")
-            storage.append(("soft_delete", mid, tenant_id))
+            storage.append(("drop", mid, tenant_id))
 
         async def update_memory(self, mid, tenant_id, patch):
             storage.append(("update", mid, tenant_id, patch))
@@ -399,7 +399,7 @@ async def test_one_failing_child_does_not_abandon_the_rest(
     # want opposite follow-up.
     assert exc.value.outcome.dropped is True
 
-    deleted = {mid for kind, mid, *_ in storage if kind == "soft_delete"}
+    deleted = {mid for kind, mid, *_ in storage if kind == "drop"}
     # c1 failed; c2 and c3 must still have been remediated, and so must the parent.
     assert deleted == {"m1", "c2", "c3"}, (
         f"a failure on one child abandoned the others: {deleted}"
@@ -425,10 +425,10 @@ async def test_a_child_whose_delete_failed_after_its_audit_is_logged_as_such(
     storage.children = [_child("c1")]
 
     class _SC:
-        async def soft_delete_memory(self, mid, tenant_id):
+        async def drop_memory(self, mid, tenant_id):
             if mid == "c1":
                 raise RuntimeError("delete failed AFTER the audit landed")
-            storage.append(("soft_delete", mid, tenant_id))
+            storage.append(("drop", mid, tenant_id))
 
         async def update_memory(self, mid, tenant_id, patch):
             storage.append(("update", mid, tenant_id, patch))
@@ -516,7 +516,7 @@ async def test_a_child_whose_audit_failed_is_reported_as_untouched(
     assert flagged, "the failure carried no field an alert could key on"
     assert flagged[0].audit_emitted is False
     # And the delete was never attempted for it.
-    assert not [a for a in storage if a[0] == "soft_delete" and a[1] == "c1"]
+    assert not [a for a in storage if a[0] == "drop" and a[1] == "c1"]
 
 
 async def test_a_cascaded_child_has_its_own_graph_rows_purged(emitted, storage):
@@ -552,10 +552,10 @@ async def test_a_child_that_could_not_be_deleted_is_not_purged(
     storage.children = [_child("c1")]
 
     class _SC:
-        async def soft_delete_memory(self, mid, tenant_id):
+        async def drop_memory(self, mid, tenant_id):
             if mid == "c1":
                 raise RuntimeError("delete refused")
-            storage.append(("soft_delete", mid, tenant_id))
+            storage.append(("drop", mid, tenant_id))
 
         async def find_children_by_parent_id(self, tenant_id, parent_id):
             return list(storage.children)
@@ -656,8 +656,8 @@ async def test_a_failed_cascade_never_erases_the_parents_own_audit(
                 raise RuntimeError("storage blipped on the child")
             storage.append(("update", mid, tenant_id, patch))
 
-        async def soft_delete_memory(self, mid, tenant_id):
-            storage.append(("soft_delete", mid, tenant_id))
+        async def drop_memory(self, mid, tenant_id):
+            storage.append(("drop", mid, tenant_id))
 
         async def find_children_by_parent_id(self, tenant_id, parent_id):
             return list(storage.children)
@@ -729,7 +729,7 @@ async def test_a_purge_response_that_is_not_an_object_does_not_raise(
     """
 
     class _SC:
-        async def soft_delete_memory(self, mid, tenant_id):
+        async def drop_memory(self, mid, tenant_id):
             pass
 
         async def find_children_by_parent_id(self, tenant_id, parent_id):
@@ -768,12 +768,12 @@ async def test_nonbusiness_keep_private_updates_visibility(emitted, storage):
     assert any(c["action"] == "nonbusiness_keep_private" for c in emitted)
 
 
-async def test_nonbusiness_drop_soft_deletes(emitted, storage):
+async def test_nonbusiness_drop_drops_the_row(emitted, storage):
     cfg = _cfg(nb={"enabled": True, "disposition": "drop"})
     mem = _mem(metadata={"business_relevance": "personal"})
     outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
     assert outcome.dropped is True
-    assert ("soft_delete", "m1", "t1") in storage
+    assert ("drop", "m1", "t1") in storage
     assert any(c["action"] == "nonbusiness_drop" for c in emitted)
 
 
@@ -801,7 +801,7 @@ async def test_business_content_is_noop(emitted, storage):
         ),
     ],
 )
-async def test_drop_audits_before_soft_delete(
+async def test_drop_audits_before_the_drop(
     monkeypatch, cfg_kwargs, metadata, drop_action
 ):
     # Compliance invariant: the audit must be recorded BEFORE the destructive
@@ -814,8 +814,8 @@ async def test_drop_audits_before_soft_delete(
         order.append(f"audit:{kw['action']}")
 
     class _SC:
-        async def soft_delete_memory(self, _mid, _tenant_id):
-            order.append("soft_delete")
+        async def drop_memory(self, _mid, _tenant_id):
+            order.append("drop")
 
     monkeypatch.setattr(governance_remediation, "emit_governance_audit", _audit)
     monkeypatch.setattr(governance_remediation, "get_storage_client", lambda: _SC())
@@ -824,4 +824,4 @@ async def test_drop_audits_before_soft_delete(
         _mem(metadata=metadata), _cfg(**cfg_kwargs)
     )
     assert outcome.dropped is True
-    assert order == [f"audit:{drop_action}", "soft_delete"]
+    assert order == [f"audit:{drop_action}", "drop"]

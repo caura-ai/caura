@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from core_api.services.contradiction import relationship as rel
+from core_api.services.contradiction_detector import CONTRADICTION_PROMPT
 
 pytestmark = pytest.mark.unit
 
@@ -128,7 +129,7 @@ async def test_llm_branch_uses_extended_prompt_and_parses_model():
     assert c == rel._CONF_MODEL
     # The extended instruction is appended to the base prompt (base untouched).
     assert "relationship" in captured["prompt"]
-    assert rel.CONTRADICTION_PROMPT.split("{")[0].strip()[:20] in captured["prompt"]
+    assert CONTRADICTION_PROMPT.split("{")[0].strip()[:20] in captured["prompt"]
     assert rel._RELATIONSHIP_INSTRUCTION.strip()[:20] in captured["prompt"]
 
 

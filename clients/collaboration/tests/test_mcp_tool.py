@@ -72,6 +72,7 @@ async def test_only_one_tool_is_advertised():
         "progress",
         "checkpoint",
         "memory_context",
+        "handoff",
     }
 
 

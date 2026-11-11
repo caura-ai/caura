@@ -42,10 +42,27 @@ class ProvidersUnavailableError(Exception):
     memory with no entities, and nothing retried it.
 
     Only for failures that asking again may fix (``_may_pass_if_asked_again``):
-    a timeout, a lost connection, an HTTP 408, 425, 429 or 5xx. Everything else
-    still degrades at once: a bad key, an unknown model or a rejected request
-    fails the same way later, output that does not parse repeats because the
-    seed is pinned, and with no usable provider there is no one to ask.
+    a timeout, a lost connection, an HTTP 408, 425, 429 or 5xx. Any other
+    provider failure is ``UnretryableProviderFailureError``, and with no usable
+    provider there is no one to ask, so that still degrades here.
+
+    ``__cause__`` is the last provider error.
+    """
+
+
+class UnretryableProviderFailureError(Exception):
+    """Every provider was reached and failed in a way asking again would repeat.
+
+    The other half of ``raise_on_provider_failure``. A bad key, an unknown model
+    or a rejected request fails the same way later; output that does not parse
+    repeats because the seed is pinned; an error nobody classified is not
+    assumed to pass. So the caller does not ask again: it settles for the
+    heuristic at once, as the extractor did, but it knows that it did.
+
+    The extractor used to settle for the heuristic itself and hand back its
+    graph as if the model had made it. From 2026-10-10 to 2026-11-08 Vertex
+    refused about half of all prompts with a 400 on the seed (caura#2367), and
+    the worker recorded none of them and flagged no audit entry.
 
     ``__cause__`` is the last provider error.
     """
@@ -111,6 +128,23 @@ Rules:
   statement about a different subject, and the update would never supersede the
   value it replaces. Exactly one entity carries role=subject unless the content
   genuinely asserts facts about two independent subjects.
+- ATTRIBUTION IS NOT THE SUBJECT. When the main clause only reports a fact
+  ("<who> recorded / changed / set / confirmed / noted / said that X is Y"),
+  the grammatical subject to use is that of the clause stating the fact: X,
+  the thing the fact is about. The reporter is role=mentioned.
+    "Nera Sol changed the Velquill gateway's primary region to cobalt ridge."
+      -> subject: velquill gateway primary region   object: cobalt ridge
+         mentioned: nera sol
+  Otherwise every agent that reports a correction becomes a different subject,
+  and no correction ever supersedes the fact another agent reported.
+- "V AS THE S" PUTS THE SUBJECT LAST. In "<who> recorded / set / listed /
+  assigned V as the S", V is the value and S is the subject:
+    "Jora Kelm recorded canary release as the Orvella API's rollout policy."
+      -> subject: orvella api rollout policy   object: canary release
+  Name the subject with its attribute (the rollout policy, the read-replica
+  count, the storage tier), the same way whichever verb the writer used, so
+  "set X's retention to 30 days" and "extended X's retention to 90 days" share
+  the subject "x retention".
 - KEEP a bracketed qualifier the content attaches to a name. "Acme (Delaware)"
   and "Acme (Ohio)" are two different organizations, so they are "acme
   (delaware)" and "acme (ohio)" — never a bare "acme". Dropping the qualifier
@@ -395,9 +429,11 @@ async def extract_entities_from_content(
       2. Alternative LLM provider (with retry) — if API key available
       3. Regex heuristic (_fake_extract) — always succeeds
 
-    With ``raise_on_provider_failure``, step 3 raises
-    ``ProvidersUnavailableError`` instead when a provider was reached and
-    failed on something asking again may fix; the caller retries later.
+    With ``raise_on_provider_failure``, step 3 raises instead when a provider
+    was reached and failed: ``ProvidersUnavailableError`` when asking again may
+    fix it, and the caller retries later; ``UnretryableProviderFailureError``
+    when it would not, and the caller settles for the heuristic itself. With no
+    usable provider it still returns the heuristic's graph.
 
     Otherwise never raises; always returns an ExtractedGraph.
     """
@@ -415,7 +451,10 @@ async def extract_entities_from_content(
         # (e.g., "helios-9" → 'technology' on one call, 'project' on the
         # next). CRC32 of the encoded prompt gives a deterministic 32-bit
         # integer that survives process restarts — unlike ``hash()`` which
-        # is salted per-process for str inputs.
+        # is salted per-process for str inputs. It is UNSIGNED, and Vertex
+        # and Gemini take a signed int32 seed: their providers fit it
+        # (``common/llm/providers/_genai_seed.py``), or half of all prompts
+        # are refused with a 400.
         seed = zlib.crc32(prompt.encode("utf-8"))
         # A5b #3 — declare the expected shape via response_schema. It is a
         # HINT, not the server-side guarantee A5b originally claimed: the
@@ -477,21 +516,27 @@ async def extract_entities_from_content(
         or None
     )
 
-    # The provider errors that asking again may fix, for the last resort below.
-    provider_errors: list[Exception] = []
+    # The provider errors, by whether asking again may fix them, for the last
+    # resort below.
+    transient_errors: list[Exception] = []
+    unretryable_errors: list[Exception] = []
 
     async def _attempt(llm: LLMProvider) -> ExtractedGraph:
         try:
             return await _do_extract(llm)
         except Exception as exc:
-            if _may_pass_if_asked_again(exc):
-                provider_errors.append(exc)
+            (transient_errors if _may_pass_if_asked_again(exc) else unretryable_errors).append(exc)
             raise
 
     def _last_resort() -> ExtractedGraph:
-        if raise_on_provider_failure and provider_errors:
-            last = provider_errors[-1]
+        if raise_on_provider_failure and transient_errors:
+            last = transient_errors[-1]
             raise ProvidersUnavailableError(
+                f"every entity-extraction provider failed; the last with {type(last).__name__}"
+            ) from last
+        if raise_on_provider_failure and unretryable_errors:
+            last = unretryable_errors[-1]
+            raise UnretryableProviderFailureError(
                 f"every entity-extraction provider failed; the last with {type(last).__name__}"
             ) from last
         return degraded_graph(content, tenant_config)

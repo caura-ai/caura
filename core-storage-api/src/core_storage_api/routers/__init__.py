@@ -1,10 +1,13 @@
 from core_storage_api.routers.agents import router as agents_router
 from core_storage_api.routers.audit import router as audit_router
+from core_storage_api.routers.batons import router as batons_router
 from core_storage_api.routers.capability_usage import router as capability_usage_router
+from core_storage_api.routers.corrections import router as corrections_router
 from core_storage_api.routers.debug import router as debug_router
 from core_storage_api.routers.documents import router as documents_router
 from core_storage_api.routers.entities import router as entities_router
 from core_storage_api.routers.evolve import router as evolve_router
+from core_storage_api.routers.exposure import router as exposure_router
 from core_storage_api.routers.fleet import router as fleet_router
 from core_storage_api.routers.health import router as health_router
 from core_storage_api.routers.idempotency import router as idempotency_router
@@ -14,6 +17,7 @@ from core_storage_api.routers.lifecycle_audit import router as lifecycle_audit_r
 from core_storage_api.routers.memories import router as memories_router
 from core_storage_api.routers.organization_settings import router as organization_settings_router
 from core_storage_api.routers.preview import router as preview_router
+from core_storage_api.routers.projections import router as projections_router
 from core_storage_api.routers.purge import router as purge_router
 from core_storage_api.routers.reports import router as reports_router
 from core_storage_api.routers.skill_factory import router as skill_factory_router
@@ -27,12 +31,15 @@ from core_storage_api.routers.value import router as value_router
 __all__ = [
     "agents_router",
     "audit_router",
+    "batons_router",
     "capability_usage_router",
     "tenant_usage_router",
     "debug_router",
+    "corrections_router",
     "documents_router",
     "entities_router",
     "evolve_router",
+    "exposure_router",
     "fleet_router",
     "health_router",
     "idempotency_router",
@@ -42,6 +49,7 @@ __all__ = [
     "memories_router",
     "organization_settings_router",
     "preview_router",
+    "projections_router",
     "purge_router",
     "reports_router",
     "skill_factory_router",

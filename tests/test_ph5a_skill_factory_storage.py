@@ -69,6 +69,8 @@ async def _seed_memory(
     created_at: datetime | None = None,
     last_recalled_at: datetime | None = None,
     supersedes_id: str | None = None,
+    visibility: str = "scope_team",
+    deleted_at: datetime | None = None,
 ) -> str:
     # NOTE: the OSS ``memories`` table has no ``updated_at`` column — the
     # contradiction read windows on ``created_at`` (see the DEVIATION note
@@ -83,11 +85,12 @@ async def _seed_memory(
                 INSERT INTO memories
                     (id, tenant_id, fleet_id, agent_id, run_id, content,
                      memory_type, status, recall_count, created_at,
-                     last_recalled_at, supersedes_id)
+                     last_recalled_at, supersedes_id, visibility, deleted_at)
                 VALUES
                     (CAST(:id AS uuid), :tenant_id, :fleet_id, :agent_id, :run_id, :content,
                      'fact', :status, :recall_count, :created_at,
-                     :last_recalled_at, CAST(:supersedes_id AS uuid))
+                     :last_recalled_at, CAST(:supersedes_id AS uuid),
+                     :visibility, :deleted_at)
                 """
             ),
             {
@@ -102,6 +105,8 @@ async def _seed_memory(
                 "created_at": created,
                 "last_recalled_at": last_recalled_at,
                 "supersedes_id": supersedes_id,
+                "visibility": visibility,
+                "deleted_at": deleted_at,
             },
         )
     return mem_id
@@ -528,6 +533,58 @@ async def test_forge_memory_content_by_ids(sc):
     assert (
         await sc.forge_memory_content_by_ids(tenant_id=_t(), memory_ids=[m1, m2]) == []
     )
+
+
+# Forge distils skill candidates, readable tenant-wide, from what these two reads
+# return. A row its author kept private, deleted, or that is held for review is
+# not the tenant's to distil. Outdated and conflicted rows stay in: a session
+# whose memories were later contradicted is one Forge needs to see.
+_FORGE_CORPUS_ROWS = {
+    "team": {},
+    "org": {"visibility": "scope_org"},
+    "outdated": {"status": "outdated"},
+    "private": {"visibility": "scope_agent"},
+    "deleted": {"status": "deleted", "deleted_at": datetime.now(UTC)},
+    "held": {"status": "quarantined"},
+}
+_FORGE_CORPUS_KEPT = {"team", "org", "outdated"}
+
+
+async def _seed_forge_corpus(tenant: str, now: datetime) -> dict[str, str]:
+    return {
+        name: await _seed_memory(
+            tenant_id=tenant,
+            run_id=f"run-{name}",
+            content=f"{name} text",
+            created_at=now - timedelta(hours=1),
+            **overrides,
+        )
+        for name, overrides in _FORGE_CORPUS_ROWS.items()
+    }
+
+
+async def test_session_memories_in_window_skips_private_deleted_and_held(sc):
+    tenant = _t()
+    now = datetime.now(UTC)
+    await _seed_forge_corpus(tenant, now)
+    rows = await sc.session_memories_in_window(
+        tenant_id=tenant,
+        fleet_id=None,
+        window_start=now - timedelta(days=1),
+        window_end=now + timedelta(minutes=1),
+    )
+    assert {r["run_id"] for r in rows} == {f"run-{n}" for n in _FORGE_CORPUS_KEPT}
+
+
+async def test_forge_memory_content_skips_private_deleted_and_held(sc):
+    tenant = _t()
+    ids = await _seed_forge_corpus(tenant, datetime.now(UTC))
+    rows = await sc.forge_memory_content_by_ids(
+        tenant_id=tenant, memory_ids=list(ids.values())
+    )
+    assert {r["id"]: r["content"] for r in rows} == {
+        ids[n]: f"{n} text" for n in _FORGE_CORPUS_KEPT
+    }
 
 
 async def test_outcome_contradiction_signals(sc):

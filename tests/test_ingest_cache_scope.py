@@ -111,7 +111,9 @@ async def _preview_as(monkeypatch, auth, agent_id):
 
     monkeypatch.setattr(memories, "ingest_preview", _preview)
     body = IngestRequest(tenant_id="tenant-1", agent_id=agent_id, content=CONTENT)
-    await memories.ingest_preview_endpoint(body, auth)
+    await memories.ingest_preview_endpoint(
+        request=None, body=body, response=None, auth=auth
+    )
     return captured["agent_id"]
 
 

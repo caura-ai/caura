@@ -48,11 +48,14 @@ from core_storage_api.middleware import (
 from core_storage_api.routers import (
     agents_router,
     audit_router,
+    batons_router,
     capability_usage_router,
+    corrections_router,
     debug_router,
     documents_router,
     entities_router,
     evolve_router,
+    exposure_router,
     fleet_router,
     health_router,
     idempotency_router,
@@ -62,6 +65,7 @@ from core_storage_api.routers import (
     memories_router,
     organization_settings_router,
     preview_router,
+    projections_router,
     purge_router,
     reports_router,
     skill_factory_router,
@@ -425,6 +429,18 @@ def create_app() -> FastAPI:
     # Value metering (migration 067): sessions, memory origins and reuse.
     # Every route is bound to one tenant.
     app.include_router(value_router, prefix=prefix)
+    # Memory exposure (migration 072): which agents a memory was handed to.
+    # Every route is bound to one tenant.
+    app.include_router(exposure_router, prefix=prefix)
+    # Memory corrections (migration 073): who to tell about a correction.
+    # Every route is bound to one tenant.
+    app.include_router(corrections_router, prefix=prefix)
+    # Handoff batons (migration 076): which agents a baton is waiting on.
+    # Every route is bound to one tenant.
+    app.include_router(batons_router, prefix=prefix)
+    # Saved field layouts (migration 078): fit claims, models and positions.
+    # Every route is bound to one tenant.
+    app.include_router(projections_router, prefix=prefix)
 
     return app
 

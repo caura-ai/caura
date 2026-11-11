@@ -35,6 +35,7 @@ from common.enrichment.constants import (
 from common.enrichment.schema import EnrichmentResult
 from common.llm.protocols import LLMProvider
 from common.llm.retry import call_with_fallback
+from common.llm.untrusted import data_block
 from common.provider_names import ProviderName
 
 logger = logging.getLogger(__name__)
@@ -347,8 +348,9 @@ async def enrich_memory(
         # re-scanned, so it must NOT be brace-escaped — escaping would corrupt
         # JSON / code / any ``{...}`` in the content before the LLM sees it (a
         # substituted value never raises KeyError). The template's own JSON
-        # example is escaped with literal ``{{ }}``.
-        prompt = ENRICHMENT_PROMPT.format(content=content, today=ref_date)
+        # example is escaped with literal ``{{ }}``. The content goes in a data
+        # block: it is stored text, never instructions to the classifier.
+        prompt = ENRICHMENT_PROMPT.format(content=data_block(content), today=ref_date)
         t0 = time.perf_counter()
         raw = await llm.complete_json(prompt)
         llm_ms = int((time.perf_counter() - t0) * 1000)

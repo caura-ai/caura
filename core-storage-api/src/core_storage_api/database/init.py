@@ -56,8 +56,21 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # exactly when stamping 070 skips no work, as with 068. It reads ``documents``
 # and ``organization_settings`` (001 and 014), so boot runs the probe only where
 # the stamp branch can use it, after 019's sentinel; an empty database has
-# neither table.
-_HEAD_FINGERPRINT_REVISION = "070"
+# neither table. 071 adds the evidence columns and builds
+# ``ix_memories_verification`` last, so that index, valid, joins the probe. 072
+# creates ``memory_exposure`` and its index in one transaction, so the table
+# joins the probe. 073 creates ``memory_correction`` and then
+# ``memory_correction_recipient`` in one transaction, so the second joins the
+# probe. 074 adds the send columns and builds
+# ``ix_memory_correction_recipient_agent`` last, in one transaction, so that
+# index joins the probe. 075 builds ``ix_memories_baton``, so that index, valid,
+# joins the probe. 076 creates ``baton_recipient`` and builds
+# ``ix_baton_recipient_waiting`` last, in one transaction, so that index joins
+# the probe. 077 creates ``agent_tombstones`` in one transaction, so the table
+# joins the probe. 078 creates ``projection_models`` and ``memory_projections``
+# and builds ``ix_memory_projections_memory`` last, in one transaction, so that
+# index joins the probe.
+_HEAD_FINGERPRINT_REVISION = "078"
 _HEAD_FINGERPRINT_SQL: str | None = (
     "SELECT (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -79,7 +92,25 @@ _HEAD_FINGERPRINT_SQL: str | None = (
     "AND table_name = 'organization_settings_audit' AND column_name = 'actor_credential_id') "
     "AND NOT EXISTS (SELECT 1 FROM documents WHERE collection = 'skills' "
     "AND ((data::jsonb) ->> 'status') IS NULL AND tenant_id NOT IN ("
-    "SELECT org_id FROM organization_settings WHERE (settings -> 'skills_factory' ->> 'enabled') = 'true'))"
+    "SELECT org_id FROM organization_settings WHERE (settings -> 'skills_factory' ->> 'enabled') = 'true')) "
+    "AND EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+    "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' "
+    "AND c.relname = 'ix_memories_verification' AND i.indisvalid) "
+    "AND EXISTS (SELECT 1 FROM information_schema.tables "
+    "WHERE table_schema = 'public' AND table_name = 'memory_exposure') "
+    "AND EXISTS (SELECT 1 FROM information_schema.tables "
+    "WHERE table_schema = 'public' AND table_name = 'memory_correction_recipient') "
+    "AND EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' "
+    "AND indexname = 'ix_memory_correction_recipient_agent') "
+    "AND EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+    "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' "
+    "AND c.relname = 'ix_memories_baton' AND i.indisvalid) "
+    "AND EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' "
+    "AND indexname = 'ix_baton_recipient_waiting') "
+    "AND EXISTS (SELECT 1 FROM information_schema.tables "
+    "WHERE table_schema = 'public' AND table_name = 'agent_tombstones') "
+    "AND EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' "
+    "AND indexname = 'ix_memory_projections_memory')"
 )
 
 _engine: AsyncEngine | None = None

@@ -1,10 +1,11 @@
 # Shared SQLAlchemy models — used by core-api and core-storage-api.
-from common.models.agent import Agent
+from common.models.agent import Agent, AgentTombstone
 from common.models.agent_activity_digest import AgentActivityDigest
 from common.models.analysis_report import CrystallizationReport
 from common.models.audit import AuditChainHead, AuditLog
 from common.models.background_task import BackgroundTaskLog
 from common.models.base import Base
+from common.models.baton_recipient import BatonRecipient
 from common.models.capability_usage import CapabilityUsage
 from common.models.dedup_review import DedupReview
 from common.models.document import Document
@@ -15,7 +16,10 @@ from common.models.keystone_version import KeystoneVersion
 from common.models.lifecycle_audit import LifecycleAudit
 from common.models.memory import Memory
 from common.models.memory_conflict import MemoryConflict
+from common.models.memory_correction import MemoryCorrection, MemoryCorrectionRecipient
 from common.models.memory_derivation import MemoryDerivation
+from common.models.memory_exposure import MemoryExposure
+from common.models.memory_projection import MemoryProjection, ProjectionModel
 from common.models.organization_settings import (
     OrganizationSettings,
     OrganizationSettingsAudit,
@@ -34,10 +38,12 @@ __all__ = [
     "Agent",
     "AgentActivityDigest",
     "AgentSession",
+    "AgentTombstone",
     "AuditChainHead",
     "AuditLog",
     "BackgroundTaskLog",
     "Base",
+    "BatonRecipient",
     "CapabilityUsage",
     "CrystallizationReport",
     "DedupReview",
@@ -52,12 +58,17 @@ __all__ = [
     "LlmUsageMinute",
     "Memory",
     "MemoryConflict",
+    "MemoryCorrection",
+    "MemoryCorrectionRecipient",
     "MemoryDerivation",
     "MemoryEntityLink",
+    "MemoryExposure",
     "MemoryOrigin",
+    "MemoryProjection",
     "MemoryReuse",
     "OrganizationSettings",
     "OrganizationSettingsAudit",
+    "ProjectionModel",
     "RecallCandidate",
     "RecallEvent",
     "Relation",

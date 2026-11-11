@@ -180,3 +180,23 @@ test("L-198: the reachability probe asks /whoami, not a tenant-wide /search", as
   const probes = calls.filter((c) => c.method === "GET" && c.path.endsWith("/whoami"));
   assert.equal(probes.length, 1, "ten ticks ran exactly one probe");
 });
+
+
+test("heartbeat reports the effective automatic-capture switch after config overrides", async () => {
+  const { applyPluginConfig, CAURA_AUTO_WRITE_TURNS } = await import("./env.js");
+  const previous = CAURA_AUTO_WRITE_TURNS;
+  try {
+    for (const [setting, expected] of [[true, true], [false, false], ["OFF", false], ["1", true]] as const) {
+      applyPluginConfig({ CAURA_AUTO_WRITE_TURNS: setting });
+      calls.length = 0;
+      await sendHeartbeat();
+      const posts = heartbeatPosts();
+      assert.equal(posts.length, 1);
+      const metadata = posts[0].body?.metadata as Record<string, unknown> | undefined;
+      assert.equal(metadata?.auto_capture_enabled, expected, "heartbeat must report the parsed live binding");
+      assert.equal(typeof metadata?.auto_capture_enabled, "boolean");
+    }
+  } finally {
+    applyPluginConfig({ CAURA_AUTO_WRITE_TURNS: previous });
+  }
+});

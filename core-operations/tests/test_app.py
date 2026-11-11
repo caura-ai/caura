@@ -39,6 +39,9 @@ _EXPECTED_JOBS = {
     # Re-runs entity extraction for memories that lost it. Hourly at quarter to,
     # clear of the top-of-hour jobs and of the reconcile at half past.
     "entity-extraction-rerun",
+    # Enriches again the rows an LLM governance policy could not judge. Hourly
+    # at quarter past, clear of the other hourly jobs.
+    "enrichment-rerun",
 }
 
 
@@ -169,3 +172,16 @@ def test_the_extraction_rerun_runs_hourly_at_quarter_to(monkeypatch):
 
     task = next(t for t in fresh._tasks if t.name == "entity-extraction-rerun")
     assert abs(task.delay_provider() - seconds_until_next_utc_minute_past(45)) < 5
+
+
+def test_the_enrichment_rerun_runs_hourly_at_quarter_past(monkeypatch):
+    from core_operations.scheduler import seconds_until_next_utc_minute_past
+
+    fresh = Scheduler()
+    monkeypatch.setattr(app, "scheduler", fresh)
+
+    app._register_scheduled_tasks()
+
+    task = next(t for t in fresh._tasks if t.name == "enrichment-rerun")
+    assert task.interval_seconds == 3600
+    assert abs(task.delay_provider() - seconds_until_next_utc_minute_past(15)) < 5

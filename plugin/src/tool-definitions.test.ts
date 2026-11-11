@@ -131,10 +131,15 @@ describe("createToolFromSpec factory", () => {
 
   test("op-dispatched tools declare op + required path params", () => {
     const manage = createToolFromSpec("caura_manage").parameters as any;
-    assert.deepEqual(manage.required, ["op", "memory_id"]);
+    // memory_id is required by every op but confirm_correction and
+    // accept_baton, which name a correction or a baton instead; the
+    // dispatcher checks it per op.
+    assert.deepEqual(manage.required, ["op"]);
     assert.deepEqual(manage.properties.op.enum, [
-      "read", "update", "transition", "delete",
+      "read", "update", "transition", "delete", "confirm_correction", "accept_baton",
     ]);
+    assert.ok(manage.properties.correction_id);
+    assert.ok(manage.properties.baton_id);
 
     const doc = createToolFromSpec("caura_doc").parameters as any;
     // ``collection`` is required for write/read/query/delete but optional
@@ -150,8 +155,22 @@ describe("createToolFromSpec factory", () => {
   // this plugin does not dispatch. It reaches core-api over REST and has no
   // endpoint for these, so its PARAM_SCHEMAS enum deliberately omits them.
   // Listing them keeps the divergence a recorded decision instead of a drift.
+  // ``verify``/``unverify`` (evidence contract v1, EC-14) do have REST
+  // endpoints; the plugin does not offer them yet, which caura_manage's
+  // description says. So does ``send_correction`` (correction propagation,
+  // CP-11: POST /corrections/{id}/send, a person's or trust-3 action). The
+  // plugin offers ``confirm_correction`` itself (CP-16), for the notices its
+  // automatic recall shows.
   const MCP_ONLY_OPS: Record<string, readonly string[]> = {
-    caura_manage: ["bulk_delete", "lineage"],
+    caura_manage: [
+      "bulk_delete",
+      "lineage",
+      "verify",
+      "unverify",
+      "send_correction",
+      // HB-09: the plugin reads a baton itself in automatic recall.
+      "read_baton",
+    ],
   };
 
   test("every declared op is offered, or recorded as MCP-only", () => {
@@ -195,9 +214,9 @@ describe("createToolFromSpec factory", () => {
     assert.ok(checked > 0, "no op-dispatched plugin tool was checked");
   });
 
-  test("caura_write requires only agent_id (content/items are mutually exclusive)", () => {
+  test("caura_write requires nothing: content/items are mutually exclusive, agent_id defaults", () => {
     const write = createToolFromSpec("caura_write").parameters as any;
-    assert.deepEqual(write.required, ["agent_id"]);
+    assert.deepEqual(write.required, []);
     assert.ok(write.properties.content);
     assert.ok(write.properties.items);
     assert.equal(write.properties.items.maxItems, 100);

@@ -107,9 +107,10 @@ def _validate(instance, schema: dict, root: dict, path: str = "$") -> list[str]:
     elif typ == "boolean":
         if not isinstance(instance, bool):
             errors.append(f"{path}: expected boolean")
-    elif typ == "integer":
-        if not isinstance(instance, int) or isinstance(instance, bool):
-            errors.append(f"{path}: expected integer")
+    elif typ == "integer" and (
+        not isinstance(instance, int) or isinstance(instance, bool)
+    ):
+        errors.append(f"{path}: expected integer")
     return errors
 
 

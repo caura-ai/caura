@@ -271,7 +271,43 @@ cli_fields() {
     "$CLAUDE_EXIT" "${subtype:-none}" "${is_error:-none}" "${status:-none}" \
     "$(wc -c <"$OUTPUT_DIR/result" | tr -d ' ')" "$(wc -c <"$OUTPUT_DIR/stderr" | tr -d ' ')"
 }
+# Why the API refused a request (4xx), which cli_fields cannot say. The CLI writes the
+# result for one, not the model. 2.1.159's fallback formatter makes it "API Error:
+# <status> <the API's message>", or "<status> <the API's JSON body>" when it cannot pull
+# the message out, and a few refusals get fixed text of the CLI's own. Only those shapes
+# are read: the error type and request id as plain tokens, the message with control
+# characters replaced, "::" broken so it cannot start a workflow command, and capped.
+# Anything else in the result stays out of the log, and so does any result without a
+# 4xx api_error_status. Mirrors caura-ai/.github#76.
+api_refusal() {
+  printf '%s' "$RESULT" | jq -r '
+    def clean: gsub("[[:cntrl:]]"; " ") | gsub("::"; ": :") | .[0:300];
+    select(.api_error_status | type == "number" and floor == . and . >= 400 and . <= 499)
+    | (.result | select(type == "string")) as $r
+    | if $r == "Prompt is too long" or $r == "Credit balance is too low" then "message=" + $r
+      else ($r | capture("\\AAPI Error: 4[0-9]{2} (?<rest>.+)\\z"; "p").rest) as $rest
+        | ($rest | fromjson? // null) as $b
+        | if ($b | type) == "object" then
+            [ ($b.error.type | select(type == "string" and test("\\A[a-z_]{1,64}\\z")) | "type=" + .),
+              ($b.request_id | select(type == "string" and test("\\Areq_[A-Za-z0-9]{1,64}\\z")) | "request_id=" + .),
+              ($b.error.message | select(type == "string") | "message=" + clean) ]
+            | join(" ")
+          else "message=" + ($rest | clean) end
+      end' 2>/dev/null || true
+}
+# Fails the review when the API refused the request, with its reason in the job log and
+# only its status in the comment. Returns when it did not. $1 opens the log line.
+fail_if_refused() {
+  local refusal status
+  refusal=$(api_refusal)
+  [ -n "$refusal" ] || return 0
+  status=$(printf '%s' "$RESULT" | jq -r '.api_error_status')
+  echo "::error::$1; the API refused the request ($(cli_fields)): ${refusal}" >&2
+  post "⚠️ Claude Code review failed: the Anthropic API refused the request (HTTP ${status}), so no review was produced. The job log has the API's reason."
+  exit 1
+}
 if [ "$CLAUDE_EXIT" -ne 0 ]; then
+  fail_if_refused "Reviewer sandbox or CLI exited ${CLAUDE_EXIT}"
   echo "::error::Reviewer sandbox or CLI exited ${CLAUDE_EXIT}; raw output withheld ($(cli_fields))" >&2
   if printf '%s' "$RESULT" | jq -e '.subtype == "error_max_budget_usd"' >/dev/null 2>&1; then
     post "⚠️ Claude Code review reached the \$${MAX_BUDGET_USD} spend ceiling after \$${COST:-unknown} without finishing. Split the PR, or raise \`MAX_BUDGET_USD\` on the workflow step."
@@ -285,6 +321,7 @@ fi
 # exits 0 with {"is_error": true, "result": "Invalid API key ..."}, and that result
 # would otherwise be posted as the review.
 if printf '%s' "$RESULT" | jq -e '.is_error == true' >/dev/null 2>&1; then
+  fail_if_refused "Reviewer reported an error with a zero exit"
   echo "::error::Reviewer reported an error with a zero exit; raw output withheld ($(cli_fields))" >&2
   post "⚠️ Claude Code review failed: the CLI reported an error while exiting successfully. Raw output was withheld."
   exit 1

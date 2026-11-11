@@ -654,6 +654,7 @@ async def test_judge_truncates_long_content_to_500_chars():
     template + content. We compare against a baseline render with
     EMPTY content but identical entities, so the byte-diff equals
     exactly ``len(truncated_new) + len(truncated_old)``."""
+    from common.llm.untrusted import data_block
     from core_api.services.contradiction_detector import (
         ENTITY_AWARE_CONTRADICTION_PROMPT,
         _format_entity_context,
@@ -690,10 +691,12 @@ async def test_judge_truncates_long_content_to_500_chars():
             entities,
         )
 
-    entities_block = _format_entity_context(entities)
+    # The judge frames each field as a data block, so the baseline frames
+    # its empty fields the same way.
+    entities_block = data_block(_format_entity_context(entities))
     baseline = ENTITY_AWARE_CONTRADICTION_PROMPT.format(
-        new_content="",
-        old_content="",
+        new_content=data_block(""),
+        old_content=data_block(""),
         new_entities=entities_block,
         old_entities=entities_block,
     )

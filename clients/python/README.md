@@ -72,6 +72,7 @@ To reach the same memory from an MCP client with no SDK, see the
 | `health()` | `GET /api/v1/health` | `dict` |
 | `stats()` | `GET /api/v1/stats` | `Stats` |
 | `get_document(doc_id, *, collection, ...)` | `GET /api/v1/documents/{doc_id}` | `dict` |
+| `get_interview_cursor(node_id, *, tenant_id=None)` | `POST /api/v1/interview/cursor` | `int` (`-1` for an authorized absent stream) |
 | `submit_interview(...)` | `POST /api/v1/interview/submit` | `dict` |
 | `close()` | — | `None` |
 
@@ -193,6 +194,45 @@ and a `User-Agent` of the form
 lets a Caura server count which SDK families talk to it; it names only the
 package, its version and the Python release. The client sends nothing to any
 host other than the `base_url` you configure.
+
+### Reading Interviewer cursors
+
+`get_interview_cursor(node_id)` reads the committed sequence from the primary.
+The credential must own the stream as a verified agent, be an organization or
+system admin, or be the tenant-wide shared deployment key. Pass `tenant_id` to
+select a tenant with the system admin key; other credentials may only name
+their own tenant. The reply contains only `last_seq`, without document or owner
+metadata. An authorized stream that does not exist returns `-1`.
+
+Online adapter `run` and `status` require one of those cursor-read credentials.
+Install credentials and non-admin tenant credentials without a verified agent
+identity are not supported for these operations, even though
+`/api/v1/interview/submit` can accept windows from them. Write permission does
+not grant cursor-read permission, and setting `--agent-id` does not establish
+ownership. Ask your administrator for the stream's owning agent credential
+or one of the explicit admin credentials above; otherwise the adapter stops
+with an actionable 403 error and does not submit or restart the stream.
+
+The adapter uses this endpoint without falling back to generic document reads.
+An unavailable endpoint, an HTTP error, or a malformed reply fails the run;
+none means that the stream should restart. Deploy a server with this endpoint
+before upgrading the adapter.
+
+Agent credentials reading `interview_watermarks` through generic REST or MCP
+reads, queries, or searches can now see only their own streams. Organization
+and system admins and the tenant-wide shared deployment key retain access,
+including to ownerless legacy streams. Collection listings omit
+`interview_jobs` and `interview_watermarks` and count only visible collections.
+
+Watermark vector search has a completeness limitation: storage selects `top_k`
+before the ownership filter runs. Scoped and broad searches can return a short
+or empty page even when other matching owned watermark rows exist. Use
+`get_interview_cursor(node_id)` for a known stream, or the document query API
+(MCP `caura_doc op=query`) with pagination for owned watermark enumeration.
+An empty search does not prove that a stream is absent. REST search omits the
+optional aggregate `unindexed_count` diagnostic for watermark and broad
+searches because that count cannot apply watermark ownership; named ordinary
+collections retain the diagnostic.
 
 ### `submit_interview()` is an Interviewer-internal surface
 

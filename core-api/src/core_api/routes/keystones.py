@@ -81,6 +81,7 @@ from core_api.errors import (
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.agent_service import enforce_broker_agent_ownership, lookup_agent
 from core_api.services.audit_service import log_action
+from core_api.services.pii_update_gate import apply_pii_policy_to_fields
 from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
 from core_api.trust_utils import (
@@ -520,6 +521,16 @@ async def upsert_keystone(
         # otherwise reads as the trust matrix contradicting the docs.
         hint=keystone_trust_hint(body.scope, body.agent_id, caller_agent_id),
     )
+    # The tenant's PII policy over the title and the text every agent in scope
+    # receives, as a memory write gets it. Before the recheck below, so it adds
+    # nothing to the recheck → write window.
+    fields = await apply_pii_policy_to_fields(
+        tenant_id=body.tenant_id,
+        agent_id=caller_agent_id,
+        data={"title": body.title, "content": body.content},
+        write_mode="keystone",
+        subject="Keystone",
+    )
     # TOCTOU narrowing: re-fetch the stored row immediately before the
     # upsert and abort with 409 if the shape changed. A legitimate
     # concurrent upsert could otherwise promote the stored scope
@@ -553,8 +564,8 @@ async def upsert_keystone(
     payload: KeystoneUpsertPayload = {
         "tenant_id": body.tenant_id,
         "doc_id": body.doc_id,
-        "title": body.title,
-        "content": body.content,
+        "title": fields["title"],
+        "content": fields["content"],
         "scope": body.scope,
         "weight": body.weight,
     }

@@ -1164,3 +1164,74 @@ async def test_failures_dupcount_breaks_recall_ties(sc):
         "Frequent weak pattern",
         "One-off weak row",
     ]
+
+
+async def test_rows_carry_visibility_and_a_derived_rows_source_trust(sc):
+    """core-api saves a run's insights in the narrowest home the rows it read
+    allow and records their lowest trust, so the rows must say where they are
+    seen and, for a row the platform derived, the trust it recorded."""
+    tenant = _t()
+    team = await _seed_memory(
+        tenant_id=tenant, agent_id="a1", fleet_id="f1", title="team", content="t"
+    )
+    crystal = await _seed_memory(
+        tenant_id=tenant,
+        agent_id="a1",
+        fleet_id="f1",
+        title="crystal",
+        content="c",
+        metadata={"_system": {"source_trust": 1}},
+    )
+    async with get_session() as session:
+        await session.execute(
+            text("UPDATE memories SET is_inferred = true WHERE id = CAST(:id AS uuid)"),
+            {"id": crystal},
+        )
+    rows = await sc.insights_query_patterns(
+        tenant_id=tenant,
+        fleet_id=None,
+        agent_id="a1",
+        scope="agent",
+        max_memories=INSIGHTS_MAX_MEMORIES,
+    )
+    by_id = {r["id"]: r for r in rows}
+    assert by_id[team]["visibility"] == "scope_team"
+    assert by_id[team]["is_inferred"] is False
+    assert by_id[team]["source_trust"] is None
+    assert by_id[crystal]["is_inferred"] is True
+    assert by_id[crystal]["source_trust"] == 1
+
+
+async def test_supersede_priors_for_scope_all_covers_every_fleet(sc):
+    """A scope='all' run saves findings in several homes, so its next run must
+    retire the agent's priors from all of them."""
+    tenant = _t()
+    priors = [
+        await _seed_memory(
+            tenant_id=tenant,
+            agent_id="a1",
+            fleet_id=fleet_id,
+            visibility=visibility,
+            memory_type="insight",
+            content=f"prior {visibility}",
+            metadata={"insight_focus": "discover", "insight_scope": "all"},
+        )
+        for fleet_id, visibility in (
+            (None, "scope_org"),
+            ("f1", "scope_team"),
+            (None, "scope_agent"),
+        )
+    ]
+    another_agents = await _seed_memory(
+        tenant_id=tenant,
+        agent_id="a2",
+        fleet_id="f1",
+        memory_type="insight",
+        content="another agent's prior",
+        metadata={"insight_focus": "discover", "insight_scope": "all"},
+    )
+    res = await sc.insights_supersede_priors(
+        tenant_id=tenant, agent_id="a1", focus="discover", scope="all", fleet_id=None
+    )
+    assert sorted(res["prior_ids"]) == sorted(priors)
+    assert await _status(another_agents) == "active"

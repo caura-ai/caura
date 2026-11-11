@@ -27,6 +27,7 @@ async def publish_memory_enriched(
     content: str,
     tenant_id: str,
     retrieval_hint: str = "",
+    llm_verdict: bool | None = None,
 ) -> None:
     """Announce successful enrichment of *memory_id*.
 
@@ -42,6 +43,7 @@ async def publish_memory_enriched(
         tenant_id=tenant_id,
         content=content,
         retrieval_hint=retrieval_hint,
+        llm_verdict=llm_verdict,
     )
     event = Event(
         event_type=Topics.Memory.ENRICHED,

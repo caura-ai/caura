@@ -19,6 +19,7 @@ import logging
 import httpx
 
 from core_operations.config import settings
+from core_operations.identity_token import CoreApiIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ async def claim_tick_lease(task: str, ttl_s: float) -> bool:
 
     timeout = httpx.Timeout(_LEASE_TIMEOUT_S)
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, auth=CoreApiIdentity()) as client:
             resp = await client.post(url, headers=headers, json={"task": task, "ttl_s": ttl_s})
     except httpx.HTTPError:
         logger.warning(

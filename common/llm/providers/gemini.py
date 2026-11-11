@@ -20,6 +20,7 @@ from common.llm.constants import (
     GOOGLE_GENAI_REQUEST_TIMEOUT_SECONDS,
     LLM_JSON_MAX_OUTPUT_TOKENS,
 )
+from common.llm.providers._genai_seed import genai_seed
 from common.llm.providers._genai_usage import record_genai_call
 from common.llm.providers._json_shape import unwrap_singleton_array
 from common.llm.providers._shape_error import ProviderResponseShapeError
@@ -96,7 +97,8 @@ class GeminiLLMProvider:
                 # The caller's seed (L-95): entity extraction pins one so a
                 # re-ask returns the same answer, and skips retrying a shape
                 # failure on that basis. Dropping it made that false here.
-                seed=seed,
+                # Fitted to the field's int32: a CRC32 seed is unsigned.
+                seed=genai_seed(seed),
                 # Runaway guard — same failure mode as the Vertex provider:
                 # an uncapped looping generation comes back as truncated JSON.
                 max_output_tokens=LLM_JSON_MAX_OUTPUT_TOKENS,
@@ -149,11 +151,19 @@ class GeminiLLMProvider:
         logger.info("Gemini complete_text (%s) took %dms", self._model, llm_ms)
         record_genai_call(response, provider=self.provider_name, model=self._model)
         try:
-            return response.text or ""
+            text = response.text or ""
         except ValueError as exc:
             raise ValueError(
                 f"Gemini model {self._model} returned no usable content (possible safety block): {exc}"
             ) from exc
+        raise_if_truncated(
+            response,
+            provider="Gemini",
+            model=self._model,
+            max_tokens=max_tokens,
+            kind="text",
+        )
+        return text
 
     async def complete_json(
         self,

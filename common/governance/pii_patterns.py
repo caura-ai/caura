@@ -637,12 +637,17 @@ def _resolve_overlaps(findings: list[Finding]) -> list[Finding]:
 def mask(text: str, findings: list[Finding]) -> str:
     """Redact each finding's span with its category token, keeping the rest.
 
-    Splices right-to-left so earlier offsets stay valid as later ones are
-    replaced. Assumes non-overlapping findings (as :func:`scan` returns).
+    Builds the result in one left-to-right pass, so the cost is linear in the
+    text however many findings it has: ingest masks whole documents, and
+    splicing the full string once per finding was quadratic. Assumes
+    non-overlapping findings (as :func:`scan` returns).
     """
     if not findings:
         return text
-    out = text
-    for f in sorted(findings, key=lambda f: f.start, reverse=True):
-        out = out[: f.start] + _REDACTION[f.category] + out[f.end :]
-    return out
+    parts: list[str] = []
+    pos = 0
+    for f in sorted(findings, key=lambda f: f.start):
+        parts += (text[pos : f.start], _REDACTION[f.category])
+        pos = f.end
+    parts.append(text[pos:])
+    return "".join(parts)

@@ -17,6 +17,7 @@ from core_api.constants import API_KEY_HEADER
 from core_api.errors import coded_detail
 from core_api.heartbeat.clients import record as _record_client_family
 from core_api.http_security import credential_matches
+from core_api.middleware.rate_limit import gateway_bucket_name
 from core_api.suppression import is_tenant_suppressed
 from core_api.tenant_context import set_current_tenant
 
@@ -570,6 +571,27 @@ class AuthContext:
                 ),
             )
 
+    def resolve_tenant(self, requested_tenant: str | None) -> str:
+        """The tenant to act on: ``requested_tenant``, else the credential's own.
+
+        For routes a recall notice's ``ask`` names without a tenant (baton
+        accept, correction confirm): a tenant-bound credential (agent or tenant
+        key) may omit it. An explicit tenant must pass ``enforce_tenant``; an
+        admin credential, which has no tenant of its own, must name one (400).
+        """
+        resolved = requested_tenant or self.tenant_id
+        if not resolved:
+            raise HTTPException(
+                status_code=400,
+                detail=coded_detail(
+                    errors.AUTH_TENANT_REQUIRED,
+                    "This operation must name a tenant.",
+                    remediation="Supply the target tenant_id on the request.",
+                ),
+            )
+        self.enforce_tenant(resolved)
+        return resolved
+
     def enforce_readable_tenant(self, requested_tenant: str) -> None:
         """Raise 403 unless the caller may READ from the requested tenant.
 
@@ -692,27 +714,6 @@ def _set_rate_limit_key(request: Request, value: str) -> None:
         request.state.rate_limit_key = value
     except AttributeError:
         pass
-
-
-def _gateway_rate_limit_key(request: Request, tenant_id: str) -> str:
-    """The bucket for a request the gateway authenticated (Path 4 behind the secret).
-
-    Core-api cannot tell which credential the gateway accepted: its auth
-    subrequest tries a JWT bearer, then the session cookie, then ``X-API-Key``,
-    and forwards all of them unchanged. So a credential names the bucket only
-    when it is the request's sole one (``X-API-Key`` or ``Authorization``, and no
-    cookie), since the gateway can only have accepted that. Otherwise the bucket
-    is the identity the gateway set, which it overwrites on every request like
-    ``X-Agent-ID`` and ``X-Org-Role``: tenant, user, agent and install.
-    """
-    api_key = request.headers.get("x-api-key") or ""
-    authorization = request.headers.get("authorization") or ""
-    if not request.headers.get("cookie") and bool(api_key) != bool(authorization):
-        bearer = authorization[len("Bearer ") :] if authorization.startswith("Bearer ") else ""
-        if api_key or bearer:
-            return f"credential:{api_key or bearer}"
-    identity = [request.headers.get(h) or "" for h in ("x-user-id", "x-agent-id", "x-install-uuid")]
-    return "identity:" + "|".join([tenant_id, *identity])
 
 
 async def get_auth_context(
@@ -886,7 +887,7 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
         if gw_secret:
             # Through the gateway. Without a secret these headers are the
             # caller's own and name no bucket, so the limiter falls back to IP.
-            _set_rate_limit_key(request, _gateway_rate_limit_key(request, tenant_id))
+            _set_rate_limit_key(request, gateway_bucket_name(request.headers.get, tenant_id))
         await _block_if_suppressed(tenant_id)
         # Cross-tenant credentials carry a list of readable tenants via
         # ``X-Readable-Tenant-IDs``. The home tenant was just checked

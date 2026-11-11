@@ -1227,10 +1227,14 @@ class PubSubEventBus(EventBus):
             logger.error(
                 "pubsub: failed to create broadcast subscription %s; this "
                 "process will NOT receive %s events (cross-process cache "
-                "invalidation falls back to the TTL). Check the service account "
-                "has pubsub.subscriptions.create on the project.",
+                "invalidation falls back to the TTL). The service account needs "
+                "pubsub.subscriptions.create on project %s and "
+                "pubsub.topics.attachSubscription on %s; a permission error's "
+                "details below name the one that was denied.",
                 sub_name,
                 topic,
+                self._broadcast_subscription_project_id,
+                topic_path,
                 exc_info=True,
             )
             return False

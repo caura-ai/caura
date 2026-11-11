@@ -233,6 +233,12 @@ async def test_the_write_pipeline_returns_409_not_a_pipeline_failure() -> None:
         ),
         patch.object(sc_mod.CoreStorageClient, "find_semantic_duplicate", new=nothing),
         patch.object(sc_mod.CoreStorageClient, "create_memory", new=refuse),
+        # No handoff baton waits on the writer (D5).
+        patch.object(
+            sc_mod.CoreStorageClient,
+            "list_baton_notices",
+            new=AsyncMock(return_value=[]),
+        ),
     ):
         with pytest.raises(HTTPException) as caught:
             await create_memory(

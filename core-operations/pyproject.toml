@@ -1,6 +1,6 @@
 [project]
 name = "core-operations"
-version = "3.37.7"
+version = "3.49.0"
 description = "Caura core-operations — host for cron/scheduled background jobs (lifecycle, retention, etc.)"
 license = "Apache-2.0"
 requires-python = ">=3.12"
@@ -15,6 +15,13 @@ dependencies = [
     "structlog>=25.4,<27",
     "python-dateutil>=2.8,<3",
     "cachetools>=7.1.7,<8",
+    # ``identity_token._fetch_blocking`` fetches the Cloud Run ID token for
+    # core-api through google.auth's requests transport. Declared here rather
+    # than left to the [pubsub] extra's transitive chain, so an install
+    # without that extra still sends the token instead of logging a failed
+    # fetch on every call.
+    "google-auth>=2.30,<3",
+    "requests>=2.32,<3",
 ]
 
 [project.optional-dependencies]

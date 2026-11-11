@@ -72,8 +72,7 @@ def _check_key_transport(base_url: str, allow_insecure_http: bool | None) -> Non
             f"Refusing to send the API key to {host}: base_url uses plain HTTP to a "
             "non-loopback host, so the key would cross the network in cleartext. Use https://, or "
             "pass allow_insecure_http=True (or set CAURA_ALLOW_INSECURE_HTTP=true) to accept the "
-            "risk, e.g. on a trusted private network."
-            + invalid_env
+            "risk, e.g. on a trusted private network." + invalid_env
         )
 
 
@@ -166,6 +165,10 @@ class Caura:
         fleet_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         origin: dict[str, int] | None = None,
+        source_uri: str | None = None,
+        tool_call_id: str | None = None,
+        observed_at: datetime | str | None = None,
+        trace_id: str | None = None,
         **extra: Any,
     ) -> Memory:
         """Persist a memory. Returns the enriched ``Memory`` (POST /api/v1/memories).
@@ -174,6 +177,16 @@ class Caura:
         usage since the session's previous write — ``tokens_in``,
         ``tokens_out``, ``turns``. Read it from the provider's responses; leave
         it out rather than estimate.
+
+        Evidence — where the memory came from. ``source_uri``: the URL, file or
+        record it was read from. ``tool_call_id``: the id of the tool call
+        whose result it records (e.g. the ``tool_use`` id). ``observed_at``:
+        when the fact was observed, if earlier than this write. ``trace_id``:
+        the session or trace it belongs to; leave it out and the server uses
+        the client's session (``session_id``), else an id for the request.
+        Each is sent only when given. ``tool_call_id``, ``observed_at`` and
+        ``trace_id`` need a server with the evidence fields (caura#2307);
+        an older one answers 422 naming the field.
         """
         body: dict[str, Any] = {"tenant_id": self.tenant_id, "content": content}
         resolved_agent = agent_id or self.agent_id
@@ -190,6 +203,16 @@ class Caura:
                 **{k: origin[k] for k in ("tokens_in", "tokens_out", "turns") if k in origin},
                 "source": "sdk",
             }
+        if source_uri:
+            body["source_uri"] = source_uri
+        if tool_call_id:
+            body["tool_call_id"] = tool_call_id
+        if observed_at:
+            body["observed_at"] = (
+                observed_at.isoformat() if isinstance(observed_at, datetime) else observed_at
+            )
+        if trace_id:
+            body["trace_id"] = trace_id
         body.update(extra)
         data = self._post("/api/v1/memories", body)
         if not isinstance(data, dict):
@@ -314,6 +337,23 @@ class Caura:
         )
         self._raise_for_status(response)
         return self._json(response)
+
+    def get_interview_cursor(self, node_id: str, *, tenant_id: str | None = None) -> int:
+        """Read an authorized stream cursor; -1 means the stream does not exist.
+
+        Requires the stream's verified agent credential, an org/system admin,
+        or the tenant-wide deployment key. All HTTP and transport errors propagate.
+        """
+        body: dict[str, Any] = {"node_id": node_id}
+        if tenant_id is not None:
+            body["tenant_id"] = tenant_id
+        response = self._request("POST", "/api/v1/interview/cursor", json=body)
+        self._raise_for_status(response)
+        payload = self._json(response)
+        last_seq = payload.get("last_seq") if isinstance(payload, dict) else None
+        if type(last_seq) is not int or last_seq < -1:
+            raise CauraAPIError(response.status_code, "Invalid interview cursor response")
+        return last_seq
 
     def submit_interview(
         self,

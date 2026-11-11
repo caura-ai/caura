@@ -34,6 +34,7 @@ from core_storage_api.routers._validation import (
 )
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import (
+    FIELD_PAGE_EMBEDDINGS,
     MISSING_PROVENANCE_PREDICATE_SQL,
     BulkValidationError,
     PostgresService,
@@ -58,6 +59,8 @@ _DATETIME_FIELDS = {
     "ts_valid_start",
     "ts_valid_end",
     "last_dedup_checked_at",
+    "observed_at",
+    "verified_at",
 }
 
 
@@ -256,6 +259,9 @@ async def scored_search(request: Request) -> list[dict]:
                 # A63 — history questions lift the status demotion so
                 # superseded values stay reachable.
                 history_query=bool(body.get("history_query", False)),
+                # Evidence contract v1 — a filter, not a ranking input.
+                verified_only=bool(body.get("verified_only", False)),
+                baton_id=body.get("baton_id") or None,
             )
         for r in results:
             # MEMORY_LIST_FIELDS, not MEMORY_FIELDS (audit oss-0814-m-39): this
@@ -299,6 +305,12 @@ async def scored_search(request: Request) -> list[dict]:
             for _factor in ("fts_score", "freshness", "entity_boost", "recall_boost", "temporal_boost"):
                 _v = getattr(r, _factor, None)
                 row[_factor] = float(_v) if _v is not None else None
+            # EC-19: only while the tenant's verified boost is on. Off, the
+            # factor was never computed, so the key stays absent rather than
+            # claiming a 1.0 that no SQL produced.
+            _vb = getattr(r, "verification_boost", None)
+            if _vb is not None:
+                row["verification_boost"] = float(_vb)
             # D12 arm provenance (ann-pool mode): which pool arms admitted the
             # row ("ann+fts", "boosted", ...). NULL on the default path and on
             # pre-provenance storage rows — "not reported", not "no arms".
@@ -336,6 +348,41 @@ async def scored_search(request: Request) -> list[dict]:
             error=not success,
         )
     return out
+
+
+@router.post("/scored-search/explain")
+async def scored_search_explain(request: Request) -> dict:
+    """Which scored-search filter removes ``memory_id`` for this request (EC-06).
+
+    Takes the ``/scored-search`` body (core-api sends the very payload it built
+    for the search) plus ``memory_id``, and answers per filter with
+    ``PostgresService.memory_explain_filters``. Only the filter arguments are
+    read: scoring knobs cannot remove a row, so ``search_params`` and the
+    embedding are not required here.
+    """
+    body: dict = await request.json()
+    memory_id = _require_uuid(body, "memory_id")
+    tenant_id = _require(body, "tenant_id")
+    valid_at = body.get("valid_at")
+    if isinstance(valid_at, str):
+        valid_at = datetime.fromisoformat(valid_at)
+    return await _svc.memory_explain_filters(
+        memory_id,
+        tenant_id,
+        body.get("query") or "",
+        fleet_ids=body.get("fleet_ids"),
+        caller_agent_id=body.get("caller_agent_id"),
+        caller_tenant_id=body.get("caller_tenant_id"),
+        filter_agent_id=body.get("filter_agent_id"),
+        memory_type_filter=body.get("memory_type_filter"),
+        status_filter=body.get("status_filter"),
+        valid_at=valid_at,
+        readable_tenant_ids=body.get("readable_tenant_ids") or None,
+        history_query=bool(body.get("history_query", False)),
+        strict_fleet_scoping=body.get("strict_fleet_scoping", False),
+        verified_only=bool(body.get("verified_only", False)),
+        baton_id=body.get("baton_id") or None,
+    )
 
 
 @router.post("/load-by-ids")
@@ -395,6 +442,9 @@ async def load_by_ids(request: Request) -> list[dict]:
                 valid_at=valid_at,
                 readable_tenant_ids=body.get("readable_tenant_ids") or None,
                 strict_fleet_scoping=body.get("strict_fleet_scoping", False),
+                verified_only=bool(body.get("verified_only", False)),
+                baton_id=body.get("baton_id") or None,
+                query=body.get("query") or None,
             )
         # No vectors (L-188): ClassifyQuery builds result rows from these, and
         # a result carries no vector.
@@ -540,6 +590,19 @@ async def purge_entity_artifacts(request: Request) -> dict:
     )
 
 
+@router.post("/drop")
+async def drop_memory(request: Request) -> dict:
+    """A governance drop: soft-delete one memory and clear its text (``memory_drop``).
+
+    Body carries ``tenant_id`` and ``memory_id``. ``{"dropped": false}`` when
+    nothing matched (no such memory, another tenant's, or held), not a 404, so a
+    replay of a drop that already landed is not an error.
+    """
+    body: dict = await request.json()
+    dropped = await _svc.memory_drop(_require(body, "tenant_id"), _require_uuid(body, "memory_id"))
+    return {"dropped": dropped}
+
+
 @router.post("/find-successors")
 async def find_successors(request: Request) -> list[dict]:
     body: dict = await request.json()
@@ -561,6 +624,8 @@ async def find_successors(request: Request) -> list[dict]:
         # Where the search read, so its stale rows' corrections are found
         # there too (L-43); absent reads the home tenant, as before.
         readable_tenant_ids=body.get("readable_tenant_ids") or None,
+        verified_only=bool(body.get("verified_only", False)),
+        baton_id=body.get("baton_id") or None,
     )
     # ``successor_of`` names the row each one replaced: its ``supersedes_id``,
     # or for a contradiction's further loser the one its record names (M-34).
@@ -1697,7 +1762,7 @@ async def list_by_filters(request: Request) -> list[dict]:
     """Non-admin memory list WITH visibility scoping (MCP ``caura_list``).
 
     Body: ``{tenant_id, caller_agent_id?, caller_tenant_id?, fleet_id?,
-    written_by?, memory_type?, status?, run_id?, weight_min?, weight_max?,
+    written_by?, memory_type?, status?, run_id?, baton_id?, weight_min?, weight_max?,
     created_after?, created_before?, include_deleted, sort, order, limit, offset,
     cursor_ts?, cursor_id?, readable_tenant_ids?, visibility?,
     include_scope_agent?}``.
@@ -1759,6 +1824,7 @@ async def list_by_filters(request: Request) -> list[dict]:
         exclude_memory_types=exclude_memory_types,
         status=body.get("status"),
         run_id=body.get("run_id"),
+        baton_id=body.get("baton_id") or None,
         weight_min=body.get("weight_min"),
         weight_max=body.get("weight_max"),
         created_after=created_after,
@@ -1825,10 +1891,25 @@ async def field_page(request: Request) -> dict:
     ``/list`` exactly, so the field never places a row the caller's memory
     list would not show. Returns ``{rows, entities, next_cursor}``; each row's
     embedding is base64 little-endian float32 (``embedding_b64``).
+
+    Optional ``model_version`` adds each row's saved position under that
+    version (``x``, ``y``, ``cluster``, null when it has none) and its
+    ``row_version``, which a position computed from it must name when saved
+    (``POST /projections/positions``), and optional
+    ``embeddings`` (``all``, the default, ``unplaced`` or ``none``) picks which
+    rows ship their embedding. Without either, the answer is as before.
     """
     body: dict = await request.json()
     tenant_id = _require(body, "tenant_id")
     args = _field_scope_args(tenant_id, body)
+    model_version = body.get("model_version")
+    if model_version is not None and (not isinstance(model_version, str) or not 0 < len(model_version) <= 64):
+        raise HTTPException(status_code=422, detail="model_version must be a string of 1-64 characters")
+    embeddings = body.get("embeddings", "all")
+    if embeddings not in FIELD_PAGE_EMBEDDINGS:
+        raise HTTPException(
+            status_code=422, detail=f"embeddings must be one of {sorted(FIELD_PAGE_EMBEDDINGS)}"
+        )
     try:
         limit = max(1, min(int(body.get("limit", 2000)), 2000))
     except (TypeError, ValueError):
@@ -1844,7 +1925,14 @@ async def field_page(request: Request) -> dict:
         raise HTTPException(status_code=422, detail=f"invalid cursor fields: {exc}") from exc
     if cursor_ts is not None and cursor_ts.tzinfo is None:
         raise HTTPException(status_code=422, detail="cursor_ts must be timezone-aware")
-    return await _svc.memory_field_page(**args, limit=limit, cursor_ts=cursor_ts, cursor_id=cursor_id)
+    return await _svc.memory_field_page(
+        **args,
+        limit=limit,
+        cursor_ts=cursor_ts,
+        cursor_id=cursor_id,
+        model_version=model_version,
+        embeddings=embeddings,
+    )
 
 
 @router.post("/stats-breakdown")
@@ -2379,12 +2467,13 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
         from sqlalchemy import update as sql_update
 
         from common.models import Memory
-        from core_storage_api.services.postgres_service import get_session
+        from core_storage_api.services.postgres_service import get_session, verification_on_status_change
 
         try:
             expected_uuid = UUID(str(expected_supersedes_id))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="expected_supersedes_id must be a UUID") from exc
+        verification = verification_on_status_change(status)
         async with get_session() as session:
             result = await session.execute(
                 sql_update(Memory)
@@ -2412,6 +2501,10 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                     status_changed_at=case(
                         (Memory.status.is_distinct_from(status), datetime.now(UTC)),
                         else_=Memory.status_changed_at,
+                    ),
+                    # EC-13, as on every status write (``memory_update_status``).
+                    verification_status=(
+                        Memory.verification_status if verification is None else verification
                     ),
                 )
             )

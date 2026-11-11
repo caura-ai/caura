@@ -23,6 +23,9 @@ on:
 env:
   PYTHON_VERSION: "3.13"
   UV_VERSION: "0.9.26"
+  # Managed Pythons come from Astral's mirror, not GitHub release assets,
+  # which have failed setup with 504s (tests/test_workflow_uv_python_mirror.py).
+  UV_PYTHON_INSTALL_MIRROR: "https://releases.astral.sh/github/python-build-standalone/releases/download"
 
 permissions:
   contents: read
@@ -37,7 +40,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5.4.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -76,23 +79,50 @@ jobs:
         # database published it, so the scan passed on it (L-239). OSV carries
         # both the PYSEC and the GHSA advisories.
         #
+        # pip-audit exits 1 for a finding and for a crash alike. On 9 Nov 2026
+        # api.osv.dev timed out, pip-audit crashed, and this step reported
+        # core-storage-api as known-vulnerable. A finding writes the -o report
+        # and a crash writes none, so a crash is tried once more, and then fails
+        # the job as unaudited instead.
+        #
         # Accepted advisories: none. Accept one with --ignore-vuln on the
         # pip-audit line only with the reason it does not apply here, listed in
         # this comment, and drop it once a fixed release is locked.
         run: |
           vulnerable=""
+          unaudited=""
           for service in core-api core-storage-api core-operations core-worker; do
             mapfile -t extras < <(grep -o -- '--extra [a-z-]*' "${service}/Dockerfile" | sort -u | sed 's/ /=/')
             uv export --frozen --no-dev "${extras[@]}" --no-emit-project --quiet \
               --directory "${service}" -o "${RUNNER_TEMP}/${service}.txt"
+            report="${RUNNER_TEMP}/${service}-audit.txt"
             echo "::group::${service} ${extras[*]}"
-            pip-audit --desc --no-deps --disable-pip --vulnerability-service osv \
-              -r "${RUNNER_TEMP}/${service}.txt" \
-              || vulnerable="${vulnerable} ${service}"
+            for attempt in 1 2; do
+              rm -f "${report}"
+              status=0
+              pip-audit --desc --no-deps --disable-pip --vulnerability-service osv \
+                -r "${RUNNER_TEMP}/${service}.txt" -o "${report}" || status=$?
+              if [ "${status}" = 0 ] || [ -f "${report}" ] || [ "${attempt}" = 2 ]; then
+                break
+              fi
+              echo "pip-audit did not finish for ${service}; trying again in 30 seconds."
+              sleep 30
+            done
             echo "::endgroup::"
+            if [ "${status}" != 0 ] && [ -f "${report}" ]; then
+              cat "${report}"
+              vulnerable="${vulnerable} ${service}"
+            elif [ "${status}" != 0 ]; then
+              unaudited="${unaudited} ${service}"
+            fi
           done
+          if [ -n "${unaudited}" ]; then
+            echo "::error::pip-audit did not finish for:${unaudited}, twice, so their dependencies were not audited. The traceback is in each one's log group; it is usually a network error reaching OSV. Rerun the job."
+          fi
           if [ -n "${vulnerable}" ]; then
             echo "::error::Known-vulnerable dependencies in:${vulnerable}. Bump them, or accept the advisory in this step's comment with the reason it does not apply."
+          fi
+          if [ -n "${vulnerable}${unaudited}" ]; then
             exit 1
           fi
 
@@ -103,6 +133,9 @@ jobs:
     concurrency:
       group: secret-scan-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -110,15 +143,38 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The archive comes from the Actions cache when it can: GitHub release
+      # assets answered anonymous downloads with 504s on 9 Nov 2026 and failed
+      # this job. The key holds the checksum, and the install checks it however
+      # the archive arrived. The weekly run on main seeds the entry every PR
+      # restores; the save follows the install, so a run whose scan fails still
+      # seeds it.
+      - name: Restore the Gitleaks archive
+        id: gitleaks-archive
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/gitleaks/archive.tar.gz
+          key: gitleaks-${{ env.GITLEAKS_VERSION }}-linux-x64-${{ env.GITLEAKS_SHA256 }}
+
       - name: Install checksum-pinned Gitleaks
         run: |
+          archive="$RUNNER_TEMP/gitleaks/archive.tar.gz"
           mkdir -p "$RUNNER_TEMP/gitleaks"
-          curl --fail --silent --show-error --location --retry 3 \
-            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
-            -o "$RUNNER_TEMP/gitleaks/archive.tar.gz"
-          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks/archive.tar.gz" | sha256sum --check
-          tar -xzf "$RUNNER_TEMP/gitleaks/archive.tar.gz" -C "$RUNNER_TEMP/gitleaks" gitleaks
+          if [ ! -f "$archive" ]; then
+            curl --fail --silent --show-error --location --retry 3 \
+              "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+              -o "$archive"
+          fi
+          echo "${GITLEAKS_SHA256}  $archive" | sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP/gitleaks" gitleaks
           echo "$RUNNER_TEMP/gitleaks" >> "$GITHUB_PATH"
+
+      - name: Save the Gitleaks archive
+        if: steps.gitleaks-archive.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/gitleaks/archive.tar.gz
+          key: ${{ steps.gitleaks-archive.outputs.cache-primary-key }}
 
       - name: Test commit safeguards with disposable fake credentials
         run: python3 -m unittest discover -s tests -p test_secret_scanning.py -v

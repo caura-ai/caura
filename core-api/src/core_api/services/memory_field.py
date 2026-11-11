@@ -755,11 +755,27 @@ async def _get_memory_field(scope: dict, *, limit: int) -> dict:
     try:
         return _slice_field(await asyncio.shield(build), limit)
     except TimeoutError:
+        # A layout already running keeps going and is cached when it finishes
+        # (``_build``); this request stops waiting for it.
+        logger.warning(
+            "Memory map build for tenant %s passed its %s s deadline; the request stopped waiting",
+            scope["tenant_id"],
+            FIELD_BUILD_TIMEOUT_SECONDS,
+            extra={
+                "path": "memory-field-build-deadline",
+                "tenant_id": scope["tenant_id"],
+                "deadline_s": FIELD_BUILD_TIMEOUT_SECONDS,
+            },
+        )
         raise FieldBusyError from None
 
 
 async def _build(scope: dict, key: tuple, *, limit: int, sig: dict, signature: str) -> dict:
-    """Page the caller's rows with their embeddings, lay them out and cache it."""
+    """Page the caller's rows with their embeddings, lay them out and cache it.
+
+    Logs where the time went once the layout finishes: storage, decoding and
+    the layout itself, so a slow map can be told from a busy one.
+    """
     sc = get_storage_client()
     rows: list[dict] = []
     entities: dict[str, dict] = {}
@@ -767,12 +783,19 @@ async def _build(scope: dict, key: tuple, *, limit: int, sig: dict, signature: s
     flags: list[bool] = []
     dim = 0
     cursor: dict | None = None
+    started = time.monotonic()
+    storage_s = decode_s = 0.0
+    pages = 0
     while len(rows) < limit:
         body = {**scope, "limit": min(FIELD_PAGE_SIZE, limit - len(rows))}
         if cursor:
             body["cursor_ts"] = cursor["ts"]
             body["cursor_id"] = cursor["id"]
+        asked = time.monotonic()
         page = await sc.memory_field_page(body)
+        decoding = time.monotonic()
+        storage_s += decoding - asked
+        pages += 1
         page_rows = page.get("rows") or []
         page_vecs: list[np.ndarray | None] = []
         for r in page_rows:
@@ -792,6 +815,7 @@ async def _build(scope: dict, key: tuple, *, limit: int, sig: dict, signature: s
                 block[t] = vec.astype(np.float16)
             flags.append(vec is not None)
         chunks.append(block)
+        decode_s += time.monotonic() - decoding
         cursor = page.get("next_cursor")
         if not cursor or not page_rows:
             break
@@ -804,6 +828,7 @@ async def _build(scope: dict, key: tuple, *, limit: int, sig: dict, signature: s
     has_vec = np.array(flags, dtype=bool)
 
     tenant = scope["tenant_id"]
+    laying_out = time.monotonic()
     layout = asyncio.create_task(
         asyncio.to_thread(
             build_field,
@@ -822,6 +847,33 @@ async def _build(scope: dict, key: tuple, *, limit: int, sig: dict, signature: s
             # The request may have timed out while its shielded layout kept
             # running. Save that work before releasing the tenant's build slot.
             field_cache.put(key, done.result())
+            finished = time.monotonic()
+            ms = {
+                "storage_ms": round(storage_s * 1000),
+                "decode_ms": round(decode_s * 1000),
+                "layout_ms": round((finished - laying_out) * 1000),
+                "total_ms": round((finished - started) * 1000),
+            }
+            logger.info(
+                "Memory map built for tenant %s: %d points (%d embedded) in %d ms "
+                "(storage %d ms over %d pages, decode %d ms, layout %d ms)",
+                tenant,
+                len(rows),
+                int(has_vec.sum()),
+                ms["total_ms"],
+                ms["storage_ms"],
+                pages,
+                ms["decode_ms"],
+                ms["layout_ms"],
+                extra={
+                    "path": "memory-field-build",
+                    "tenant_id": tenant,
+                    "points": len(rows),
+                    "embedded": int(has_vec.sum()),
+                    "pages": pages,
+                    **ms,
+                },
+            )
         if _layouts.get(tenant) is done:
             del _layouts[tenant]
         if key not in _builds:

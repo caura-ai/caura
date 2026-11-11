@@ -64,12 +64,15 @@ def resolve(
     *,
     is_inferred: bool = False,
     confidence: float | None = None,
+    outranked: bool = False,
 ) -> Resolution:
     """Map the classification to a resolution action, applying safety invariants.
 
     Always returns a valid ``ACTIONS`` value. The invariants (in order) protect
     against weak evidence overturning strong facts — the unified model's rule
-    that *inference is weaker than explicit contradiction*.
+    that *inference is weaker than explicit contradiction*. ``outranked`` says the
+    newer row's author is trusted less than the older row's, so the detector left
+    the pair as it was.
     """
     # Both-hold relationships resolve to nothing regardless of diagnosis.
     if relationship in _BOTH_HOLD:
@@ -77,6 +80,13 @@ def resolve(
 
     action = _DIAGNOSIS_ACTION.get(diagnosis, "ask")
     reason = f"{relationship}/{diagnosis} -> {action}"
+
+    # Invariant: a less-trusted author's newer row must not overturn an older one.
+    if outranked and action in _DESTRUCTIVE:
+        return Resolution(
+            "mark_disputed",
+            reason + " | disputed: the newer row's author is trusted less than the older row's",
+        )
 
     # Invariant: a system-inferred memory must not overturn an explicit fact.
     if is_inferred and action in _DESTRUCTIVE:

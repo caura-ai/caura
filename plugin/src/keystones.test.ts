@@ -28,6 +28,7 @@ process.env.CAURA_KEYSTONES_TOKEN_CAP = "120"; // ~480 chars
 const keystones = await import("./keystones.js");
 const { formatKeystones, fetchKeystonesBlock, invalidateKeystoneCache } = keystones;
 const { createToolFromSpec } = await import("./tool-definitions.js");
+const { resolveAgentIdQuiet } = await import("./resolve-agent.js");
 
 interface MockCall {
   url: string;
@@ -211,14 +212,14 @@ describe("fetchKeystonesBlock", () => {
     installFetch(rules, 200, { "X-Truncated": "true" });
     const signal = new AbortController().signal;
     const result = await createToolFromSpec("caura_keystones").execute("ks", {
-      tenant_id: "t_keystones_test", fleet_id: "f", agent_id: "a",
+      tenant_id: "t_keystones_test", fleet_id: "f", agent_id: resolveAgentIdQuiet({}),
     }, signal);
     assert.deepEqual(JSON.parse(result.content[0].text), { count: 1, truncated: true, rules });
     const call = keystoneCalls()[0];
     const query = new URL(call.url).searchParams;
     assert.equal(query.get("tenant_id"), "t_keystones_test");
     assert.equal(query.get("fleet_id"), "f");
-    assert.equal(query.get("agent_id"), "a");
+    assert.equal(query.get("agent_id"), resolveAgentIdQuiet({}));
     assert.equal(query.get("envelope"), "true");
     assert.equal(call.init?.signal, signal);
   });
@@ -227,7 +228,7 @@ describe("fetchKeystonesBlock", () => {
     installFetch({ count: 0, items: [], hint: "No rules configured." }, 200,
       { "X-Truncated": "false" });
     const result = await createToolFromSpec("caura_keystones").execute("ks", {
-      tenant_id: "t_keystones_test", fleet_id: "", agent_id: "a",
+      tenant_id: "t_keystones_test", fleet_id: "", agent_id: resolveAgentIdQuiet({}),
     });
     assert.deepEqual(JSON.parse(result.content[0].text), {
       count: 0, truncated: false, rules: [], hint: "No rules configured.",

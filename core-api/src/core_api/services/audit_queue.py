@@ -34,12 +34,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
+from dataclasses import dataclass
+from time import monotonic
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _RetryChunk:
+    events: list[dict]
+    attempts: int
+    retry_at: float
+
+
 class AuditEventQueue:
     """Bounded in-memory queue for audit events with a background flusher.
+
+    Within this queue, later events for a tenant wait behind its retained
+    failures until recovery or final loss. Independent tenants keep moving.
+    This does not order writes across processes or synchronous fallback calls.
 
     Lifecycle: ``start()`` from FastAPI lifespan startup,
     ``stop(timeout=...)`` from shutdown. Both are idempotent so a
@@ -54,7 +68,14 @@ class AuditEventQueue:
         flush_interval_seconds: float,
         flush_callable,  # async (events: list[dict]) -> None
         chunk_size: int = 500,
+        max_flush_attempts: int = 3,
+        retry_initial_backoff_seconds: float = 1.0,
+        retry_max_backoff_seconds: float = 30.0,
     ) -> None:
+        if max_flush_attempts < 1:
+            raise ValueError("max_flush_attempts must be positive")
+        if retry_initial_backoff_seconds < 0 or retry_max_backoff_seconds < 0:
+            raise ValueError("retry backoff must be nonnegative")
         self._max_queue_size = max_queue_size
         self._flush_threshold = flush_threshold
         self._flush_interval = flush_interval_seconds
@@ -72,6 +93,15 @@ class AuditEventQueue:
         # depending on the storage-side constant.
         self._chunk_size = chunk_size
         self._queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=max_queue_size)
+        # Retried slices are the logical front of the queue. Keeping them
+        # separate preserves their attempt/deadline state without changing
+        # payloads or using asyncio.Queue's private internals. Both buffers
+        # share max_queue_size; a drain holds at most one more bounded snapshot.
+        self._retry_chunks: deque[_RetryChunk] = deque()
+        self._retry_event_count = 0
+        self._max_flush_attempts = max_flush_attempts
+        self._retry_initial_backoff = retry_initial_backoff_seconds
+        self._retry_max_backoff = retry_max_backoff_seconds
         self._flusher_task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
         self._dropped_count = 0
@@ -92,10 +122,11 @@ class AuditEventQueue:
 
     @property
     def failed_count(self) -> int:
-        """Events drained from the queue but lost when the flush callable
-        raised. Distinct from ``dropped_count`` (full-queue rejection)
-        so an operator can distinguish "writers outpacing the flusher"
-        from "storage-api failing the write" in dashboards."""
+        """Events lost at the attempt/retention caps, or known to have failed
+        during an interruption. Retained retries are not losses. Distinct
+        from ``dropped_count`` (full-queue rejection), so an operator can
+        distinguish writers outpacing the flusher from failed storage writes.
+        """
         return self._failed_count
 
     @property
@@ -117,7 +148,7 @@ class AuditEventQueue:
 
     @property
     def queue_size(self) -> int:
-        return self._queue.qsize()
+        return self._queue.qsize() + self._retry_event_count
 
     def enqueue(self, event: dict, *, silent: bool = False) -> bool:
         """Non-blocking enqueue. Drops + warns when the queue is full.
@@ -143,6 +174,8 @@ class AuditEventQueue:
         path; dropping is preferable to blocking the request).
         """
         try:
+            if self.queue_size >= self._max_queue_size:
+                raise asyncio.QueueFull
             self._queue.put_nowait(event)
         except asyncio.QueueFull:
             if silent:
@@ -163,8 +196,9 @@ class AuditEventQueue:
                 )
             return False
         # Wake the flusher early when we reach the batch threshold so a
-        # storm doesn't have to wait for the interval timer.
-        if self._queue.qsize() >= self._flush_threshold:
+        # storm doesn't have to wait for the interval timer. New arrivals also
+        # wake a retry wait, so independent tenants needn't wait out backoff.
+        if self.queue_size >= self._flush_threshold or self._retry_chunks:
             self._wake_event.set()
         return True
 
@@ -204,19 +238,36 @@ class AuditEventQueue:
         finally:
             self._flusher_task = None
 
+    def _next_retry_delay(self) -> float | None:
+        """Earliest eligible retry; later same-tenant deferrals are not ready."""
+        blocked: set[str | None] = set()
+        earliest: float | None = None
+        for pending in self._retry_chunks:
+            tenants = {event.get("tenant_id") for event in pending.events}
+            if tenants - blocked:
+                earliest = pending.retry_at if earliest is None else min(earliest, pending.retry_at)
+            blocked.update(tenants)
+        return None if earliest is None else max(0.0, earliest - monotonic())
+
+    async def _wait_for_flush(self, timeout: float) -> None:
+        # New arrivals can wake a retry wait, including below the batching
+        # threshold, so an independent tenant never waits out another's backoff.
+        # Retained slices remain queued throughout this cancellable wait.
+        try:
+            await asyncio.wait_for(self._wake_event.wait(), timeout=timeout)
+        except TimeoutError:
+            pass
+        self._wake_event.clear()
+
     async def _flusher_loop(self) -> None:
         """Wake on threshold OR interval, drain available events, flush."""
         while not self._stopping.is_set():
             try:
-                # Wait for either the threshold-wake event or the
-                # interval timer, whichever fires first. ``wait_for``
-                # propagates ``TimeoutError`` on the interval path; we
-                # catch it and treat as a normal "interval flush" tick.
-                try:
-                    await asyncio.wait_for(self._wake_event.wait(), timeout=self._flush_interval)
-                except TimeoutError:
-                    pass
-                self._wake_event.clear()
+                retry_delay = self._next_retry_delay()
+                timeout = (
+                    self._flush_interval if retry_delay is None else min(self._flush_interval, retry_delay)
+                )
+                await self._wait_for_flush(0 if self._queue.qsize() else timeout)
                 await self._drain_and_flush()
             except Exception:
                 # ``_drain_and_flush`` catches per-chunk flush failures
@@ -228,10 +279,15 @@ class AuditEventQueue:
                 # audit ingestion stop.
                 logger.exception("audit flush iteration failed unexpectedly; continuing")
 
-        # Final drain on shutdown — best-effort, bounded by stop()'s
-        # outer timeout.
+        # Include retained retries in the final drain, with the same backoff
+        # and attempt caps. stop()'s outer timeout still bounds shutdown.
         try:
-            await self._drain_and_flush()
+            while self.queue_size:
+                await self._drain_and_flush()
+                if self.queue_size:
+                    retry_delay = self._next_retry_delay()
+                    timeout = self._flush_interval if retry_delay is None else retry_delay
+                    await self._wait_for_flush(0 if self._queue.qsize() else timeout)
         except Exception:
             logger.exception("audit shutdown flush failed")
 
@@ -252,10 +308,18 @@ class AuditEventQueue:
            is counted independently in ``_flushed_count`` /
            ``_failed_count``.
 
-        Failed chunks are NOT requeued — the closure's failure log
-        carries enough detail for an operator to correlate the loss
-        with the upstream cause; requeuing would risk an infinite
-        retry loop on a sustained outage.
+        Failed chunks return to the logical front for a later pass, with
+        exponential backoff and bounded attempts. Retention shares the queue
+        cap with new events. Each pass attempts its snapshot only once, so a
+        sustained outage cannot cause an unbounded retry loop.
+
+        Once a tenant has a retained failure, its later events are deferred
+        behind that failure without spending an attempt. Other tenants may
+        still flush. This preserves enqueue order for surviving events within
+        this queue, including failures that persist across several drains.
+        Future retries stay queued without sleeping in this drain, so due
+        retries and fresh events for independent tenants are not held behind
+        backoff. The outer loop waits for the next eligible deadline.
 
         ``task_done()`` is intentionally NOT called here. The
         documented ``asyncio.Queue.join()`` contract is "wait until
@@ -270,90 +334,103 @@ class AuditEventQueue:
         the final ``_drain_and_flush`` call, which doesn't depend on
         the unfinished-task counter at all.
         """
-        events: list[dict] = []
-        while True:
-            try:
-                events.append(self._queue.get_nowait())
-            except asyncio.QueueEmpty:
-                break
-        if not events:
-            return
+        retry_chunks = len(self._retry_chunks)
+        new_events = self._queue.qsize()
+        blocked_tenants: set[str | None] = set()
+        # Scan this pass's retained slices once, rotating future work back in
+        # the same order. A skipped slice still blocks later same-tenant events.
+        for _ in range(retry_chunks):
+            pending = self._retry_chunks.popleft()
+            if pending.retry_at > monotonic():
+                self._retry_chunks.append(pending)
+                blocked_tenants.update(event.get("tenant_id") for event in pending.events)
+                continue
+            self._retry_event_count -= len(pending.events)
+            await self._flush_chunk(
+                pending.events,
+                attempts=pending.attempts,
+                retry_at=pending.retry_at,
+                blocked_tenants=blocked_tenants,
+            )
+        events = [self._queue.get_nowait() for _ in range(new_events)]
         for i in range(0, len(events), self._chunk_size):
             chunk = events[i : i + self._chunk_size]
-            try:
-                await self._flush_callable(chunk)
-                self._flushed_count += len(chunk)
-                # CAURA-631: callables that drop sentinel events (e.g. audit
-                # events without ``tenant_id``) stash the dropped count on
-                # themselves so we don't silently credit them as flushed.
-                # Defaults to 0 for callables that don't use this protocol.
+            await self._flush_chunk(chunk, attempts=0, retry_at=0, blocked_tenants=blocked_tenants)
+
+    def _retain_chunk(self, events: list[dict], *, attempts: int, retry_at: float) -> bool:
+        if len(events) > self._max_queue_size - self.queue_size:
+            return False
+        self._retry_chunks.append(_RetryChunk(events, attempts, retry_at))
+        self._retry_event_count += len(events)
+        return True
+
+    async def _flush_chunk(
+        self, chunk: list[dict], *, attempts: int, retry_at: float, blocked_tenants: set[str | None]
+    ) -> None:
+        deferred = [event for event in chunk if event.get("tenant_id") in blocked_tenants]
+        chunk = [event for event in chunk if event.get("tenant_id") not in blocked_tenants]
+        if deferred and not self._retain_chunk(deferred, attempts=attempts, retry_at=retry_at):
+            self._failed_count += len(deferred)
+            logger.error(
+                "audit chunk deferral failed (chunk_size=%d, failed_events=%d); events lost "
+                "(retention cap reached)",
+                len(deferred),
+                len(deferred),
+            )
+        if not chunk:
+            return
+        try:
+            await self._flush_callable(chunk)
+            self._flushed_count += len(chunk)
+            # Callables discard unattributable sentinels without writing them.
+            self._flushed_count -= getattr(self._flush_callable, "_sentinel_count", 0)
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                # Production's per-tenant fan-out identifies the failed subset;
+                # successful sibling tenants and sentinels are never retried.
+                # A generic callable's failure leaves the whole chunk unknown,
+                # including an unacknowledged commit: retry with the same ids.
+                failed_events = getattr(exc, "failed_events", chunk)
+                self._flushed_count += len(chunk) - len(failed_events)
                 self._flushed_count -= getattr(self._flush_callable, "_sentinel_count", 0)
-            except BaseException as exc:
-                # CAURA-631: when the callable handles per-tenant flushes
-                # and only some sub-groups fail, it sets ``failed_event_count``
-                # on the raised exception so we credit the actually-failed
-                # events to ``_failed_count`` and the rest to
-                # ``_flushed_count``. Falls back to ``len(chunk)`` for
-                # legacy callables that don't carry the attribute, matching
-                # the original whole-chunk-failed accounting.
-                #
-                # ``BaseException`` (not ``Exception``) so the accounting
-                # block runs for ``CancelledError`` / ``SystemExit`` /
-                # ``BaseExceptionGroup`` paths too — the per-tenant flusher
-                # explicitly attaches ``failed_event_count`` on those raises
-                # and we'd otherwise bypass them entirely. We re-raise after
-                # accounting so propagation semantics are preserved (the
-                # outer flusher loop's ``except Exception`` then handles
-                # regular errors and lets BaseExceptions escape unchanged).
-                if isinstance(exc, Exception):
-                    failed = getattr(exc, "failed_event_count", len(chunk))
-                else:
-                    # External CancelledError / SystemExit injected at the
-                    # ``await self._flush_callable(chunk)`` suspension point
-                    # has no ``failed_event_count`` attribute — the per-
-                    # tenant flusher's raises always do, but a cancellation
-                    # delivered before the flusher returns doesn't. ``None``
-                    # therefore means "nobody told us what happened", which
-                    # the branch below routes to ``_interrupted_count``. The
-                    # events themselves stay in the queue (or are silently
-                    # lost depending on shutdown ordering), but their
-                    # disposition is "unknown" — neither "failed" nor, as it
-                    # was recorded until OSS 08/14 L-11, "flushed".
-                    failed = getattr(exc, "failed_event_count", None)
-                if failed is None:
-                    # OSS 08/14 L-11 — credit NEITHER bucket; see
-                    # ``interrupted_count``.
-                    self._interrupted_count += len(chunk)
-                else:
-                    self._failed_count += failed
-                    self._flushed_count += len(chunk) - failed
-                    # Same sentinel correction as the success path: dropped
-                    # sentinel events were neither flushed nor failed, so back
-                    # them out of the surviving-events credit.
-                    self._flushed_count -= getattr(self._flush_callable, "_sentinel_count", 0)
-                if isinstance(exc, Exception):
-                    # Per-chunk failure logged here (in addition to the
-                    # closure's rich-detail log) so a partial drain of N
-                    # chunks shows N independent log lines, each naming
-                    # the chunk size — a bare ``logger.exception`` from
-                    # the loop's outer ``except`` would only fire once
-                    # for the first failing chunk and obscure how many
-                    # chunks total were lost. Per-chunk failure isolation
-                    # contract: regular ``Exception`` is caught here and
-                    # the loop continues to the next chunk (covered by
-                    # ``test_chunk_failure_does_not_drop_other_chunks``).
-                    logger.exception(
-                        "audit chunk flush failed (chunk_size=%d, failed_events=%d); events lost",
+                attempts += 1
+                delay = min(
+                    self._retry_initial_backoff * 2 ** (attempts - 1),
+                    self._retry_max_backoff,
+                )
+                if attempts < self._max_flush_attempts and self._retain_chunk(
+                    failed_events, attempts=attempts, retry_at=monotonic() + delay
+                ):
+                    blocked_tenants.update(event.get("tenant_id") for event in failed_events)
+                    logger.warning(
+                        "audit chunk flush failed (chunk_size=%d, failed_events=%d); "
+                        "retained for retry after %ss (attempt=%d/%d)",
                         len(chunk),
-                        failed,
+                        len(failed_events),
+                        delay,
+                        attempts,
+                        self._max_flush_attempts,
                     )
                 else:
-                    # ``CancelledError`` / ``SystemExit`` /
-                    # ``BaseExceptionGroup`` etc — re-raise so shutdown
-                    # signals propagate. Per-chunk isolation only applies
-                    # to regular ``Exception``; a cancellation pre-empts
-                    # the whole drain loop intentionally.
-                    raise
+                    self._failed_count += len(failed_events)
+                    logger.exception(
+                        "audit chunk flush failed (chunk_size=%d, failed_events=%d); events lost "
+                        "(attempt or retention cap reached)",
+                        len(chunk),
+                        len(failed_events),
+                    )
+                return
+
+            # Preserve interruption accounting and propagation. Cancellation
+            # says nothing about whether an in-flight storage POST committed.
+            failed = getattr(exc, "failed_event_count", None)
+            if failed is None:
+                self._interrupted_count += len(chunk)
+            else:
+                self._failed_count += failed
+                self._flushed_count += len(chunk) - failed
+                self._flushed_count -= getattr(self._flush_callable, "_sentinel_count", 0)
+            raise
 
 
 # Module-level singleton bound at lifespan startup. Tests that need a

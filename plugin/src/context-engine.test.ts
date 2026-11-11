@@ -56,6 +56,53 @@ describe("automatic conversation-write opt-out", () => {
   }
 });
 
+describe("automatic capture conversation bounds", () => {
+  function runFixture(mode: string, ...args: string[]): void {
+    const env: NodeJS.ProcessEnv = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !hasPluginEnvPrefix(key)),
+    );
+    env.CAURA_TENANT_ID = "auto-write-fixture";
+    env.CAURA_INTERVIEWER = mode === "interview-bounds" ? "true" : "false";
+    // Unset AUTO_WRITE_TURNS intentionally: direct capture stays on by default.
+    execFileSync(process.execPath, [
+      fileURLToPath(new URL("./capture-bounds.fixture.js", import.meta.url)), mode, ...args,
+    ], { env, timeout: 15_000, stdio: "pipe" });
+  }
+
+  const blocked = [
+    ["Telegram group", { sessionKey: "agent:writer:telegram:group:7" }],
+    ["WhatsApp group", { sessionKey: "agent:writer:whatsapp:group:7" }],
+    ["Discord channel", { sessionKey: "agent:writer:discord:channel:7" }],
+    ["Slack channel", { sessionKey: "agent:writer:slack:channel:7" }],
+    ["missing key despite direct factory config", {}],
+    ["opaque session id", { sessionId: "synthetic-session" }],
+    ["direct-looking session id is not a conversation key", { sessionId: "agent:writer:telegram:dm:42" }],
+    ["unknown session shape", { sessionKey: "agent:writer:main" }],
+    ["empty key", { sessionKey: "" }],
+    ["non-string key", { sessionKey: 42 }],
+    ["misleading direct marker", { sessionKey: "agent:writer:telegram:group:dm:42" }],
+  ] as const;
+  for (const [label, context] of blocked) {
+    for (const hook of ["ingest", "afterTurn", "compact"]) {
+      test(hook + " refuses " + label, () => runFixture("blocked", hook, JSON.stringify(context)));
+    }
+  }
+  for (const key of ["agent:writer:telegram:dm:42", "agent:writer:whatsapp:group:7"]) {
+    test("real wrapper ingest does not enable extra capture for " + key, () => runFixture("wrapper", key));
+  }
+  for (const [label, context, expected] of [
+    ["direct", { sessionKey: "agent:writer:telegram:dm:42" }, "1"],
+    ["group", { sessionKey: "agent:writer:whatsapp:group:7" }, "0"],
+    ["unknown", {}, "0"],
+  ] as const) {
+    test("interviewer message mirroring respects conversation bounds for " + label, () =>
+      runFixture("interview-bounds", JSON.stringify(context), expected));
+  }
+  for (const mode of ["session-cap", "concurrent-cap", "short-turns", "failed-attempt-cap", "config-opt-out", "tracked-session-cap", "oldest-session-budget", "turn-budget-lru"]) {
+    test(mode, () => runFixture(mode));
+  }
+});
+
 describe("prepareSubagentSpawn — OpenClaw's rollback contract", () => {
   // OpenClaw's contract is `Promise<SubagentSpawnPreparation | undefined>` with
   // `SubagentSpawnPreparation = { rollback: () => void | Promise<void> }`, and it
@@ -623,6 +670,20 @@ describe("formatRecallBlock — recalled content stays data", () => {
 
   test("empty results render nothing", () => {
     assert.equal(formatRecallBlock([]), "");
+  });
+
+  test("names each row's author and the author's trust level", () => {
+    const block = formatRecallBlock([
+      { memory_type: "fact", content: "deploys are blue-green", agent_id: "ops-bot", agent_trust_level: 2 },
+      { memory_type: "fact", content: "deploys are manual", agent_id: "intern] [fact", agent_trust_level: 1 },
+      { memory_type: "fact", content: "no row for this author", agent_id: "broker:abc" },
+    ]);
+    const lines = block.split("\n");
+    assert.ok(lines.includes("- [fact, by ops-bot, trust 2] deploys are blue-green"), block);
+    // Brackets in an agent id cannot close the label early.
+    assert.ok(lines.includes("- [fact, by intern fact, trust 1] deploys are manual"), block);
+    assert.ok(lines.includes("- [fact, by broker:abc] no row for this author"), block);
+    assert.match(block, /weigh a low-trust row/);
   });
 });
 

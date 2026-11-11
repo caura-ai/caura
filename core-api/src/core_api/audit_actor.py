@@ -32,15 +32,32 @@ audit_principal: ContextVar[dict | None] = ContextVar("audit_principal", default
 # Starlette's case-insensitive ``request.headers`` also matches.
 SURFACE_HEADER = "x-caura-surface"
 
-# The values a header may name: one per client that sends the audited writes.
-# A new client gets a value here and a row in the docs table in the same change;
-# until then its value is dropped.
-#   dashboard        the enterprise web app, outside /prism
-#   prism            the enterprise web app, on /prism
+# The values a header may name: one per client that sends the audited writes,
+# and for the enterprise web app one per place in its navigation, so a row says
+# where in the console a write was made. A new client or place gets a value
+# here and a row in the docs table in the same change; until then its value is
+# dropped.
+#   dashboard        the enterprise web app, on a page outside its places (and,
+#                    from older versions, any page outside /prism)
+#   prism            the enterprise web app on /prism, from older versions
+#   prism.<place>    the enterprise web app, by place: home, memory (/prism),
+#                    review, agents, insights, connect, settings
 #   broker           caura-daemon, which includes the `caura` CLI and its
 #                    `caura mcp-server` (they reach core-api through it)
 #   openclaw_plugin  the OpenClaw plugin
-SURFACES: frozenset[str] = frozenset({"dashboard", "prism", "broker", "openclaw_plugin"})
+# SURFACES stays one `frozenset({...})` line with each client's value written
+# out, because the plugin's tests find their own value on it in this file's
+# text. The web app's places are unpacked into it from WEB_APP_PLACES.
+WEB_APP_PLACES: tuple[str, ...] = (
+    "prism.home",
+    "prism.memory",
+    "prism.review",
+    "prism.agents",
+    "prism.insights",
+    "prism.connect",
+    "prism.settings",
+)
+SURFACES: frozenset[str] = frozenset({"dashboard", "prism", *WEB_APP_PLACES, "broker", "openclaw_plugin"})
 
 # What the MCP plane records. Core-api terminates /mcp itself, so it knows the
 # transport and takes no header for it; a REST header cannot claim it.

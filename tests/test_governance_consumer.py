@@ -45,7 +45,7 @@ def sc(monkeypatch):
     module (each captured ``get_storage_client`` at import time)."""
     c = MagicMock()
     c.get_memory = AsyncMock()
-    c.soft_delete_memory = AsyncMock()
+    c.drop_memory = AsyncMock()
     c.update_memory = AsyncMock()
     # H-02: a drop now also purges the graph rows mined from the row. Returns
     # explicit zero counts rather than a bare AsyncMock so the caller's log
@@ -114,7 +114,7 @@ async def test_pii_drop_acks_and_skips_detection(sc, detect, monkeypatch):
 
     await consumer.handle_memory_enriched(_event(mid))
 
-    sc.soft_delete_memory.assert_awaited_once_with(str(mid), "tenant-gov")
+    sc.drop_memory.assert_awaited_once_with(str(mid), "tenant-gov")
     detect.assert_not_awaited()  # dropped by policy → contradiction detection skipped
 
 
@@ -157,7 +157,7 @@ async def test_clean_signal_runs_detection_with_no_governance_action(
 
     await consumer.handle_memory_enriched(_event(mid))
 
-    sc.soft_delete_memory.assert_not_awaited()
+    sc.drop_memory.assert_not_awaited()
     sc.update_memory.assert_not_awaited()
     detect.assert_awaited_once()
 

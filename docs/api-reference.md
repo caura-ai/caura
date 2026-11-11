@@ -23,13 +23,20 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/memories/held` | GET | The memories held for review, newest first, with `total`; `session_id` narrows to one broker session. Each one's `system_metadata.hold` says why: `below_trust` (an agent below the organization's trust level) or `write_gate` (a file write the broker's gate refused, with the tool, paths, action and rule ids). A held write's auto-chunks aren't listed: they move with it. A person only |
 | `/memories/rollback-session` | POST | Undo a broker session's writes (`{"session_id"}`): its live memories and the rows derived from them become `outdated`, what they had superseded or contradicted becomes `active` again (`restored`), and its held ones are rejected as a person rejects them (`cancelled` and soft-deleted), with their auto-chunks. A person only |
 | `/memories/{id}/contradictions` | GET | View contradiction chain |
+| `/memories/{id}/exposure` | GET | The agents this memory was handed to: `{memory_id, agents: [{agent_id, count, first_seen, last_seen, last_trace_id}], total_reads}`, latest read first. Every search, recall and by-id read that returned the memory to an agent counts, over MCP and REST; a chunk or atomic fact counts for its parent. A person's reads and a credential naming no agent are not counted. Same access rule as `GET /memories/{id}`. See [correction propagation](plans/correction-propagation.md) |
+| `/memories/{id}/corrections` | GET | The memory's corrections, newest first (`limit` 1-100, default 20): `{memory_id, corrections: [...]}`, each as `GET /corrections/{id}`. Same access rule as `GET /memories/{id}`. See [correction propagation](plans/correction-propagation.md) |
+| `/corrections/{id}` | GET | One correction and the agents it tells: `{id, memory_id, kind, actor, corrected_at, old_summary, new_summary, detail, status, sent_at, sent_by, recipients: [{agent_id, reads, first_seen, last_seen, last_trace_id, channel, notice_state, confirmed_at, ...}], counts: {recipients, truncated, readers, pending, sent, delivered, confirmed, late, failed, unreachable}}`. `status` is `preview` until sent, `sending` while the bus throttles a recipient, `sent`, then `closed` once every recipient confirmed or failed. `channel` is `bus` or `recall` (the agent is told on its next recall). Recipients are the agents that read the memory before the correction, the correcting agent excluded, latest read first, at most 50. Once sent, a read refreshes the bus outcomes (at most every 30 s). An agent that is not a recipient gets `old_summary: null`. Another tenant's correction, or one on a memory the caller cannot read, is a 404 |
+| `/corrections/{id}/send` | POST | Send the notices: one Caura bus notice per recipient (`channel: bus`); an agent the bus does not know, or every agent when `COLLABORATION_API_URL` is unset, is told on its next recall (`channel: recall`). Idempotent; a recipient the bus throttled is retried. A signed-in person, an admin or tenant key, or an agent at trust_level >= 3 that can read the memory. Returns the correction. MCP: `caura_manage op=send_correction` |
+| `/corrections/{id}/confirm` | POST | The recipient agent confirms its notice: `{correction_id, memory_id, agent_id, notice_state: "confirmed", confirmed_at}`. A tenant-key caller names the agent with `agent_id`. 404 when the caller is not a recipient. MCP: `caura_manage op=confirm_correction` |
+| `/batons/{id}` | GET | A handoff baton, for its receiver (as delivered to it) or its sender: `{type, v, baton_id, from_agent, goal, decisions, failed_approaches, open_questions, memory_ids, linked: [{memory_id, title}], doc_ids, created_at}`. Each link is checked again against the reader's access and left out when it cannot read it; a receiver never sees the withheld count. A tenant-key caller names the agent with `agent_id`. 404 for anyone else and for an unknown baton. For an agent not on the bus; one on it reads `GET /api/v1/bus/batons/{id}` |
+| `/batons/{id}/accept` | POST | The receiver takes the baton up, so its recall notice (`baton_notices`) stops: `{baton_id, agent_id, from_agent, state: "accepted", accepted_at}` (`replied` when it was already answered on the bus). Idempotent. The bus's baton status (`GET /api/v1/bus/batons/{id}`) shows the sender `accepted`. A tenant-key caller names the agent with `agent_id`; a person cannot accept. 404 when the caller is not a receiver |
 | `/memories` | DELETE | Bulk soft-delete, narrowed by `fleet_id`, `agent_id`, `memory_type`, `status`, `run_id`, `created_after` / `created_before` and `exclude_memory_types` as `GET /memories` filters, plus `exclude_ids` and `metadata_filter`. Skips held memories (`quarantined`), as every delete does, because a person decides on those. A fleet or tenant purge still removes them |
 | `/memories/stats` | GET | Counts by type, agent, and status, narrowed by the same filters as the bulk delete above (bar `exclude_ids` and `metadata_filter`; `created_before` is exclusive here), plus `pending: {embedding, enrichment, fanout}` (live rows still owed background work), `stranded: {embedding}` (the pending-embedding rows written over an hour ago, which nothing will come back for; re-embed them with `python -m core_storage_api.scripts.backfill_embeddings`) and `settled` (all zero once the stranded rows are set aside). Benchmarks and other measure-after-ingest callers should poll until `settled: true` before measuring, and check `stranded`, since those rows are searched by keyword only — see [BENCHMARKS.md](../BENCHMARKS.md#reproduce-it-yourself). With no embedding provider configured, `embedding_configured` is `false`: rows are stored unembedded and searched by keyword, `pending.embedding` counts them, and `settled` ignores that count |
 | `/memories/field` | GET | A 2D map layout of the memories the caller can list, computed from their embeddings (PCA, k-means clusters, per-cluster local layout; numpy only). Returns `points` (normalised `x`/`y` in 0-1, `cluster` — `-1` for a memory not embedded yet — plus list fields, a 240-char `preview`, `content_chars`, `supersedes_id`/`superseded_by` and `entity_ids`), `clusters` (anchor, `size`, short entity-based `label`), the linked `entities`, and `total`. Same tenant check, fleet gate and visibility scoping as `GET /memories`; superseded and archived memories are included, deleted ones are not. `fleet_id` filters; `limit` (default 20000, max 50000) caps the newest memories placed. Cached in-process for up to 10 minutes and recomputed when a memory is written, edited, embedded, deleted or changes status. A process builds at most `MEMORY_FIELD_MAX_CONCURRENT_BUILDS` maps at once (default 2) and one per tenant; a request for a map already being built waits for it, and any other answers `429` with `Retry-After` |
 | `/search` | POST | Hybrid semantic + keyword search with graph-enhanced retrieval |
 | `/recall` | POST | Search + LLM synthesis — `summary` is the answer to the query (the model reasons step by step internally; only its final answer is surfaced), alongside the source memories under `memories` (also mirrored to `items` for /search-shaped consumers — **`items` is deprecated and scheduled for removal in v4.0.0**; send `items_alias: false` to drop that copy now and halve the response, and read `memories`. The MCP recall brief already omits it by default). `top_k` is the result count — `limit` is accepted as an alias for it |
-| `/ingest/preview` | POST | Extract 5-20 atomic facts from a URL or text (no writes) |
-| `/ingest/commit` | POST | Write previewed facts as memories |
+| `/ingest/preview` | POST | Extract 5-20 atomic facts per section from a URL or text (no writes). One model call per section; a document of more than 32 sections is refused with `413` |
+| `/ingest/commit` | POST | Write previewed facts as memories: 1 to 100 a call, on the bulk-write rate limit |
 
 The broker's install credential carries no agent identity. On these routes it
 reads and changes shared memories as a tenant credential does, but a
@@ -125,6 +132,7 @@ refused with `AGENT_IDENTITY_MISMATCH`. The same holds over MCP.
 | `/admin/memories/stats` | GET | Memory counts by tenant/type/status (admin key) |
 | `/admin/memories/{id}/re-extract` | POST | Re-run one memory's entity extraction in the background, replacing the graph it has (admin key, `tenant_id` query). 202; 404 when the memory is gone or held, 409 when its organization has entity extraction off |
 | `/admin/entity-extraction/rerun-lost` | POST | Re-run entity extraction for memories that lost it (a run that raised, was cancelled by a shutdown, or settled for the regex heuristic), oldest first, up to 50 per call and 3 per memory; answers with counts at once. core-operations calls it hourly (admin key) |
+| `/admin/enrichment/rerun-unjudged` | POST | Enrich again the memories an LLM governance policy (`governance.pii` or `governance.non_business`) could not judge, because every provider failed and enrichment fell back to the keyword heuristic: such a row is marked `governance_llm_uncertain`, audited and logged. Oldest first, up to 50 per call and 3 per memory; answers with counts at once. core-operations calls it hourly (admin key) |
 | `/settings` | GET / PUT | Per-tenant configuration. `quarantine.below_trust` (0 to 4; unset or 0 holds nothing) holds every write from an agent below that trust level as `quarantined`, for a person to release or reject; `quarantine.below_trust_by_fleet` overrides it per fleet (`{fleet_id: level}`). A raised level applies to every write sent after the change is saved, on every instance; a write caught between two quick changes gets a 503 to retry |
 | `/audit-log` | GET | Tenant audit entries; agent and install credentials are refused. New rows record credential kind/id and authenticated actor fields; caller-supplied agent names are claims. |
 | `/audit-log/verify` | GET | Verify the tenant's tamper-evident audit hash chain: `valid`, `verified_count`, and `next_seq` when the window is `truncated` (page with `start_seq`). Agent credentials, install credentials and org members are refused. Windows default to and are capped at 50,000 rows; one verification runs per tenant, with one start per minute (429 with Retry-After). Redis shares admission across replicas when configured; admission returns 503 if Redis is unavailable. |
@@ -161,7 +169,9 @@ request is refused `401` before any identity header is consulted.
 **Audit attribution**
 
 New memory-update events record `content_changed` without content excerpts or
-content digests, including when no PII policy is configured. Derived-child
+content digests, including when no PII policy is configured. Memory events
+record no title, and an edit to the title, `object_value`, `source_uri` or
+`predicate` is listed in `text_changed` without the old or new text. Derived-child
 delete events retain `owner_agent_id` separately from the authenticated actor.
 REST and MCP use the same normalized credential-kind labels.
 
@@ -173,8 +183,15 @@ request goes ahead as normal (no 4xx).
 
 | `X-Caura-Surface` | Client |
 |---|---|
-| `dashboard` | The enterprise web app, outside `/prism` |
-| `prism` | The enterprise web app, on `/prism` |
+| `prism.home` | The enterprise web app, on Home |
+| `prism.memory` | The enterprise web app, in Memory (`/prism`) |
+| `prism.review` | The enterprise web app, in Review |
+| `prism.agents` | The enterprise web app, in Agents |
+| `prism.insights` | The enterprise web app, in Insights |
+| `prism.connect` | The enterprise web app, in Connect |
+| `prism.settings` | The enterprise web app, in Settings |
+| `dashboard` | The enterprise web app, on a page outside those places; from older versions, any page outside `/prism` |
+| `prism` | The enterprise web app, on `/prism`, from older versions |
 | `broker` | caura-daemon, including the `caura` CLI and `caura mcp-server`, which reach core-api through it |
 | `openclaw_plugin` | The OpenClaw plugin |
 
@@ -276,6 +293,8 @@ directly. A complete `ALLOYDB_HOST`, `ALLOYDB_USER`, `ALLOYDB_PASSWORD`, and
 | `PLATFORM_LLM_API_KEY` | — | OpenAI API key for the platform LLM singleton |
 | `PLATFORM_LLM_GCP_PROJECT_ID` | — | GCP project for platform Vertex LLM |
 | `PLATFORM_LLM_GCP_LOCATION` | `us-central1` | GCP region for platform Vertex LLM |
+| `PLATFORM_RECALL_LLM_MODEL` | *(empty)* | A second Vertex model that writes recall briefs for the tenants in `PLATFORM_RECALL_LLM_TENANTS`, wherever the platform LLM would have. Needs `PLATFORM_LLM_PROVIDER=vertex`; uses the same project and location |
+| `PLATFORM_RECALL_LLM_TENANTS` | *(empty)* | Comma-separated tenant ids that use `PLATFORM_RECALL_LLM_MODEL`. Set both or neither; one without the other is reported on `/health` and ignored |
 | `PLATFORM_EMBEDDING_PROVIDER` | *(empty)* | Platform-default embeddings: `openai` or empty to disable |
 | `PLATFORM_EMBEDDING_MODEL` | *(empty)* | Embedding model override (e.g. `text-embedding-3-small`) |
 | `PLATFORM_EMBEDDING_API_KEY` | — | OpenAI API key for platform embeddings |

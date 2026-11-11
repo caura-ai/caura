@@ -194,6 +194,11 @@ SELF_ID_PARAMS_EXCLUDED: dict[str, str] = {
         "node to, not a claim about who the caller is (agent credentials are refused)"
     ),
     "agent": "install-skill's runtime selector (claude-code | codex | both)",
+    "as_agent_id": (
+        "search/explain's SUBJECT: whose search to explain, named by a caller "
+        "_require_explain_access already holds to trust >= 3 or tenant admin — "
+        "not a claim about who the caller is"
+    ),
 }
 # ``written_by`` is the nearest miss and is deliberately not here: it is an
 # AUTHOR filter, and ``GET /memories`` documents it as distinct from the
@@ -312,6 +317,10 @@ ADMIN_PLANE_ROUTERS = frozenset(
 # router is on instead.
 NON_ADMIN_PLANE_ROUTERS: dict[str, str] = {
     "memories": "agent-plane: an agent writing its own memories is the product",
+    "search_explain": (
+        "trust-plane read: explaining a search needs an agent at trust 3 or a "
+        "tenant-admin credential (_require_explain_access); it writes nothing"
+    ),
     "stm": "agent-plane: short-term notes are written by agents",
     "entities": "agent-plane: derived from agent-written memories",
     "documents": "agent-plane: caura_doc is an agent-facing surface",
@@ -337,6 +346,10 @@ NON_ADMIN_PLANE_ROUTERS: dict[str, str] = {
     # dismissal is the only record that detection was wrong — so the resolve route
     # gates on require_trust(min_level=2), the keystone-author bar.
     "conflicts": "trust-plane: human review of detector output, gated by require_trust",
+    # Correction propagation: a person (or a trust-3 agent, enforce_send_correction)
+    # sends a correction's notices; the recipient agent confirms its own.
+    "corrections": "trust-plane send (enforce_send_correction); agent-plane confirm of its own notice",
+    "batons": "agent plane: a baton's receiver (or sender) reads it and accepts its own notice; storage refuses anyone else",
 }
 
 # Routers that exist ONLY under an explicit env flag, and so are not part of
@@ -366,8 +379,13 @@ WRITE_GATE_ALLOWLIST: dict[str, str] = {
     # ``enforce_readable_tenant``, which is the read-side scope check.
     "POST /api/v1/search": "read: POST-bodied query, gated by enforce_readable_tenant",
     "POST /api/v1/recall": "read: POST-bodied query, gated by enforce_readable_tenant",
+    "POST /api/v1/search/explain": (
+        "read: POST-bodied query explaining one search, gated by "
+        "enforce_readable_tenant and _require_explain_access"
+    ),
     "POST /api/v1/documents/query": "read: POST-bodied query, gated by enforce_readable_tenant",
     "POST /api/v1/documents/search": "read: POST-bodied query, gated by enforce_readable_tenant",
+    "POST /api/v1/interview/cursor": "read: credential-owned cursor, gated by cursor_read_access",
     "POST /api/v1/skills/installable": "read: POST-bodied query, gated by enforce_readable_tenant",
     # Unauthenticated bootstrap. These take no ``auth`` parameter at all — they
     # render an install script for a machine that does not have a credential
@@ -441,6 +459,14 @@ PLANE_GATE_ALLOWLIST: dict[str, str] = {
 # parameter (``GET /memories/stats``'s knob was both author filter and
 # visibility identity; ``/recall``'s ``filter_agent_id`` was both).
 SELF_GATE_ALLOWLIST: dict[str, str] = {
+    # EC-06: the body's identity fields describe the search being EXPLAINED.
+    # ``caller_agent_id`` still goes through ``_resolve_read_identity`` (and so
+    # ``enforce_self_agent``) unless ``as_agent_id`` names the subject, which
+    # only a trust-3 agent or a tenant admin reaches; nothing is written.
+    "POST /api/v1/search/explain": (
+        "explain-as: names whose search to explain, behind trust >= 3 or "
+        "tenant admin in _require_explain_access; read-only"
+    ),
     # STRICTER than precedence, and the reason it is worth its own line. The
     # authorization principal here is ``auth.agent_id`` alone — the query param
     # is never promoted — and ``enforce_delete`` then gates that principal at
@@ -541,6 +567,11 @@ SELF_GATE_ALLOWLIST: dict[str, str] = {
 # product call this file cannot make; what it records is that the question was
 # asked, by whom it was answered, and what the handler does today.
 ROW_GATE_ALLOWLIST: dict[str, str] = {
+    # Reads ONE row's placement (tenant, fleet, author, status) to explain a
+    # search; changes nothing. ``memory_id`` names the row explained.
+    "POST /api/v1/search/explain": (
+        "read-only: trust >= 3 or tenant admin, checked in _require_explain_access"
+    ),
     # Re-homes rows to another agent across fleets: an edit of rows the caller
     # may not own, at the bar the delete and peer-edit gates both use. The
     # handler checks it inline on the caller that enforce_self_agent has bound

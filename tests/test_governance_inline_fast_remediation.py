@@ -103,7 +103,7 @@ def _storage():
     sc.get_memory = AsyncMock(return_value=_row())
     sc.update_memory = AsyncMock(return_value=None)
     sc.update_memory_status = AsyncMock(return_value=None)
-    sc.soft_delete_memory = AsyncMock(return_value=True)
+    sc.drop_memory = AsyncMock(return_value=True)
     return sc
 
 
@@ -204,7 +204,7 @@ async def test_inline_enrichment_persists_business_relevance():
 
 
 async def test_inline_fast_write_drops_a_personal_memory_when_configured():
-    """End-to-end: nb=drop + a 'personal' verdict must soft-delete the row.
+    """End-to-end: nb=drop + a 'personal' verdict must drop the row.
 
     This is the behaviour H-18 says was silently skipped. It needs BOTH fixes —
     the remediation call AND the persisted ``business_relevance``.
@@ -217,7 +217,7 @@ async def test_inline_fast_write_drops_a_personal_memory_when_configured():
         storage=sc,
         memory_id=mid,
     )
-    sc.soft_delete_memory.assert_awaited_once_with(str(mid), TENANT)
+    sc.drop_memory.assert_awaited_once_with(str(mid), TENANT)
 
 
 async def test_inline_fast_write_drops_a_pii_memory_when_configured():
@@ -230,7 +230,7 @@ async def test_inline_fast_write_drops_a_pii_memory_when_configured():
         storage=sc,
         memory_id=mid,
     )
-    sc.soft_delete_memory.assert_awaited_once_with(str(mid), TENANT)
+    sc.drop_memory.assert_awaited_once_with(str(mid), TENANT)
 
 
 async def test_keep_private_downgrades_visibility_instead_of_dropping():
@@ -243,7 +243,7 @@ async def test_keep_private_downgrades_visibility_instead_of_dropping():
         storage=sc,
         memory_id=mid,
     )
-    sc.soft_delete_memory.assert_not_awaited()
+    sc.drop_memory.assert_not_awaited()
     assert any(
         call.args[0] == str(mid) and call.args[2].get("visibility") == "scope_agent"
         for call in sc.update_memory.await_args_list
@@ -259,7 +259,7 @@ async def test_clean_content_is_left_alone():
         gov_cfg=_gov_cfg(pii=True, nb=True),
         storage=sc,
     )
-    sc.soft_delete_memory.assert_not_awaited()
+    sc.drop_memory.assert_not_awaited()
 
 
 # ── Cost + correctness of how the verdict reaches remediation ─────────────────
@@ -304,7 +304,7 @@ async def test_a_stale_read_replica_cannot_defeat_the_verdict():
         storage=sc,
         memory_id=mid,
     )
-    sc.soft_delete_memory.assert_awaited_once_with(str(mid), TENANT)
+    sc.drop_memory.assert_awaited_once_with(str(mid), TENANT)
 
 
 # ── Wiring: which callers may remediate ───────────────────────────────────────
@@ -323,7 +323,7 @@ async def test_strong_mode_is_not_double_remediated():
         storage=sc,
         remediate=False,
     )
-    sc.soft_delete_memory.assert_not_awaited()
+    sc.drop_memory.assert_not_awaited()
 
 
 async def test_deferred_deployment_does_not_remediate_here():
@@ -339,7 +339,7 @@ async def test_deferred_deployment_does_not_remediate_here():
         storage=sc,
         inline=False,
     )
-    sc.soft_delete_memory.assert_not_awaited()
+    sc.drop_memory.assert_not_awaited()
 
 
 async def test_no_verdict_means_no_remediation(task_failures):
@@ -355,7 +355,7 @@ async def test_no_verdict_means_no_remediation(task_failures):
         gov_cfg=_gov_cfg(pii=True, nb=True),
         storage=sc,
     )
-    sc.soft_delete_memory.assert_not_awaited()
+    sc.drop_memory.assert_not_awaited()
 
 
 async def test_remediation_failure_surfaces_to_the_task_tracker():

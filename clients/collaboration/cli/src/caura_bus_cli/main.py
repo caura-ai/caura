@@ -419,7 +419,58 @@ def send(
             ),
             idempotency_key=idempotency_key,
         )
-        return receipt.model_dump()
+        return receipt.model_dump(exclude_none=True)
+
+    execute(config, run, key_file)
+
+
+@app.command()
+def handoff(
+    goal: str,
+    to: list[str] = typer.Option(..., "--to"),
+    idempotency_key: str = typer.Option(..., "--idempotency-key"),
+    decision: list[str] = typer.Option([], "--decision", help="A decision taken (repeat)"),
+    failed: list[str] = typer.Option([], "--failed", help='"what::why" for an approach that failed (repeat)'),
+    question: list[str] = typer.Option([], "--question", help="An open question (repeat)"),
+    memory: list[str] = typer.Option([], "--memory", help="A linked memory UUID (repeat)"),
+    doc: list[str] = typer.Option([], "--doc", help='A linked document as "collection/doc_id" (repeat)'),
+    thread: str | None = None,
+    config: Path | None = typer.Option(None),
+    key_file: Path | None = typer.Option(None, help="0600 file holding the agent key"),
+):
+    """Hand work to another agent as a baton; prints baton_id and links withheld per receiver."""
+    from caura_bus_mcp.batons import baton_receipt
+    from caura_bus_mcp.server import Handoff
+    from pydantic import ValidationError
+
+    def pair(value, separator, names):
+        first, found, second = value.partition(separator)
+        if not found:
+            raise typer.BadParameter(f"{value!r}: expected {separator.join(names)}")
+        return dict(zip(names, (first.strip(), second.strip()), strict=True))
+
+    try:
+        params = Handoff.model_validate(
+            {
+                "to": to,
+                "goal": goal,
+                "idempotency_key": idempotency_key,
+                "decisions": decision,
+                "failed_approaches": [pair(f, "::", ("what", "why")) for f in failed],
+                "open_questions": question,
+                "memory_ids": memory,
+                "doc_ids": [pair(d, "/", ("collection", "doc_id")) for d in doc],
+                "thread_id": thread,
+            }
+        )
+    except ValidationError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    fields = params.send()
+    key = fields.pop("idempotency_key")
+
+    async def run(bus):
+        receipt = await bus.send(SendMessage(**fields), idempotency_key=key)
+        return baton_receipt(receipt.model_dump(exclude_none=True))
 
     execute(config, run, key_file)
 

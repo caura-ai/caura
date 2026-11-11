@@ -274,7 +274,8 @@ again. `POST /api/v1/memories` and MCP `caura_write` also take the key as
 `metadata.idempotency_key`; MCP `caura_evolve` takes it as `idempotency_key`.
 
 A key belongs to the tenant, the agent the request is attributed to, and the
-way it was sent (header, body or MCP), and it lasts 24 hours. Two agents that
+way it was sent (header, body or MCP), and it lasts 24 hours; the stored
+response is deleted by the next daily purge after that. Two agents that
 happen to use the same key each get their own write. Reusing a key with a
 different body is a `422`. A retry that arrives while the first request is
 still running waits for it, and gets a `409` if the first takes too long.

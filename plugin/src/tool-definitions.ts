@@ -28,7 +28,8 @@ import {
   getToolDescription,
 } from "./env.js";
 import { assertSafePathSegment } from "./validation.js";
-import { resolveAgentIdQuiet } from "./resolve-agent.js";
+import { sessionHeader } from "./origin-usage.js";
+import { toolAgentId } from "./resolve-agent.js";
 import { getSpec } from "./tool-specs.js";
 import { fetchKeystonesPayload } from "./keystones.js";
 
@@ -101,6 +102,12 @@ interface EnrichOptions {
    * standard-trust caller to its home fleet, so recall must opt in explicitly.
    */
   skipAgentDefault?: boolean;
+
+  /**
+   * The run the tool was built for: its session names the agent a
+   * ``resolveIdentity`` call is sent as.
+   */
+  run?: ToolRunContext;
 }
 
 async function enrichBody(
@@ -109,13 +116,12 @@ async function enrichBody(
 ): Promise<Record<string, unknown>> {
   const body = { ...params };
   if (!body.tenant_id) body.tenant_id = await ensureTenantId();
-  // ``resolveAgentIdQuiet`` covers the env var too (its step 4), so the
-  // identity-bearing branch subsumes the plain one rather than racing it.
-  // Quiet, not loud: the install-scoped default IS the design for a tool call,
-  // which carries no session context to resolve a richer identity from. The
-  // loud variant is for the per-turn paths, where a fall-through is a real bug.
+  // ``toolAgentId`` covers the env var too, so the identity-bearing branch
+  // subsumes the plain one rather than racing it. It reads the run and the
+  // install's config, never ``params``: an ``agent_id`` the model passed was
+  // already checked against the run by ``createToolFromSpec``.
   if (!body.agent_id) {
-    if (opts.resolveIdentity) body.agent_id = resolveAgentIdQuiet(params);
+    if (opts.resolveIdentity) body.agent_id = toolAgentId(undefined, opts.run?.sessionKey);
     else if (!opts.skipAgentDefault && CAURA_AGENT_ID) body.agent_id = CAURA_AGENT_ID;
   }
   // The configured fleet below is a DEFAULT, for callers that did not say
@@ -164,7 +170,9 @@ export const STATUSES = [
 // so they cannot drift. Deliberately NOT `tools.json`'s `ops[]`, which is
 // what the MCP handler ACCEPTS and legitimately differs — see MCP_ONLY_OPS
 // in tool-definitions.test.ts.
-const MANAGE_OPS = ["read", "update", "transition", "delete"] as const;
+const MANAGE_OPS = [
+  "read", "update", "transition", "delete", "confirm_correction", "accept_baton",
+] as const;
 const DOC_OPS = [
   "write", "read", "query", "delete", "search", "list_collections",
 ] as const;
@@ -215,9 +223,9 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
 
   caura_write: {
     type: "object",
-    required: ["agent_id"],
+    required: [],
     properties: {
-      agent_id: { type: "string", description: "REQUIRED. Your agent identifier." },
+      agent_id: { type: "string", description: "Optional. Your own agent id: calls are sent as the agent running them, and another agent's id is refused." },
       content: { type: "string", description: "Single-write content. Provide one of {content, items}." },
       items: {
         type: "array", minItems: 1, maxItems: 100,
@@ -230,6 +238,9 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
             weight: { type: "number" },
             source_uri: { type: "string" },
             run_id: { type: "string" },
+            tool_call_id: { type: "string" },
+            observed_at: { type: "string" },
+            trace_id: { type: "string" },
             metadata: { type: "object" },
             status: STATUS_SCHEMA,
           },
@@ -241,6 +252,10 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       weight: { type: "number", description: "Importance 0-1 (single-write only)" },
       source_uri: { type: "string", description: "Provenance URI (single-write only)" },
       run_id: { type: "string", description: "Run/session identifier (single-write only)" },
+      // Evidence contract v1. Omitted ``trace_id`` is the OpenClaw session.
+      tool_call_id: { type: "string", description: "Id of the tool call whose result this records (single-write only)" },
+      observed_at: { type: "string", description: "ISO time the fact was observed, if earlier (single-write only)" },
+      trace_id: { type: "string", description: "Session/trace id; default: this session (single-write only)" },
       metadata: { type: "object", description: "Additional metadata (single-write only)" },
       status: STATUS_SCHEMA,
       write_mode: { type: "string", enum: ["fast", "strong", "auto"], description: "Single-write only" },
@@ -249,10 +264,23 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
 
   caura_manage: {
     type: "object",
-    required: ["op", "memory_id"],
+    required: ["op"],
     properties: {
       op: { type: "string", enum: [...MANAGE_OPS] },
-      memory_id: { type: "string", description: "UUID of memory to act on" },
+      memory_id: {
+        type: "string",
+        description: "UUID of memory to act on. Required except for op=confirm_correction and op=accept_baton",
+      },
+      correction_id: {
+        type: "string",
+        description:
+          "For op=confirm_correction: the id from a Memory Corrections notice. " +
+          "Confirm only after checking the work that used the old version.",
+      },
+      baton_id: {
+        type: "string",
+        description: "For op=accept_baton: the id from a Handoff Batons notice. Accept once you take the work up.",
+      },
       status: { type: "string", enum: [...STATUSES], description: "Required for op=transition" },
       content: { type: "string", description: "For op=update" },
       memory_type: WRITABLE_MEMORY_TYPE_SCHEMA,
@@ -420,9 +448,20 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
 
 // --- HTTP dispatch ---
 
+/**
+ * What OpenClaw tells a tool about the run it is called in (the
+ * ``OpenClawPluginToolContext`` a tool factory receives). Only the session is
+ * read: it is the trace a memory written by the tool belongs to.
+ */
+export interface ToolRunContext {
+  sessionKey?: string;
+  sessionId?: string;
+}
+
 type ExecuteFn = (
   params: Record<string, unknown>,
   signal?: AbortSignal,
+  run?: ToolRunContext,
 ) => Promise<unknown>;
 
 // Translate friendly MCP-tool param names to existing REST query/body fields.
@@ -449,7 +488,15 @@ function searchBody(params: Record<string, unknown>): Record<string, unknown> {
 }
 
 // Fields of a /search or /recall response that ride along with the rows.
-const RECALL_PASSTHROUGH_FIELDS = ["recall_tracked", "warnings", "diagnostic", "_latency_ms", "_server_ms"];
+const RECALL_PASSTHROUGH_FIELDS = [
+  "recall_tracked", "warnings", "diagnostic", "_latency_ms", "_server_ms",
+  // CP-16: corrections to memories this agent read; it confirms each with
+  // caura_manage op=confirm_correction.
+  "correction_notices",
+  // HB-09: handoff batons waiting on this agent; it accepts each with
+  // caura_manage op=accept_baton.
+  "baton_notices",
+];
 
 /**
  * ``caura_recall``'s result: the rows once, as ``results``, with ``count``
@@ -480,6 +527,9 @@ const SINGLE_WRITE_ONLY_FIELDS = [
   "weight",
   "source_uri",
   "run_id",
+  "tool_call_id",
+  "observed_at",
+  "trace_id",
   "metadata",
   "status",
   "write_mode",
@@ -530,12 +580,11 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     return envelope;
   },
 
-  caura_write: async (params, signal) => {
+  caura_write: async (params, signal, run) => {
     const isBatch = Array.isArray(params.items);
     // Never send an empty agent_id: on the gateway path it collapses onto the
-    // reserved "main" default. ``resolveIdentity`` supplies the install-scoped
-    // id this dispatch used to build inline.
-    const body = await enrichBody(params, { resolveIdentity: true });
+    // reserved "main" default. ``resolveIdentity`` supplies the run's agent.
+    const body = await enrichBody(params, { resolveIdentity: true, run });
     // SAFE-01. ``caura_write`` is ONE tool with two bodies behind it, and this
     // dispatch forwards the caller's params wholesale — so whichever half's
     // fields the caller didn't use rode along into the other half's endpoint.
@@ -548,6 +597,11 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     // visibility — the per-item spellings belong inside each item object).
     // Single: ``items``, which reaches here only when it is present but not an
     // array (``isBatch`` is false), i.e. already malformed.
+    // Evidence contract v1: the session the agent wrote from, as the header the
+    // server stamps a memory's ``trace_id`` from (the same label the
+    // auto-capture writes carry). A header, not a body field, so a server that
+    // predates the evidence fields ignores it instead of 422-ing the write.
+    const session = sessionHeader(run?.sessionKey ?? run?.sessionId);
     if (isBatch) {
       for (const k of SINGLE_WRITE_ONLY_FIELDS) delete body[k];
       // POST /memories/bulk requires a per-attempt idempotency token via
@@ -561,19 +615,47 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
       // MCP path which auto-generates `mcp:{uuid4()}`.
       return apiCall("POST", "/memories/bulk", body, undefined, signal, undefined, {
         "X-Bulk-Attempt-Id": randomUUID(),
+        ...session,
       });
     }
     delete body.items;
-    return apiCall("POST", "/memories", body, undefined, signal);
+    return apiCall("POST", "/memories", body, undefined, signal, undefined, session);
   },
 
-  caura_manage: async (params, signal) => {
+  caura_manage: async (params, signal, run) => {
     // op=update sends ``agent_id`` as a query param; the other ops ignore it.
-    const enriched = await enrichBody(params, { resolveIdentity: true });
+    const enriched = await enrichBody(params, { resolveIdentity: true, run });
     const op = enriched.op as ManageOp;
+    const tenant_id = enriched.tenant_id as string;
+    if (op === "confirm_correction") {
+      // CP-16: the agent itself confirms it checked its work against a
+      // correction notice. ``agent_id`` selects its agent-scoped credential;
+      // the server accepts only a recipient of the correction.
+      const correction_id = enriched.correction_id;
+      assertSafePathSegment(correction_id, "correction_id");
+      return apiCall(
+        "POST",
+        `/corrections/${encodeURIComponent(correction_id)}/confirm`,
+        undefined,
+        { tenant_id, agent_id: enriched.agent_id as string },
+        signal,
+      );
+    }
+    if (op === "accept_baton") {
+      // HB-09: the agent itself takes up a baton handed to it, so its recall
+      // stops showing it. The server accepts only a receiver of the baton.
+      const baton_id = enriched.baton_id;
+      assertSafePathSegment(baton_id, "baton_id");
+      return apiCall(
+        "POST",
+        `/batons/${encodeURIComponent(baton_id)}/accept`,
+        undefined,
+        { tenant_id, agent_id: enriched.agent_id as string },
+        signal,
+      );
+    }
     const memory_id = enriched.memory_id as string;
     assertSafePathSegment(memory_id, "memory_id");
-    const tenant_id = enriched.tenant_id as string;
     const id = encodeURIComponent(memory_id);
     if (op === "read") {
       return apiCall("GET", `/memories/${id}`, undefined, { tenant_id }, signal);
@@ -609,7 +691,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     unsupportedOp("caura_manage", op, MANAGE_OPS);
   },
 
-  caura_doc: async (params, signal) => {
+  caura_doc: async (params, signal, run) => {
     const op = params.op as DocOp;
     if (["write", "read", "query", "delete"].includes(op) &&
         (typeof params.collection !== "string" || !params.collection.trim())) {
@@ -622,7 +704,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
         (typeof params.doc_id !== "string" || !params.doc_id.trim())) {
       throw new Error(`[caura] caura_doc op=${op} requires a non-empty doc_id`);
     }
-    const enriched = await enrichBody(params, { resolveIdentity: op === "write" });
+    const enriched = await enrichBody(params, { resolveIdentity: op === "write", run });
     const collection = enriched.collection as string | undefined;
     const tenant_id = enriched.tenant_id as string;
     if (op === "write") {
@@ -715,8 +797,8 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     );
   },
 
-  caura_tune: async (params, signal) => {
-    const enriched = await enrichBody(params, { resolveIdentity: true });
+  caura_tune: async (params, signal, run) => {
+    const enriched = await enrichBody(params, { resolveIdentity: true, run });
     const tenant_id = enriched.tenant_id as string;
     const agent_id = enriched.agent_id as string;
     assertSafePathSegment(agent_id, "agent_id");
@@ -780,13 +862,35 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
 // --- Factory ---
 
 /**
+ * ``params`` with each agent id the model passed checked against the run's own
+ * agents (``toolAgentId``). The id picks the credential a call is sent with, so
+ * a tool call may act only as the agent running it; another id throws here,
+ * before any request. ``caller_agent_id`` is recall's spelling of the same id.
+ */
+function withRunIdentity(
+  params: Record<string, unknown>,
+  run?: ToolRunContext,
+): Record<string, unknown> {
+  const checked = { ...params };
+  for (const key of ["agent_id", "caller_agent_id"]) {
+    const value = checked[key];
+    if (value === undefined || value === null || value === "") continue;
+    checked[key] = toolAgentId(value, run?.sessionKey);
+  }
+  return checked;
+}
+
+/**
  * Build a registered `AgentTool` by name.
  *
  * Throws at construction if the tool is missing a parameters schema or
  * dispatch entry — a sanity check to catch local drift between
  * `PARAM_SCHEMAS`, `ENDPOINT_DISPATCH`, and `tools.json`.
+ *
+ * ``run`` is the OpenClaw run the tool is built for (index.ts registers a
+ * factory, so each run gets its own); without it a write carries no session.
  */
-export function createToolFromSpec(name: string): AgentTool {
+export function createToolFromSpec(name: string, run?: ToolRunContext): AgentTool {
   const spec = getSpec(name);
   const parameters = PARAM_SCHEMAS[name];
   const execute = ENDPOINT_DISPATCH[name];
@@ -805,8 +909,11 @@ export function createToolFromSpec(name: string): AgentTool {
       return getToolDescription(spec.name, fallbackDescription);
     },
     parameters,
+    // ``_toolCallId`` is THIS call's id, not the tool call a memory's content
+    // came from, so it is never sent as ``tool_call_id``: that field is the
+    // evidence a fact was observed, and the agent names it when it has one.
     async execute(_toolCallId, params, signal) {
-      const result = await execute(params, signal);
+      const result = await execute(withRunIdentity(params, run), signal, run);
       return textResult(JSON.stringify(result, null, 2));
     },
   };

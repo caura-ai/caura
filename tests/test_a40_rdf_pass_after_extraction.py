@@ -186,11 +186,13 @@ def test_write_time_path_delegates_to_the_shared_pass():
 
 def test_the_write_time_pass_still_gates_the_semantic_judge():
     """Path A's semantic judge has always been gated on ``if not
-    contradictions``. Extraction must not have dropped that, or the RDF path
-    would stop saving the LLM call it used to save."""
+    contradictions`` (and now on no dispute either). Extraction must not have
+    dropped that, or the RDF path would stop saving the LLM call it used to
+    save."""
     src = inspect.getsource(cd._detect)
-    assert "if not contradictions:" in src
-    assert src.index("_rdf_conflict_pass(") < src.index("if not contradictions:")
+    gate = "if not contradictions and not _disputed:"
+    assert gate in src
+    assert src.index("_rdf_conflict_pass(") < src.index(gate)
 
 
 def test_post_extraction_path_runs_the_pass_too():
@@ -219,9 +221,10 @@ def test_the_pass_reads_the_refreshed_row_not_the_one_fetched_before_retraction(
 
 def test_a_deterministic_verdict_short_circuits_the_llm_judge():
     """The no-new-LLM-calls property, asserted on the code rather than assumed:
-    Path C returns as soon as the pass produces contradictions, so a
-    deterministic verdict REPLACES a judge call instead of preceding one."""
+    Path C returns as soon as the pass produces contradictions or disputes, so
+    a deterministic verdict REPLACES a judge call instead of preceding one."""
     src = inspect.getsource(cd.detect_contradictions_by_entities_async)
     head = src[: src.index("find_entity_overlap_candidates")]
-    assert "if rdf.contradictions:" in head
-    assert "return" in head[head.index("if rdf.contradictions:") :]
+    gate = "if rdf.contradictions or rdf.disputed_pairs:"
+    assert gate in head
+    assert "return" in head[head.index(gate) :]

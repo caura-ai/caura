@@ -101,3 +101,11 @@ class STMBackend(Protocol):
         ``clear_notes``.
         """
         ...
+
+    async def clear_tenant(self, tenant_id: str) -> bool:
+        """Delete every note and bulletin of a tenant, and nothing of another's.
+
+        For an organization purge. Returns True only when the delete reached
+        the backend — see ``clear_notes``.
+        """
+        ...

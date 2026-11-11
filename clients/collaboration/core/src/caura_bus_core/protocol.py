@@ -58,6 +58,10 @@ class Receipt(StrictModel):
     recipients: list[str]
     status: Literal["accepted"] = "accepted"
     duplicate: bool = False
+    # A handoff baton split across receivers with different readable links:
+    # every part's receipt, and the per-receiver link counts.
+    messages: list[dict] | None = None
+    baton: dict | None = None
 
 
 class Claim(StrictModel):

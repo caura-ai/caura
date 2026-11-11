@@ -32,6 +32,51 @@ function sessionAgentId(name: string): string {
   return getDefaultAgentId();
 }
 
+/** The agent named by a session key ("agent:AGENT_NAME:..."), if any. */
+function sessionAgentName(sessionKey: unknown): string | undefined {
+  if (typeof sessionKey !== "string") return undefined;
+  const parts = sessionKey.split(":");
+  return parts.length >= 2 && parts[0] === "agent" && parts[1] ? parts[1] : undefined;
+}
+
+/**
+ * The agent a tool call is sent as.
+ *
+ * Taken from the run OpenClaw built the tool for and from this install's
+ * config, never from the tool's arguments: the model writes those, and the
+ * agent id picks the credential the call carries, so it decides the trust and
+ * the private memories the server grants. ``requested`` is the ``agent_id``
+ * the model passed. It is kept only when it names one of the run's own agents,
+ * and ``main``, OpenClaw's name for an install's one agent, stands for that
+ * agent. Any other id throws, before a request is made or a key provisioned.
+ *
+ * The run's own agents, the first being the one a call without
+ * ``agent_id`` is sent as:
+ *   - a session of a listed agent, or of any agent but an unlisted ``main``:
+ *     that agent, as the per-turn paths resolve it;
+ *   - a session of the unlisted ``main``, or no session: the install's own
+ *     agent, as ``CAURA_AGENT_ID`` or the install's default id. With no
+ *     session the run's agent is unknown, so a listed agent cannot be named:
+ *     that would let the model choose among them.
+ */
+export function toolAgentId(requested: unknown, sessionKey?: string): string {
+  const name = sessionAgentName(sessionKey);
+  const listed = listedAgents(readOpenClawConfig());
+  const install = !name || (name === "main" && !listed);
+  const own = name && !install
+    ? [name]
+    : [CAURA_AGENT_ID || getDefaultAgentId(), getDefaultAgentId()];
+  if (requested === undefined || requested === null || requested === "") return own[0];
+  if (typeof requested === "string") {
+    if (own.includes(requested)) return requested;
+    if (requested === "main" && install && !listed) return own[0];
+  }
+  throw new Error(
+    `[caura] agent_id ${JSON.stringify(requested)} is not the agent running this call ` +
+      `('${own[0]}'). Omit agent_id: each call is sent as the agent running it.`,
+  );
+}
+
 function resolveAgentIdInner(
   sources: Array<Record<string, unknown> | undefined | null>,
   quiet: boolean,
@@ -46,12 +91,8 @@ function resolveAgentIdInner(
     if (agent?.id && typeof agent.id === "string") return agent.id;
     if (agent?.name && typeof agent.name === "string") return agent.name;
 
-    if (src.sessionKey && typeof src.sessionKey === "string") {
-      const parts = (src.sessionKey as string).split(":");
-      if (parts.length >= 2 && parts[0] === "agent" && parts[1]) {
-        return sessionAgentId(parts[1]);
-      }
-    }
+    const named = sessionAgentName(src.sessionKey);
+    if (named) return sessionAgentId(named);
 
     if (src.agentName && typeof src.agentName === "string")
       return src.agentName as string;

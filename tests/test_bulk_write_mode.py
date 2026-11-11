@@ -10,7 +10,7 @@ one item opting in must not change how anything batched alongside it is treated.
 """
 
 import uuid
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import text
@@ -21,6 +21,7 @@ from core_api.constants import (
     BULK_STRONG_EMBED_TIMEOUT_SECONDS,
 )
 from core_api.schemas import BulkMemoryCreate, BulkMemoryItem
+from core_api.services import memory_service
 from core_api.services.memory_service import create_memories_bulk
 
 # Long enough to clear CheckContentLength's minimum-length quality gate.
@@ -71,12 +72,38 @@ async def _embedded(engine, memory_id) -> bool:
     return bool(row[0])
 
 
+def _backfilled(backfill: AsyncMock) -> list[str]:
+    """The ids of every row the write handed to the backfill, sorted."""
+    return sorted(
+        str(mid) for call in backfill.call_args_list for mid, _ in call.args[0]
+    )
+
+
 @pytest.fixture
-def deferring_deployment(monkeypatch):
+def backfill(monkeypatch) -> AsyncMock:
+    """Stand in for the background backfill, recording the rows handed to it.
+
+    A deferred row gets its vector from ``_reembed_memories_bulk``, which the
+    write starts as a background task. Left real, it races these tests: it can
+    fill a deferred row's vector between two of their reads, so a row the write
+    deferred reads as embedded inline. These tests are about the write's own
+    choice, so the stub keeps the column as the write left it, and the call it
+    records says which rows the write handed on. ``AsyncMock`` records a call
+    when the write makes it, before the task runs.
+    """
+    stub = AsyncMock()
+    monkeypatch.setattr(memory_service, "_reembed_memories_bulk", stub)
+    return stub
+
+
+@pytest.fixture
+def deferring_deployment(monkeypatch, backfill):
     """Make the deployment defer embedding, as SaaS does.
 
     ``settings.inline_embedding`` is a read-only property over
-    ``deployment_mode``, so the mode is what has to move.
+    ``deployment_mode``, so the mode is what has to move. Takes ``backfill``
+    because a deferred row always goes to the backfill, so no test here reads
+    the column with the real one running.
     """
     monkeypatch.setattr(settings, "deployment_mode", "deferred")
     assert not settings.inline_embedding
@@ -84,7 +111,7 @@ def deferring_deployment(monkeypatch):
 
 @pytest.mark.integration
 async def test_strong_item_embeds_inline_when_deployment_defers(
-    _engine, deferring_deployment
+    _engine, deferring_deployment, backfill
 ):
     rows = await _write(
         _item("Strong write embeds on the request path.", write_mode="strong")
@@ -94,18 +121,22 @@ async def test_strong_item_embeds_inline_when_deployment_defers(
         "write_mode='strong' must embed inline even when the deployment defers — "
         "that is the whole point of the opt-in"
     )
+    assert _backfilled(backfill) == []
 
 
 @pytest.mark.integration
-async def test_omitted_write_mode_still_defers(_engine, deferring_deployment):
+async def test_omitted_write_mode_still_defers(_engine, deferring_deployment, backfill):
     """Control: without the opt-in, nothing about the deferred path changes."""
     rows = await _write(_item("Ordinary write keeps deferring."))
 
     assert not await _embedded(_engine, rows[0].id)
+    assert _backfilled(backfill) == [str(rows[0].id)]
 
 
 @pytest.mark.integration
-async def test_mixed_batch_embeds_only_the_strong_item(_engine, deferring_deployment):
+async def test_mixed_batch_embeds_only_the_strong_item(
+    _engine, deferring_deployment, backfill
+):
     """The per-item guarantee: one item's opt-in does not leak onto its neighbours."""
     rows = await _write(
         _item("Deferred neighbour one."),
@@ -117,10 +148,13 @@ async def test_mixed_batch_embeds_only_the_strong_item(_engine, deferring_deploy
     assert embedded == [False, True, False], (
         f"only the write_mode='strong' item should be embedded inline, got {embedded}"
     )
+    assert _backfilled(backfill) == sorted([str(rows[0].id), str(rows[2].id)])
 
 
 @pytest.mark.integration
-async def test_unknown_write_mode_behaves_as_fast(_engine, deferring_deployment):
+async def test_unknown_write_mode_behaves_as_fast(
+    _engine, deferring_deployment, backfill
+):
     """An unrecognised value must degrade, not 422 the whole batch.
 
     ``BulkMemoryItem`` deliberately avoids schema constraints that reject every
@@ -133,6 +167,7 @@ async def test_unknown_write_mode_behaves_as_fast(_engine, deferring_deployment)
     )
 
     assert [await _embedded(_engine, r.id) for r in rows] == [False, False]
+    assert _backfilled(backfill) == sorted(str(r.id) for r in rows)
 
 
 @pytest.mark.integration
@@ -148,7 +183,7 @@ async def test_inline_deployment_embeds_everything_regardless(_engine):
 
 @pytest.mark.integration
 async def test_strong_embed_failure_does_not_fail_the_batch(
-    _engine, deferring_deployment
+    _engine, deferring_deployment, backfill
 ):
     """A failed opt-in embed falls back to the backfill instead of 5xx-ing.
 
@@ -166,6 +201,7 @@ async def test_strong_embed_failure_does_not_fail_the_batch(
 
     # Both fell back to the deferred path; neither is lost.
     assert [await _embedded(_engine, r.id) for r in rows] == [False, False]
+    assert _backfilled(backfill) == sorted(str(r.id) for r in rows)
 
 
 @pytest.mark.integration

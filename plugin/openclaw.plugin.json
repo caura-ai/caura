@@ -2,7 +2,7 @@
   "id": "memclaw",
   "name": "Caura",
   "kind": "memory",
-  "version": "2.25.6",
+  "version": "2.28.2",
   "description": "Central persistent memory for OpenClaw agents — write, search, and entity lookup tools.",
   "entry": "dist/index.js",
   "skills": [
@@ -21,8 +21,11 @@
         "description": "Supported alias for CAURA_AGENT_ID; the new name wins when both are set."
       },
       "CAURA_AUTO_WRITE_TURNS": {
-        "type": ["boolean", "string"],
-        "description": "Automatic capture, on by default: the plugin saves user messages, turn summaries and compaction summaries, and runs the pre-compaction flush turn, as memories private to the agent (current servers also scan them for secrets and mark them as captured). Set false (or 0, no, off) to turn all four off; explicit memory tools keep working. A value here wins over the .env file."
+        "type": [
+          "boolean",
+          "string"
+        ],
+        "description": "Automatic conversation capture, on by default, is limited to explicitly identified direct conversations. Group and unknown-session capture is refused; the automatic flush turn is disabled because its callback has no conversation identity. Turn summaries have a ten-attempt per-session limit and stay private to the agent. Set false (or 0, no, off) to disable capture; explicit memory tools keep working. A value here wins over the .env file. Heartbeats report the effective switch as metadata.auto_capture_enabled."
       }
     },
     "required": []

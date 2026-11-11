@@ -725,6 +725,9 @@ async def _distill_cluster(
     # Collect all member-memory ids; fetch their content for the prompt.
     all_memory_ids = sorted({mid for trace in cluster_traces for mid in trace.memory_ids})
     contents = await memory_fetcher(all_memory_ids)
+    # Storage returns shared rows only, so a member made private, deleted or
+    # held after its trace was built is missing here: quote and cite neither.
+    cited_ids = [mid for mid in all_memory_ids if mid in contents]
 
     # Build per-trace snapshots.
     snapshots: list[TraceSnapshot] = []
@@ -848,7 +851,7 @@ async def _distill_cluster(
             "content": content,
             "content_hash": content_hash,
             # Provenance — Inbox card surfaces these in Phase 2.
-            "cites": all_memory_ids,
+            "cites": cited_ids,
             "goal": parsed["goal"],
             "evidence": parsed["evidence"],
             "cluster_fingerprint": fingerprint.fp,

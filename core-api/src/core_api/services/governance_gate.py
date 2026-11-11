@@ -30,6 +30,12 @@ ACTION_NB_PREGATE_DROP = "nonbusiness_pregate_drop"
 # was rejected (503) rather than stored unclassified. Distinct from a drop
 # (nothing was classified) — records the unavailability-turned-rejection.
 ACTION_NB_PREGATE_UNAVAILABLE = "nonbusiness_pregate_unavailable"
+# Fast mode: an LLM policy is on, but no model judged the row. Every provider
+# failed and enrichment fell back to the keyword heuristic, which gives no PII or
+# business verdict, so the policy could not be applied. Nothing was changed; the
+# row is marked and logged for the re-run sweep. Also the row's metadata key and
+# its ``background_task_log`` task.
+ACTION_LLM_UNCERTAIN = "governance_llm_uncertain"
 
 
 def _content_sha256(content: str) -> str:
@@ -84,6 +90,14 @@ def llm_pii_audit_detail(
 
 def nonbusiness_audit_detail(action: str, content: str, write_mode: str | None) -> dict:
     return _base_audit_detail(action, content, write_mode)
+
+
+def llm_uncertain_audit_detail(content: str, policies: list[str]) -> dict:
+    """Audit detail for a fast-mode row no model judged: which LLM policies
+    could not be applied, and the content hash."""
+    detail = _base_audit_detail(ACTION_LLM_UNCERTAIN, content, "fast")
+    detail["policies"] = policies
+    return detail
 
 
 def nonbusiness_pregate_audit_detail(

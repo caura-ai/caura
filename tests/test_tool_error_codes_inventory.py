@@ -39,6 +39,7 @@ import pytest
 
 import core_api.tools as tools
 from tests._error_codes import (
+    admission_codes,
     dispatch_codes,
     emitted_codes,
     prebaked_error_constants,
@@ -151,6 +152,22 @@ def test_the_scan_follows_the_dispatcher() -> None:
     assert "REQUEST_BUDGET_EXCEEDED" in dispatch_codes(), (
         "call_tool's budget envelope is not being read — it passes the code "
         "by name, as _error_response(REQUEST_BUDGET_EXCEEDED, …)"
+    )
+
+
+def test_the_scan_gives_admission_codes_to_the_tools_admitted() -> None:
+    """Path 7. ``call_tool`` answers ``RATE_LIMITED`` in place of running a
+    tool, but only for the tools ``_admission`` charges. Counted for every
+    tool, as path 5 is, it would have every manifest promise a code most
+    tools never send; counted for none, the ones that do would leave it out."""
+    assert "RATE_LIMITED" not in dispatch_codes(), (
+        "path 5 is walking into _admitted, so every tool is charged its codes"
+    )
+    assert "RATE_LIMITED" in admission_codes("caura_write"), (
+        "_admission charges caura_write, but the scan does not see it"
+    )
+    assert admission_codes("caura_stats") == frozenset(), (
+        "_admission does not charge caura_stats"
     )
 
 
