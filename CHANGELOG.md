@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.51.1](https://github.com/caura-ai/caura/compare/backend-v3.51.0...backend-v3.51.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* bound background model work per tenant ([#2418](https://github.com/caura-ai/caura/issues/2418)) ([f2221a8](https://github.com/caura-ai/caura/commit/f2221a89fedb16349c5449b721672a997f900c1c))
+
 ## [3.51.0](https://github.com/caura-ai/caura/compare/backend-v3.50.0...backend-v3.51.0) (2026-11-11)
 
 
