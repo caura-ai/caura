@@ -145,6 +145,7 @@ from core_api.services.memory_service import (
     soft_delete_memory,
     update_memory,
 )
+from core_api.services.receipt_validation import annotate_memory_receipts
 from core_api.services.release_replay import REPLAY_TASK, replay_released_write
 from core_api.services.system_metadata import extract_system_metadata
 from core_api.services.task_tracker import tracked_task
@@ -702,6 +703,9 @@ async def list_memories(
 
     has_more = len(rows) > limit
     items = [_memory_to_out(m) for m in rows[:limit]]
+    items = await annotate_memory_receipts(
+        items, authorized_tenant_ids=set(list_payload["readable_tenant_ids"] or [tenant_id])
+    )
 
     next_cursor = None
     # OSS 09/02 L-23 — only mint a cursor this endpoint would accept back.
@@ -1094,9 +1098,10 @@ async def list_held_memories(
     if len(rows) > limit:
         last = rows[limit - 1]
         next_cursor = encode_cursor(datetime.fromisoformat(last["created_at"]), UUID(last["id"]))
-    return HeldMemoryPage(
-        items=[_memory_to_out(m) for m in rows[:limit]], next_cursor=next_cursor, total=page["total"]
+    items = await annotate_memory_receipts(
+        [_memory_to_out(m) for m in rows[:limit]], authorized_tenant_ids={tenant_id}
     )
+    return HeldMemoryPage(items=items, next_cursor=next_cursor, total=page["total"])
 
 
 @router.post("/memories/rollback-session", response_model=SessionRollbackResponse)
@@ -1449,7 +1454,7 @@ async def get_memory(
                 },
             )
 
-    return {
+    result = {
         "id": memory["id"],
         "tenant_id": memory["tenant_id"],
         "fleet_id": memory["fleet_id"],
@@ -1492,6 +1497,8 @@ async def get_memory(
         "embedding_preview": detail["embedding_preview"],
         "embedding_stats": detail["embedding_stats"],
     }
+    [result] = await annotate_memory_receipts([result], authorized_tenant_ids={tenant_id})
+    return result
 
 
 @router.get("/memories/{memory_id}/exposure", responses={200: {"model": _oar.MemoryExposureResponse}})
@@ -3989,6 +3996,8 @@ async def admin_list_memories(
     page = rows[:limit]
     # ``_memory_to_out`` accepts either an ORM row or a storage dict.
     items = [_memory_to_out(r) for r in page]
+    # enforce_admin above authorizes every served tenant.
+    items = await annotate_memory_receipts(items, authorized_tenant_ids={row["tenant_id"] for row in page})
 
     next_cursor = None
     # OSS 09/02 L-23 — same pairing as ``GET /memories``: mint only what the

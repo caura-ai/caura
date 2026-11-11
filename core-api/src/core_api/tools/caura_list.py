@@ -46,6 +46,7 @@ _SPEC = ToolSpec(
         "MISSING_AGENT_ID",
         "RATE_LIMITED",
         "REQUEST_BUDGET_EXCEEDED",
+        "TENANT_MISMATCH",
         "UNAUTHORIZED",
     ),
 )

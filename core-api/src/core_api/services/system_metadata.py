@@ -109,6 +109,7 @@ PLATFORM_ONLY_KEYS: frozenset[str] = frozenset(
         # for itself.
         "rules_receipt",
         "rules_receipt_origin",
+        "rules_receipt_validation",
         # The broker's write gate's account of a write it refused. Kept, in
         # ``_system.hold``, only from an install credential's bulk write
         # (``services/write_gate_hold.py``); from anyone else it would make

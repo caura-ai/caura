@@ -37,14 +37,6 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 # shaping (slice + next_cursor) over stubbed storage rows.
 
 
-def _out_stub(mid: str):
-    class _Out:
-        def model_dump(self, mode="python"):
-            return {"id": mid, "content": f"memory {mid}"}
-
-    return _Out()
-
-
 async def test_list_scope_agent_allowed_at_trust_1(mcp_env, monkeypatch):
     """scope='agent' (default) only requires trust ≥ 1."""
 
@@ -358,14 +350,24 @@ async def test_list_happy_path_with_rows_and_next_cursor(mcp_env, monkeypatch):
 
     Storage returns dict rows (``limit+1`` over-fetched); the tool slices to
     ``limit`` and builds ``next_cursor`` from the last served row's
-    ``created_at`` + ``id``. ``_memory_to_out`` (top-level import on mcp_server)
-    accepts a dict row, so patch it there for a deterministic shape."""
+    ``created_at`` + ``id``. Use tenant-bound storage rows and the real
+    serializer so the read boundary can authorize each served row."""
     rows = [
-        {"id": str(uuid4()), "created_at": datetime.now(UTC).isoformat()}
+        {
+            "id": str(uuid4()),
+            "tenant_id": mcp_env["tenant"],
+            "agent_id": "alice",
+            "memory_type": "fact",
+            "content": "A stored memory",
+            "weight": 1.0,
+            "created_at": datetime.now(UTC).isoformat(),
+            "status": "active",
+            "visibility": "scope_team",
+            "recall_count": 0,
+        }
         for _ in range(3)
     ]
     stub_storage_client(monkeypatch, list_memories_by_filters=rows)
-    monkeypatch.setattr(mcp_server, "_memory_to_out", lambda m: _out_stub(m["id"]))
     out = await mcp_server.caura_list(limit=2)
     payload = parse_envelope(out)
     assert payload["count"] == 2

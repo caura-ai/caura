@@ -150,6 +150,7 @@ from core_api.services.organization_settings import (
 )
 from core_api.services.pii_update_gate import apply_pii_policy_to_fields
 from core_api.services.recall_service import summarize_memories
+from core_api.services.receipt_validation import annotate_memory_receipts
 from core_api.services.skill_lifecycle import SKILL_WRITE_MIN_TRUST, skill_trust_message
 
 # Re-export so existing `monkeypatch.setattr(mcp_server, "_require_trust", ...)`
@@ -4265,7 +4266,11 @@ async def caura_list(
             rows = await get_storage_client().list_memories_by_filters(list_payload)
             has_more = len(rows) > capped_limit
             # ``_memory_to_out`` accepts either an ORM row or a storage dict.
-            items = [_memory_to_out(m).model_dump(mode="json") for m in rows[:capped_limit]]
+            memories = await annotate_memory_receipts(
+                [_memory_to_out(m) for m in rows[:capped_limit]],
+                authorized_tenant_ids=set(list_payload["readable_tenant_ids"] or [tenant_id]),
+            )
+            items = [memory.model_dump(mode="json") for memory in memories]
             next_cursor = None
             # OSS 09/02 L-23 — mint only what the gate above would take back.
             # This is the third copy of the pair and was the one still drifted:

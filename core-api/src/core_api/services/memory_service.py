@@ -18,6 +18,7 @@ from core_api.config import settings
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot, per_tenant_storage_slot
 from core_api.request_phase import phase
 from core_api.services.agent_identity import ReservedAgentIdError, enforce_reserved_write_id
+from core_api.services.receipt_validation import annotate_memory_receipts
 from core_api.tasks import track_task
 
 try:
@@ -6245,7 +6246,7 @@ async def search_memories(
     #
     # Diagnostic mode requires the pipeline path for score introspection
     if _USE_PIPELINE_SEARCH or diagnostic:
-        return await _search_memories_pipeline(
+        results = await _search_memories_pipeline(
             tenant_id,
             query,
             fleet_ids=fleet_ids,
@@ -6275,6 +6276,9 @@ async def search_memories(
             empty_hint_ctx=empty_hint_ctx,
             verified_only=verified_only,
             baton_id=baton_id,
+        )
+        return await annotate_memory_receipts(
+            results, authorized_tenant_ids=set(readable_tenant_ids or [tenant_id])
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
     # The legacy path bumps recall_count unconditionally (no caller-agent gate,
@@ -6318,7 +6322,9 @@ async def search_memories(
     from core_api.services.memory_exposure import schedule_exposure
 
     schedule_exposure(legacy_results, agent_id=caller_agent_id, tenant_id=tenant_id)
-    return legacy_results
+    return await annotate_memory_receipts(
+        legacy_results, authorized_tenant_ids=set(readable_tenant_ids or [tenant_id])
+    )
 
 
 async def _search_memories_pipeline(

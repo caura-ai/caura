@@ -18,6 +18,7 @@ from core_api.schemas import (
     RelationUpsert,
     RelationUpsertOut,
 )
+from core_api.services.receipt_validation import annotate_memory_receipts
 
 logger = logging.getLogger(__name__)
 
@@ -409,6 +410,8 @@ async def get_entity(
                 last_recalled_at=mem.get("last_recalled_at"),
             )
         )
+
+    linked_memories = await annotate_memory_receipts(linked_memories, authorized_tenant_ids={tenant_id})
 
     # Outgoing relations. C23 — since v1.0.0 this read
     # ``entity.get("relations", [])`` off the with-memories payload, which has

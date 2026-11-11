@@ -20,6 +20,7 @@ _SPEC = ToolSpec(
         "INVALID_ARGUMENTS",
         "NOT_FOUND",
         "REQUEST_BUDGET_EXCEEDED",
+        "TENANT_MISMATCH",
         "UNAUTHORIZED",
     ),
 )
