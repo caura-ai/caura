@@ -264,7 +264,12 @@ async def _drive_bulk(
     )
     captured: dict[str, str | None] = {}
 
-    async def _create(body_, *, bulk_attempt_id=None, from_broker=False):
+    async def _create(
+        body_, *, bulk_attempt_id=None, from_broker=False, broker_install_uuid=None
+    ):
+        assert broker_install_uuid == (
+            auth.install_uuid if auth.is_install_credential else None
+        )
         captured["agent_id"] = body_.agent_id
         raise _Sentinel()
 

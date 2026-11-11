@@ -21,6 +21,7 @@ import uuid
 logger = logging.getLogger(__name__)
 
 RULES_RECEIPT_KEY = "rules_receipt"
+RULES_RECEIPT_ORIGIN_KEY = "rules_receipt_origin"
 
 # A rule-set hash as both the broker and ``common.governance.ruleset_hash`` write
 # it: a sha256 hex digest, lowercase.
@@ -55,3 +56,39 @@ def rules_receipt_from(metadata: dict | None) -> dict | None:
         logger.warning("dropping a malformed rules receipt: %s", exc)
         return None
     return {"event_id": event_id, "rule_set_hash": rule_set_hash}
+
+
+def rules_receipt_origin_from(
+    metadata: dict | None, *, tenant_id: str, install_uuid: str | None
+) -> dict | None:
+    """Snapshot a complete broker binding before caller metadata is sanitised.
+
+    Tenant and install come from authenticated admission. The session and
+    agent are the original per-item broker assertion, copied into protected
+    storage; a current author, reader or registry lookup cannot replace them.
+    Missing bindings leave the write intact without inventing an origin.
+    """
+    if not isinstance(metadata, dict) or rules_receipt_from(metadata) is None:
+        return None
+    session_id = metadata.get("session_id")
+    agent_id = metadata.get("agent_id")
+    if (
+        not isinstance(session_id, str)
+        or not session_id.strip()
+        or len(session_id) > 4096
+        or not isinstance(agent_id, str)
+        or not isinstance(install_uuid, str)
+    ):
+        return None
+    try:
+        install_id = str(uuid.UUID(install_uuid))
+        agent_id = str(uuid.UUID(agent_id))
+    except ValueError:
+        return None
+    return {
+        "version": 1,
+        "tenant_id": tenant_id,
+        "install_id": install_id,
+        "session_id": session_id,
+        "agent_id": agent_id,
+    }
