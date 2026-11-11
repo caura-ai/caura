@@ -139,7 +139,12 @@ from core_api.services.governance_gate import (
 from core_api.services.hooks import get_hooks
 from core_api.services.memory_corrections import on_memory_corrected, on_status_corrected
 from core_api.services.organization_settings import ResolvedConfig, validate_search_profile
-from core_api.services.rules_receipt import RULES_RECEIPT_KEY, rules_receipt_from
+from core_api.services.rules_receipt import (
+    RULES_RECEIPT_KEY,
+    RULES_RECEIPT_ORIGIN_KEY,
+    rules_receipt_from,
+    rules_receipt_origin_from,
+)
 from core_api.services.system_metadata import (
     CALLER_OWNABLE_KEYS,
     NONBUSINESS_KEPT_PRIVATE_KEY,
@@ -1651,6 +1656,7 @@ async def create_memories_bulk(
     memory_type_is_agent_set: bool | None = None,
     is_inferred: bool = False,
     from_broker: bool = False,
+    broker_install_uuid: str | None = None,
     system_values: list[dict] | None = None,
 ) -> BulkMemoryResponse:
     """Create multiple memories with per-attempt idempotency (CAURA-602).
@@ -1729,6 +1735,15 @@ async def create_memories_bulk(
         if from_broker
         else {}
     )
+    receipt_origins = {
+        i: origin
+        for i in receipts
+        if (
+            origin := rules_receipt_origin_from(
+                items[i].metadata, tenant_id=data.tenant_id, install_uuid=broker_install_uuid
+            )
+        )
+    }
     # g2.5 — and so are the holds its write gate asks for: an item the gate
     # refused comes ``quarantined``, with the gate's account of it.
     gate_holds = (
@@ -2359,6 +2374,8 @@ async def create_memories_bulk(
             metadata.setdefault(SYSTEM_NAMESPACE, {})[HOLD_KEY] = item_hold
         if i in receipts:
             metadata.setdefault(SYSTEM_NAMESPACE, {})[RULES_RECEIPT_KEY] = receipts[i]
+        if i in receipt_origins:
+            metadata.setdefault(SYSTEM_NAMESPACE, {})[RULES_RECEIPT_ORIGIN_KEY] = receipt_origins[i]
 
         entity_link_dicts = [
             {"entity_id": str(link.entity_id), "role": link.role} for link in item.entity_links
@@ -5083,6 +5100,24 @@ async def update_memory(
                     **replaced,
                     SYSTEM_NAMESPACE: {**(replaced.get(SYSTEM_NAMESPACE) or {}), CAPTURE_KEY: captured},
                 }
+            # Replacing caller metadata cannot replace the broker's original
+            # receipt or the protected binding captured with it.
+            original_system = (old_meta or {}).get(SYSTEM_NAMESPACE)
+            if isinstance(original_system, dict):
+                receipt_provenance = {
+                    key: original_system[key]
+                    for key in (RULES_RECEIPT_KEY, RULES_RECEIPT_ORIGIN_KEY)
+                    if key in original_system
+                }
+                if receipt_provenance:
+                    replaced = patch["metadata_"] or {}
+                    patch["metadata_"] = {
+                        **replaced,
+                        SYSTEM_NAMESPACE: {
+                            **(replaced.get(SYSTEM_NAMESPACE) or {}),
+                            **receipt_provenance,
+                        },
+                    }
         elif data.metadata is None:
             # Surface the breaking change explicitly: pre-PR
             # ``{"metadata": null}`` cleared the column. The

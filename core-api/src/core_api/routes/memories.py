@@ -2138,7 +2138,10 @@ async def _write_memories_bulk_inner(
                 # the write gate asks for are the broker's word, so only the
                 # broker's credential is taken at it.
                 create_memories_bulk(
-                    body, bulk_attempt_id=bulk_attempt_id, from_broker=auth.is_install_credential
+                    body,
+                    bulk_attempt_id=bulk_attempt_id,
+                    from_broker=auth.is_install_credential,
+                    broker_install_uuid=auth.install_uuid if auth.is_install_credential else None,
                 ),
                 timeout=bulk_budget,
             )
