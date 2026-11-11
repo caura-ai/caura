@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.51.0](https://github.com/caura-ai/caura/compare/backend-v3.50.0...backend-v3.51.0) (2026-11-11)
+
+
+### Features
+
+* **core-api:** an open map takes only new points; the layout refits with growth ([#2423](https://github.com/caura-ai/caura/issues/2423)) ([c910c06](https://github.com/caura-ai/caura/commit/c910c064b1443e8856bd08c2d9db6b81405d65c7))
+
 ## [3.50.0](https://github.com/caura-ai/caura/compare/backend-v3.49.0...backend-v3.50.0) (2026-11-11)
 
 
