@@ -36,9 +36,9 @@ import math
 import re
 import time
 from collections import Counter, OrderedDict
-from collections.abc import Sequence
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from collections.abc import Coroutine, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn
 from uuid import uuid4
 
@@ -350,6 +350,9 @@ class FieldModel:
     norm_scale: np.ndarray
     norm_offset: np.ndarray
     sizes: np.ndarray
+    # The tenant's shared embedded memories when this model was fitted, which
+    # a later read compares with today's count to decide on a refit.
+    fitted_total: np.ndarray = field(default_factory=lambda: np.array(0.0))
 
     @property
     def dim(self) -> int:
@@ -362,6 +365,7 @@ class FieldModel:
         arrays: dict[str, Any] = {
             name: np.asarray(getattr(self, name), dtype=np.float32) for name in _MODEL_ARRAYS
         }
+        arrays["fitted_total"] = np.asarray(self.fitted_total, dtype=np.float64)
         np.savez(buf, **arrays)
         return buf.getvalue()
 
@@ -369,7 +373,11 @@ class FieldModel:
     def from_bytes(cls, raw: bytes) -> FieldModel:
         # ``allow_pickle=False``: parameters are arrays, never objects.
         with np.load(io.BytesIO(raw), allow_pickle=False) as arrays:
-            return cls(**{name: arrays[name].astype(np.float64) for name in _MODEL_ARRAYS})
+            parts = {name: arrays[name].astype(np.float64) for name in _MODEL_ARRAYS}
+            # Saved before it counted its tenant: the fit size, which is that
+            # count up to ``FIT_SAMPLE``.
+            fitted = arrays["fitted_total"] if "fitted_total" in arrays.files else parts["sizes"].sum()
+            return cls(**parts, fitted_total=np.asarray(fitted, dtype=np.float64))
 
 
 def _fit_layout(data: np.ndarray) -> tuple[FieldModel, list[list[int]], np.ndarray]:
@@ -437,6 +445,7 @@ def _fit_layout(data: np.ndarray) -> tuple[FieldModel, list[list[int]], np.ndarr
         norm_scale=scale,
         norm_offset=offset,
         sizes=sizes,
+        fitted_total=np.array(float(m)),
     )
     return model, ordered, coords
 
@@ -654,6 +663,9 @@ def _assemble_field(
     *,
     total: int,
     version_src: str,
+    layout_version: str | None = None,
+    truncated: bool = False,
+    since: datetime | None = None,
 ) -> dict[str, Any]:
     """The response body for ``rows`` placed by ``layout``. A cluster none of
     the rows falls in (a saved model's, for this caller's rows) is left out."""
@@ -712,6 +724,9 @@ def _assemble_field(
         "kind": FIELD_KIND,
         "model_version": hashlib.sha256(version_src.encode()).hexdigest()[:12],
         "computed_at": datetime.now(UTC).isoformat(),
+        "layout_version": layout_version,
+        "truncated": truncated,
+        "next_since": _next_since(rows, layout.cluster, since),
         "total": total,
         "clusters": clusters,
         "points": points,
@@ -721,6 +736,25 @@ def _assemble_field(
             if eid in entities
         ],
     }
+
+
+def _next_since(rows: Sequence[dict], clusters: Sequence[int], since: datetime | None) -> str | None:
+    """The ``since`` for an open map's next poll: just before the oldest of
+    ``rows`` still waiting to be placed (see ``UNPLACED_WAIT_SECONDS``), or
+    else the newest of them; ``since`` itself when there are none."""
+    wait_from = datetime.now(UTC) - timedelta(seconds=UNPLACED_WAIT_SECONDS)
+    newest = since
+    waiting: datetime | None = None
+    for r, c in zip(rows, clusters, strict=True):
+        if not r.get("created_at"):
+            continue
+        at = datetime.fromisoformat(r["created_at"])
+        if newest is None or at > newest:
+            newest = at
+        if c < 0 and at > wait_from and (waiting is None or at < waiting):
+            waiting = at
+    cursor = waiting - timedelta(microseconds=1) if waiting is not None else newest
+    return cursor.isoformat() if cursor is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -816,12 +850,29 @@ FIT_RETRY_SECONDS = 30.0
 # many of the caller's newest memories, holding one of the process's layout
 # slots (``_fit_slots``), so it costs no more than an inline fit.
 ON_REQUEST_MAX = FIT_INLINE_MAX
+# ``since`` returns at most this many new memories; more says ``truncated``.
+SINCE_MAX = 1000
+# A memory written moments before a read usually has no embedding yet, so it
+# comes back unplaced. ``next_since`` stops short of such a memory while it is
+# younger than this, so an open map polling with it gets the memory again once
+# it is placed; one still unplaced after that (an embedding that failed) no
+# longer holds the map back.
+UNPLACED_WAIT_SECONDS = 600.0
+# A tenant whose shared embedded memories have grown by this factor since its
+# fit, and by at least ``REFIT_MIN_NEW``, is refitted in the background while
+# reads serve the layout they have. Reading the tenant-wide count is a
+# signature scan, so growth is checked at most every ``REFIT_CHECK_SECONDS``.
+REFIT_GROWTH = 1.25
+REFIT_MIN_NEW = 100
+REFIT_CHECK_SECONDS = 300.0
 
 # Fits running in this process, by tenant, and reads in flight, by cache key.
 # Touched only on this process's event loop, so they need no lock.
 _fits: dict[str, asyncio.Task[SavedModel | None]] = {}
 # Each tenant's last fit that saved nothing: ``(until, "failed" | "too_few")``.
 _fit_outcomes: OrderedDict[str, tuple[float, str]] = OrderedDict()
+# When each tenant's growth is next checked, by this process.
+_refit_due: OrderedDict[str, float] = OrderedDict()
 _serves: dict[tuple, asyncio.Task[dict]] = {}
 _fit_slots = asyncio.Semaphore(settings.memory_field_max_concurrent_builds)
 # Which version each tenant's saved model is, rechecked every five seconds,
@@ -843,6 +894,7 @@ def _reset_state() -> None:
     _fit_slots = asyncio.Semaphore(settings.memory_field_max_concurrent_builds)
     _fits.clear()
     _fit_outcomes.clear()
+    _refit_due.clear()
     _serves.clear()
     _signatures.clear()
 
@@ -884,7 +936,7 @@ async def _signature(scope: dict) -> dict:
         raise
 
 
-async def get_memory_field(scope: dict, *, limit: int) -> dict:
+async def get_memory_field(scope: dict, *, limit: int, since: datetime | None = None) -> dict:
     """Rate-limit map requests per tenant, then serve the saved layout.
 
     Signatures refresh within five seconds. See ``_get_memory_field``.
@@ -913,10 +965,10 @@ async def get_memory_field(scope: dict, *, limit: int) -> dict:
                 raise HTTPException(
                     status_code=429, detail="Memory map request rate exceeded", headers={"Retry-After": "1"}
                 )
-    return await _get_memory_field(scope, limit=limit)
+    return await _get_memory_field(scope, limit=limit, since=since)
 
 
-async def _get_memory_field(scope: dict, *, limit: int) -> dict:
+async def _get_memory_field(scope: dict, *, limit: int, since: datetime | None = None) -> dict:
     """The caller's map, from the tenant's saved layout.
 
     No saved model yet: the request claims the tenant's fit. With at most
@@ -929,6 +981,10 @@ async def _get_memory_field(scope: dict, *, limit: int) -> dict:
     whose last fit found too few shared embeddings; after a failed fit,
     requests answer ``FieldBusyError`` for ``FIT_RETRY_SECONDS`` rather than
     fitting again.
+
+    With a saved model, a tenant grown enough since its fit is refitted in the
+    background (``_maybe_refit``). ``since`` returns only the memories written
+    after it (``_serve_since``), for an open map to merge in.
     """
     tenant = scope["tenant_id"]
     # Only the signature read occupies a search slot.
@@ -947,8 +1003,16 @@ async def _get_memory_field(scope: dict, *, limit: int) -> dict:
             # few of. The same five-second signature cache serves it.
             async with per_tenant_slot("search", tenant):
                 shared = await _signature({"tenant_id": tenant})
-            inline = int(shared.get("embedded") or 0) <= FIT_INLINE_MAX
-            saved = await _fit_or_wait(tenant, inline=inline)
+            shared_embedded = int(shared.get("embedded") or 0)
+            saved = await _fit_or_wait(
+                tenant, inline=shared_embedded <= FIT_INLINE_MAX, shared_embedded=shared_embedded
+            )
+    if saved is not None:
+        await _maybe_refit(tenant, saved)
+    if since is not None:
+        return await _serve_since(
+            scope, saved, since=since, limit=min(limit, SINCE_MAX), total=int(sig.get("count") or 0)
+        )
     # Laid out on request although there are embeddings enough to fit: bound it.
     bounded = saved is None and embedded >= MIN_FIT
     if bounded:
@@ -994,7 +1058,7 @@ async def _saved_model(tenant: str, *, fresh: bool = False) -> SavedModel | None
     return saved
 
 
-async def _fit_or_wait(tenant: str, *, inline: bool) -> SavedModel | None:
+async def _fit_or_wait(tenant: str, *, inline: bool, shared_embedded: int) -> SavedModel | None:
     """Start the tenant's fit if this process is not already running it, and
     wait for it when ``inline``. None when the tenant has too few shared
     embeddings to fit.
@@ -1005,26 +1069,7 @@ async def _fit_or_wait(tenant: str, *, inline: bool) -> SavedModel | None:
     """
     task = _fits.get(tenant)
     if task is None:
-        task = asyncio.create_task(_claim_and_fit(tenant))
-        _fits[tenant] = task
-
-        def _done(done: asyncio.Task[SavedModel | None]) -> None:
-            if _fits.get(tenant) is done:
-                del _fits[tenant]
-            _current_model.pop((tenant,))
-            if done.cancelled():
-                return
-            exc = done.exception()  # retrieved; ``_fit`` logged a failure
-            if exc is None:
-                if done.result() is None:
-                    _record_fit_outcome(tenant, "too_few")
-                else:
-                    _fit_outcomes.pop(tenant, None)
-            elif not isinstance(exc, FieldPreparingError):
-                # Not a claim another process holds: this fit itself failed.
-                _record_fit_outcome(tenant, "failed")
-
-        task.add_done_callback(_done)
+        task = _start_fit(tenant, _claim_and_fit(tenant, shared_embedded=shared_embedded))
     if not inline:
         raise FieldPreparingError
     waiting = asyncio.timeout(FIT_INLINE_WAIT_SECONDS)
@@ -1038,6 +1083,60 @@ async def _fit_or_wait(tenant: str, *, inline: bool) -> SavedModel | None:
             # Stopped waiting; the shielded fit goes on and is saved.
             raise FieldPreparingError from None
         raise FieldBusyError from exc
+
+
+def _start_fit(tenant: str, work: Coroutine[Any, Any, SavedModel | None]) -> asyncio.Task[SavedModel | None]:
+    """Run ``work`` as the tenant's fit in this process, and remember how it
+    ended: a model saved, too few shared embeddings, or a failure."""
+    task = asyncio.create_task(work)
+    _fits[tenant] = task
+
+    def _done(done: asyncio.Task[SavedModel | None]) -> None:
+        if _fits.get(tenant) is done:
+            del _fits[tenant]
+        _current_model.pop((tenant,))
+        if done.cancelled():
+            return
+        exc = done.exception()  # retrieved; ``_fit`` logged a failure
+        if exc is None:
+            if done.result() is None:
+                _record_fit_outcome(tenant, "too_few")
+            else:
+                _fit_outcomes.pop(tenant, None)
+                _record_refit_check(tenant)  # a fresh fit is a growth check
+        elif not isinstance(exc, FieldPreparingError):
+            # Not a claim another process holds: this fit itself failed.
+            _record_fit_outcome(tenant, "failed")
+
+    task.add_done_callback(_done)
+    return task
+
+
+async def _maybe_refit(tenant: str, saved: SavedModel) -> None:
+    """Start a background refit when the tenant has grown enough since
+    ``saved`` was fitted. Reads go on serving ``saved`` until the new model
+    is saved; a client sees ``layout_version`` change then."""
+    due = _refit_due.get(tenant)
+    if (due is not None and due > time.monotonic()) or tenant in _fits:
+        return
+    _record_refit_check(tenant)
+    try:
+        async with per_tenant_slot("search", tenant):
+            shared = await _signature({"tenant_id": tenant})
+    except FieldBusyError:
+        return  # storage is busy; the read goes on, and the next check retries
+    current = int(shared.get("embedded") or 0)
+    fitted = float(saved.model.fitted_total)
+    if current < max(fitted * REFIT_GROWTH, fitted + REFIT_MIN_NEW):
+        return
+    _start_fit(tenant, _claim_and_fit(tenant, refit_from=saved.version, shared_embedded=current))
+
+
+def _record_refit_check(tenant: str) -> None:
+    _refit_due[tenant] = time.monotonic() + REFIT_CHECK_SECONDS
+    _refit_due.move_to_end(tenant)
+    while len(_refit_due) > 1024:
+        _refit_due.popitem(last=False)
 
 
 def _fit_outcome(tenant: str) -> str | None:
@@ -1058,23 +1157,27 @@ def _record_fit_outcome(tenant: str, outcome: str) -> None:
         _fit_outcomes.popitem(last=False)
 
 
-async def _claim_and_fit(tenant: str) -> SavedModel | None:
+async def _claim_and_fit(
+    tenant: str, *, refit_from: str | None = None, shared_embedded: int | None = None
+) -> SavedModel | None:
     """Claim the tenant's fit in storage and run it. ``FieldPreparingError``
-    when another process holds the claim."""
+    when another process holds the claim. ``refit_from`` names the model a
+    refit replaces; any other saved model means the work is already done."""
     sc = get_storage_client()
     token = uuid4().hex
     claim = await sc.projection_claim(tenant, token, FIT_LEASE_SECONDS)
     if not claim.get("claimed"):
         raise FieldPreparingError
-    if claim.get("model_version"):
+    if claim.get("model_version") and claim.get("model_version") != refit_from:
         # Saved since this process read the model (a replica behind the
-        # primary): serve that one rather than fitting again.
+        # primary, or another process's refit): serve that one rather than
+        # fitting again.
         await sc.projection_release(tenant, token)
         saved = await _saved_model(tenant, fresh=True)
         if saved is None:
             raise FieldPreparingError
         return saved
-    return await _fit(tenant, token)
+    return await _fit(tenant, token, shared_embedded=shared_embedded)
 
 
 @dataclass
@@ -1141,7 +1244,7 @@ def _lost_claim(tenant: str) -> NoReturn:
     raise FieldPreparingError
 
 
-async def _fit(tenant: str, token: str) -> SavedModel | None:
+async def _fit(tenant: str, token: str, *, shared_embedded: int | None = None) -> SavedModel | None:
     """Fit the tenant's layout under ``token``'s claim and save it.
 
     Pages the newest ``FIELD_MAX_LIMIT`` of the tenant's shared memories with
@@ -1170,6 +1273,10 @@ async def _fit(tenant: str, token: str) -> SavedModel | None:
             )
             laying_out = time.monotonic()
             model = await asyncio.to_thread(fit_model, vectors[sample])
+            # The tenant-wide count a refit is measured against: the caller's
+            # signature read of it, or what this fit paged (the same up to the
+            # newest ``FIELD_MAX_LIMIT``).
+            model.fitted_total = np.array(float(shared_embedded or embedded.size))
             xy, cluster = await asyncio.to_thread(place, model, vectors)
             layout_s = time.monotonic() - laying_out
 
@@ -1273,42 +1380,7 @@ async def _serve(
         return payload
 
     got = await _page({**scope, "model_version": saved.version, "embeddings": "unplaced"}, limit=limit)
-    n = len(got.rows)
-    xs = [0.5] * n
-    ys = [0.5] * n
-    clusters = [-1] * n
-    for i, r in enumerate(got.rows):
-        if r.get("x") is not None:
-            xs[i], ys[i], clusters[i] = float(r["x"]), float(r["y"]), int(r["cluster"])
-    todo = [
-        i
-        for i, r in enumerate(got.rows)
-        if r.get("x") is None and (vec := got.vectors[i]) is not None and vec.shape[0] == saved.model.dim
-    ][:PLACE_PER_REQUEST]
-    if todo:
-        xy, cluster = await asyncio.to_thread(place, saved.model, _stack(got.vectors, todo))
-        items = []
-        for t, i in enumerate(todo):
-            xs[i], ys[i], clusters[i] = float(xy[t, 0]), float(xy[t, 1]), int(cluster[t])
-            items.append(
-                {
-                    "memory_id": got.rows[i]["id"],
-                    "x": xs[i],
-                    "y": ys[i],
-                    "cluster": clusters[i],
-                    "row_version": got.rows[i]["row_version"],
-                }
-            )
-        sc = get_storage_client()
-        for start in range(0, len(items), POSITIONS_BATCH):
-            # None: a refit saved a new model since this read began, and the
-            # next read places these under it.
-            await sc.projection_positions_save(
-                scope["tenant_id"], saved.version, items[start : start + POSITIONS_BATCH]
-            )
-    for i, r in enumerate(got.rows):
-        if clusters[i] < 0:
-            xs[i], ys[i] = _jitter(r["id"])
+    xs, ys, clusters = await _positions(scope, saved, got.rows, got.vectors)
 
     k = int(saved.model.centroids.shape[0])
     members: list[list[int]] = [[] for _ in range(k)]
@@ -1334,6 +1406,98 @@ async def _serve(
             *(f"{r['id']}:{c}" for r, c in zip(got.rows, clusters, strict=True)),
         ]
     )
-    payload = _assemble_field(got.rows, layout, got.entities, total=total, version_src=version_src)
+    payload = _assemble_field(
+        got.rows, layout, got.entities, total=total, version_src=version_src, layout_version=saved.version
+    )
     field_cache.put(key, payload)
     return payload
+
+
+async def _positions(
+    scope: dict, saved: SavedModel, rows: list[dict], vectors: list[np.ndarray | None]
+) -> tuple[list[float], list[float], list[int]]:
+    """Each row's position: its saved one, or one placed now with ``saved``.
+
+    Up to ``PLACE_PER_REQUEST`` rows with no position are placed and saved,
+    so the next read finds them placed; a row with no embedding yet, or beyond
+    that bound, sits near the centre with ``cluster = -1``.
+    """
+    n = len(rows)
+    xs = [0.5] * n
+    ys = [0.5] * n
+    clusters = [-1] * n
+    for i, r in enumerate(rows):
+        if r.get("x") is not None:
+            xs[i], ys[i], clusters[i] = float(r["x"]), float(r["y"]), int(r["cluster"])
+    todo = [
+        i
+        for i, r in enumerate(rows)
+        if r.get("x") is None and (vec := vectors[i]) is not None and vec.shape[0] == saved.model.dim
+    ][:PLACE_PER_REQUEST]
+    if todo:
+        xy, cluster = await asyncio.to_thread(place, saved.model, _stack(vectors, todo))
+        items = []
+        for t, i in enumerate(todo):
+            xs[i], ys[i], clusters[i] = float(xy[t, 0]), float(xy[t, 1]), int(cluster[t])
+            items.append(
+                {
+                    "memory_id": rows[i]["id"],
+                    "x": xs[i],
+                    "y": ys[i],
+                    "cluster": clusters[i],
+                    "row_version": rows[i]["row_version"],
+                }
+            )
+        sc = get_storage_client()
+        for start in range(0, len(items), POSITIONS_BATCH):
+            # None: a refit saved a new model since this read began, and the
+            # next read places these under it.
+            await sc.projection_positions_save(
+                scope["tenant_id"], saved.version, items[start : start + POSITIONS_BATCH]
+            )
+    for i, r in enumerate(rows):
+        if clusters[i] < 0:
+            xs[i], ys[i] = _jitter(r["id"])
+    return xs, ys, clusters
+
+
+async def _serve_since(
+    scope: dict, saved: SavedModel | None, *, since: datetime, limit: int, total: int
+) -> dict:
+    """The memories written after ``since``, newest first, at most ``limit``,
+    positioned on the saved layout for an open map to merge in.
+
+    ``clusters`` is empty: the open map has them. ``truncated`` says the
+    caller should reload the whole map, because more is new than this holds,
+    or because the map is laid out on request and has no saved positions to
+    merge into.
+    """
+    if saved is None:
+        layout = FieldLayout(x=[], y=[], cluster=[], anchors=[], sizes=[], members=[])
+        return _assemble_field(
+            [], layout, {}, total=total, version_src=f"{FIELD_KIND}|since|none", truncated=True, since=since
+        )
+    got = await _page({**scope, "model_version": saved.version, "embeddings": "unplaced"}, limit=limit + 1)
+    new = [
+        i
+        for i, r in enumerate(got.rows)
+        if r.get("created_at") and datetime.fromisoformat(r["created_at"]) > since
+    ]
+    truncated = len(new) > limit
+    new = new[:limit]
+    rows = [got.rows[i] for i in new]
+    xs, ys, clusters = await _positions(scope, saved, rows, [got.vectors[i] for i in new])
+    layout = FieldLayout(x=xs, y=ys, cluster=clusters, anchors=[], sizes=[], members=[])
+    version_src = "|".join(
+        [FIELD_KIND, "since", saved.version, *(f"{r['id']}:{c}" for r, c in zip(rows, clusters, strict=True))]
+    )
+    return _assemble_field(
+        rows,
+        layout,
+        got.entities,
+        total=total,
+        version_src=version_src,
+        layout_version=saved.version,
+        truncated=truncated,
+        since=since,
+    )
