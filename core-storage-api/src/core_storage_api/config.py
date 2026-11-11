@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     environment: Literal["development", "production", "sandbox"] = "development"
+    # Outbound background model attempts across all services/credentials.
+    background_llm_attempts_per_minute: int = Field(default=120, ge=1, le=100000)
+    background_llm_concurrency: int = Field(default=4, ge=1, le=1000)
 
     # Database — writes go to the primary at ``database_url``. Reads
     # route to ``read_database_url`` when it's set (e.g. a managed-Postgres

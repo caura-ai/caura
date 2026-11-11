@@ -13,6 +13,7 @@ the counterweights, one per new recorder:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from contextlib import ExitStack
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ from common.enrichment.schema import AtomicFact, EnrichmentResult
 from core_api.constants import VECTOR_DIM
 from core_api.services import contradiction_detector as cd
 from core_api.services import memory_service, task_tracker
+from core_api.services.background_admission import FairGate
 
 pytestmark = pytest.mark.asyncio
 
@@ -119,19 +121,26 @@ async def test_a_failed_detection_is_recorded(run, path) -> None:
 async def test_the_detection_slot_is_free_before_recording(run) -> None:
     """The record is a storage write; holding the A19 slot across it would
     let a degraded storage stall every queued detection pass."""
-    seen: list[int] = []
+    gate = FairGate(cap=1, per_tenant=1, tenant_backlog=1, global_backlog=1)
+    seen: list[bool] = []
 
     async def record(_row):
-        seen.append(cd._detection_gate()._value)
+        # A real acquisition proves the slot is usable while storage records
+        # the failure, without depending on a semaphore's private counter.
+        permit = await asyncio.wait_for(gate.acquire(TENANT), timeout=0.1)
+        try:
+            seen.append(True)
+        finally:
+            permit.release()
 
     with ExitStack() as stack:
+        stack.enter_context(patch.object(cd, "_detection_gate", return_value=gate))
         _detector_env(stack, get_memory=AsyncMock(side_effect=RuntimeError("x")))
         log_sc = _log_sink(stack)
         log_sc.add_task_failure.side_effect = record
-        before = cd._detection_gate()._value
         await run(uuid.uuid4())
 
-    assert seen == [before]
+    assert seen == [True]
 
 
 async def test_a_concluded_path_a_run_records_nothing() -> None:

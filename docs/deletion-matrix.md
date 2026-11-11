@@ -66,6 +66,9 @@ the token. It may remain only where this table says **Kept** for that step.
 | `fleet_commands` | Commands sent to plugin nodes, and their results | **No text** | **No text** | **Deleted** |
 | `capability_usage` | Counts of which capabilities were used | **No text** | **No text** | **Deleted** |
 | `tenant_usage_counters` | Usage counts | **No text** | **No text** | **Deleted** |
+| `background_model_budgets` | Background attempt counts, one rolling window per tenant | **No text** | **No text** | **Deleted** |
+| `background_model_reservations` | Recent admitted or cancelled attempt ids, no content | **No text** | **No text** | **Deleted** |
+| `background_model_work` | Deferred or parked memory ids, operation kinds and fixed terminal reasons; workers re-read live content | **No text** | **No text** | **Deleted** |
 | `llm_usage_minutes` | Model token counts per minute | **No text** | **No text** | **Deleted** |
 | `value_usage_minutes` | Value metering counts per minute | **No text** | **No text** | **Deleted** |
 | `organization_settings` | The organization's settings | **No text** | **No text** | **Deleted** |

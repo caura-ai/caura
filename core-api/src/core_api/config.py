@@ -427,6 +427,8 @@ class Settings(BaseSettings):
     # so a tenant's previews are what fill the provider quota and thread pool
     # every tenant's recall shares. Fast-fails 429 like the caps above.
     per_tenant_llm_concurrency: int = 2
+    # Async interview jobs cannot occupy the interactive model-call slots.
+    per_tenant_background_llm_concurrency: int = 2
     # Deeper bulkhead at the storage roundtrip itself
     # (CAURA-602 follow-up). Smaller than the route-entry caps above
     # because each request only holds the storage slot for the actual
@@ -446,29 +448,16 @@ class Settings(BaseSettings):
     # enough that real exhaustion fails before the request hits the
     # worker.
     per_tenant_acquire_timeout_seconds: float = 0.05
-    # Process-wide cap on concurrently RUNNING contradiction-detection
-    # passes (A19). Every trigger — write, bulk fan-out, back-channel
-    # consumers, post-entity-extraction — schedules detection as an
-    # unbounded fire-and-forget task, so the caps above bound how fast
-    # writes are ADMITTED but nothing bounds how many detections then
-    # run at once: 8 concurrent 100-item bulks leave ~1,600 detection
-    # coroutines racing the moment they commit. Each pass holds up to
-    # ``_ENTITY_CTX_FANOUT_LIMIT`` (8) storage connections during its
-    # Path C context fetch and one LLM judge call for seconds, on the
-    # SAME storage pool (200 conns, 5s pool budget) and provider quota
-    # the foreground request path uses — a big enough burst turns into
-    # foreground PoolTimeouts and judge abstains (#821), i.e. dropped
-    # detections. Global rather than per-tenant because the resources
-    # being protected are process-global; detection is post-commit
-    # background work, so excess passes QUEUE (never shed) and drain in
-    # FIFO order. Sizing: 16 x 8 = 128 worst-instant storage conns
-    # (< 200 with headroom for foreground), 16 concurrent judge calls
-    # is below the enrichment path's accepted worst case (CAURA-627),
-    # and at a ~2s batch judge that sustains ~8 detections/s per
-    # process — comfortably above one saturated tenant's admitted
-    # write rate. Matches ``per_tenant_write_concurrency`` on purpose:
-    # one process keeps pace with one saturated tenant.
+    # Both contradiction paths share bounded round-robin tenant queues.
+    # Excess passes persist a minimal reference rather than waiting without a
+    # ceiling or rejecting the foreground write that already committed.
     contradiction_detection_concurrency: int = 16
+    contradiction_detection_per_tenant_concurrency: int = Field(default=4, ge=1)
+    contradiction_detection_tenant_backlog: int = Field(default=64, ge=1)
+    # Keep a hot retry tenant below half of the fixed 16-job replay pool.
+    background_retry_per_tenant_concurrency: int = Field(default=4, ge=1, le=8)
+    background_retry_poll_seconds: float = Field(default=1, ge=1, le=60)
+    contradiction_detection_global_backlog: int = Field(default=256, ge=1)
     # Process-wide cap on memory-map layouts being built at once
     # (``GET /memories/field``, M-125). An uncached build pages up to 50,000
     # memories with their embeddings off the read replica, decodes them on
@@ -662,6 +651,7 @@ class Settings(BaseSettings):
         "per_tenant_write_concurrency",
         "per_tenant_embed_concurrency",
         "per_tenant_llm_concurrency",
+        "per_tenant_background_llm_concurrency",
         "per_tenant_storage_write_concurrency",
         "per_tenant_storage_search_concurrency",
         "contradiction_detection_concurrency",

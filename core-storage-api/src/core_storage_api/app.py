@@ -77,6 +77,7 @@ from core_storage_api.routers import (
     usage_router,
     value_router,
 )
+from core_storage_api.routers.background_work import router as background_work_router
 from core_storage_api.routers.skill_delivery import router as skill_delivery_router
 
 logger = logging.getLogger(__name__)
@@ -430,6 +431,7 @@ def create_app() -> FastAPI:
     # totals, flushed by core-api and core-worker. Cross-tenant / RLS-free
     # like the two above; each row names its tenant.
     app.include_router(usage_router, prefix=prefix)
+    app.include_router(background_work_router, prefix=prefix)
     # Value metering (migration 067): sessions, memory origins and reuse.
     # Every route is bound to one tenant.
     app.include_router(value_router, prefix=prefix)

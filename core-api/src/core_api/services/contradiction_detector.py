@@ -25,6 +25,7 @@ from datetime import datetime
 from typing import Any, NamedTuple
 from uuid import UUID
 
+from common.background_work import BackgroundWorkDeferred
 from common.constants import predicate_cluster
 from common.llm.untrusted import UNTRUSTED_DATA_RULE, data_block, quote_untrusted
 from common.provider_names import ProviderName
@@ -35,6 +36,8 @@ from core_api.config import settings
 from core_api.constants import CONTRADICTED_STATUSES, SINGLE_VALUE_PREDICATES
 from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
 from core_api.schemas import ContradictionInfo
+from core_api.services.background_admission import FairGate, Permit
+from core_api.services.background_retry import defer_work
 from core_api.services.source_trust import author_trust, row_trust
 from core_api.services.subject_preflight import _subjects_differ_with_certainty
 from core_api.services.task_tracker import record_task_failure
@@ -387,69 +390,30 @@ async def _record_conflicts(
             )
 
 
-# ---------------------------------------------------------------------------
-# A19 — process-wide admission gate for detection passes.
-# ---------------------------------------------------------------------------
-
-# Every trigger site schedules detection with ``track_task`` (a bare
-# ``asyncio.create_task``), so the per-tenant bulkheads bound how fast writes
-# are ADMITTED while nothing bounds how many detections then RUN at once: the
-# tasks outlive the requests that spawned them, and 8 concurrent 100-item
-# bulks leave ~1,600 detection coroutines racing the moment they commit. Each
-# pass holds up to ``_ENTITY_CTX_FANOUT_LIMIT`` (8) connections of the SAME
-# 200-connection / 5s-pool-budget storage pool the foreground request path
-# uses, plus one LLM judge call for seconds — a big enough burst surfaces as
-# foreground PoolTimeouts (the 2026-06-16 incident shape) and judge abstains
-# (#821), i.e. silently dropped detections. This gate turns that collapse
-# into bounded concurrency + FIFO queueing.
-#
-# Queue, never shed: detection is post-commit background work with no caller
-# waiting on it, and a shed pass is a contradiction nobody ever looks for.
-# Waiting coroutines cost ~KBs; the resources the cap protects (storage pool,
-# provider quota, event loop) are what actually collapse. ONE shared gate for
-# every entry point — mirroring ``interview_service.synthesis_sem`` — because
-# two independent Semaphore(N)s would allow 2N whenever Path A bursts overlap
-# Path C bursts, exactly the stampede the cap exists to prevent. Global
-# rather than per-tenant (unlike ``per_tenant_concurrency``) because the
-# protected resources are process-global; a hot tenant delaying another
-# tenant's BACKGROUND detection is acceptable in a way that pool exhaustion
-# for everyone is not.
-#
-# The semaphore is cached per running loop rather than created at import:
-# asyncio primitives bind to the first loop that awaits them, and the test
-# suite runs one loop per test — a module-level instance would poison every
-# later test with "bound to a different event loop" (same reason
-# ``_bounded_gather`` builds a fresh semaphore per call). Production has one
-# loop per process, so the cached instance is process-wide there.
-_DETECTION_GATE: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
+# One bounded fair gate for both detection paths, cached per event loop.
+_DETECTION_GATE: tuple[asyncio.AbstractEventLoop, FairGate] | None = None
 
 
-def _detection_gate() -> asyncio.Semaphore:
+def _detection_gate() -> FairGate:
     global _DETECTION_GATE
     loop = asyncio.get_running_loop()
     if _DETECTION_GATE is None or _DETECTION_GATE[0] is not loop:
-        _DETECTION_GATE = (loop, asyncio.Semaphore(settings.contradiction_detection_concurrency))
+        _DETECTION_GATE = (
+            loop,
+            FairGate(
+                settings.contradiction_detection_concurrency,
+                settings.contradiction_detection_per_tenant_concurrency,
+                settings.contradiction_detection_tenant_backlog,
+                settings.contradiction_detection_global_backlog,
+            ),
+        )
     return _DETECTION_GATE[1]
 
 
-async def _acquire_detection_slot() -> tuple[asyncio.Semaphore, int]:
-    """Take one detection slot, returning ``(gate, queued_ms)``.
-
-    ``queued_ms`` is surfaced in the ``path_a/c_completed`` lines so gate
-    pressure is quantifiable from production logs alone (detection-proper
-    time = ``elapsed_ms - queued_ms``); the pre-acquire DEBUG mirrors
-    ``per_tenant_storage_slot``'s saturation log. Split from the entry
-    points so both share one queue and one instrumentation story.
-    """
-    gate = _detection_gate()
-    if gate.locked():
-        logger.debug(
-            "contradiction-detection gate saturated; queuing",
-            extra={"cap": settings.contradiction_detection_concurrency},
-        )
+async def _acquire_detection_slot(tenant_id: str) -> tuple[Permit, int]:
     t0 = time.monotonic()
-    await gate.acquire()
-    return gate, round((time.monotonic() - t0) * 1000)
+    permit = await _detection_gate().acquire(tenant_id)
+    return permit, round((time.monotonic() - t0) * 1000)
 
 
 # ---------------------------------------------------------------------------
@@ -849,6 +813,7 @@ async def _detection_disabled_for_tenant(tenant_id: str, memory_id, path: str) -
     tenant="tenant_id",
     fleet="fleet_id",
     agent=lambda a: (a.get("new_memory") or {}).get("agent_id"),
+    background=True,
 )
 async def detect_contradictions_async(
     memory_id: UUID,
@@ -893,6 +858,7 @@ async def detect_contradictions_async(
     lock_token = ""
     failure: Exception | None = None
     failure_tb = ""
+    deferred: BackgroundWorkDeferred | None = None
     # A19 — admission gate BEFORE any storage or Redis traffic, so a queued
     # pass consumes nothing but a waiting coroutine. Acquired before the
     # idempotency lock on purpose: the lock's 1h TTL must clock detection,
@@ -901,7 +867,11 @@ async def detect_contradictions_async(
     # Acquire sits OUTSIDE the try so a cancellation mid-wait (shutdown's
     # ``cancel_all_tasks``) cannot reach a ``release()`` for a slot that was
     # never taken.
-    _gate, queued_ms = await _acquire_detection_slot()
+    try:
+        _gate, queued_ms = await _acquire_detection_slot(tenant_id)
+    except BackgroundWorkDeferred as exc:
+        await defer_work(get_storage_client(), tenant_id, memory_id, "contradiction_content", exc)
+        return
     abstentions = _JudgeAbstentions()
     abstentions_token = _judge_abstentions.set(abstentions)
     try:
@@ -988,6 +958,8 @@ async def detect_contradictions_async(
             },
         )
 
+    except BackgroundWorkDeferred as exc:
+        deferred = exc
     except Exception as exc:
         logger.exception("Async contradiction detection failed for memory %s", memory_id)
         failure, failure_tb = exc, traceback.format_exc()
@@ -1021,6 +993,8 @@ async def detect_contradictions_async(
             queued_ms,
             tenant_id,
         )
+    if deferred is not None:
+        await defer_work(get_storage_client(), tenant_id, memory_id, "contradiction_content", deferred)
     if failure is not None:
         await _record_detection_lost(memory_id, tenant_id, "content", failure, failure_tb)
 
@@ -2856,6 +2830,8 @@ async def _retraction_judge_clears(
         )
         new_entities = ctx_by_memory.get(winner_id, [])
         old_entities = ctx_by_memory.get(loser_id, [])
+    except BackgroundWorkDeferred:
+        raise
     except Exception as e:
         # CAURA-134 — include exception class name in the log. The
         # default str(e) is empty for ``asyncio.TimeoutError``, which
@@ -2896,6 +2872,8 @@ async def _retraction_judge_clears(
         verdict, confidence = await _llm_entity_aware_contradiction_check(
             new_content, old_content, new_entities, old_entities, tenant_config
         )
+    except BackgroundWorkDeferred:
+        raise
     except Exception as e:
         # CAURA-134 — include the exception class name and use the
         # grep-friendly ``PATH_C_RETRACTION judge_failed`` prefix.
@@ -3007,6 +2985,8 @@ async def _attempt_entity_retraction(
         # scoping, so it would miss the edge owner precisely when it matters.
         try:
             owners = await sc.find_by_supersedes_id(retraction_tenant_id, str(new_memory.get("id")))
+        except BackgroundWorkDeferred:
+            raise
         except Exception:
             logger.warning(
                 "Retraction could not resolve the flipped counterpart for memory %s",
@@ -3150,6 +3130,8 @@ async def _attempt_entity_retraction(
             # longer ours to make.
             expected_supersedes_id=str(candidate.get("id")),
         )
+    except BackgroundWorkDeferred:
+        raise
     except Exception as e:
         # CAS rejection (409) means another writer mutated the chain
         # — the candidate revert above still landed (idempotent), and
@@ -3250,6 +3232,8 @@ async def _retract_unlinked_verdicts(sc, new_memory: dict, tenant_config) -> int
                     loser.get("id"),
                     confidence,
                 )
+    except BackgroundWorkDeferred:
+        raise
     except Exception:
         logger.warning("PATH_C_RETRACTION unlinked_failed memory=%s", new_id, exc_info=True)
     return reverted
@@ -3260,7 +3244,7 @@ async def _retract_unlinked_verdicts(sc, new_memory: dict, tenant_config) -> int
 # ---------------------------------------------------------------------------
 
 
-@scoped("contradiction", tenant="tenant_id", fleet="fleet_id")
+@scoped("contradiction", tenant="tenant_id", fleet="fleet_id", background=True)
 async def detect_contradictions_by_entities_async(
     memory_id: UUID,
     tenant_id: str,
@@ -3297,6 +3281,7 @@ async def detect_contradictions_by_entities_async(
     lock_token = ""
     failure: Exception | None = None
     failure_tb = ""
+    deferred: BackgroundWorkDeferred | None = None
     # A19 — same admission gate as Path A, and deliberately the SAME gate:
     # Path C is the heavier occupant (it runs the entity-context fetch, and
     # on the per-id fallback path that still holds up to
@@ -3306,7 +3291,11 @@ async def detect_contradictions_by_entities_async(
     # outside-the-try rationale. The batched fetch (m-05) cut the round-trips
     # a held slot spends on storage from ~170 to 4 across both phases; it did
     # not change which gate Path C belongs in.
-    _gate, queued_ms = await _acquire_detection_slot()
+    try:
+        _gate, queued_ms = await _acquire_detection_slot(tenant_id)
+    except BackgroundWorkDeferred as exc:
+        await defer_work(get_storage_client(), tenant_id, memory_id, "contradiction_entity", exc)
+        return
     abstentions = _JudgeAbstentions()
     abstentions_token = _judge_abstentions.set(abstentions)
     try:
@@ -3561,6 +3550,8 @@ async def detect_contradictions_by_entities_async(
                     len(new_ctx),
                     ctx_sizes,
                 )
+            except BackgroundWorkDeferred:
+                raise
             except Exception as e:
                 # Fail open — keep candidates and let the LLM judge
                 # decide via the base prompt. Conservative against
@@ -3726,6 +3717,8 @@ async def detect_contradictions_by_entities_async(
                     results[0] = await _llm_contradiction_check(
                         new_content, c.get("content", ""), tenant_config
                     )
+            except BackgroundWorkDeferred:
+                raise
             except Exception as e:  # mirror gather(return_exceptions=True)
                 results[0] = e
         else:
@@ -3745,6 +3738,8 @@ async def detect_contradictions_by_entities_async(
                     )
                     for j, i in enumerate(ea_idx):
                         results[i] = _judge_contradiction(ea_raws[j])
+                except BackgroundWorkDeferred:
+                    raise
                 except Exception as e:
                     for i in ea_idx:
                         results[i] = e
@@ -3754,6 +3749,8 @@ async def detect_contradictions_by_entities_async(
                     base_raws = await _llm_contradiction_check_batch(new_content, base_cands, tenant_config)
                     for j, i in enumerate(base_idx):
                         results[i] = _judge_contradiction(base_raws[j])
+                except BackgroundWorkDeferred:
+                    raise
                 except Exception as e:
                     for i in base_idx:
                         results[i] = e
@@ -3933,8 +3930,12 @@ async def detect_contradictions_by_entities_async(
                     tenant_config,
                     overlap_candidates=candidates,
                 )
+            except BackgroundWorkDeferred:
+                raise
             except Exception:
                 logger.warning("path_d_shadow wrapper failed for %s", memory_id, exc_info=True)
+    except BackgroundWorkDeferred as exc:
+        deferred = exc
     except Exception as exc:
         logger.exception("Entity-based contradiction detection failed for %s", memory_id)
         failure, failure_tb = exc, traceback.format_exc()
@@ -3975,6 +3976,8 @@ async def detect_contradictions_by_entities_async(
         # ``return`` at every concluded outcome, so a record placed after the
         # ``finally`` would only ever see the exception path, never a run whose
         # judge abstained. The slot is already free by this point.
+        if deferred is not None:
+            await defer_work(get_storage_client(), tenant_id, memory_id, "contradiction_entity", deferred)
         if failure is not None:
             await _record_detection_lost(memory_id, tenant_id, "entity", failure, failure_tb)
 

@@ -4,6 +4,11 @@ from common.models.agent_activity_digest import AgentActivityDigest
 from common.models.analysis_report import CrystallizationReport
 from common.models.audit import AuditChainHead, AuditLog
 from common.models.background_task import BackgroundTaskLog
+from common.models.background_work import (
+    BackgroundModelBudget,
+    BackgroundModelReservation,
+    BackgroundModelWork,
+)
 from common.models.base import Base
 from common.models.baton_recipient import BatonRecipient
 from common.models.capability_usage import CapabilityUsage
@@ -43,6 +48,9 @@ __all__ = [
     "AuditChainHead",
     "AuditLog",
     "BackgroundTaskLog",
+    "BackgroundModelBudget",
+    "BackgroundModelReservation",
+    "BackgroundModelWork",
     "Base",
     "BatonRecipient",
     "CapabilityUsage",

@@ -36,6 +36,7 @@ except ImportError:
         pass  # type: ignore[misc]
 
 
+from common.background_work import BackgroundWorkDeferred
 from common.constants import HOLD_KEY, QUARANTINED_MEMORY_STATUS, VECTOR_DIM
 from common.embedding import (
     embedding_configured,
@@ -120,6 +121,7 @@ from core_api.search_trim import (
     trim_reserving_fts_matches,
 )
 from core_api.services.auto_capture import CAPTURE_KEY, capture_of, stamp_capture
+from core_api.services.background_retry import defer_work
 from core_api.services.contradiction_detector import _pick_older, revert_unheld_loser
 from core_api.services.entity_extraction_worker import process_entity_extraction
 from core_api.services.entity_tokens import extract_entity_tokens
@@ -4053,7 +4055,7 @@ def _merged_metadata(stored: dict, metadata_patch: dict) -> dict:
     return merged
 
 
-@scoped("enrichment", tenant="tenant_id", agent="agent_id", fleet="fleet_id")
+@scoped("enrichment", tenant="tenant_id", agent="agent_id", fleet="fleet_id", background=True)
 async def _enrich_memory_background(
     memory_id: UUID,
     content: str,
@@ -4160,6 +4162,9 @@ async def _enrich_memory_background(
 
     try:
         enrichment = await enrich_memory(content, tenant_config)
+    except BackgroundWorkDeferred as exc:
+        await defer_work(get_storage_client(), tenant_id, memory_id, "enrichment", exc)
+        return None
     except (ValueError, RuntimeError, OpenAIError, GoogleAPIError) as exc:
         logger.exception("Background enrichment LLM call failed for memory %s", memory_id)
         await _record_enrich_stranded(

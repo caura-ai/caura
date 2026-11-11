@@ -857,6 +857,46 @@ class CoreStorageClient:
                 _storage_detail(exc.response), _storage_duplicate_fields(exc.response)
             ) from exc
 
+    async def list_due_background_tenants(
+        self, *, after_tenant: str | None = None, limit: int = 32
+    ) -> list[str]:
+        params: dict = {"background_due": True, "limit": limit}
+        if after_tenant is not None:
+            params["after_tenant"] = after_tenant
+        result = await self._get("/tenants/active", read=False, **params)
+        tenants = result.get("tenant_ids") if isinstance(result, dict) else None
+        if (
+            not isinstance(tenants, list)
+            or len(tenants) > limit
+            or any(not isinstance(tenant, str) or not tenant.strip() for tenant in tenants)
+            or tenants != sorted(set(tenants))
+            or (after_tenant is not None and any(tenant <= after_tenant for tenant in tenants))
+        ):
+            raise RuntimeError("Invalid background tenant discovery")
+        return tenants
+
+    async def reserve_background_attempt(self, **payload) -> dict:
+        return await self._post("/background-work/reserve", payload, idempotent=True)  # type: ignore[return-value]
+
+    async def release_background_attempt(self, **payload) -> dict:
+        return await self._post("/background-work/release", payload, idempotent=True)  # type: ignore[return-value]
+
+    async def defer_background_work(self, payload: dict) -> dict:
+        return await self._post("/background-work/defer", payload, idempotent=True)  # type: ignore[return-value]
+
+    async def claim_background_work(self, tenant_id: str, *, limit: int = 1) -> list[dict]:
+        result = await self._post("/background-work/claim", {"tenant_id": tenant_id, "limit": limit})
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("items"), list)
+            or len(result["items"]) > limit
+        ):
+            raise RuntimeError("Invalid background work claim")
+        return result["items"]
+
+    async def finish_background_work(self, payload: dict) -> dict:
+        return await self._post("/background-work/finish", payload, idempotent=True)  # type: ignore[return-value]
+
     async def get_memory(
         self, memory_id: str, tenant_id: str, *, read: bool = True, include_held: bool = False
     ) -> dict | None:

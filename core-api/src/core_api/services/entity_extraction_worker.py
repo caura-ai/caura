@@ -10,6 +10,7 @@ from typing import Any, Final, Literal
 from uuid import UUID
 
 from common import entity_naming as _entity_naming
+from common.background_work import BackgroundWorkDeferred
 from common.constants import SINGLE_VALUE_PREDICATES
 from common.embedding import get_embedding, get_embeddings_batch
 from common.entity_naming import canonical_match_key
@@ -28,6 +29,7 @@ from core_api.constants import (
 from core_api.schemas import RelationUpsert
 from core_api.services.abbreviations import defined_abbreviations, initials, looks_like_abbreviation
 from core_api.services.audit_service import log_action
+from core_api.services.background_retry import defer_work
 from core_api.services.entity_extraction import (
     ExtractedGraph,
     ProvidersUnavailableError,
@@ -478,7 +480,7 @@ _ProviderFailure = ProvidersUnavailableError | UnretryableProviderFailureError
 # ``maintenance.reextract_heuristic_graphs`` reads it, because a model graph that
 # names no subject has the heuristic's shape and the graph alone cannot tell them
 # apart.
-ExtractionOutcome = Literal["model", "heuristic", "skipped", "failed"]
+ExtractionOutcome = Literal["model", "heuristic", "skipped", "failed", "deferred"]
 
 
 async def _still_wants_extraction(memory_id: UUID, tenant_id: str, content: str) -> bool:
@@ -689,7 +691,7 @@ async def _embed_names(names: list[str], tenant_cfg: Any) -> list[list[float] | 
     return embedded
 
 
-@scoped("entity-extraction", tenant="tenant_id", agent="agent_id", fleet="fleet_id")
+@scoped("entity-extraction", tenant="tenant_id", agent="agent_id", fleet="fleet_id", background=True)
 async def process_entity_extraction(
     memory_id: UUID,
     tenant_id: str,
@@ -1548,6 +1550,9 @@ async def process_entity_extraction(
             return "skipped"
         return made_by
 
+    except BackgroundWorkDeferred as exc:
+        await defer_work(get_storage_client(), tenant_id, memory_id, "extraction", exc)
+        return "deferred"
     except Exception as exc:
         logger.exception("Entity extraction failed for memory %s (non-fatal)", memory_id)
         # 09/02 M-40 — make the failure a ROW, not just a LINE.

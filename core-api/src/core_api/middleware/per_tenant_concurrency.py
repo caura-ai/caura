@@ -46,7 +46,7 @@ from core_api.request_phase import phase
 
 logger = logging.getLogger(__name__)
 
-Scope = Literal["write", "search", "embed", "llm", "storage_write", "storage_search"]
+Scope = Literal["write", "search", "embed", "llm", "background_llm", "storage_write", "storage_search"]
 
 # Per-(scope, tenant) state. Read-modify-write of ``_TENANT_SEMAPHORES``
 # in ``_get_semaphore`` is safe without a lock because asyncio runs one
@@ -72,6 +72,8 @@ def _cap_for(scope: Scope) -> int:
         return settings.per_tenant_embed_concurrency
     if scope == "llm":
         return settings.per_tenant_llm_concurrency
+    if scope == "background_llm":
+        return settings.per_tenant_background_llm_concurrency
     if scope == "storage_write":
         return settings.per_tenant_storage_write_concurrency
     if scope == "storage_search":
@@ -102,7 +104,7 @@ def _get_semaphore(scope: Scope, tenant_id: str) -> asyncio.Semaphore:
 
 @asynccontextmanager
 async def per_tenant_slot(
-    scope: Literal["write", "search", "embed", "llm"],
+    scope: Literal["write", "search", "embed", "llm", "background_llm"],
     tenant_id: str,
 ) -> AsyncIterator[None]:
     """Acquire one of the per-tenant slots for ``scope``, or raise 429
@@ -110,13 +112,15 @@ async def per_tenant_slot(
 
     Cap is read from ``Settings`` (``per_tenant_write_concurrency`` /
     ``per_tenant_search_concurrency`` / ``per_tenant_embed_concurrency`` /
-    ``per_tenant_llm_concurrency``) at semaphore-creation time. Use as a context manager around the
+    ``per_tenant_llm_concurrency`` / ``per_tenant_background_llm_concurrency``)
+    at semaphore-creation time. ``background_llm`` is independent of interactive
+    ``llm`` capacity. Use as a context manager around the
     request handler body (or, for ``"embed"``, around the embedding
     backend call). Releases on exit (success or exception) so a handler
     raising 5xx still frees the slot.
 
     The ``scope`` parameter is narrowed to the fast-fail-429 scopes
-    (``"write"`` / ``"search"`` / ``"embed"`` / ``"llm"``) — the deeper ``"storage_*"``
+    (``"write"`` / ``"search"`` / ``"embed"`` / ``"llm"`` / ``"background_llm"``) — the deeper ``"storage_*"``
     scopes have different semantics (unbounded queue) and live behind
     :func:`per_tenant_storage_slot`. Passing a storage scope here would
     create a fast-fail 429 semaphore against the same ``(scope,

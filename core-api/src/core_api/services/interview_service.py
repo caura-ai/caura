@@ -31,8 +31,9 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from common.background_work import BackgroundWorkDeferred
 from common.governance import mask, scan
-from common.usage import scoped
+from common.usage import scoped, usage_scope
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings as app_settings
 from core_api.constants import (
@@ -44,6 +45,7 @@ from core_api.constants import (
     MAX_CONTENT_LENGTH,
     NODE_OFFLINE_SECONDS,
 )
+from core_api.middleware.per_tenant_concurrency import per_tenant_slot
 from core_api.providers._retry import deliberate_fake_provider
 from core_api.request_phase import phase
 from core_api.schemas import BulkMemoryCreate, BulkMemoryItem, BulkMemoryResponse
@@ -976,6 +978,32 @@ async def enqueue_interview_job(
 async def process_interview_job(
     tenant_id: str, doc_id: str, *, allow_stale_processing: bool = False
 ) -> dict | None:
+    """Process durable work with separate background job and model admission."""
+    try:
+        async with per_tenant_slot("background_llm", tenant_id):
+            with usage_scope(tenant_id=tenant_id, operation="interview", background=True):
+                return await _process_interview_job(
+                    tenant_id,
+                    doc_id,
+                    allow_stale_processing=allow_stale_processing,
+                )
+    except HTTPException as exc:
+        if exc.status_code != 429:
+            raise
+        logger.info(
+            "interview background work deferred",
+            extra={
+                "tenant_id": tenant_id,
+                "reason": "tenant_slots_busy",
+                "retry_after_seconds": 60,
+            },
+        )
+        return None
+
+
+async def _process_interview_job(
+    tenant_id: str, doc_id: str, *, allow_stale_processing: bool = False
+) -> dict | None:
     """Synthesize one persisted interview job. NEVER raises (#665).
 
     Lifecycle: ``pending`` → ``processing`` (attempts+1) → ``done`` on
@@ -1139,6 +1167,7 @@ async def process_interview_job(
     # convergence; ``wrote_done`` records the one exit that must not.
     result: dict | None = None
     wrote_done = False
+    deferred = False
     try:
         try:
             result = await _synthesize_and_write(
@@ -1155,6 +1184,16 @@ async def process_interview_job(
                 # The watermark already advanced at accept time (route).
                 advance_watermark_after=False,
             )
+        except BackgroundWorkDeferred:
+            deferred = True
+            try:
+                await _set_state({"status": "pending", "attempts": attempts - 1}, skip_if_terminal=True)
+            except Exception:
+                logger.warning(
+                    "interview admission refund write unavailable",
+                    extra={"tenant_id": tenant_id, "doc_id": doc_id, "reason": "refund_unavailable"},
+                )
+            return None
         except Exception:
             logger.exception(
                 "interview job: synthesis failed (tenant=%s doc=%s attempt=%d)",
@@ -1209,10 +1248,13 @@ async def process_interview_job(
                     # SAME fresh snapshot it merges onto (one fetch-write
                     # gap; round 6 collapsed the old separate pre-check +
                     # write shape). Still not atomic (plain-replace upsert),
-                    # but the residual race is one gap, not two. No
-                    # "attempts" key on the reset either: the fresh merge
-                    # base already carries the stored count.
-                    await _set_state({"status": "pending"}, skip_if_terminal=True)
+                    # but the residual race is one gap, not two. Ordinary
+                    # failure keeps the stored count; admission deferral must
+                    # retry its refund too if the first write was unavailable.
+                    reset: dict = {"status": "pending"}
+                    if deferred:
+                        reset["attempts"] = attempts - 1
+                    await _set_state(reset, skip_if_terminal=True)
                     break
                 # BaseException: a CancelledError-mid-teardown reset attempt
                 # must not mask the ORIGINAL in-flight exception (which the
@@ -1223,7 +1265,7 @@ async def process_interview_job(
                         tenant_id,
                         doc_id,
                         reset_try,
-                        exc_info=True,
+                        exc_info=not deferred,
                     )
     return result
 
