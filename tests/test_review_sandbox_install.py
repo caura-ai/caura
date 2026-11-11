@@ -69,3 +69,101 @@ def test_official_fallback_allows_pruning_without_changing_other_mirrors(
 )
 def test_without_official_fallback_the_list_is_preserved(tmp_path, initial):
     assert _prune(tmp_path, initial) == initial
+
+
+# On 2026-11-11 GitHub's runners stopped resolving azure.archive.ubuntu.com and
+# then archive.ubuntu.com too, so pruning to the official mirror no longer helped.
+# The installer now falls back to a mirror outside ubuntu.com. These run the
+# real package stage against stubbed sudo, timeout and apt-get.
+STUBS = {
+    "sudo": 'exec "$@"\n',
+    # Drops timeout's options and duration, and tells apt-get it was bounded.
+    "timeout": """while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -k|-s) shift 2 ;;
+    -*) shift ;;
+    *) shift; break ;;
+  esac
+done
+STUB_BOUNDED=1 exec "$@"
+""",
+    # A call passing -o Dir::Etc::SourceList=FILE uses the fallback list; any
+    # other call uses the runner's own mirrors.
+    "apt-get": """list=
+prev=
+for a in "$@"; do
+  if [ "$prev" = -o ]; then
+    case "$a" in Dir::Etc::SourceList=*) list=${a#Dir::Etc::SourceList=} ;; esac
+  fi
+  prev=$a
+done
+{
+  printf 'apt-get %s | bounded=%s\\n' "$*" "${STUB_BOUNDED:-0}"
+  [ -z "$list" ] || sed 's/^/  list: /' "$list"
+} >> "$STUB_APT_LOG"
+if [ -n "$list" ]; then exit "${STUB_APT_FALLBACK_RC:-0}"; fi
+exit "${STUB_APT_RUNNER_RC:-0}"
+""",
+}
+
+
+def _install_packages(tmp_path, runner_rc=0, fallback_rc=0):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in STUBS.items():
+        stub = bin_dir / name
+        stub.write_text("#!/usr/bin/env bash\n" + body)
+        stub.chmod(0o755)
+    log = tmp_path / "apt.log"
+    log.touch()
+    source = INSTALLER.read_text()
+    stage, separator, _ = source.partition("\n# Ubuntu restricts")
+    assert separator, "installer AppArmor stage was not found"
+    stage = stage.replace(
+        "/etc/apt/apt-mirrors.txt", shlex.quote(str(tmp_path / "no mirror list"))
+    )
+    result = subprocess.run(
+        ["bash", "-c", stage],
+        env={
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "STUB_APT_LOG": str(log),
+            "STUB_APT_RUNNER_RC": str(runner_rc),
+            "STUB_APT_FALLBACK_RC": str(fallback_rc),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return result, log.read_text()
+
+
+def test_healthy_runner_mirrors_need_no_fallback(tmp_path):
+    result, log = _install_packages(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "install -y bubblewrap apparmor-utils" in log
+    assert "list:" not in log
+    assert "::warning::" not in result.stdout
+
+
+def test_failed_runner_mirrors_fall_back_to_a_signed_mirror_outside_ubuntu_com(
+    tmp_path,
+):
+    result, log = _install_packages(tmp_path, runner_rc=100)
+    assert result.returncode == 0, result.stdout + result.stderr
+    key = "signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+    for suite in ("noble", "noble-updates", "noble-security"):
+        assert (
+            f"  list: deb [{key}] https://mirrors.edge.kernel.org/ubuntu {suite} main"
+            in log.splitlines()
+        )
+    installs = [line for line in log.splitlines() if "install -y" in line]
+    assert any("Dir::Etc::SourceList=" in line for line in installs)
+    assert "fallback mirror" in result.stdout
+    assert "::error::" not in result.stdout + result.stderr
+
+
+def test_no_mirror_at_all_fails_the_install(tmp_path):
+    result, log = _install_packages(tmp_path, runner_rc=100, fallback_rc=100)
+    assert result.returncode != 0
+    assert "::error::" in result.stdout + result.stderr
+    assert "bounded=0" not in log
