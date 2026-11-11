@@ -319,3 +319,20 @@ def test_a_fit_needs_four_points():
     _, vecs, _ = _blobs(10)
     with pytest.raises(ValueError):
         fit_model(vecs[:3])
+
+
+def test_a_model_saved_before_it_counted_its_tenant_still_loads():
+    """Models saved before ``fitted_total`` existed fall back to their fit
+    size, which is the tenant's shared embedded count up to the sample."""
+    import io
+
+    _, vecs, _ = _blobs(300)
+    model = fit_model(vecs)
+    with np.load(io.BytesIO(model.to_bytes()), allow_pickle=False) as arrays:
+        older = {name: arrays[name] for name in arrays.files if name != "fitted_total"}
+    buf = io.BytesIO()
+    np.savez(buf, **older)
+    loaded = FieldModel.from_bytes(buf.getvalue())
+    assert float(loaded.fitted_total) == float(model.sizes.sum())
+    _, cluster = place(loaded, vecs)
+    assert (cluster == place(model, vecs)[1]).all()

@@ -26,7 +26,12 @@ TENANT = "map-timing"
 SCOPE = {"tenant_id": TENANT, "include_scope_agent": True}
 
 
-def _row(i: int, visibility: str = "scope_team", fleet_id: str | None = None) -> dict:
+def _row(
+    i: int,
+    visibility: str = "scope_team",
+    fleet_id: str | None = None,
+    created_at: str = "2026-11-10T00:00:00+00:00",
+) -> dict:
     vec = np.zeros(8, dtype="<f4")
     vec[i % 8] = 1.0
     vec[(i + 3) % 8] = 0.1 * (i % 5)
@@ -34,7 +39,7 @@ def _row(i: int, visibility: str = "scope_team", fleet_id: str | None = None) ->
         "id": f"m-{i}",
         "title": None,
         "preview": f"memory {i}",
-        "created_at": "2026-11-10T00:00:00+00:00",
+        "created_at": created_at,
         "entity_ids": [],
         "row_version": str(1000 + i),
         "visibility": visibility,

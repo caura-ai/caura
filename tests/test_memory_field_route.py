@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from datetime import datetime
 from uuid import uuid4
 
 import pytest
@@ -585,3 +586,49 @@ async def test_a_failed_fit_gives_its_claim_back(client, sc, as_auth, monkeypatc
     monkeypatch.setattr(memory_field, "fit_model", real)
     memory_field._reset_state()
     assert (await _field(client, tenant)).status_code == 200
+
+
+async def test_since_brings_only_new_points_on_the_saved_layout(client, sc, as_auth):
+    ids = await _seed(sc)
+    tenant = ids["tenant"]
+    as_auth(tenant)
+    full = (await _field(client, tenant)).json()
+    assert (
+        full["layout_version"]
+        == (await sc.projection_model_get(tenant))["model_version"]
+    )
+    assert full["truncated"] is False
+    newest = max(p["created_at"] for p in full["points"])
+    # The newest seeded memory has no embedding yet, so the cursor stops
+    # just before it.
+    waiting = {p["id"]: p for p in full["points"]}[ids["unembedded"]]
+    assert waiting["cluster"] == -1 and waiting["created_at"] == newest
+    assert datetime.fromisoformat(full["next_since"]) < datetime.fromisoformat(newest)
+
+    added = await _write(
+        sc, tenant, "billing refund note, newest", embedding=_vec(0, 0.04)
+    )
+    resp = await _field(client, tenant, since=newest)
+    assert resp.status_code == 200, resp.text
+    delta = resp.json()
+    assert [p["id"] for p in delta["points"]] == [added]
+    topic = {p["id"]: p for p in full["points"]}[ids["topic"][0]]
+    assert delta["points"][0]["cluster"] == topic["cluster"]
+    assert delta["layout_version"] == full["layout_version"]
+    assert delta["truncated"] is False
+    assert delta["clusters"] == []
+
+    # Polling with the cursor brings the waiting memory back with the new one.
+    resp = await _field(client, tenant, since=full["next_since"])
+    assert resp.status_code == 200, resp.text
+    polled = resp.json()
+    assert [(p["id"], p["cluster"] >= 0) for p in polled["points"]] == [
+        (added, True),
+        (ids["unembedded"], False),
+    ]
+    assert datetime.fromisoformat(polled["next_since"]) == datetime.fromisoformat(
+        full["next_since"]
+    )
+
+    naive = await _field(client, tenant, since="2026-11-10T00:00:00")
+    assert naive.status_code == 422, naive.text

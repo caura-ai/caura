@@ -132,6 +132,7 @@ from core_api.services.memory_exposure import schedule_exposure
 from core_api.services.memory_field import (
     FIELD_DEFAULT_LIMIT,
     FIELD_MAX_LIMIT,
+    SINCE_MAX,
     FieldBusyError,
     FieldPreparingError,
     get_memory_field,
@@ -977,6 +978,15 @@ async def memory_field(
         le=FIELD_MAX_LIMIT,
         description=f"Most recent memories to place, 1-{FIELD_MAX_LIMIT}.",
     ),
+    since: datetime | None = Query(
+        default=None,
+        description=(
+            "Only memories created after this time (ISO 8601 with a timezone), newest first, "
+            f"at most {SINCE_MAX}, positioned on the saved layout for an open map to merge in. "
+            "`clusters` is then empty, and `truncated` asks for a full reload. Poll with the "
+            "response's `next_since`, which holds back for memories not placed yet."
+        ),
+    ),
     auth: AuthContext = Depends(get_auth_context),
 ):
     """A 2D map layout of the caller's memories, computed from their embeddings.
@@ -995,7 +1005,11 @@ async def memory_field(
 
     Positions come from the tenant's saved layout, fitted once and placed
     with the saved model as memories arrive, so a new memory appears without
-    a rebuild and no point moves. A tenant's first request fits it: inline
+    a rebuild and no point moves. ``layout_version`` names that layout and
+    changes only when it is refitted, which happens in the background once the
+    tenant has grown by a quarter; an open map polls with ``since`` for the
+    memories written after it, passing each response's ``next_since``, and
+    reloads when ``layout_version`` changes or ``truncated`` is set. A tenant's first request fits it: inline
     for a tenant with up to a few thousand embedded memories, and in the
     background for a larger one, when requests answer 429 with
     ``Retry-After`` until the layout is saved. Responses are cached
@@ -1017,8 +1031,10 @@ async def memory_field(
         "caller_tenant_id": auth.tenant_id,
         "fleet_id": fleet_id,
     }
+    if since is not None and since.tzinfo is None:
+        raise HTTPException(status_code=422, detail="since must include a timezone")
     try:
-        return await get_memory_field(scope_body, limit=limit)
+        return await get_memory_field(scope_body, limit=limit, since=since)
     except FieldPreparingError:
         raise HTTPException(
             status_code=429,

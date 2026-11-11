@@ -147,6 +147,24 @@ class MemoryFieldEntity(BaseModel):
 class MemoryFieldResponse(BaseModel):
     kind: str = Field(description="Layout algorithm; 'pca2' today.")
     model_version: str = Field(description="Short hash of the layout inputs.")
+    layout_version: str | None = Field(
+        default=None,
+        description=(
+            "The saved layout's version; it changes only when the layout is refitted. "
+            "Null while the map is laid out on request."
+        ),
+    )
+    truncated: bool = Field(
+        default=False,
+        description="With `since`: more is new than this holds, or there are no saved positions; reload in full.",
+    )
+    next_since: str | None = Field(
+        default=None,
+        description=(
+            "The `since` for an open map's next poll: just before the oldest memory here written in the "
+            "last 10 minutes and not placed yet (cluster -1), so it comes back placed; otherwise the newest here."
+        ),
+    )
     computed_at: str
     total: int = Field(description="Memories visible to the caller (points holds the newest `limit`).")
     clusters: list[MemoryFieldCluster]
