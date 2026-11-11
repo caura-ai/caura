@@ -78,7 +78,7 @@ function installMockFetch(): void {
         const name = row.data.name?.trim() || row.doc_id.replace(/^(?:forge|agent)\//, "");
         const description = row.data.description?.trim() || "";
         const content = /^---\r?\n/.test(raw) ? raw : withSynthFrontmatter(name, description, raw);
-        return { ...row, delivery: { grant_id: "approved-fixture", bytes: Buffer.byteLength(content),
+        return { ...row, delivery: { grant_id: "fd203497-0706-4ade-846c-edfb956650ce", bytes: Buffer.byteLength(content),
           artifact_hash: "sha256:" + createHash("sha256").update(content).digest("hex") } };
       }) }), {
         status: 200,

@@ -142,7 +142,8 @@ export async function apiCall(
     };
     let res = await fetch(url.toString(), requestInit);
 
-    let deliveryText = normalized === "/skills/installable" ? await skillResponseText(res) : undefined;
+    const skillResponse = normalized === "/skills/installable" || normalized === "/skills/installations";
+    let deliveryText = skillResponse ? await skillResponseText(res) : undefined;
 
     // A rejected agent credential gets exactly one fallback attempt with the
     // tenant key. Retrying in this frame avoids re-deriving ``agent_id`` from
@@ -159,7 +160,7 @@ export async function apiCall(
       if (CAURA_API_KEY) retryHeaders["X-API-Key"] = CAURA_API_KEY;
       else delete retryHeaders["X-API-Key"];
       res = await fetch(url.toString(), { ...requestInit, headers: retryHeaders });
-      deliveryText = normalized === "/skills/installable" ? await skillResponseText(res) : undefined;
+      deliveryText = skillResponse ? await skillResponseText(res) : undefined;
     }
 
     if (!res.ok) {

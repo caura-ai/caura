@@ -43,7 +43,7 @@ function entry(content = "# Reviewed fixture\n", slug = "approved") {
   return {
     doc_id: `agent/${slug}`,
     data,
-    delivery: { grant_id: "grant-fixture", artifact_hash: hash(artifact), bytes: Buffer.byteLength(artifact, "utf8") },
+    delivery: { grant_id: "6a0691c7-f69b-4cb3-90a5-f4611412f667", artifact_hash: hash(artifact), bytes: Buffer.byteLength(artifact, "utf8") },
   };
 }
 function manifest(documents: unknown[] = [entry()], extra: Record<string, unknown> = {}) {
@@ -257,7 +257,7 @@ for (const vector of metadataVectors) {
   test(`shared metadata vector: ${vector.id}`, async () => {
     reply = manifest([{
       doc_id: "agent/approved", data: vector.canonical,
-      delivery: { grant_id: "shared-vector", artifact_hash: vector.artifact_hash, bytes: vector.bytes },
+      delivery: { grant_id: "eab6149e-6786-496d-89d5-fc40e6e80b23", artifact_hash: vector.artifact_hash, bytes: vector.bytes },
     }]);
     const summary = await reconcile({ nodeId: NODE });
     assert.deepEqual(summary.installed, ["approved"]);
