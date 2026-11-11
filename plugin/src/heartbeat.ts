@@ -832,6 +832,7 @@ async function processCommand(cmd: {
           "educate.ts", "context-engine.ts", "agent-auth.ts",
           "health.ts", "install-id.ts", "identity.ts",
           "reconcile-skills.ts",
+          "skill-installations.ts",
           // ``keystones.ts`` MUST be in this list. ``context-engine.ts``
           // statically imports ``"./keystones.js"``. When
           // ``/plugin-manifest`` is unreachable (older backend or

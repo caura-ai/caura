@@ -69,6 +69,93 @@ publishes only to that namespace.
 Deploy the storage lookup and core API before releasing the matching plugin.
 Old plugins' unversioned requests fail explicitly; they retain their existing
 copies. New plugins have no generic-catalog fallback. The heartbeat carries
-the prior completed reconciliation summary; it is a node-reported snapshot,
-not a durable installation receipt or attestation. Durable installation events
-are a separate change. Existing files are not remotely attested by this API.
+the prior completed reconciliation summary; it remains a node-reported snapshot,
+separate from the durable results below. Existing files are not remotely
+attested by this API.
+
+## Installation results
+
+`POST /api/v1/skills/installations` accepts `reporting_version: 1`, `node_id`
+and 1–64 events. Each event carries a stable UUID `event_id`, `skill_doc_id`,
+immutable approval `grant_id`, `artifact_hash`, `outcome` (`installed`,
+`updated` or `removed`), an opaque UUID `target_id`, and the node's local
+`occurred_at` time. The server derives tenant/credential/node attribution and
+adds its own receipt time. Raw skill content, absolute paths, caller-supplied
+actor/fleet claims and unknown fields are refused. The credential must still
+match the node's current owner, and the exact historical approval must match
+that node/owner, skill and artifact. Reporting does not grant new delivery or
+activate a skill. A superseded current approval does not invalidate an offline
+result for the earlier artifact.
+
+The API acknowledges `accepted_event_ids` only after synchronous durable
+storage accepts the whole batch. Stable IDs are namespaced by tenant, node
+and owner in the existing event store. A lost acknowledgment can be retried
+with the same IDs without appending another result. Invalid or failed storage
+responses acknowledge nothing. An ID denotes one report; replaying it does not
+replace the first stored report. This is at-least-once submission with storage
+deduplication, not an exactly-once filesystem transaction or remote attestation.
+A compromised node can report a false outcome.
+
+The plugin keeps `skill-installations.json` in its private installation
+directory. It retains approval bindings for files it actually materializes,
+pending outcomes and write-ahead intent, with a total 1 MiB ceiling and at
+most 256 pending events plus 256 quarantined rejections. POSIX files are mode
+`0600`; Windows uses inherited profile-directory access controls. Updates use a
+verified same-directory temporary file and atomic rename. File data is synchronized before publication;
+directory entries are also synchronized on POSIX. Direct reconciliation calls
+are serialized within the gateway; run one gateway writer per plugin directory.
+
+Intent is persisted before a skill mutation. Success becomes reportable only
+after the installed bytes verify or a tracked directory removal completes.
+After restart, a reserved write whose exact bytes are present can finish its
+report; an unperformed intent is not reported as success. Unreadable or damaged
+state is held for operator review rather than reset. Changed tenant identity
+always holds the original state. A changed node ID within the same tenant
+loads the journal in drain-only mode. It recovers old intent and submits ready
+results with the journal's original node ID, while both write and removal
+methods refuse mutations. Once active results are accepted or explicitly
+quarantined, it persists fresh node/target bindings and discards the prior
+node's installed bindings;
+unchanged existing files gain no new installation history. Quarantined reports
+retain their original tenant/node identity across that rebind.
+Retry IDs and local target IDs survive restart. Events never include private
+target paths, though recovery necessarily retains them in the private file.
+
+Unchanged copies, rejected artifacts, failed writes and foreign additive
+collisions produce no successful-installation event. Legacy copies without a
+recorded materialization keep existing pruning rules without invented approval
+history. A tracked file changed outside reconciliation is held before removal
+reporting. Corrupt, oversized, unwritable or full state pauses skill changes;
+heartbeat and command handling stay available. Failed delivery, malformed
+acknowledgments and offline result storage retain pending events. Reports use
+bounded batches and short request deadlines, so an offline result endpoint
+cannot hold heartbeats behind the usual long request timeout.
+
+A batch rejected with 409 or 422 is retried individually to isolate invalid
+reports. Each individually rejected report moves atomically to the bounded
+private `rejected` list, retaining its original event ID, node/tenant, status
+and rejection time, with an explicit log entry. It is not acknowledged as
+accepted or silently deleted, and no longer blocks active delivery. Other
+failures, including network/timeouts, 5xx, 408 and 429, retain the original
+pending events for recovery. For the current receiver, 401/403 and a missing
+route also stay retryable. When heartbeat supplies a replacement node ID,
+an actual old-node submission refused with 401/403/404 instead moves that
+batch to the bounded quarantine with `reason: superseded_receiver` and the
+replacement UUID. This is an explicit local disposition of obsolete-receiver
+reports, not acceptance or proof of permanent server rejection; original IDs,
+artifacts, node/tenant, status and time remain available for investigation.
+It lets an inaccessible old receiver finish draining without a manual file
+edit. A transient failure still holds drain-only mode until recovery.
+Isolation shares a ceiling
+of eight reporting requests per reconciliation, each with a two-second
+deadline. If quarantine or the total file budget fills, further rejections
+stay pending rather than evicting old evidence; continued exhaustion can pause
+mutations until an operator resolves the retained reports. New manifests and
+write intents require UUID grant IDs. Older non-UUID pending reports can still
+receive an explicit rejection without locking the whole journal.
+
+Deploy the reporting API before releasing this plugin version. A missing or
+incompatible endpoint never counts as acceptance; results remain local and
+eventual outbox saturation pauses further mutations. These results describe
+node-reported operations after this version starts recording them. They do not
+backfill prior installation history or prove what files currently exist.

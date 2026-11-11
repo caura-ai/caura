@@ -9,6 +9,7 @@
 import {
   existsSync, mkdirSync, readdirSync, readFileSync,
   rmSync, statSync, writeFileSync, renameSync,
+  openSync, closeSync, fsyncSync,
 } from "fs";
 import path, { join, resolve } from "path";
 import { createHash, randomUUID } from "node:crypto";
@@ -17,6 +18,7 @@ import { apiCall } from "./transport.js";
 import { CAURA_TENANT_ID, readEnv } from "./env.js";
 import { getPluginDir, ensureExtraSkillDirs } from "./config.js";
 import { logError } from "./logger.js";
+import { SkillInstallations, syncSkillDirectory, isSkillGrantId, type SkillArtifact } from "./skill-installations.js";
 
 /**
  * Bundled skills shipped with the plugin install. Never deleted by
@@ -61,9 +63,12 @@ function writeSkillAtomically(target: string, content: string): void {
   if (bytes.length > 65_536) throw new Error("Skill exceeds 64 KiB");
   const temporary = `${target}.${randomUUID()}.tmp`;
   try {
-    writeFileSync(temporary, bytes, { flag: "wx", mode: 0o600 });
+    const fd = openSync(temporary, "wx", 0o600);
+    try { writeFileSync(fd, bytes); fsyncSync(fd); }
+    finally { closeSync(fd); }
     if (!readFileSync(temporary).equals(bytes)) throw new Error("Skill file verification failed");
     renameSync(temporary, target);
+    syncSkillDirectory(path.dirname(target));
   } finally {
     rmSync(temporary, { force: true });
   }
@@ -294,6 +299,8 @@ function reconcileOwnedDir(
   desired: Map<string, string>,
   held: ReadonlySet<string>,
   pruneAllowed: boolean,
+  installations: SkillInstallations,
+  artifacts: ReadonlyMap<string, SkillArtifact>,
 ): DirReconcileResult {
   const result: DirReconcileResult = {
     added: [],
@@ -321,7 +328,9 @@ function reconcileOwnedDir(
       continue;
     }
     try {
-      rmSync(join(skillsRoot, slug), { recursive: true, force: true });
+      installations.remove(join(skillsRoot, slug, "SKILL.md"), () => {
+        rmSync(join(skillsRoot, slug), { recursive: true, force: true });
+      });
       result.removed.push(slug);
       console.log(`[caura] Reconciler removed orphan skill: ${slug}`);
     } catch (e: unknown) {
@@ -358,8 +367,10 @@ function reconcileOwnedDir(
       }
     }
     try {
-      mkdirSync(dir, { recursive: true });
-      writeSkillAtomically(target, content);
+      installations.write(target, artifacts.get(slug)!, () => {
+        mkdirSync(dir, { recursive: true });
+        writeSkillAtomically(target, content);
+      });
       installedSet.add(slug);
       result.added.push(slug);
       console.log(
@@ -397,6 +408,8 @@ function reconcileAdditiveDir(
   desired: Map<string, string>,
   held: ReadonlySet<string>,
   pruneAllowed: boolean,
+  installations: SkillInstallations,
+  artifacts: ReadonlyMap<string, SkillArtifact>,
 ): DirReconcileResult {
   const result: DirReconcileResult = {
     added: [],
@@ -427,7 +440,9 @@ function reconcileAdditiveDir(
       continue;
     }
     try {
-      rmSync(join(skillsRoot, slug), { recursive: true, force: true });
+      installations.remove(join(skillsRoot, slug, "SKILL.md"), () => {
+        rmSync(join(skillsRoot, slug), { recursive: true, force: true });
+      });
       result.removed.push(slug);
       console.log(`[caura] Reconciler (additive) removed owned orphan: ${slug}`);
     } catch (e: unknown) {
@@ -484,30 +499,31 @@ function reconcileAdditiveDir(
       // dir appeared after our existsSync check, closing the TOCTOU window
       // that a recursive (idempotent) mkdir would leave open.
       let isNew = false;
-      try {
-        mkdirSync(skillDir);
-        isNew = true;
-      } catch (mkdirErr: unknown) {
-        if ((mkdirErr as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirErr;
-        // Dir raced into existence after our existsSync check — re-verify
-        // ownership before touching it; a foreign winner is a collision.
-        if (!isCauraOwned(skillDir)) {
-          result.collisions.push(slug);
-          console.warn(
-            `[caura] additive: ${slug} collision (post-existsSync race in ${skillsRoot}); skipping`,
-          );
-          continue;
-        }
-      }
       // Stamp ownership on a genuinely new dir. For an existing dir we only
       // reach here after the ownership check passed, so the marker should
       // already be present — but re-stamp defensively if it vanished
       // between that check and now (a marker IS the ownership signal, and a
       // dir missing it at guard time is treated as a foreign collision).
-      if (isNew || !existsSync(join(skillDir, OWNED_MARKER))) {
-        writeFileSync(join(skillDir, OWNED_MARKER), OWNED_MARKER_BODY, "utf-8");
-      }
-      writeSkillAtomically(target, content);
+      const written = installations.write(target, artifacts.get(slug)!, () => {
+        try {
+          mkdirSync(skillDir);
+          isNew = true;
+        } catch (mkdirErr: unknown) {
+          if ((mkdirErr as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirErr;
+          // Intent was reserved before mkdir, but a foreign winner still
+          // grants no ownership and must not produce an installation event.
+          if (!isCauraOwned(skillDir)) {
+            result.collisions.push(slug);
+            console.warn(`[caura] additive: ${slug} collision (post-existsSync race in ${skillsRoot}); skipping`);
+            return false;
+          }
+        }
+        if (isNew || !existsSync(join(skillDir, OWNED_MARKER))) {
+          writeFileSync(join(skillDir, OWNED_MARKER), OWNED_MARKER_BODY, "utf-8");
+        }
+        writeSkillAtomically(target, content);
+      }, OWNED_MARKER);
+      if (!written) continue;
       installedSet.add(slug);
       result.added.push(slug);
       console.log(
@@ -526,7 +542,16 @@ function reconcileAdditiveDir(
  * Mirror the catalog onto the configured target dirs. Returns a summary
  * for tests / logging; never throws.
  */
-export async function reconcileSkills(receiver?: { nodeId: string }): Promise<ReconcileSummary> {
+// Serialize all entrypoints in this gateway, including direct callers outside
+// heartbeat's single-flight wrapper, so two ticks cannot overwrite the journal.
+let reconcileQueue: Promise<void> = Promise.resolve();
+export function reconcileSkills(receiver?: { nodeId: string }): Promise<ReconcileSummary> {
+  const work = reconcileQueue.then(() => runReconcileSkills(receiver));
+  reconcileQueue = work.then(() => {}, () => {});
+  return work;
+}
+
+async function runReconcileSkills(receiver?: { nodeId: string }): Promise<ReconcileSummary> {
   const summary: ReconcileSummary = {
     catalogCount: 0,
     installed: [],
@@ -542,6 +567,18 @@ export async function reconcileSkills(receiver?: { nodeId: string }): Promise<Re
   if (!CAURA_TENANT_ID || !receiver?.nodeId) {
     // No tenant resolved — heartbeat already short-circuits in this
     // case, but the reconciler is called independently in tests.
+    return summary;
+  }
+
+  let installations: SkillInstallations;
+  try {
+    installations = new SkillInstallations(receiver.nodeId);
+    await installations.flush();
+    // Old-node results drain with their recorded identity. Until they are
+    // accepted or explicitly quarantined, no current-node mutations may run.
+    if (!installations.canMutate()) return summary;
+  } catch (error) {
+    logError("Skill changes paused: installation state unavailable", error);
     return summary;
   }
 
@@ -567,7 +604,7 @@ export async function reconcileSkills(receiver?: { nodeId: string }): Promise<Re
     catalog = resp.documents;
     for (const doc of catalog) {
       if (!doc || !doc.data || typeof doc.data.content !== "string" || !doc.delivery
-          || typeof doc.delivery.grant_id !== "string" || !doc.delivery.grant_id) {
+          || !isSkillGrantId(doc.delivery.grant_id)) {
         throw new Error("Unapproved skill delivery entry");
       }
       const slug = filesystemSlugForCatalogId(typeof doc.doc_id === "string" ? doc.doc_id : "");
@@ -619,6 +656,7 @@ export async function reconcileSkills(receiver?: { nodeId: string }): Promise<Re
   //    because a second one with the same name appeared; the server refuses
   //    to approve such a second skill, and this covers any it never saw.
   const desired = new Map<string, string>();
+  const artifacts = new Map<string, SkillArtifact>();
   const catalogSourceBySlug = new Map<string, string>();
   const ambiguousSlugs = heldSlugs;
   for (const doc of catalog) {
@@ -650,6 +688,7 @@ export async function reconcileSkills(receiver?: { nodeId: string }): Promise<Re
     }
     if (priorDocId !== undefined) {
       desired.delete(slug);
+      artifacts.delete(slug);
       catalogSourceBySlug.delete(slug);
       ambiguousSlugs.add(slug);
       summary.skipped.push(priorDocId, docId);
@@ -657,6 +696,11 @@ export async function reconcileSkills(receiver?: { nodeId: string }): Promise<Re
     }
     catalogSourceBySlug.set(slug, docId);
     desired.set(slug, materializedContent);
+    artifacts.set(slug, {
+      skill_doc_id: docId,
+      grant_id: doc.delivery!.grant_id!,
+      artifact_hash: doc.delivery!.artifact_hash!,
+    });
   }
 
   // 3. Reconcile each configured target. Default is a single ``owned``
@@ -673,8 +717,8 @@ export async function reconcileSkills(receiver?: { nodeId: string }): Promise<Re
   for (const target of targets) {
     const dirResult =
       target.mode === "additive"
-        ? reconcileAdditiveDir(target.dir, desired, ambiguousSlugs, pruneAllowed)
-        : reconcileOwnedDir(target.dir, desired, ambiguousSlugs, pruneAllowed);
+        ? reconcileAdditiveDir(target.dir, desired, ambiguousSlugs, pruneAllowed, installations, artifacts)
+        : reconcileOwnedDir(target.dir, desired, ambiguousSlugs, pruneAllowed, installations, artifacts);
     addedAll.push(...dirResult.added);
     removedAll.push(...dirResult.removed);
     protectedAll.push(...dirResult.protected);
@@ -707,6 +751,7 @@ export async function reconcileSkills(receiver?: { nodeId: string }): Promise<Re
   // separately so catalog ambiguity isn't conflated with local ownership.
   summary.skipped = [...new Set(summary.skipped)].sort();
   summary.collisions = [...new Set(collisionsAll)].sort();
+  await installations.flush();
 
   // 4. Register any opt-in target dirs in OpenClaw's ``skills.load.extraDirs``
   //    so their reconciled skills actually reach agents. Append-only,

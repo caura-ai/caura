@@ -426,6 +426,10 @@ PLANE_GATE_ALLOWLIST: dict[str, str] = {
     # that, and keeps agent credentials working on the nodes bound to them.
     "POST /api/v1/fleet/heartbeat": "node-plane: the plugin's own check-in",
     "POST /api/v1/fleet/commands/{command_id}/result": "node-plane: the plugin's own ack",
+    "POST /api/v1/skills/installations": (
+        "node-plane: current credential/node and historical approval bound; "
+        "covered by tests/test_skill_installation_results.py"
+    ),
     # SELF-plane. An agent tuning its OWN search profile is the documented
     # behaviour behind MCP ``caura_tune``, and this route is what the plugin's
     # tool PATCHes. The route enforces the narrower rule itself: an agent

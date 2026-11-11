@@ -11,7 +11,7 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 from starlette.responses import JSONResponse
 
 from common.constants import NODE_PRINCIPAL_TENANT
@@ -87,6 +87,36 @@ class DeliveryManifest(BaseModel):
     prune_allowed: bool
     documents: list[DeliveryDocument]
     held: list[HeldSkill]
+
+
+class InstallationEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_id: UUID
+    skill_doc_id: str = Field(max_length=106, pattern=SLUG.pattern)
+    grant_id: UUID
+    artifact_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    outcome: Literal["installed", "updated", "removed"]
+    target_id: UUID
+    occurred_at: AwareDatetime
+
+
+class InstallationResults(TenantScopedBody):
+    model_config = ConfigDict(extra="forbid")
+    reporting_version: Literal[1]
+    node_id: UUID
+    events: list[InstallationEvent] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _unique_events(self):
+        if len({event.event_id for event in self.events}) != len(self.events):
+            raise ValueError("Event IDs must be unique within a batch")
+        return self
+
+
+class InstallationAcceptance(BaseModel):
+    reporting_version: Literal[1]
+    node_id: UUID
+    accepted_event_ids: list[UUID]
 
 
 def _tenant(auth: AuthContext, requested: str | None) -> str:
@@ -181,6 +211,96 @@ def _receiver(auth: AuthContext, node: dict) -> None:
         principal = NODE_PRINCIPAL_TENANT
     if principal != node["owner_principal"]:
         raise HTTPException(403, "Receiver is bound to another credential")
+
+
+@router.post("/skills/installations", response_model=InstallationAcceptance)
+async def record_installations(
+    body: InstallationResults,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Persist authenticated node reports; this is not filesystem attestation."""
+    tenant = _tenant(auth, body.tenant_id)
+    auth.enforce_read_only()
+    auth.enforce_usage_limits()
+    sc = get_storage_client()
+    node_id = str(body.node_id)
+    node = await _node(sc, tenant, node_id)
+    _receiver(auth, node)
+    owner = node["owner_principal"]
+    recipient = {"node_id": node_id, "owner_principal": owner}
+    # A delayed report remains meaningful after the current pointer changes.
+    # Resolve only the exact immutable versions, on the primary; never infer
+    # provenance from the current skill, fleet labels or a supplied principal.
+    versions: dict[str, dict] = {}
+    for event in body.events:
+        grant_id = str(event.grant_id)
+        if grant_id not in versions:
+            try:
+                row = await sc.get_document(tenant, GRANTS_COLLECTION, grant_id, read=False)
+            except Exception as exc:
+                raise HTTPException(503, "Approval storage unavailable; retry the same event IDs") from exc
+            data = row.get("data") if isinstance(row, dict) else None
+            if (
+                not isinstance(row, dict)
+                or row.get("tenant_id") != tenant
+                or row.get("collection") != GRANTS_COLLECTION
+                or row.get("doc_id") != grant_id
+                or not isinstance(data, dict)
+                or data.get("record_type") == "current"
+            ):
+                raise HTTPException(409, "An immutable delivery approval is required")
+            versions[grant_id] = data
+        grant = versions[grant_id]
+        recipients = grant.get("recipients")
+        if (
+            grant.get("delivery_version") != 1
+            or grant.get("grant_id") != grant_id
+            or grant.get("skill_doc_id") != event.skill_doc_id
+            or grant.get("artifact_hash") != event.artifact_hash
+            or not isinstance(recipients, list)
+            or recipient not in recipients
+        ):
+            raise HTTPException(409, "Installation result does not match the approved receiver and artifact")
+
+    actor = _node_principal(auth)
+    if actor is None:
+        actor = f"user:{auth.user_id}" if auth.user_id else f"credential:{auth.credential_id or 'tenant'}"
+    received_at = datetime.now(UTC).isoformat()
+    events = [
+        {
+            "tenant_id": tenant,
+            "agent_id": str(auth.agent_id) if auth.agent_id_verified and auth.agent_id else None,
+            "action": "skill.installation",
+            "resource_type": "skill",
+            "resource_id": str(event.grant_id),
+            # The caller cannot collide with another node's reports or with
+            # IDs from other writers of the existing per-tenant event chain.
+            "client_event_id": "skill-installation:"
+            + _hash(json.dumps([tenant, node_id, owner, str(event.event_id)])).removeprefix("sha256:"),
+            "detail": {
+                **event.model_dump(mode="json"),
+                "node_id": node_id,
+                "owner_principal": owner,
+                "reported_by": actor,
+                "received_at": received_at,
+                "source": "node_reported",
+            },
+        }
+        for event in body.events
+    ]
+    try:
+        # Synchronous storage acceptance, with the storage chain's existing
+        # stable-ID deduplication. Queue acceptance is not an acknowledgment.
+        result = await sc.create_audit_logs_bulk(events)
+        if not isinstance(result, dict) or result.get("ok") is not True or result.get("count") != len(events):
+            raise RuntimeError("Installation storage did not acknowledge the complete batch")
+    except Exception as exc:
+        raise HTTPException(503, "Installation storage unavailable; retry the same event IDs") from exc
+    return {
+        "reporting_version": 1,
+        "node_id": node_id,
+        "accepted_event_ids": [str(event.event_id) for event in body.events],
+    }
 
 
 @router.post("/skills/{doc_id:path}/delivery", responses={200: {"model": DeliveryApproval}})
