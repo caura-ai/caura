@@ -166,20 +166,20 @@ async def test_field_signature_is_cached_for_sequential_requests(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_field_builds_have_independent_tenant_slots(monkeypatch):
+async def test_field_reads_have_independent_tenant_slots(monkeypatch):
     monkeypatch.setattr(
-        memory_field, "_signature", AsyncMock(return_value={"count": 0})
+        memory_field, "_signature", AsyncMock(return_value={"count": 0, "embedded": 0})
     )
-    monkeypatch.setattr(memory_field.settings, "memory_field_max_concurrent_builds", 1)
+    monkeypatch.setattr(memory_field, "_saved_model", AsyncMock(return_value=None))
     entered = []
     release = asyncio.Event()
 
-    async def build(scope, *_args, **_kwargs):
+    async def serve(scope, *_args, **_kwargs):
         entered.append(scope["tenant_id"])
         await release.wait()
         return {"points": [], "clusters": [], "entities": []}
 
-    monkeypatch.setattr(memory_field, "_build", build)
+    monkeypatch.setattr(memory_field, "_serve", serve)
     tasks = [
         asyncio.create_task(memory_field.get_memory_field({"tenant_id": t}, limit=1))
         for t in ("one", "two")
@@ -191,8 +191,7 @@ async def test_field_builds_have_independent_tenant_slots(monkeypatch):
     finally:
         release.set()
         await asyncio.gather(*tasks, return_exceptions=True)
-        memory_field._builds.clear()
-        memory_field._building_tenants.clear()
+        memory_field._reset_state()
 
 
 def test_resolver_errors_do_not_disclose_addresses_or_dns_details(monkeypatch):
@@ -310,39 +309,6 @@ async def test_field_signature_refreshes_after_ttl(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_field_limit_variants_share_the_same_build(monkeypatch):
-    memory_field.field_cache.clear()
-    memory_field._build_started.clear()
-    monkeypatch.setattr(
-        memory_field, "_signature", AsyncMock(return_value={"count": 1})
-    )
-    released = asyncio.Event()
-    started = asyncio.Event()
-
-    async def build(*_a, **_kw):
-        started.set()
-        await released.wait()
-        return {
-            "points": [{"id": "one", "cluster": -1, "entity_ids": []}],
-            "clusters": [],
-            "entities": [],
-        }
-
-    built = AsyncMock(side_effect=build)
-    monkeypatch.setattr(memory_field, "_build", built)
-    scope = {"tenant_id": "limit-variants"}
-    first = asyncio.create_task(memory_field.get_memory_field(scope, limit=1))
-    await started.wait()
-    second = asyncio.create_task(memory_field.get_memory_field(scope, limit=2))
-    await asyncio.sleep(0)
-    released.set()
-    await asyncio.gather(first, second)
-    assert built.await_count == 1
-    assert built.await_args.kwargs["limit"] == memory_field.FIELD_MAX_LIMIT
-    memory_field._build_started.clear()
-
-
-@pytest.mark.asyncio
 async def test_memory_metadata_merge_cannot_grow_past_the_stored_budget(monkeypatch):
     from uuid import uuid4
 
@@ -366,61 +332,6 @@ async def test_memory_metadata_merge_cannot_grow_past_the_stored_budget(monkeypa
     with pytest.raises(ValueError, match="UTF-8 bytes"):
         await svc.memory_update(uuid4(), "t", {"metadata_patch": {"y": "z"}})
     assert session.execute.await_count == 1  # lock/read only; no UPDATE issued
-
-
-@pytest.mark.asyncio
-async def test_field_timeout_keeps_slot_until_layout_worker_finishes(monkeypatch):
-    memory_field._build_started.clear()
-    memory_field._signature_cache.clear()
-    scope = {"tenant_id": "slow-layout"}
-    release = asyncio.Event()
-    started = asyncio.Event()
-    sc = SimpleNamespace(memory_field_page=AsyncMock(return_value={"rows": []}))
-    monkeypatch.setattr(memory_field, "get_storage_client", lambda: sc)
-    monkeypatch.setattr(
-        memory_field, "_signature", AsyncMock(return_value={"count": 0})
-    )
-    monkeypatch.setattr(memory_field, "FIELD_BUILD_TIMEOUT_SECONDS", 0.02)
-
-    async def slow_layout(*_a, **_kw):
-        started.set()
-        await release.wait()
-        return {"points": [], "clusters": [], "entities": []}
-
-    monkeypatch.setattr(memory_field.asyncio, "to_thread", slow_layout)
-    try:
-        with pytest.raises((TimeoutError, memory_field.FieldBusyError)):
-            await memory_field.get_memory_field(scope, limit=1)
-        assert started.is_set()
-        assert "slow-layout" in memory_field._building_tenants
-    finally:
-        release.set()
-        for _ in range(10):
-            await asyncio.sleep(0)
-    assert "slow-layout" not in memory_field._building_tenants
-
-
-@pytest.mark.asyncio
-async def test_field_new_scope_observes_tenant_build_cooldown(monkeypatch):
-    memory_field._build_started.clear()
-    scope = {"tenant_id": "cooldown-test"}
-    monkeypatch.setattr(
-        memory_field, "_signature", AsyncMock(return_value={"count": 0})
-    )
-    build = AsyncMock(return_value={"points": [], "clusters": [], "entities": []})
-    monkeypatch.setattr(memory_field, "_build", build)
-    try:
-        await memory_field.get_memory_field(scope, limit=1)
-        with pytest.raises(HTTPException) as exc:
-            await memory_field.get_memory_field(
-                {**scope, "caller_agent_id": "another-scope"}, limit=1
-            )
-        assert exc.value.status_code == 429
-        assert "tenant" in exc.value.detail.lower()
-        assert 1 <= int(exc.value.headers["Retry-After"]) <= 5
-        assert build.await_count == 1
-    finally:
-        memory_field._build_started.clear()
 
 
 @pytest.mark.parametrize("text", ["a < b and more text", "before <unfinished"])
@@ -471,19 +382,19 @@ async def test_signature_service_unavailable_becomes_field_backpressure(monkeypa
 async def test_waiting_map_requests_leave_search_slots_available(monkeypatch):
     from core_api.middleware.per_tenant_concurrency import per_tenant_slot
 
-    memory_field._build_started.clear()
     monkeypatch.setattr(memory_field.settings, "per_tenant_search_concurrency", 1)
     monkeypatch.setattr(
-        memory_field, "_signature", AsyncMock(return_value={"count": 0})
+        memory_field, "_signature", AsyncMock(return_value={"count": 0, "embedded": 0})
     )
+    monkeypatch.setattr(memory_field, "_saved_model", AsyncMock(return_value=None))
     started, release = asyncio.Event(), asyncio.Event()
 
-    async def build(*_a, **_kw):
+    async def serve(*_a, **_kw):
         started.set()
         await release.wait()
         return {"points": [], "clusters": [], "entities": []}
 
-    monkeypatch.setattr(memory_field, "_build", build)
+    monkeypatch.setattr(memory_field, "_serve", serve)
     scope = {"tenant_id": "map-slot-test"}
     first = asyncio.create_task(memory_field.get_memory_field(scope, limit=1))
     try:
@@ -497,7 +408,7 @@ async def test_waiting_map_requests_leave_search_slots_available(monkeypatch):
     finally:
         release.set()
         await first
-        memory_field._build_started.clear()
+        memory_field._reset_state()
 
 
 @pytest.mark.asyncio
@@ -590,51 +501,6 @@ def test_html_preserves_text_after_unclosed_final_tag():
 
 
 @pytest.mark.asyncio
-async def test_layout_finishing_after_deadline_is_cached_for_following_request(
-    monkeypatch,
-):
-    memory_field.field_cache.clear()
-    memory_field._build_started.clear()
-    scope = {"tenant_id": "late-layout-cache"}
-    release = asyncio.Event()
-    started = asyncio.Event()
-    sc = SimpleNamespace(memory_field_page=AsyncMock(return_value={"rows": []}))
-    monkeypatch.setattr(memory_field, "get_storage_client", lambda: sc)
-    monkeypatch.setattr(
-        memory_field, "_signature", AsyncMock(return_value={"count": 0})
-    )
-    monkeypatch.setattr(memory_field, "FIELD_BUILD_TIMEOUT_SECONDS", 0.02)
-    payload = {"points": [], "clusters": [], "entities": []}
-
-    async def slow_layout(*_a, **_kw):
-        started.set()
-        await release.wait()
-        return payload
-
-    layout_worker = AsyncMock(side_effect=slow_layout)
-    monkeypatch.setattr(memory_field.asyncio, "to_thread", layout_worker)
-    try:
-        with pytest.raises(memory_field.FieldBusyError):
-            await memory_field.get_memory_field(scope, limit=1)
-        assert started.is_set()
-        assert scope["tenant_id"] in memory_field._building_tenants
-        layout = memory_field._layouts[scope["tenant_id"]]
-        release.set()
-        await layout
-        await asyncio.sleep(0)  # run completion callbacks before retrying
-        assert scope["tenant_id"] not in memory_field._building_tenants
-        assert await memory_field.get_memory_field(scope, limit=1) is payload
-        assert layout_worker.await_count == 1
-        assert sc.memory_field_page.await_count == 1
-    finally:
-        release.set()
-        for _ in range(10):
-            await asyncio.sleep(0)
-        memory_field._build_started.clear()
-        memory_field.field_cache.clear()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("timeout_ms", [2000, 7500])
 async def test_field_signature_uses_configured_transaction_local_timeout(
     monkeypatch, timeout_ms
@@ -724,37 +590,6 @@ async def test_map_enforces_every_compound_rate_limit(monkeypatch):
     assert exc.value.headers["Retry-After"] == "1"
     assert hit.call_count == 2
     signature.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_tenant_build_cooldown_reports_remaining_time_and_then_allows_other_scope(
-    monkeypatch,
-):
-    memory_field._build_started.clear()
-    clock = [100.0]
-    monkeypatch.setattr(memory_field.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(
-        memory_field, "_signature", AsyncMock(return_value={"count": 0})
-    )
-    build = AsyncMock(return_value={"points": [], "clusters": [], "entities": []})
-    monkeypatch.setattr(memory_field, "_build", build)
-    scope = {"tenant_id": "tenant-cooldown", "caller_agent_id": "first"}
-    try:
-        await memory_field.get_memory_field(scope, limit=1)
-        clock[0] += 1.2
-        with pytest.raises(HTTPException) as exc:
-            await memory_field.get_memory_field(
-                {**scope, "caller_agent_id": "second"}, limit=1
-            )
-        assert exc.value.status_code == 429
-        assert exc.value.headers["Retry-After"] == "4"
-        clock[0] += 4
-        await memory_field.get_memory_field(
-            {**scope, "caller_agent_id": "second"}, limit=1
-        )
-        assert build.await_count == 2
-    finally:
-        memory_field._build_started.clear()
 
 
 @pytest.mark.asyncio

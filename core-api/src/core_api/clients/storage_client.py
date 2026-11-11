@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
@@ -723,6 +724,18 @@ class CoreStorageClient:
             raise pointer
         resp.raise_for_status()
         return resp.json()
+
+    async def _put(self, path: str, data: dict) -> httpx.Response:
+        """PUT, retried only when the request provably never left. The caller
+        reads the status, since what a conflict means is the route's own."""
+        headers = await self._auth_headers(read=False)
+
+        def _do() -> Awaitable[httpx.Response]:
+            return self._http.put(f"{self._prefix}{path}", json=data, headers=headers)
+
+        resp = await self._execute(_do, retry=with_connect_phase_retry, label=f"PUT {path}")
+        self._maybe_evict_on_auth_error(resp, read=False)
+        return resp
 
     async def _delete(self, path: str, **params: Any) -> bool:
         headers = await self._auth_headers(read=False)
@@ -1777,6 +1790,75 @@ class CoreStorageClient:
         if result is None:
             raise RuntimeError("core-storage-api /memories/field-page returned 404")
         return result  # type: ignore[return-value]
+
+    # -- saved field layouts (core-storage ``/projections``) -------------
+
+    async def projection_claim(self, tenant_id: str, claim_token: str, lease_seconds: int) -> dict:
+        """Claim the tenant's next layout fit: ``{claimed, model_version,
+        fitted_at}``, the last two naming the model saved so far."""
+        body = {"tenant_id": tenant_id, "claim_token": claim_token, "lease_seconds": lease_seconds}
+        return await self._post("/projections/claim", body)  # type: ignore[return-value]
+
+    async def projection_release(self, tenant_id: str, claim_token: str) -> bool:
+        """Give up a claim without saving a model."""
+        result = await self._post(
+            "/projections/release", {"tenant_id": tenant_id, "claim_token": claim_token}
+        )
+        return bool(result.get("released"))  # type: ignore[union-attr]
+
+    async def projection_model_get(self, tenant_id: str) -> dict:
+        """The tenant's saved model and whether a fit is running; every model
+        field is null for a tenant never fitted."""
+        result = await self._get(f"/projections/model/{_path_segment(tenant_id)}")
+        if result is None:
+            raise RuntimeError("core-storage-api /projections/model returned 404")
+        return result
+
+    async def projection_model_save(
+        self,
+        tenant_id: str,
+        claim_token: str,
+        *,
+        model_version: str,
+        kind: str,
+        dim: int,
+        n_fit: int,
+        params: bytes,
+    ) -> bool:
+        """Save a fit. False when ``claim_token`` no longer holds the claim."""
+        resp = await self._put(
+            "/projections/model",
+            {
+                "tenant_id": tenant_id,
+                "claim_token": claim_token,
+                "model_version": model_version,
+                "kind": kind,
+                "dim": dim,
+                "n_fit": n_fit,
+                "params_b64": base64.b64encode(params).decode("ascii"),
+            },
+        )
+        if resp.status_code == 409:
+            return False
+        resp.raise_for_status()
+        return True
+
+    async def projection_positions_save(
+        self, tenant_id: str, model_version: str, items: list[dict], claim_token: str | None = None
+    ) -> int | None:
+        """Save up to 2,000 ``{memory_id, x, y, cluster, row_version}``. None
+        when ``model_version`` is neither the saved model's nor the live
+        claim's; storage skips memories that changed since they were read."""
+        body: dict[str, Any] = {"tenant_id": tenant_id, "model_version": model_version, "items": items}
+        if claim_token is not None:
+            body["claim_token"] = claim_token
+        try:
+            result = await self._post("/projections/positions", body)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                return None
+            raise
+        return int(result["saved"])  # type: ignore[call-overload]
 
     async def memory_stats_breakdown(self, data: dict) -> dict:
         """Visibility-scoped stats breakdown (MCP ``caura_stats``).

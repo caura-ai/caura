@@ -11,11 +11,14 @@ import pytest
 
 from core_api.services.memory_field import (
     FieldLayout,
+    FieldModel,
     _FieldCache,
     build_field,
     choose_k,
     compute_layout,
+    fit_model,
     label_clusters,
+    place,
 )
 
 pytestmark = pytest.mark.unit
@@ -271,3 +274,48 @@ def test_cache_ttl_and_lru():
     expired = _FieldCache(ttl=-1)
     expired.put(("x",), {})
     assert expired.get(("x",)) is None
+
+
+def test_a_saved_model_places_its_fitting_points_where_the_layout_does():
+    """``compute_layout`` is a fit plus placing the points it fitted, so a
+    saved model puts those points where the on-request layout did."""
+    ids, vecs, _ = _blobs(400)
+    layout = compute_layout(ids, vecs, np.ones(len(ids), dtype=bool))
+    xy, cluster = place(fit_model(vecs), vecs)
+    same = [i for i in range(len(ids)) if cluster[i] == layout.cluster[i]]
+    # k-means stops after 30 iterations, so a point on a border can still sit
+    # in the cluster nearest its centroid by a hair.
+    assert len(same) >= 0.97 * len(ids)
+    for i in same:
+        assert abs(xy[i, 0] - layout.x[i]) < 1e-6 and abs(xy[i, 1] - layout.y[i]) < 1e-6
+
+
+def test_a_new_point_lands_beside_its_neighbour():
+    _, vecs, _ = _blobs(400)
+    model = fit_model(vecs[:300])
+    rng = np.random.default_rng(7)
+    near = vecs[300:] + rng.normal(size=vecs[300:].shape).astype(np.float16) * 0.01
+    xy_new, cluster_new = place(model, near)
+    xy_old, cluster_old = place(model, vecs[300:])
+    assert (cluster_new == cluster_old).mean() >= 0.97
+    assert np.abs(xy_new - xy_old).max() < 0.05
+    assert ((xy_new >= 0.02) & (xy_new <= 0.98)).all()
+
+
+def test_a_model_survives_saving_and_loading():
+    _, vecs, _ = _blobs(300)
+    model = fit_model(vecs)
+    loaded = FieldModel.from_bytes(model.to_bytes())
+    assert loaded.dim == DIM
+    xy, cluster = place(model, vecs)
+    xy_loaded, cluster_loaded = place(loaded, vecs)
+    assert (cluster == cluster_loaded).all()
+    assert np.allclose(xy, xy_loaded, atol=1e-4)
+    # Parameters only: the blob refuses to load anything that needs pickle.
+    assert len(model.to_bytes()) < 4 * 1024 * 1024
+
+
+def test_a_fit_needs_four_points():
+    _, vecs, _ = _blobs(10)
+    with pytest.raises(ValueError):
+        fit_model(vecs[:3])
