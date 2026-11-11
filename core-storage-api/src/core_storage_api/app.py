@@ -60,6 +60,7 @@ from core_storage_api.routers import (
     health_router,
     idempotency_router,
     insights_router,
+    keystone_fetches_router,
     keystones_router,
     lifecycle_audit_router,
     memories_router,
@@ -374,6 +375,7 @@ def create_app() -> FastAPI:
     app.include_router(agents_router, prefix=prefix)
     app.include_router(documents_router, prefix=prefix)
     app.include_router(keystones_router, prefix=prefix)
+    app.include_router(keystone_fetches_router, prefix=prefix)
     app.include_router(fleet_router, prefix=prefix)
     app.include_router(audit_router, prefix=prefix)
     app.include_router(reports_router, prefix=prefix)

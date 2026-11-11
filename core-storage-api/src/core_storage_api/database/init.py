@@ -70,7 +70,10 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # joins the probe. 078 creates ``projection_models`` and ``memory_projections``
 # and builds ``ix_memory_projections_memory`` last, in one transaction, so that
 # index joins the probe.
-_HEAD_FINGERPRINT_REVISION = "078"
+# 079 creates the install-bound fetch table and its retention index in one
+# transaction. Its unique binding includes a non-null fleet (empty for tenant
+# scope); a metadata-created schema must have these before stamping.
+_HEAD_FINGERPRINT_REVISION = "079"
 _HEAD_FINGERPRINT_SQL: str | None = (
     "SELECT (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -110,7 +113,14 @@ _HEAD_FINGERPRINT_SQL: str | None = (
     "AND EXISTS (SELECT 1 FROM information_schema.tables "
     "WHERE table_schema = 'public' AND table_name = 'agent_tombstones') "
     "AND EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' "
-    "AND indexname = 'ix_memory_projections_memory')"
+    "AND indexname = 'ix_memory_projections_memory') "
+    "AND EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' "
+    "AND indexname = 'ix_keystone_fetch_retention') "
+    "AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' "
+    "AND table_name = 'keystone_fetches' AND column_name = 'fleet_id' AND is_nullable = 'NO') "
+    "AND EXISTS (SELECT 1 FROM information_schema.key_column_usage WHERE table_schema = 'public' "
+    "AND table_name = 'keystone_fetches' AND constraint_name = 'uq_keystone_fetch_bucket' "
+    "AND column_name = 'fleet_id')"
 )
 
 _engine: AsyncEngine | None = None

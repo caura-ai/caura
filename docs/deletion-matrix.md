@@ -49,6 +49,7 @@ the token. It may remain only where this table says **Kept** for that step.
 | `documents`, `interview_jobs` collection | The masked session events the interviewer turns into memories (off by default) | **No text** | **No text**. Finished jobs are deleted 14 days after they finish | **Deleted** |
 | `documents`, any other collection | Documents agents write themselves | **No text** | **No text** | **Deleted** |
 | `keystone_versions` | Every version of the tenant's keystone documents | **No text** | **No text** | **Deleted** |
+| `keystone_fetches` | Install, credential and recipient ids, rule-set hashes and first-fetch timestamps; no rule text. Read evidence expires after 90 days; physical cleanup is scheduled separately | **No text** | **No text** | **Deleted** |
 | `analysis_reports` | Crystallizer reports: counts, issue codes and memory ids | **No text** | **No text** | **Deleted** |
 | `dedup_reviews` | Pairs of statements held for a duplicate review, verbatim. Nothing in this repository writes the table today | **No text** | **No text** | **Deleted** |
 | `idempotency_responses` | The replayable response to a write sent with an `Idempotency-Key`, which can include the memory's content | **Kept** until it expires, 24 hours after the write by default | **Cleared** once expired | **Deleted** |

@@ -71,12 +71,13 @@ _TYPE_FILLERS = {
 
 # Columns whose value a CHECK constraint restricts, so a random filler is
 # rejected. Kept small and explicit rather than parsed out of
-# ``pg_get_constraintdef``: two entries is not worth a constraint parser, and if a
-# third appears the IntegrityError names the constraint, which points straight
+# ``pg_get_constraintdef``: a few entries are not worth a constraint parser, and if
+# another appears the IntegrityError names the constraint, which points straight
 # here.
 _CONSTRAINED_VALUES = {
     ("session_traces", "outcome_label"): "unknown",
     ("capability_usage", "transport"): "rest",
+    ("keystone_fetches", "rule_set_hash"): "0" * 64,
 }
 
 
