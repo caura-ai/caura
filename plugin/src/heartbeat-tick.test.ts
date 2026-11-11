@@ -60,6 +60,7 @@ interface Call {
   body?: Record<string, unknown>;
 }
 const calls: Call[] = [];
+let responseNode: string | undefined = "042e88d1-e793-42f1-a61f-38221e574ef0";
 // Commands the next heartbeat response carries.
 let deliver: Array<{ id: string; command: string }> = [];
 // While set, a command's result post waits for it; resultPosted fires first.
@@ -80,7 +81,7 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
   }
   let payload: unknown = { ok: true };
   if (url.pathname.endsWith("/fleet/heartbeat")) {
-    payload = { commands: deliver };
+    payload = { node_id: responseNode, commands: deliver };
     deliver = [];
   }
   return new Response(JSON.stringify(payload), {
@@ -118,6 +119,11 @@ test("L-56: a tick that starts while another runs does not run a second heartbea
     1,
     "the overlapping tick reran the skill reconciler",
   );
+  const heartbeatIndex = calls.findIndex((c) => c.path.endsWith("/fleet/heartbeat"));
+  const pullIndex = calls.findIndex((c) => c.path.endsWith("/skills/installable"));
+  assert.ok(pullIndex > heartbeatIndex, "bootstrap the bound node before requesting delivery");
+  assert.equal(calls[pullIndex].body?.node_id, "042e88d1-e793-42f1-a61f-38221e574ef0");
+  assert.equal(calls[pullIndex].body?.delivery_version, 1);
 });
 
 /** Whether ``promise`` settles within ``ms``. */
@@ -199,4 +205,32 @@ test("heartbeat reports the effective automatic-capture switch after config over
   } finally {
     applyPluginConfig({ CAURA_AUTO_WRITE_TURNS: previous });
   }
+});
+
+
+test("a heartbeat without a receiver UUID cannot reuse an earlier identity", async () => {
+  for (const node of [undefined, "local-node-label"]) {
+    calls.length = 0;
+    responseNode = node;
+    try {
+      await sendHeartbeat();
+      assert.equal(heartbeatPosts().length, 1);
+      assert.equal(calls.filter((c) => c.path.endsWith("/skills/installable")).length, 0);
+    } finally {
+      responseNode = "042e88d1-e793-42f1-a61f-38221e574ef0";
+    }
+  }
+});
+
+test("a failed heartbeat cannot pull using an earlier receiver UUID", async () => {
+  calls.length = 0;
+  const fetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    if (String(input).endsWith("/fleet/heartbeat")) return new Response("unavailable", { status: 503 });
+    return fetch(input, init);
+  }) as typeof fetch;
+  try {
+    await sendHeartbeat();
+    assert.equal(calls.filter((c) => c.path.endsWith("/skills/installable")).length, 0);
+  } finally { globalThis.fetch = fetch; }
 });

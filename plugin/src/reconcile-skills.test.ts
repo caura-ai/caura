@@ -22,6 +22,7 @@
  */
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "fs";
 import { join, posix, win32 } from "path";
 import { tmpdir } from "os";
@@ -39,7 +40,10 @@ const originalHome = process.env.HOME;
 const tmpHome = mkdtempSync(join(tmpdir(), "reconcile-skills-test-home-"));
 process.env.HOME = tmpHome;
 
-const { reconcileSkills, PROTECTED_SKILLS, resolveSkillTargets, OWNED_MARKER, skillTargetDepth } = await import("./reconcile-skills.js");
+const { reconcileSkills: reconcileApprovedSkills, PROTECTED_SKILLS, resolveSkillTargets, OWNED_MARKER, skillTargetDepth } = await import("./reconcile-skills.js");
+
+const NODE = "042e88d1-e793-42f1-a61f-38221e574ef0";
+function reconcileSkills() { return reconcileApprovedSkills({ nodeId: NODE }); }
 
 const SKILLS_ROOT = join(tmpHome, ".openclaw", "plugins", FROZEN_PLUGIN_ID, "skills");
 
@@ -69,7 +73,14 @@ function installMockFetch(): void {
     // mock returns whatever ``mockCatalog`` holds — i.e. only what the
     // server would have already deemed installable.
     if (url.endsWith("/api/v1/skills/installable")) {
-      return new Response(JSON.stringify({ documents: mockCatalog }), {
+      return new Response(JSON.stringify({ delivery_version: 1, node_id: NODE, complete: true, prune_allowed: true, held: [], documents: mockCatalog.map((row) => {
+        const raw = row.data.content ?? "";
+        const name = row.data.name?.trim() || row.doc_id.replace(/^(?:forge|agent)\//, "");
+        const description = row.data.description?.trim() || "";
+        const content = /^---\r?\n/.test(raw) ? raw : withSynthFrontmatter(name, description, raw);
+        return { ...row, delivery: { grant_id: "approved-fixture", bytes: Buffer.byteLength(content),
+          artifact_hash: "sha256:" + createHash("sha256").update(content).digest("hex") } };
+      }) }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
@@ -205,7 +216,7 @@ describe("reconcileSkills", () => {
     assert.equal(readSkill("skill-a"), withSynthFrontmatter("skill-a", "alpha", "# A\n"));
   });
 
-  test("invariant 5: unsafe slug from catalog is skipped, never lands on disk", async () => {
+  test("invariant 5: unsafe catalog identity prevents all writes and pruning", async () => {
     plantOnDisk(FROZEN_PLUGIN_ID);
     mockCatalog = [
       { doc_id: "../etc/passwd", data: { name: "x", description: "exploit",     content: "exploit\n" } },
@@ -215,9 +226,9 @@ describe("reconcileSkills", () => {
 
     const summary = await reconcileSkills();
 
-    assert.deepEqual(listSkillDirs(), [FROZEN_PLUGIN_ID, "valid-slug"]);
-    assert.deepEqual(summary.added, ["valid-slug"]);
-    assert.equal(summary.skipped.length, 2);
+    assert.deepEqual(listSkillDirs(), [FROZEN_PLUGIN_ID]);
+    assert.deepEqual(summary.added, []);
+    assert.deepEqual(summary.removed, []);
     // No traversal artefact created
     assert.ok(!existsSync(join(tmpHome, "etc", "passwd")));
   });
@@ -326,7 +337,7 @@ describe("reconcileSkills", () => {
     assert.deepEqual(summary.skipped, ["forge/generated-skill"]);
   });
 
-  test("catalog returns missing content/description → row skipped, others applied", async () => {
+  test("incomplete artifact fails the whole manifest without writes or pruning", async () => {
     plantOnDisk(FROZEN_PLUGIN_ID);
     mockCatalog = [
       { doc_id: "no-content",     data: { name: "x", description: "ok" } as MockCatalogEntry["data"] },
@@ -336,9 +347,9 @@ describe("reconcileSkills", () => {
 
     const summary = await reconcileSkills();
 
-    assert.deepEqual(listSkillDirs(), ["good", FROZEN_PLUGIN_ID]);
-    assert.deepEqual(summary.added, ["good"]);
-    assert.equal(summary.skipped.length, 2);
+    assert.deepEqual(listSkillDirs(), [FROZEN_PLUGIN_ID]);
+    assert.deepEqual(summary.added, []);
+    assert.deepEqual(summary.removed, []);
   });
 
   test("frontmatter synthesis: plain markdown gets name+description prepended for OpenClaw discovery", async () => {

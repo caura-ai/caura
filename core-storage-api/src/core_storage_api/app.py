@@ -77,6 +77,7 @@ from core_storage_api.routers import (
     usage_router,
     value_router,
 )
+from core_storage_api.routers.skill_delivery import router as skill_delivery_router
 
 logger = logging.getLogger(__name__)
 
@@ -374,6 +375,7 @@ def create_app() -> FastAPI:
     app.include_router(entities_router, prefix=prefix)
     app.include_router(agents_router, prefix=prefix)
     app.include_router(documents_router, prefix=prefix)
+    app.include_router(skill_delivery_router, prefix=prefix)
     app.include_router(keystones_router, prefix=prefix)
     app.include_router(keystone_fetches_router, prefix=prefix)
     app.include_router(fleet_router, prefix=prefix)

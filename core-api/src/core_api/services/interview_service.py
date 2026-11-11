@@ -70,12 +70,16 @@ JOBS_COLLECTION = "interview_jobs"
 # ``GET /api/v1/bus/batons/{id}``. The document routes cannot apply that rule
 # (they gate by tenant and fleet, not by named agents), so they refuse it.
 BATON_COLLECTION = "batons"
-SYSTEM_COLLECTIONS = frozenset({WATERMARK_COLLECTION, JOBS_COLLECTION, BATON_COLLECTION})
+SKILL_DELIVERY_COLLECTION = "_skill_delivery_grants"
+SYSTEM_COLLECTIONS = frozenset(
+    {WATERMARK_COLLECTION, JOBS_COLLECTION, BATON_COLLECTION, SKILL_DELIVERY_COLLECTION}
+)
 # Named in the refusal, so a caller knows where the collection is served.
 _SYSTEM_COLLECTION_OWNERS = {
     WATERMARK_COLLECTION: "the interview service",
     JOBS_COLLECTION: "the interview service",
     BATON_COLLECTION: "the Caura bus",
+    SKILL_DELIVERY_COLLECTION: "the skill delivery service",
 }
 
 
@@ -99,7 +103,7 @@ def refuse_system_collection(collection: str) -> None:
 # cursor there, and it holds sequence numbers, not content.
 # A baton names the memories each receiver may read and is for its sender and
 # receivers only; the bus serves it to them.
-SYSTEM_READ_REFUSED_COLLECTIONS = frozenset({JOBS_COLLECTION, BATON_COLLECTION})
+SYSTEM_READ_REFUSED_COLLECTIONS = frozenset({JOBS_COLLECTION, BATON_COLLECTION, SKILL_DELIVERY_COLLECTION})
 
 
 def refuse_system_read(collection: str | None) -> None:

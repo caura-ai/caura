@@ -29,6 +29,13 @@ from core_api.middleware.idempotency import (
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot
 from core_api.middleware.rate_limit import search_limit, write_limit
 from core_api.request_bounds import bounded_json
+from core_api.routes.skill_delivery import (
+    DeliveryManifest,
+    InstallableSkillsRequest,
+)
+from core_api.routes.skill_delivery import (
+    installable_skills as approved_installable_skills,
+)
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.agent_service import (
     broker_owned_agent_id,
@@ -303,20 +310,6 @@ class DocQueryRequest(TenantScopedBody):
     order: str = Field(default="asc", pattern=r"^(asc|desc)$")
     limit: int = Field(default=20, ge=1, le=1000)
     offset: int = Field(default=0, ge=0)
-
-
-class InstallableSkillsRequest(TenantScopedBody):
-    """Request for the agent-harness install surface (`/skills/installable`).
-
-    Deliberately narrower than ``DocQueryRequest``: the collection is
-    fixed to ``skills`` and the ``where`` filter is server-decided (the
-    caller cannot widen it), so a harness can't ask for non-active skills.
-    """
-
-    # DELIBERATELY PERMISSIVE (SAFE-01): a QUERY body, not a write. See
-    # ``core_api.schemas.STRICT_WRITE_BODY`` for why the two sides differ.
-    fleet_id: str | None = None
-    limit: int = Field(default=1000, ge=1, le=1000)
 
 
 class DocSearchRequest(TenantScopedBody):
@@ -889,43 +882,14 @@ async def query_documents(
     return [_dict_to_out(d) for d in docs if access is None or access.allows(d)]
 
 
-@router.post("/skills/installable", responses={200: {"model": list[DocOut]}})
+@router.post("/skills/installable", responses={200: {"model": DeliveryManifest}})
 async def installable_skills(
     body: InstallableSkillsRequest,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Skills an agent harness should INSTALL onto a node's disk.
-
-    The push-to-disk install path (the OpenClaw plugin reconciler)
-    consumes this instead of a raw ``/documents/query`` so the active-only
-    gate is enforced server-side — the SAME contract the MCP pull
-    surface applies to opted-in tenants (PR #315). The client carries no
-    policy and cannot widen the filter.
-
-    Only ``status='active'`` skills are returned, for every tenant: a
-    ``candidate`` / ``staged`` / ``quarantined`` skill is unreviewed
-    instructions and never reaches a node's disk or an agent's palette.
-    ``skills_factory.enabled`` turns the Forge on; it no longer decides
-    whether a person reviews what nodes install. Skills a tenant that never
-    opted in had on its nodes were backfilled ``active`` (migration 070), so
-    none was removed.
-
-    Fleet/tenant visibility scoping is identical to ``/documents/query``.
-    """
-    auth.enforce_readable_tenant(body.tenant_id)
-    where = {"status": "active"}
-
-    sc = get_storage_client()
-    docs = await sc.query_documents(
-        {
-            "tenant_id": body.tenant_id,
-            "collection": SKILLS_COLLECTION,
-            "fleet_id": body.fleet_id,
-            "where": where,
-            "limit": body.limit,
-        }
-    )
-    return [_dict_to_out(d) for d in docs]
+    """Complete node-bound delivery manifest; unversioned clients are refused."""
+    auth.enforce_tenant(body.tenant_id)
+    return await approved_installable_skills(body, auth)
 
 
 @router.get("/documents", responses={200: {"model": list[DocOut]}})

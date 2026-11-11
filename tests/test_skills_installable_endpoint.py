@@ -14,7 +14,14 @@ Asserted contract:
 
 from __future__ import annotations
 
+import pytest
+
+from common.constants import NODE_PRINCIPAL_TENANT
 from tests.conftest import get_test_auth
+
+pytestmark = pytest.mark.unit
+
+NODE = "042e88d1-e793-42f1-a61f-38221e574ef0"
 
 
 class _CapturingStorage:
@@ -24,7 +31,19 @@ class _CapturingStorage:
         self._captured = captured
         self._rows = rows or []
 
-    async def query_documents(self, params):
+    async def get_node_binding(self, tenant, node_id):
+        return {
+            "id": node_id,
+            "tenant_id": tenant,
+            "owner_principal": NODE_PRINCIPAL_TENANT,
+        }
+
+    async def read_skill_delivery_records(self, **kwargs):
+        return []
+
+    async def query_documents(self, params, *, read=True):
+        assert read is False
+        assert params["collection"] == "skills"
         self._captured.update(params)
         return self._rows
 
@@ -39,18 +58,24 @@ async def test_installable_forces_active_only_whatever_the_flag_says(
     tenant_id, headers = get_test_auth()
     captured: dict = {}
     monkeypatch.setattr(
-        "core_api.routes.documents.get_storage_client",
+        "core_api.routes.skill_delivery.get_storage_client",
         lambda: _CapturingStorage(captured),
     )
     resp = await client.post(
         "/api/v1/skills/installable",
-        json={"tenant_id": tenant_id, "fleet_id": "fleet-a"},
+        json={
+            "tenant_id": tenant_id,
+            "fleet_id": "fleet-a",
+            "node_id": NODE,
+            "delivery_version": 1,
+        },
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
     assert captured["where"] == {"status": "active"}
     assert captured["collection"] == "skills"
-    assert captured["fleet_id"] == "fleet-a"
+    assert not captured.get("fleet_id")  # A fleet claim grants no receiver authority.
+    assert resp.json()["complete"] is True
 
 
 async def test_installable_rejects_caller_where(client, monkeypatch):
@@ -61,12 +86,17 @@ async def test_installable_rejects_caller_where(client, monkeypatch):
     tenant_id, headers = get_test_auth()
     captured: dict = {}
     monkeypatch.setattr(
-        "core_api.routes.documents.get_storage_client",
+        "core_api.routes.skill_delivery.get_storage_client",
         lambda: _CapturingStorage(captured),
     )
     resp = await client.post(
         "/api/v1/skills/installable",
-        json={"tenant_id": tenant_id, "where": {"status": "staged"}},
+        json={
+            "tenant_id": tenant_id,
+            "where": {"status": "staged"},
+            "node_id": NODE,
+            "delivery_version": 1,
+        },
         headers=headers,
     )
     assert resp.status_code == 200, resp.text

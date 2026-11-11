@@ -304,6 +304,7 @@ ADMIN_PLANE_ROUTERS = frozenset(
         "org_deletion",
         "lifecycle",
         "skills_inbox",
+        "skill_delivery",
         "scheduler_lease",
         # Internal, read-only matching uses the system-admin credential.
         "keystone_fetches",
@@ -388,7 +389,7 @@ WRITE_GATE_ALLOWLIST: dict[str, str] = {
     "POST /api/v1/documents/query": "read: POST-bodied query, gated by enforce_readable_tenant",
     "POST /api/v1/documents/search": "read: POST-bodied query, gated by enforce_readable_tenant",
     "POST /api/v1/interview/cursor": "read: credential-owned cursor, gated by cursor_read_access",
-    "POST /api/v1/skills/installable": "read: POST-bodied query, gated by enforce_readable_tenant",
+    "POST /api/v1/skills/installable": "read: receiver-bound manifest, gated by enforce_tenant and approved_installable_skills",
     # Unauthenticated bootstrap. These take no ``auth`` parameter at all — they
     # render an install script for a machine that does not have a credential
     # yet, which is the whole point. Nothing tenant-scoped is written.

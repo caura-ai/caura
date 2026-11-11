@@ -20,6 +20,40 @@ import { withUserAgent } from "./user-agent.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
+// Only the skill delivery surface has this wire contract. Count decoded
+// response bytes while streaming, including failures and dishonest lengths.
+const SKILL_RESPONSE_MAX = 4 * 1024 * 1024;
+async function skillResponseText(res: Response): Promise<string> {
+  const declared = Number(res.headers.get("Content-Length"));
+  if (Number.isFinite(declared) && declared > SKILL_RESPONSE_MAX) {
+    await res.body?.cancel();
+    throw new Error("Skill response exceeds 4 MiB");
+  }
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > SKILL_RESPONSE_MAX) throw new Error("Skill response exceeds 4 MiB");
+      chunks.push(value);
+    }
+    return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+function revokedDelivery(text: string): boolean {
+  try { return JSON.parse(text)?.detail === AGENT_KEY_REVOKED; }
+  catch { return false; }
+}
+
 // Shaped like the other errors here, so a revoked agent counts as a refusal
 // (a 4xx), not as the backend being unreachable.
 function revokedAgentError(agentId: string): Error {
@@ -108,12 +142,14 @@ export async function apiCall(
     };
     let res = await fetch(url.toString(), requestInit);
 
+    let deliveryText = normalized === "/skills/installable" ? await skillResponseText(res) : undefined;
+
     // A rejected agent credential gets exactly one fallback attempt with the
     // tenant key. Retrying in this frame avoids re-deriving ``agent_id`` from
     // the body/query and recursively provisioning the same rejected key. A
     // revoked agent gets none: the tenant key would still act as it (L-79).
     if (res.status === 401 && effectiveKey !== CAURA_API_KEY && effectiveAgentId) {
-      if (await isRevocation(res)) {
+      if (deliveryText === undefined ? await isRevocation(res) : revokedDelivery(deliveryText)) {
         markAgentRevoked(effectiveAgentId);
         throw revokedAgentError(effectiveAgentId);
       }
@@ -123,10 +159,11 @@ export async function apiCall(
       if (CAURA_API_KEY) retryHeaders["X-API-Key"] = CAURA_API_KEY;
       else delete retryHeaders["X-API-Key"];
       res = await fetch(url.toString(), { ...requestInit, headers: retryHeaders });
+      deliveryText = normalized === "/skills/installable" ? await skillResponseText(res) : undefined;
     }
 
     if (!res.ok) {
-      const text = await res.text();
+      const text = deliveryText ?? await res.text();
       // Truncate server error body to avoid leaking internal details
       const safeText = text.length > 200 ? text.slice(0, 200) + "..." : text;
       throw new Error(`Caura API ${res.status}: ${safeText}`);
@@ -141,7 +178,7 @@ export async function apiCall(
       return { ok: true, _latency_ms: Date.now() - start };
     }
 
-    const data = await res.json();
+    const data = deliveryText === undefined ? await res.json() : JSON.parse(deliveryText);
     const latency_ms = Date.now() - start;
     const serverTime = res.headers.get("X-Response-Time");
     if (typeof data === "object" && data !== null && !Array.isArray(data)) {

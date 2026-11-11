@@ -1,0 +1,114 @@
+[
+  {
+    "id": "description-feff",
+    "input": {
+      "name": "metadata-fixture",
+      "description": " \tUse this fixture.\ufeff \r\n",
+      "content": "# Shared delivery fixture\n"
+    },
+    "canonical": {
+      "name": "metadata-fixture",
+      "description": "Use this fixture.\ufeff",
+      "content": "# Shared delivery fixture\n"
+    },
+    "artifact": "---\nname: \"metadata-fixture\"\ndescription: \"Use this fixture.\ufeff\"\n---\n\n# Shared delivery fixture\n",
+    "artifact_hash": "sha256:f27cfe1f6e8bfdf206f51fa07c997b1351dc9028d06ae2e43d042bceda8cbd8f",
+    "bytes": 96
+  },
+  {
+    "id": "description-nel",
+    "input": {
+      "name": "metadata-fixture",
+      "description": "\u0085Use this fixture.\u0085",
+      "content": "# Shared delivery fixture\n"
+    },
+    "canonical": {
+      "name": "metadata-fixture",
+      "description": "\u0085Use this fixture.\u0085",
+      "content": "# Shared delivery fixture\n"
+    },
+    "artifact": "---\nname: \"metadata-fixture\"\ndescription: \"\u0085Use this fixture.\u0085\"\n---\n\n# Shared delivery fixture\n",
+    "artifact_hash": "sha256:23a22f0477657264be00355a523740f6610d8d01c3182082f5c99ca3e10bcd59",
+    "bytes": 97
+  },
+  {
+    "id": "name-feff",
+    "input": {
+      "name": "\ufeffmetadata-fixture\ufeff",
+      "description": "Use this fixture.",
+      "content": "# Shared delivery fixture\n"
+    },
+    "canonical": {
+      "name": "\ufeffmetadata-fixture\ufeff",
+      "description": "Use this fixture.",
+      "content": "# Shared delivery fixture\n"
+    },
+    "artifact": "---\nname: \"\ufeffmetadata-fixture\ufeff\"\ndescription: \"Use this fixture.\"\n---\n\n# Shared delivery fixture\n",
+    "artifact_hash": "sha256:0e24fa72315922b6d4d69eb0d3bb83eb27534420d90c1174694de3af41291938",
+    "bytes": 99
+  },
+  {
+    "id": "name-nel",
+    "input": {
+      "name": "\u0085metadata-fixture\u0085",
+      "description": "Use this fixture.",
+      "content": "# Shared delivery fixture\n"
+    },
+    "canonical": {
+      "name": "\u0085metadata-fixture\u0085",
+      "description": "Use this fixture.",
+      "content": "# Shared delivery fixture\n"
+    },
+    "artifact": "---\nname: \"\u0085metadata-fixture\u0085\"\ndescription: \"Use this fixture.\"\n---\n\n# Shared delivery fixture\n",
+    "artifact_hash": "sha256:509361672f54fc8d22cbc763f8bfc91c6fc9a5a48ccc20f46ce9926839637452",
+    "bytes": 97
+  },
+  {
+    "id": "python-controls",
+    "input": {
+      "name": "\u001cmetadata-fixture\u001f",
+      "description": "\u001dUse this fixture.\u001e",
+      "content": "# Shared delivery fixture\n"
+    },
+    "canonical": {
+      "name": "\u001cmetadata-fixture\u001f",
+      "description": "\u001dUse this fixture.\u001e",
+      "content": "# Shared delivery fixture\n"
+    },
+    "artifact": "---\nname: \"\\u001cmetadata-fixture\\u001f\"\ndescription: \"\\u001dUse this fixture.\\u001e\"\n---\n\n# Shared delivery fixture\n",
+    "artifact_hash": "sha256:16fa5a293fb6a25023cd19c2a7cc1ee29e6fe579c4da1c3b9d05faa230c15175",
+    "bytes": 117
+  },
+  {
+    "id": "unicode-space",
+    "input": {
+      "name": "\u00a0metadata-fixture\u00a0",
+      "description": "\u00a0Use this fixture.\u00a0",
+      "content": "# Shared delivery fixture\n"
+    },
+    "canonical": {
+      "name": "\u00a0metadata-fixture\u00a0",
+      "description": "\u00a0Use this fixture.\u00a0",
+      "content": "# Shared delivery fixture\n"
+    },
+    "artifact": "---\nname: \"\u00a0metadata-fixture\u00a0\"\ndescription: \"\u00a0Use this fixture.\u00a0\"\n---\n\n# Shared delivery fixture\n",
+    "artifact_hash": "sha256:602e2ffbd2f8316ee61722058e77d2ee0f4270bfcb111921f283b965cc9886aa",
+    "bytes": 101
+  },
+  {
+    "id": "ascii-whitespace",
+    "input": {
+      "name": "\t metadata-fixture\r\n",
+      "description": "\n Use this fixture. \t",
+      "content": "# Shared delivery fixture\n"
+    },
+    "canonical": {
+      "name": "metadata-fixture",
+      "description": "Use this fixture.",
+      "content": "# Shared delivery fixture\n"
+    },
+    "artifact": "---\nname: \"metadata-fixture\"\ndescription: \"Use this fixture.\"\n---\n\n# Shared delivery fixture\n",
+    "artifact_hash": "sha256:09bded20156446edc12ca0e74bf608e0270ec089356ad08b260a8239230cc877",
+    "bytes": 93
+  }
+]

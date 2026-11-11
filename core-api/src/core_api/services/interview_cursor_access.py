@@ -7,7 +7,11 @@ from fastapi import HTTPException
 
 from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import CAURA_KEY_CREDENTIAL, AuthContext
-from core_api.services.interview_service import JOBS_COLLECTION, WATERMARK_COLLECTION
+from core_api.services.interview_service import (
+    JOBS_COLLECTION,
+    SKILL_DELIVERY_COLLECTION,
+    WATERMARK_COLLECTION,
+)
 
 
 def _field(row: Any, name: str) -> Any:
@@ -88,4 +92,8 @@ def visible_cursor_search_rows(rows: list, auth: AuthContext | None, tenant_id: 
 
 
 def visible_document_collections(rows: list[dict]) -> list[dict]:
-    return [row for row in rows if row.get("name") not in {JOBS_COLLECTION, WATERMARK_COLLECTION}]
+    return [
+        row
+        for row in rows
+        if row.get("name") not in {JOBS_COLLECTION, WATERMARK_COLLECTION, SKILL_DELIVERY_COLLECTION}
+    ]

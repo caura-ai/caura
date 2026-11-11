@@ -83,6 +83,7 @@ from core_api.routes.reports import router as reports_router
 from core_api.routes.scheduler_lease import router as scheduler_lease_router
 from core_api.routes.search_explain import router as search_explain_router
 from core_api.routes.settings import router as settings_router
+from core_api.routes.skill_delivery import router as skill_delivery_router
 from core_api.routes.skills_inbox import router as skills_inbox_router
 from core_api.routes.stats import router as stats_router
 from core_api.routes.stm import router as stm_router
@@ -1260,6 +1261,7 @@ app.include_router(settings_router, prefix="/api/v1")
 app.include_router(agents_router, prefix="/api/v1")
 app.include_router(fleet_router, prefix="/api/v1")
 app.include_router(documents_router, prefix="/api/v1")
+app.include_router(skill_delivery_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
 # Skill Factory Phase 2 — HITL Skills Inbox. Serves every tenant: every
 # skills write is staged until approved here, whatever

@@ -465,35 +465,19 @@ function queueCommands(commands: Parameters<typeof processCommand>[0][]): void {
   }
 }
 
+let latestReconcile: ReconcileSummary | undefined;
+
 async function runHeartbeat(): Promise<void> {
   cleanupStaleBackups();
   verifyDeployPostRestart();
   if (!CAURA_TENANT_ID || !CAURA_NODE_NAME) return;
 
-  // Skill reconciler — converge plugin/skills/ with the catalog before
-  // anything else. Failures are non-fatal (best-effort distribution).
-  // Replaces the dropped install_skill / uninstall_skill push commands.
-  // Capture the summary so this tick's outcome (which active skills are
-  // installed on this node, plus deltas/skips) rides the heartbeat for
-  // operator observability. Left undefined if reconciliation throws.
-  let reconcile: ReconcileSummary | undefined;
-  if (CAURA_CLEARTEXT_REMOTE) {
-    // L-80: over plain HTTP anyone on the path could forge the catalog and
-    // write skills the agents follow. Keep the skills already on disk and
-    // report no summary, the same as a tick whose reconcile threw.
-    if (!_insecureSkillsSyncWarned) {
-      console.warn(
-        "[caura] skills sync is disabled: CAURA_API_URL is plain HTTP to another host. " +
-          "Installed skills are kept. Point CAURA_API_URL at https:// to sync them.",
-      );
-      _insecureSkillsSyncWarned = true;
-    }
-  } else {
-    try {
-      reconcile = await reconcileSkills();
-    } catch (e: unknown) {
-      logError("reconcileSkills failed", e);
-    }
+  // Report the prior completed reconciliation; this tick first authenticates
+  // its receiver through heartbeat, then pulls the approved manifest.
+  const reconcile = latestReconcile;
+  if (CAURA_CLEARTEXT_REMOTE && !_insecureSkillsSyncWarned) {
+    console.warn("[caura] skills sync is disabled over remote plain HTTP; installed copies are kept.");
+    _insecureSkillsSyncWarned = true;
   }
 
   const pluginDir = getPluginDir();
@@ -705,18 +689,24 @@ async function runHeartbeat(): Promise<void> {
     // Cooldown signal: when set, the backend's auto-upgrade trigger
     // refuses to queue further deploy commands until this timestamp.
     deploy_blocked_until,
-    // Latest skill-reconcile summary for this node. Backend stores it as
-    // the newest snapshot on the node row (nodes.metadata.reconcile),
-    // surfaced via /fleet/nodes — so an operator can confirm an
-    // approved/active skill actually landed. Omitted if reconciliation
-    // threw this tick (older backends ignore the unknown field).
+    // Prior completed local reconciliation, reported as a snapshot on the
+    // next heartbeat. This is node-reported state, not an installation receipt.
     reconcile,
   };
 
   try {
     const result = (await apiCall("POST", "/fleet/heartbeat", body)) as Record<string, any>;
     if (result?.commands?.length) queueCommands(result.commands);
+    latestReconcile = undefined;
+    // A local label, previous response or failed heartbeat cannot authorize a
+    // fresh pull. Use only the authenticated response's storage-issued UUID.
+    if (!CAURA_CLEARTEXT_REMOTE && typeof result?.node_id === "string"
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.node_id)) {
+      latestReconcile = await reconcileSkills({ nodeId: result.node_id });
+    }
+
   } catch (e: unknown) {
+    latestReconcile = undefined;
     logError("heartbeat failed", e);
   }
 

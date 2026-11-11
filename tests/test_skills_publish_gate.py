@@ -35,13 +35,33 @@ def _skill(slug: str, **overrides) -> dict:
 
 
 async def _installable_slugs(client, tenant_id: str) -> set[str]:
-    resp = await client.post(
-        "/api/v1/skills/installable",
-        json={"tenant_id": tenant_id},
-        headers=get_admin_headers(),
-    )
+    # Delivery now requires a registered receiver and a versioned manifest.
+    # Read as admin even when the preceding write used an agent override.
+    from core_api.app import app
+    from core_api.auth import get_auth_context
+
+    override = app.dependency_overrides.pop(get_auth_context, None)
+    try:
+        beat = await client.post(
+            "/api/v1/fleet/heartbeat",
+            json={"tenant_id": tenant_id, "node_name": "publish-gate-fixture"},
+            headers=get_admin_headers(),
+        )
+        assert beat.status_code == 200, beat.text
+        resp = await client.post(
+            "/api/v1/skills/installable",
+            json={
+                "tenant_id": tenant_id,
+                "node_id": beat.json()["node_id"],
+                "delivery_version": 1,
+            },
+            headers=get_admin_headers(),
+        )
+    finally:
+        if override is not None:
+            app.dependency_overrides[get_auth_context] = override
     assert resp.status_code == 200, resp.text
-    return {d["doc_id"] for d in resp.json()}
+    return {d["doc_id"] for d in resp.json()["documents"]}
 
 
 @pytest.fixture
