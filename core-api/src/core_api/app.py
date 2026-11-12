@@ -56,6 +56,7 @@ from core_api.middleware.request_timeout import (
     _TIMEOUT_OPT_OUT_PATHS,
     RequestTimeoutMiddleware,
 )
+from core_api.otel_spans import FASTAPI_TELEMETRY, configure_tracing, shutdown_tracing
 from core_api.routes.agents import router as agents_router
 from core_api.routes.audit import router as audit_router
 from core_api.routes.batons import router as batons_router
@@ -466,6 +467,10 @@ async def lifespan(app):
         except ImportError:
             logger.warning("sentry-sdk not installed, skipping Sentry init")
 
+    # OpenTelemetry memory spans: exported only when OTEL_EXPORTER_OTLP_ENDPOINT
+    # is set, and never in place of a provider ddtrace already installed.
+    configure_tracing()
+
     # CAURA-595: bridge ``settings.<KEY>`` credential values into
     # ``os.environ`` so the shared ``common.llm._credentials`` and
     # ``common.llm._platform`` modules — which read ``os.environ``
@@ -766,6 +771,7 @@ async def lifespan(app):
             usage_ledger=usage_ledger,
             session_tracker=session_tracker,
         )
+        await shutdown_tracing()
         executor.shutdown(wait=False)
 
 
@@ -842,6 +848,9 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
     openapi_tags=OPENAPI_TAGS,
     lifespan=lifespan,
+    # FastAPI's native OpenTelemetry request spans: kept beside our memory
+    # spans, but not under ddtrace, and with no OTel logs (otel_spans).
+    telemetry=FASTAPI_TELEMETRY,
 )
 configure_swagger_ui(app)
 

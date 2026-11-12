@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 
 from common.governance import Finding
+from core_api.otel_spans import record_policy_decision
 from core_api.services.audit_service import log_action
 
 # Audit action verbs (also the prefixes the governance UI filters list views on).
@@ -155,7 +156,11 @@ async def emit_governance_audit(
     the event. Higher-volume non-reject signals (flag / keep-private) stay
     best-effort and ride the queue's normal back-pressure (drop-with-counter
     under sustained overload) — the request hot path is never blocked for them.
+
+    Every governance action passes through here, so this is also where it
+    lands on the operation's trace (``caura.policy_decision``).
     """
+    record_policy_decision(action)
     await log_action(
         tenant_id=tenant_id,
         agent_id=agent_id,

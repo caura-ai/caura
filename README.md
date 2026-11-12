@@ -266,6 +266,8 @@ raises writes nothing, and writes that fail on a temporary error wait in an
 outbox you replay. Use the clients above when you only need to call the API;
 use Rail when an agent should remember and follow rules. Guide, API reference,
 and reliability semantics live in the [Rail repository](https://github.com/caura-ai/caura-rail).
+To see each turn's recall and writes in Langfuse, Datadog or another
+OpenTelemetry backend, see [`docs/opentelemetry.md`](docs/opentelemetry.md).
 
 ---
 
