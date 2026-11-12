@@ -396,7 +396,7 @@ BEFORE starting any task:
   alongside the raw results (brief.summary is the answer itself, not the
   model's working)
 - Include fleet_id to scope to this fleet, omit for tenant-wide search
-- Filter by status="active" to skip deleted/archived memories
+- Archived and superseded memories are left out by default; pass status to read them
 - Use `valid_at` for point-in-time queries (REST `/search`, MCP `caura_recall`, and the OpenClaw plugin all accept it)
 
 AFTER completing work:
@@ -690,7 +690,7 @@ Auto-chunking is opt-in, off by default: set the tenant setting `chunking.auto_c
 The `core-operations` scheduler, which the stock `docker compose` stack runs, fires these ticks nightly (02:00 UTC by default, each movable in its settings):
 
 1. **Expires** — active memories past `ts_valid_end` or `expires_at` → status `outdated`, which default search excludes
-2. **Archives** — active memories older than 90 days with weight below 0.3 and no recalls → status `archived`
+2. **Archives** — active memories older than 90 days with weight below 0.3 and no recalls → status `archived`, which default search also excludes
 3. **Purges** — soft-deleted memories past the tenant's retention window are removed
 4. **Crystallizes** — merges near-duplicate clusters for tenants with `crystallizer.auto_crystallize` on and more than 1,000 active memories, when something was written since the last run
 5. **Links entities** and **discovers insights** — for tenants that enable `entity_linking.auto_entity_linking_enabled` and `insights.auto_insights_enabled`
