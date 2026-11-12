@@ -37,6 +37,7 @@ from core_storage_api.services.postgres_service import (
     FIELD_PAGE_EMBEDDINGS,
     MISSING_PROVENANCE_PREDICATE_SQL,
     BulkValidationError,
+    ConflictReviewConflictError,
     PostgresService,
 )
 
@@ -1632,7 +1633,7 @@ async def get_memory_conflict(conflict_id: str, tenant_id: str) -> dict:
 
 @router.patch("/memory-conflicts/{conflict_id}/resolve")
 async def resolve_memory_conflict(conflict_id: str, request: Request) -> dict:
-    """D11 — record a reviewer's decision.
+    """Apply supported resolved effects atomically with the review record.
 
     409 when the row is no longer pending. Two reviewers working the same queue
     is the ordinary case, and the CAS in the service is what stops the second
@@ -1649,6 +1650,8 @@ async def resolve_memory_conflict(conflict_id: str, request: Request) -> dict:
             resolution_note=body.get("resolution_note"),
             resolved_by=body.get("resolved_by"),
         )
+    except ConflictReviewConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not moved:
@@ -1662,6 +1665,8 @@ async def resolve_memory_conflict(conflict_id: str, request: Request) -> dict:
             detail=f"Conflict already reviewed (review_status={existing.review_status})",
         )
     row = await _svc.memory_conflict_get(UUID(str(conflict_id)), tenant_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Conflict not found")
     return orm_to_dict(row, _MEMORY_CONFLICT_FIELDS)
 
 

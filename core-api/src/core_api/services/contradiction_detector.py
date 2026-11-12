@@ -210,9 +210,13 @@ def verdict_applied(record: dict) -> bool:
 
     A dispute (``effect_applied`` false) demoted nothing and wired no edge, so it
     holds no row demoted, and a dismissal or a retraction has nothing to undo.
-    Records written before the field existed were all applied.
+    Resolved rows with a recorded reviewer effect use that committed effect;
+    the detector snapshot remains intact. Legacy rows retain their old meaning.
     """
-    return (record.get("metadata_") or {}).get("effect_applied") is not False
+    metadata = record.get("metadata_") or {}
+    if record.get("review_status") == "resolved" and type(metadata.get("review_effect_applied")) is bool:
+        return metadata["review_effect_applied"]
+    return metadata.get("effect_applied") is not False
 
 
 async def revert_unheld_loser(sc, tenant_id: str, loser: dict, *, ignore: Callable[[dict], bool]) -> bool:

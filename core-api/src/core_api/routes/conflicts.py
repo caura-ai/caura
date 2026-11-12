@@ -10,8 +10,8 @@ proposal (``action``, ``audit_reason``) and the reviewer's decision
 comparing them is the measurement — a ``dismissed`` row is the only record in the
 system that detection was wrong.
 
-Read-only listing plus one state transition. A ``resolved`` decision touches no
-memory row. A ``dismissed`` one also undoes what detection did to the pair
+Read-only listing plus one state transition. A ``resolved`` decision applies
+its supported verdict atomically in storage. A ``dismissed`` one also undoes what detection did to the pair
 (M-102): it was the only record that detection was wrong, and nothing else ever
 read it, so the loser stayed demoted and the winner's edge kept presenting it as
 corrected. The undo goes through the same CAS-guarded writes retraction uses. A
@@ -245,7 +245,7 @@ async def resolve_conflict(
     body: ConflictResolveRequest,
     auth: AuthContext = Depends(get_auth_context),
 ) -> ConflictOut:
-    """Record a reviewer's decision on one conflict.
+    """Apply a supported verdict and record the reviewer's decision on one conflict.
 
     ``dismissed`` also undoes detection's change to the pair: the winner's
     ``supersedes_id`` is cleared and the loser reverted to ``active``, unless the
@@ -265,7 +265,7 @@ async def resolve_conflict(
     """
     auth.enforce_tenant(body.tenant_id)
     # Blocks demo-sandbox and read-only credentials before any state moves — a
-    # review decision is a write, even though no memory row changes.
+    # review decision and its memory effects are writes.
     auth.enforce_read_only()
     # TRUST-plane, not admin-plane. ``enforce_admin`` admits only the super-admin
     # key, which would put review out of reach of the people who actually run a
@@ -298,7 +298,8 @@ async def resolve_conflict(
         # L-228: storage's answer for an unknown or foreign id. Nothing was
         # decided, so there is nothing to undo and nothing to audit.
         raise HTTPException(status_code=404, detail="Conflict not found")
-    # After the record: the decision stands even if undoing it does not.
+    committed_action = row.get("resolution_action", body.resolution_action)
+    # Dismissal retains its existing undo behavior after the record.
     undo: str | None = None
     if body.review_status == "dismissed":
         try:
@@ -322,7 +323,7 @@ async def resolve_conflict(
         resource_id=conflict_id,
         detail={
             "review_status": body.review_status,
-            "resolution_action": body.resolution_action,
+            "resolution_action": committed_action,
             "undo": undo,
             **auth.audit_actor(),
         },
@@ -332,7 +333,7 @@ async def resolve_conflict(
         tenant_id=body.tenant_id,
         conflict=row,
         review_status=body.review_status,
-        resolution_action=body.resolution_action,
+        resolution_action=committed_action,
         agent_id=auth.agent_id,
     )
     return ConflictOut(**row)
