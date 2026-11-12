@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.52.0](https://github.com/caura-ai/caura/compare/backend-v3.51.1...backend-v3.52.0) (2026-11-12)
+
+
+### Features
+
+* **observability:** OpenTelemetry GenAI memory spans ([#2430](https://github.com/caura-ai/caura/issues/2430)) ([1f64ecc](https://github.com/caura-ai/caura/commit/1f64ecc176a28b6c603f7c240b6ff2f1164abcb7))
+
 ## [3.51.1](https://github.com/caura-ai/caura/compare/backend-v3.51.0...backend-v3.51.1) (2026-11-11)
 
 
