@@ -57,6 +57,12 @@ sentry-sdk[fastapi]>=2.74.0,<3
 # Structured logging with GCP Cloud Logging severity mapping (common/structlog_config.py)
 structlog>=26.1.0,<27
 
+# OpenTelemetry memory spans (docs/opentelemetry.md). The API alone records
+# nothing; to export over OTLP add
+# `opentelemetry-sdk opentelemetry-exporter-otlp-proto-http` (core-api's
+# [otel] extra) and set OTEL_EXPORTER_OTLP_ENDPOINT.
+opentelemetry-api>=1.45.1,<2
+
 # NOTE: google-cloud-pubsub is NOT listed here so OSS standalone deploys
 # (EVENT_BUS_BACKEND=inprocess, default) stay lightweight. GCP/SaaS
 # deployments that need the Pub/Sub backend install it via the [pubsub]

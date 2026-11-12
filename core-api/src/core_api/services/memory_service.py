@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 
 from common import duplicate_memory
+from core_api import otel_spans
 from core_api.clients.storage_client import DuplicateMemoryError, get_storage_client
 from core_api.config import settings
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot, per_tenant_storage_slot
@@ -912,6 +913,7 @@ def _memory_to_out(
     agent=lambda a: a["data"].agent_id,
     fleet=lambda a: a["data"].fleet_id,
 )
+@otel_spans.trace_create
 async def create_memory(
     data: MemoryCreate, *, is_inferred: bool = False, system_values: dict | None = None
 ) -> MemoryOut:
@@ -1650,6 +1652,7 @@ def _adopt_broker_evidence(item: BulkMemoryItem) -> None:
     agent=lambda a: a["data"].agent_id,
     fleet=lambda a: a["data"].fleet_id,
 )
+@otel_spans.trace_create_bulk
 async def create_memories_bulk(
     data: BulkMemoryCreate,
     *,
@@ -4487,6 +4490,7 @@ async def _enrich_memory_background(
     return governed_row
 
 
+@otel_spans.trace_delete
 async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> dict:
     """Soft-delete one memory and every row derived from it.
 
@@ -4652,6 +4656,7 @@ _EDIT_KEPT_IF_SET_FIELDS: frozenset[str] = frozenset({"title", "ts_valid_start",
 
 
 @scoped("update", tenant="tenant_id", agent="agent_id")
+@otel_spans.trace_update
 async def update_memory(
     memory_id: UUID,
     tenant_id: str,
@@ -6189,6 +6194,7 @@ def _extract_temporal_date_range(
 
 
 @scoped(None, tenant="tenant_id", agent="caller_agent_id")
+@otel_spans.trace_search
 async def search_memories(
     tenant_id: str,
     query: str,

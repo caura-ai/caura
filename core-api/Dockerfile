@@ -48,7 +48,9 @@ ARG WITH_INGEST=0
 # DD_APM_ENABLED pulls in the ddtrace tracer via the ``datadog`` extra; only the
 # SaaS build sets it, so OSS / on-prem images carry no Datadog Python code.
 ARG DD_APM_ENABLED=false
-RUN EXTRAS="--extra pubsub"; \
+# ``otel`` (OTLP span exporter) is always installed: it stays inert until an
+# operator sets OTEL_EXPORTER_OTLP_ENDPOINT (core_api.otel_spans).
+RUN EXTRAS="--extra pubsub --extra otel"; \
     if [ "$WITH_INGEST" = "1" ]; then EXTRAS="$EXTRAS --extra ingest"; fi; \
     if [ "$DD_APM_ENABLED" = "true" ]; then EXTRAS="$EXTRAS --extra datadog"; fi; \
     uv export --frozen --no-dev $EXTRAS --no-emit-project \

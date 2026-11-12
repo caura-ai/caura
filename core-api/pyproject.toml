@@ -7,9 +7,11 @@ requires-python = ">=3.12"
 dependencies = [
     # FastAPI 0.137+ is OK since #364 made the startup guard read app.openapi()
     # instead of walking app.routes (0.137's include_router mounts a sub-app,
-    # hiding prefixed paths from app.routes). The committed uv.lock pins the exact
-    # version; this range only bounds future re-locks.
-    "fastapi>=0.141.1,<1",
+    # hiding prefixed paths from app.routes). 0.142 is the floor because
+    # core_api.app passes ``telemetry=`` (FastAPI's native OpenTelemetry, which
+    # otel_spans configures). The committed uv.lock pins the exact version; this
+    # range only bounds future re-locks.
+    "fastapi>=0.142.0,<1",
     "uvicorn[standard]>=0.51.0,<1",
     # The cap is the next minor, as core-storage-api's is. CI type-checks and
     # tests each package against its own uv.lock.
@@ -65,6 +67,10 @@ dependencies = [
     # runtime. Pulled in transitively today via ``mcp`` but declaring
     # explicitly so removing/upgrading mcp can't silently break uploads.
     "python-multipart>=0.0.20,<1",
+    # core_api.otel_spans emits the OTel GenAI memory spans through the
+    # API. fastapi and mcp already pull it in; declared because we import it.
+    # Without the ``otel`` extra (or ddtrace's bridge) every span is a no-op.
+    "opentelemetry-api>=1.45.1,<2",
 ]
 
 [project.optional-dependencies]
@@ -78,6 +84,13 @@ pubsub = ["google-cloud-pubsub>=2.39.1,<3"]
 # (Dockerfile: --build-arg DD_APM_ENABLED=true). Auto-instruments FastAPI /
 # SQLAlchemy / asyncpg / httpx / redis with no code changes.
 datadog = ["ddtrace>=4.12.2"]
+# OpenTelemetry memory spans exported over OTLP/HTTP (docs/opentelemetry.md).
+# Inert unless OTEL_EXPORTER_OTLP_ENDPOINT is set. The default image includes
+# it; protobuf and requests are already in the lock.
+otel = [
+    "opentelemetry-sdk>=1.45.1,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.1,<2",
+]
 # Optional: multi-format document extraction for the /ingest/* endpoints.
 # Kreuzberg (~64MB, Elastic-2.0) is excluded from the default image to cut
 # cold-start pull + import time — the ingest endpoints return 501 without it
@@ -85,7 +98,7 @@ datadog = ["ddtrace>=4.12.2"]
 # `--extra ingest` (Dockerfile: --build-arg WITH_INGEST=1) to enable ingest.
 ingest = ["kreuzberg>=4.10.2,<5"]
 dev = [
-    "core-api[test,pubsub,ingest]",
+    "core-api[test,pubsub,ingest,otel]",
     "mypy>=2.3.0,<3.0",
     "ruff>=0.16.2,<1.0",
     "types-croniter>=6.2.4.20260711",

@@ -19,6 +19,7 @@ from core_api.errors import (
     AUTH_FLEET_SCOPE_FORBIDDEN,
     coded_detail,
 )
+from core_api.otel_spans import note_caller_trust_level
 from core_api.services.audit_service import log_action
 
 logger = logging.getLogger(__name__)
@@ -414,6 +415,7 @@ async def resolve_write_agent(
             require_approval=require_approval,
             owner_install_uuid=install_uuid,
         )
+    note_caller_trust_level(chosen_agent_id, agent.get("trust_level"))
     return agent, AgentIdentity(chosen_agent_id)
 
 
@@ -528,7 +530,13 @@ def refuse_restricted_reader(agent: dict | None, agent_id: str) -> None:
     ``agent`` is the caller's row as the route already read it. An unregistered
     identity (``None``) has no level and is not refused here: registration
     happens on writes, and the reads keep their soft-pass for it.
+
+    Being the one gate every agent read passes, it is also where the read's
+    memory span learns the reader's trust level (``resolve_write_agent`` is
+    the write side's).
     """
+    if agent:
+        note_caller_trust_level(agent_id, agent.get("trust_level"))
     if agent and agent.get("trust_level", 0) < 1:
         raise HTTPException(
             status_code=403,
