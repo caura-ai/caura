@@ -272,6 +272,64 @@ services:
       retries: 3
       start_period: 10s
 
+  # ── Core Worker (the async-embed consumer) ──────────────────────
+  #
+  # Consumes the EMBED_REQUESTED / ENRICH_REQUESTED events a
+  # DEPLOYMENT_MODE=deferred write publishes, PATCHes the resulting
+  # embedding/enrichment back to core-storage-api, publishes the
+  # EMBEDDED / ENRICHED back-channels core-api then acts on, and runs
+  # the scheduled embedding backfill sweep. Without it a deferred write
+  # stays enrichment_pending / embedding=NULL forever, with no error
+  # anywhere (#720). The default DEPLOYMENT_MODE=inline runs both
+  # in-process on core-api and needs no worker.
+  #
+  # THE BUS IS THE WHOLE CONTRACT. The worker only receives events its
+  # publisher's bus can deliver cross-process, and the default
+  # EVENT_BUS_BACKEND=inprocess is a per-process singleton: core-api in
+  # its container and core-worker in this one would each talk to their
+  # own. Set EVENT_BUS_BACKEND=pubsub (with GCP_PROJECT_ID and
+  # EVENT_BUS_SUBSCRIPTION_PREFIX) in ``.env`` — Compose feeds env_file
+  # entries to both services, so one setting gives them one bus. With
+  # the bus still in-process, core-api refuses to boot in deferred mode
+  # (M-15 in core-api/src/core_api/app.py) rather than accept writes
+  # nothing will complete.
+  #
+  # env_file carries the provider keys (OPENAI_API_KEY,
+  # PLATFORM_EMBEDDING_*, PLATFORM_LLM_*, EVENT_BUS_*): the worker
+  # resolves its providers from the same environment core-api uses.
+  # env.dev defaults to the fake providers, so a keyless stack starts
+  # the worker fine — it just embeds nothing real.
+  core-worker:
+    image: ghcr.io/caura-ai/caura-core-worker:${CAURA_VERSION:-${MEMCLAW_VERSION:-latest}}  # legacy-name-ok: rule 3 dual-read alias
+    pull_policy: missing
+    build:
+      context: .
+      dockerfile: core-worker/Dockerfile
+    env_file:
+      - env.dev
+      - path: .env
+        required: false
+    environment:
+      # core-storage-api, not the enterprise compose's oss-core-storage-api:
+      # the worker PATCHes embed/enrich results here and refuses to start
+      # without the shared secret storage-secret-init generated.
+      CORE_STORAGE_API_URL: http://core-storage-api:8002
+      CORE_STORAGE_SHARED_SECRET: "${CORE_STORAGE_SHARED_SECRET:-}"
+      CORE_STORAGE_SHARED_SECRET_FILE: /run/caura-storage/shared-secret
+    volumes:
+      - storage_secret:/run/caura-storage:ro
+    depends_on:
+      # Healthy, not merely started: the worker PATCHes storage on every
+      # event, and core-storage-api being up is what makes that possible.
+      core-storage-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   # ── Local Embedder (opt-in via ``--profile embed-local``) ───────
   #
   # HuggingFace Text Embeddings Inference server. Drop-in replacement
