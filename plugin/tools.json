@@ -191,6 +191,7 @@
       "INVALID_ARGUMENTS",
       "NOT_FOUND",
       "REQUEST_BUDGET_EXCEEDED",
+      "TENANT_MISMATCH",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",
@@ -485,6 +486,7 @@
       "MISSING_AGENT_ID",
       "RATE_LIMITED",
       "REQUEST_BUDGET_EXCEEDED",
+      "TENANT_MISMATCH",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",
@@ -839,6 +841,7 @@
       "MISSING_AGENT_ID",
       "RATE_LIMITED",
       "REQUEST_BUDGET_EXCEEDED",
+      "TENANT_MISMATCH",
       "UNAUTHORIZED",
       "UNAVAILABLE",
       "UPSTREAM_TIMEOUT"

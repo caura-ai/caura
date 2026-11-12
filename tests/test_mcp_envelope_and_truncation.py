@@ -55,14 +55,6 @@ def _wire_recall(monkeypatch):
     return stub_storage_client(monkeypatch, get_agent=None)
 
 
-def _out_stub(mid: str):
-    class _Out:
-        def model_dump(self, mode="python"):
-            return {"id": mid}
-
-    return _Out()
-
-
 # ---------------------------------------------------------------------------
 # Truncation is reported as data, not only as prose
 # ---------------------------------------------------------------------------
@@ -136,11 +128,21 @@ async def test_recall_over_cap_keeps_the_human_warning(mcp_env, monkeypatch):
 async def test_list_dual_emits_items_and_results(mcp_env, monkeypatch):
     """Both keys, same rows — a REST-shaped parser reads ``items`` and works."""
     rows = [
-        {"id": str(uuid4()), "created_at": datetime.now(UTC).isoformat()}
+        {
+            "id": str(uuid4()),
+            "tenant_id": mcp_env["tenant"],
+            "agent_id": "alice",
+            "memory_type": "fact",
+            "content": "A stored memory",
+            "weight": 1.0,
+            "created_at": datetime.now(UTC).isoformat(),
+            "status": "active",
+            "visibility": "scope_team",
+            "recall_count": 0,
+        }
         for _ in range(2)
     ]
     stub_storage_client(monkeypatch, list_memories_by_filters=rows)
-    monkeypatch.setattr(mcp_server, "_memory_to_out", lambda m: _out_stub(m["id"]))
 
     payload = parse_envelope(await mcp_server.caura_list(limit=5))
 
@@ -167,11 +169,21 @@ async def test_list_items_reflects_the_served_slice(mcp_env, monkeypatch):
     while ``results`` stayed correct — and the two keys would disagree.
     """
     rows = [
-        {"id": str(uuid4()), "created_at": datetime.now(UTC).isoformat()}
+        {
+            "id": str(uuid4()),
+            "tenant_id": mcp_env["tenant"],
+            "agent_id": "alice",
+            "memory_type": "fact",
+            "content": "A stored memory",
+            "weight": 1.0,
+            "created_at": datetime.now(UTC).isoformat(),
+            "status": "active",
+            "visibility": "scope_team",
+            "recall_count": 0,
+        }
         for _ in range(3)
     ]
     stub_storage_client(monkeypatch, list_memories_by_filters=rows)
-    monkeypatch.setattr(mcp_server, "_memory_to_out", lambda m: _out_stub(m["id"]))
 
     payload = parse_envelope(await mcp_server.caura_list(limit=2))
 

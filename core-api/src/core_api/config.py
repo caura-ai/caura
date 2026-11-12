@@ -557,6 +557,9 @@ class Settings(BaseSettings):
     # routes GET + tagged-read POST calls here instead of ``core_storage_api_url``;
     # empty keeps today's single-service behaviour (OSS + pre-split deploys).
     core_storage_read_url: str = ""
+    # Optional enterprise receipt lookup; absent configuration leaves evidence unavailable.
+    session_receipt_match_url: str = ""
+    session_receipt_match_audience: str = ""
     # Public base URL of THIS API as callers reach it (e.g. https://api.caura.ai).
     # When set, the OpenAPI spec gains a ``servers`` block so generated clients
     # and agents resolve relative paths correctly; empty emits no servers block.

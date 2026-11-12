@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import get_type_hints
 from unittest.mock import AsyncMock, patch
 
@@ -361,15 +360,21 @@ async def test_mcp_list_does_not_mint_a_cursor_for_an_unsupported_sort(
     highest-traffic instance of the bug.
     """
     rows = [
-        {"id": str(uuid.uuid4()), "created_at": datetime.now(UTC).isoformat()}
+        {
+            "id": str(uuid.uuid4()),
+            "tenant_id": mcp_env["tenant"],
+            "agent_id": "alice",
+            "memory_type": "fact",
+            "content": "A stored memory",
+            "weight": 1.0,
+            "created_at": datetime.now(UTC).isoformat(),
+            "status": "active",
+            "visibility": "scope_team",
+            "recall_count": 0,
+        }
         for _ in range(3)
     ]
     stub_storage_client(monkeypatch, list_memories_by_filters=rows)
-    monkeypatch.setattr(
-        mcp_server,
-        "_memory_to_out",
-        lambda m: SimpleNamespace(model_dump=lambda mode="python": m),
-    )
 
     out = await mcp_server.caura_list(limit=2, sort="weight")
     payload = parse_envelope(out)
@@ -382,15 +387,21 @@ async def test_mcp_list_does_not_mint_a_cursor_for_an_unsupported_sort(
 async def test_mcp_list_still_mints_for_the_supported_sort(mcp_env, monkeypatch):
     """The gate must not be so tight that the working sort stops paginating."""
     rows = [
-        {"id": str(uuid.uuid4()), "created_at": datetime.now(UTC).isoformat()}
+        {
+            "id": str(uuid.uuid4()),
+            "tenant_id": mcp_env["tenant"],
+            "agent_id": "alice",
+            "memory_type": "fact",
+            "content": "A stored memory",
+            "weight": 1.0,
+            "created_at": datetime.now(UTC).isoformat(),
+            "status": "active",
+            "visibility": "scope_team",
+            "recall_count": 0,
+        }
         for _ in range(3)
     ]
     stub_storage_client(monkeypatch, list_memories_by_filters=rows)
-    monkeypatch.setattr(
-        mcp_server,
-        "_memory_to_out",
-        lambda m: SimpleNamespace(model_dump=lambda mode="python": m),
-    )
 
     out = await mcp_server.caura_list(limit=2)  # created_at/desc are the defaults
     assert parse_envelope(out)["next_cursor"] is not None
