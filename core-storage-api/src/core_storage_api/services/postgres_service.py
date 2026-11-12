@@ -2380,6 +2380,10 @@ class MemoryContentChangedError(Exception):
     """
 
 
+class ConflictReviewConflictError(Exception):
+    """The pair is unavailable or its state no longer supports the decision."""
+
+
 def _fleet_scope(column, fleet_id: str | None):
     """Fleet predicate matching an index that groups on ``COALESCE(fleet_id, '')``.
 
@@ -4266,7 +4270,7 @@ class PostgresService:
         resolution_note: str | None = None,
         resolved_by: str | None = None,
     ) -> bool:
-        """D11 — record a reviewer's decision. Returns True iff a row moved.
+        """Apply supported resolved effects and record the review atomically.
 
         CAS on ``review_status = 'pending'``. Two reviewers opening the same
         queue is the normal case, not the edge case: without the compare the
@@ -4284,6 +4288,161 @@ class PostgresService:
         if resolution_action is not None and resolution_action not in ACTIONS:
             raise ValueError(f"resolution_action {resolution_action!r} must be one of {ACTIONS}")
         async with get_session() as session:
+            review_values: dict[str, Any] = {}
+            if review_status == "resolved":
+                lookup = select(MemoryConflict).where(
+                    MemoryConflict.id == conflict_id,
+                    MemoryConflict.tenant_id == tenant_id,
+                    MemoryConflict.review_status == "pending",
+                )
+                proposal = (await session.execute(lookup)).scalar_one_or_none()
+                if proposal is None:
+                    return False
+                pair_ids = {proposal.new_memory_id, proposal.old_memory_id}
+                # Parents first, globally ordered: deletion takes the same
+                # parent-before-conflict order before cascading to this record.
+                pair = list(
+                    (await session.execute(_ordered_memory_lock_select(list(pair_ids), tenant_id)))
+                    .scalars()
+                    .all()
+                )
+                conflict = (
+                    await session.execute(lookup.with_for_update().execution_options(populate_existing=True))
+                ).scalar_one_or_none()
+                if conflict is None:
+                    return False
+                if (
+                    len(pair_ids) != 2
+                    or len(pair) != 2
+                    or pair_ids != {conflict.new_memory_id, conflict.old_memory_id}
+                    or await session.scalar(select(_tenant_suppressed(tenant_id)))
+                ):
+                    raise ConflictReviewConflictError("Conflict pair is unavailable or changed")
+                chosen = resolution_action if resolution_action is not None else conflict.action
+                if chosen not in {"replace", "supersede", "mark_disputed", "no_op"}:
+                    raise ValueError(
+                        "This action requires additional resolution input; review remains pending"
+                    )
+                resolution_action = chosen
+                live = {"active", "pending", "confirmed"}
+                if any(row.status not in live | set(CONTRADICTED_STATUSES) for row in pair):
+                    raise ConflictReviewConflictError("Conflict pair is unavailable or changed")
+                left, right = pair
+                for row, other in ((left, right), (right, left)):
+                    if row.supersedes_id not in (None, other.id):
+                        raise ConflictReviewConflictError("Conflict chain has changed")
+                holder = await session.scalar(
+                    select(Memory.id)
+                    .where(
+                        Memory.tenant_id == tenant_id,
+                        Memory.deleted_at.is_(None),
+                        Memory.id.not_in(pair_ids),
+                        Memory.supersedes_id.in_(pair_ids),
+                    )
+                    .limit(1)
+                )
+                if holder is not None:
+                    raise ConflictReviewConflictError("Another chain still holds this pair")
+                others = (
+                    (
+                        await session.execute(
+                            select(MemoryConflict).where(
+                                MemoryConflict.tenant_id == tenant_id,
+                                MemoryConflict.id != conflict_id,
+                                MemoryConflict.review_status != "dismissed",
+                                or_(
+                                    MemoryConflict.new_memory_id.in_(pair_ids),
+                                    MemoryConflict.old_memory_id.in_(pair_ids),
+                                ),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                for other_record in others:
+                    if other_record.metadata_ is not None and not isinstance(other_record.metadata_, dict):
+                        raise ConflictReviewConflictError("Conflict provenance is unavailable")
+                    extra = other_record.metadata_ or {}
+                    applied = extra.get("effect_applied") is not False
+                    if (
+                        other_record.review_status == "resolved"
+                        and type(extra.get("review_effect_applied")) is bool
+                    ):
+                        applied = extra["review_effect_applied"]
+                    if applied:
+                        raise ConflictReviewConflictError("Another verdict still holds this pair")
+                # Detection's direction: creation time, then UUID for a tie or
+                # missing time. The triggering id can itself be the older one.
+                if (
+                    left.created_at is not None
+                    and right.created_at is not None
+                    and left.created_at != right.created_at
+                ):
+                    loser, winner = (left, right) if left.created_at < right.created_at else (right, left)
+                else:
+                    loser, winner = (left, right) if str(left.id) < str(right.id) else (right, left)
+                if chosen != "mark_disputed" and winner.status not in live:
+                    raise ConflictReviewConflictError("The winning memory has changed state")
+                if conflict.metadata_ is not None and not isinstance(conflict.metadata_, dict):
+                    raise ConflictReviewConflictError("Conflict provenance is unavailable")
+                metadata = dict(conflict.metadata_ or {})
+                if (
+                    chosen == "no_op"
+                    and loser.status in CONTRADICTED_STATUSES
+                    and (
+                        metadata.get("effect_applied") is False
+                        or (
+                            loser.status_changed_at is not None
+                            and conflict.created_at is not None
+                            and loser.status_changed_at > conflict.created_at
+                        )
+                    )
+                ):
+                    raise ConflictReviewConflictError("The retired memory has changed state")
+                for row in pair:
+                    edge: UUID | None
+                    if chosen == "mark_disputed":
+                        status, edge = "conflicted", None
+                    elif chosen in {"replace", "supersede"}:
+                        status = (
+                            winner.status
+                            if row.id == winner.id
+                            else ("conflicted" if chosen == "replace" else "outdated")
+                        )
+                        edge = loser.id if row.id == winner.id else None
+                    else:
+                        status = "active" if row.status in CONTRADICTED_STATUSES else row.status
+                        edge = None
+                    values: dict[str, Any] = {"status": status, "supersedes_id": edge}
+                    if status != row.status:
+                        values["status_changed_at"] = datetime.now(UTC)
+                    if (status != row.status or status == "conflicted") and (
+                        verification := verification_on_status_change(status)
+                    ) is not None:
+                        values["verification_status"] = verification
+                    changed = await session.execute(
+                        sql_update(Memory)
+                        .where(
+                            Memory.id == row.id,
+                            Memory.tenant_id == tenant_id,
+                            Memory.deleted_at.is_(None),
+                            Memory.status == row.status,
+                            Memory.supersedes_id.is_(None)
+                            if row.supersedes_id is None
+                            else Memory.supersedes_id == row.supersedes_id,
+                        )
+                        .values(**values)
+                    )
+                    if (changed.rowcount or 0) != 1:  # type: ignore[attr-defined]
+                        raise ConflictReviewConflictError("Conflict pair changed during review")
+                # Preserve detector provenance; record the human effect apart.
+                metadata.update(
+                    review_effect_applied=chosen != "no_op",
+                    review_winner_id=str(winner.id),
+                    review_loser_id=str(loser.id),
+                )
+                review_values["metadata_"] = metadata
             stmt = (
                 sql_update(MemoryConflict)
                 .where(
@@ -4297,9 +4456,12 @@ class PostgresService:
                     resolution_note=resolution_note,
                     resolved_by=resolved_by,
                     resolved_at=func.now(),
+                    **review_values,
                 )
             )
             result = await session.execute(stmt)
+            if review_status == "resolved" and not result.rowcount:  # type: ignore[attr-defined]
+                raise ConflictReviewConflictError("Conflict was reviewed concurrently")
             await session.commit()
             # ``rowcount`` lives on CursorResult; the async ``execute`` is typed
             # as Result. Same ignore the sibling CAS updates in this file use.

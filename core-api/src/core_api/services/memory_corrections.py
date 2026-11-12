@@ -167,22 +167,39 @@ async def _conflict_corrected(
 
         sc = get_storage_client()
         old_id, new_id = str(conflict["old_memory_id"]), str(conflict["new_memory_id"])
+        metadata = conflict.get("metadata_") or {}
+        committed_action = resolution_action or conflict.get("resolution_action")
+        if review_status == "resolved":
+            loser, winner = metadata.get("review_loser_id"), metadata.get("review_winner_id")
+            if isinstance(loser, str) and isinstance(winner, str) and {loser, winner} == {old_id, new_id}:
+                old_id, new_id = loser, winner
         old = await sc.get_memory(old_id, tenant_id, read=False) or {"id": old_id}
         new = await sc.get_memory(new_id, tenant_id, read=False) or {"id": new_id}
-        # The event names the pair's old memory: resolved, it is the one the
-        # verdict corrected; dismissed, the one detection had wrongly retired
-        # and the dismissal restores. The other is ``related_memory_id``.
+        # Resolved reviews name the committed loser, including flipped trigger
+        # order; dismissals retain their existing direction. Replacement text
+        # belongs only to a verdict that selected a surviving proposition.
         on_memory_corrected(
             tenant_id=tenant_id,
             memory=old,
             kind="conflict_resolve",
             agent_id=agent_id,
             old_summary=old.get("content"),
-            new_summary=new.get("content") if review_status == "resolved" else None,
+            new_summary=(
+                new.get("content")
+                if review_status == "resolved"
+                and (
+                    committed_action in {"replace", "supersede"}
+                    # Legacy hook callers omitted an action before effects
+                    # were committed explicitly. Preserve their summaries;
+                    # marked reviews require a known replacement action.
+                    or (committed_action is None and "review_effect_applied" not in metadata)
+                )
+                else None
+            ),
             detail={
                 "conflict_id": str(conflict.get("id")),
                 "review_status": review_status,
-                "resolution_action": resolution_action,
+                "resolution_action": committed_action,
                 "related_memory_id": new_id,
             },
         )
