@@ -49,6 +49,10 @@ def test_bench_regression_phrasings_trigger(q: str) -> None:
         "When did we switch from Slack to Teams?",
         "Originally the deploy cadence was weekly, right?",
         "The project was renamed from Atlas — what were the milestones?",
+        # Fleet agents asking for the value a correction replaced:
+        "Before it was last changed: which SSO provider do we use?",
+        "Which region did checkout use before this got updated?",
+        "What did the runbook say before the last update?",
     ],
 )
 def test_history_phrasings_trigger(q: str) -> None:
@@ -65,6 +69,8 @@ def test_history_phrasings_trigger(q: str) -> None:
         "Summarize the team's deployment process.",
         "What's the coffee-to-water ratio I use?",
         "recommend a show for me to watch tonight",
+        "Check the primary region before the update ships.",
+        "Snapshot the config before it changes.",
     ],
 )
 def test_present_state_queries_stay_quiet(q: str) -> None:

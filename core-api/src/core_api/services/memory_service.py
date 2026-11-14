@@ -6033,6 +6033,13 @@ def _extract_history_hint(query: str) -> bool:
                 r"(started|joined|began|moved|arrived|signed|switched)\b",
                 r"\b(changed|switched|moved|upgraded|downgraded|renamed) from\b",
                 r"\bbefore (i|we|you|he|she|they|the (switch|change|move))\b",
+                # "Before it was last changed: ...", "before this got updated" —
+                # past tense only, so "before it changes" stays a present query.
+                r"\bbefore (it|this|that)( was| got| had been)?( last| recently)? "
+                r"(changed|updated|replaced|switched|edited|corrected)\b",
+                # "before the last update" — the qualifier makes it past; a bare
+                # "before the update ships" stays quiet.
+                r"\bbefore the (last|latest|most recent|recent) (change|update|switch|migration)\b",
                 r"\b(old|former|previous|original|earlier) "
                 r"(value|address|role|title|team|setup|setting|config|plan|ratio|schedule|version)\b",
             )
