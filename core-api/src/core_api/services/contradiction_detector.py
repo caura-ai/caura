@@ -2792,6 +2792,32 @@ def _rdf_pass_would_mark(new_memory: dict, other: dict, *, other_is_loser: bool)
     return other_value is not None and _rdf_object_key(value) != _rdf_object_key(other_value)
 
 
+def _entities_settle_subject(new_entities: list[dict], old_entities: list[dict]) -> bool:
+    """Whether the resolved rows tell the retraction judge if the two subjects
+    are the same thing.
+
+    They do in two cases. Both statements link the SAME subject row: one entity,
+    whatever the wording. Or every subject row is a person: two person rows are
+    two people, which is the same-name case (two "Priya") the entity-aware
+    prompt exists for.
+
+    Otherwise they do not. Extraction files one thing under two rows all the
+    time — a thing and one of its attributes ("support team" / "support
+    hours"), a name and its abbreviation, a possessive, even the same name in
+    another case — so two different non-person rows are not two different
+    things. Measured on the fleet benchmark's 501 pairs (2026-11-15): of the
+    content-route verdicts the entity-aware judge cleared on differing rows,
+    32 were real corrections and 8 were not.
+    """
+    new_subjects = [e for e in new_entities if e.get("role") == "subject"]
+    old_subjects = [e for e in old_entities if e.get("role") == "subject"]
+    if not new_subjects or not old_subjects:
+        return False
+    if {e.get("entity_id") for e in new_subjects} & {e.get("entity_id") for e in old_subjects}:
+        return True
+    return all(e.get("entity_type") == "person" for e in (*new_subjects, *old_subjects))
+
+
 async def _retraction_judge_clears(
     sc, winner: dict, loser: dict, tenant_config, *, tenant_id: str, memory_id, candidate_id
 ) -> float | None:
@@ -2873,9 +2899,23 @@ async def _retraction_judge_clears(
     # and a 10 s cut here cancelled a hanging primary before its retry or the
     # fallback provider could run.
     try:
-        verdict, confidence = await _llm_entity_aware_contradiction_check(
-            new_content, old_content, new_entities, old_entities, tenant_config
-        )
+        if _entities_settle_subject(new_entities, old_entities):
+            verdict, confidence = await _llm_entity_aware_contradiction_check(
+                new_content, old_content, new_entities, old_entities, tenant_config
+            )
+        else:
+            # The rows say nothing about whether the two subjects are one
+            # thing, and the entity-aware prompt would read "different
+            # entity_id" as "different subject" and clear the verdict on that
+            # alone. Judge the two statements themselves instead: the same one
+            # call, with the single-pair prompt.
+            logger.info(
+                "PATH_C_RETRACTION entities_do_not_settle_subject memory=%s candidate=%s "
+                "(judging the statements)",
+                memory_id,
+                candidate_id,
+            )
+            verdict, confidence = await _llm_contradiction_check(new_content, old_content, tenant_config)
     except BackgroundWorkDeferred:
         raise
     except Exception as e:

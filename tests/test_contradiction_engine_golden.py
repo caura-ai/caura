@@ -204,10 +204,12 @@ def _sc_for_path_c(
     )
 
     async def get_entity(eid: str, tenant_id: str) -> dict | None:
+        # Person rows, so the entity-aware judge is the one that runs (see
+        # ``_entities_settle_subject``).
         if eid == ent_new:
-            return {"id": eid, "canonical_name": "Haifa", "entity_type": "place"}
+            return {"id": eid, "canonical_name": "Dana Levi", "entity_type": "person"}
         if eid == ent_cand:
-            return {"id": eid, "canonical_name": "Tel Aviv", "entity_type": "place"}
+            return {"id": eid, "canonical_name": "Dana Cohen", "entity_type": "person"}
         return None
 
     sc.get_entity = AsyncMock(side_effect=get_entity)
