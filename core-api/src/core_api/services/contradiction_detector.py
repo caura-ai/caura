@@ -1848,44 +1848,95 @@ NEW statement:
 Candidate statements (judge each, by index):
 {candidates_block}
 
-For EACH candidate index decide, applying the rules in order:
-1. same_subject (bool): true ONLY when the candidate and the NEW statement refer
-   to the SAME real-world entity (exact name / known alias / role+name in
-   context / unambiguously resolved pronoun). false for two people sharing a
-   name, different companies/products/projects/teams, or any uncertainty.
+For EACH candidate index answer four questions, in this order:
+A. SAME THING? Do the candidate and the NEW statement describe the same
+   real-world thing? Yes for the same named entity (exact name, known alias
+   or abbreviation, role+name in context, unambiguously resolved pronoun),
+   and for a descriptive phrase and its abbreviation or paraphrase ("the
+   applicant tracking system used by recruiting" and "recruiting's ATS").
+   No when the two name different parts, variants, environments, regions,
+   audiences, time windows or categories of one thing ("the web pipeline" /
+   "the mobile pipeline"; "in staging" / "in production"; "draft A" /
+   "draft B"; "on weekdays" / "on weekends"; "billing contact" / "technical
+   contact"), for two people sharing a name, for different
+   companies/products/projects/teams, and under real uncertainty. No as
+   well when either statement is conditional or hypothetical ("if ...",
+   "would", "could", "might"): it describes a possibility, not the thing as
+   it is.
    The subject is what a statement is about, not the person or agent who
    recorded, changed or confirmed it.
-2. non_conflict_reason (exactly one): "none"; "temporal_supersession"
-   (BOTH statements are records of PAST events that stay true as history —
-   "hired in 2020" / "promoted in 2023"; NOT for current-state claims where
-   the newer statement changes the state, e.g. "lives in X" vs "lives in Y"
-   or "runs at 01:00" vs "runs at 03:00" — a state change is an update and
-   updates ARE contradictions, reason "none");
-   "list_valued_predicate" (a multi-valued predicate or two different attributes
-   that both hold); "refinement" (one is a more specific version of the other);
-   "scope_mismatch" (same subject under different implicit qualifiers — time
-   window / whole vs part / context; both hold); "same_name_distinct_subject"
-   (same surface name, plausibly different instances); "conditional_unrealized"
-   (one is hypothetical/irrealis); "event_restatement" (same event restated).
-3. contradicts (bool): true ONLY when same_subject is true AND
-   non_conflict_reason is "none" AND the two assert mutually exclusive states in
-   the same time frame. Updates / corrections about the same subject ARE
-   contradictions ("X lives in Tel Aviv" vs "X lives in Haifa").
+B. SAME SLOT? Do both give a value for the same single-valued attribute of
+   that thing (its owner, provider, tool, location, schedule, limit, duration,
+   version, status, or whether something is allowed)? A slot includes what
+   its value applies to: "the price of the basic plan" and "the price of
+   the premium plan" are two slots, as are "the timeout for uploads" and
+   "the timeout for downloads", "the owner" and "the deputy owner", "this
+   year's budget" and "last year's budget", a goal and a measured result.
+   No for two different attributes (where logs are stored / how long they
+   are kept), and for an attribute that naturally holds several values at
+   once: languages spoken or supported, managers in a matrix organisation,
+   parallel projects, a further item ("also", "in addition", "a second ...").
+C. DIFFERENT VALUE? Is the NEW statement's value different from the
+   candidate's: another value, or a negation ("no longer", "not ... anymore")?
+   Wording such as "now", "moved from X to Y", "changed", "switched", "raised
+   to", "extended to", "instead of" marks an update, and an update of the
+   same slot IS a contradiction.
+D. CAN BOTH HOLD? Name the reason both statements can be true at once, or
+   "none" when the NEW value replaces the candidate's:
+   - "list_valued_predicate": the attribute naturally holds several values
+     at once (languages spoken or supported, managers in a matrix
+     organisation, parallel projects, a further item);
+   - "refinement": one value is a more specific version of the other ("Q3" /
+     "September 15"; "Europe" / "Munich");
+   - "scope_mismatch": the same subject under different implicit qualifiers
+     (whole / part, weekdays / weekends, separate past periods such as "from
+     2010 to 2014" / "from 2015 to 2018");
+   - "same_name_distinct_subject": the same surface name for plausibly
+     different instances (two runs of "the nightly build", two people called
+     "John" with nothing to tell them apart);
+   - "conditional_unrealized": either statement is conditional or
+     hypothetical ("if", "would", "could", "might");
+   - "event_restatement": the same event or value restated in another tense,
+     unit or synonym ("is acquiring" / "acquired", "was hired" / "joined");
+   - "temporal_supersession": BOTH statements are records of past events that
+     stay true as history ("hired in 2020" / "promoted in 2023"). NOT for a
+     current state the NEW statement changes ("status: planned" / "status:
+     shipped", "runs at 01:00" / "runs at 03:00"): that is an update, reason
+     "none".
+A candidate contradicts the NEW statement exactly when A, B and C are all yes
+and D is "none".
 
-Reply with ONLY a JSON object, no prose, no markdown fences, with exactly two
-keys. EVERY candidate index from 0 to N-1 must appear in exactly one of them:
-- "clean": array of every candidate index (integers) where contradicts is false.
-- "hits": object mapping each contradicting candidate index (as a STRING) to
-  its judgment with the three fields above.
-{{"clean": [1, 2, 4], "hits": {{"0": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true}}, "3": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true}}}}}}
-Calibration: in most batches FEW OR NO candidates contradict — an empty "hits"
-is the normal answer, not a failure to find something. Apply the three rules to
-every candidate independently, exactly as if you were judging that one pair on
-its own. A candidate goes in "hits" ONLY when all three rules pass decisively;
-uncertainty, partial overlap, related-but-compatible claims, or any applicable
-non_conflict_reason put it in "clean". Never add a hit because a batch "should"
-contain one. If NO candidate contradicts, "hits" is {{}} and "clean" lists every
-index.
+Reply with ONLY a JSON object, no prose, no markdown fences, with exactly one
+key, "checks": an object mapping EVERY candidate index from 0 to N-1 (as a
+STRING) to one of two values:
+- the string "-" when the candidate is plainly about something else;
+- otherwise an object with these keys, in this order:
+  "things": the candidate's thing, then the NEW statement's thing, as short
+     noun phrases, each with EVERY qualifier it carries (environment, region,
+     variant, audience, category, period), as "<candidate's> / <NEW's>";
+  "same_thing": your answer to A (true/false). false whenever the two things
+     differ in any qualifier;
+  "slots": the attribute each statement gives a value for, with what that
+     value applies to, as "<candidate's> / <NEW's>";
+  "one_value_only": true when the thing can have only ONE value in this slot
+     at a time (one owner, one address, one schedule, one limit); false when
+     it can have several (languages, skills, supported platforms, members,
+     features, managers in a matrix);
+  "same_slot": your answer to B. false when same_thing is false, whenever
+     the two slots differ in what they apply to, and when one_value_only is
+     false;
+  "different_value": your answer to C. false when same_slot is false;
+  "non_conflict_reason": your answer to D, one of the names above;
+  "change": "<candidate's value> -> <NEW statement's value>", or "" when
+     nothing is replaced.
+Shape, for a batch where candidate <i> is an update and <k> a look-alike:
+{{"checks": {{"<i>": {{"things": "<thing> / <same thing>", "same_thing": true, "slots": "<attribute> / <same attribute>", "one_value_only": true, "same_slot": true, "different_value": true, "non_conflict_reason": "none", "change": "<old value> -> <new value>"}}, "<j>": "-", "<k>": {{"things": "<thing, qualifier 1> / <thing, qualifier 2>", "same_thing": false, "slots": "", "one_value_only": false, "same_slot": false, "different_value": false, "non_conflict_reason": "none", "change": ""}}}}}}
+Calibration: judge every candidate on its own, exactly as if it were the only
+one. Most candidates are merely related and fail a question, so a batch with
+no contradiction is common and is not a failure to find something; never
+pass a candidate because a batch "should" contain one. But a candidate that
+passes every question must be reported as such: a stale value left unmarked is as
+wrong as a true fact marked.
 """
 )
 
@@ -1911,6 +1962,34 @@ def _expand_sparse_batch(obj: object, n: int) -> list[dict]:
     """
     if not isinstance(obj, dict):
         return [{"contradicts": False} for _ in range(n)]
+
+    checks = obj.get("checks")
+    if isinstance(checks, dict):
+        # The current contract: one entry per candidate, each verdict stated
+        # once. A candidate contradicts only when all three answers are the
+        # literal ``True``; "-" (about something else), a missing index and any
+        # malformed entry expand to the safe default.
+        out = []
+        for i in range(n):
+            entry = checks.get(str(i))
+            if entry is None:
+                entry = checks.get(i)  # tolerate int keys
+            passed = isinstance(entry, dict) and all(
+                entry.get(key) is True for key in ("same_thing", "same_slot", "different_value")
+            )
+            # The reason is handed on as written, so ``_judge_contradiction``
+            # applies the same veto set (and the same A63 exception) as it does
+            # to a single-pair reply.
+            out.append(
+                {
+                    "same_subject": True,
+                    "non_conflict_reason": entry.get("non_conflict_reason", "none"),
+                    "contradicts": True,
+                }
+                if passed
+                else {"contradicts": False}
+            )
+        return out
 
     if "hits" in obj or "clean" in obj:
         hits_raw = obj.get("hits")

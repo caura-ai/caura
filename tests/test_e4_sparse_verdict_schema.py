@@ -122,14 +122,74 @@ def test_gate2_vetoes_non_conflict_reason_hit() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "prompt", [BATCH_CONTRADICTION_PROMPT, BATCH_ENTITY_AWARE_CONTRADICTION_PROMPT]
-)
-def test_prompts_ask_for_sparse_reply(prompt: str) -> None:
+def test_entity_aware_prompt_asks_for_sparse_reply() -> None:
+    prompt = BATCH_ENTITY_AWARE_CONTRADICTION_PROMPT
     assert '"clean"' in prompt
     assert '"hits"' in prompt
     assert "relationship" not in prompt
     assert "diagnosis" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# The content judge's "checks" contract: every verdict stated once
+# ---------------------------------------------------------------------------
+
+PASS = {
+    "things": "the gateway / the gateway",
+    "same_thing": True,
+    "slots": "region / region",
+    "one_value_only": True,
+    "same_slot": True,
+    "different_value": True,
+    "non_conflict_reason": "none",
+    "change": "eu-west -> us-east",
+}
+
+
+def test_content_prompt_asks_for_checks() -> None:
+    prompt = BATCH_CONTRADICTION_PROMPT
+    assert '"checks"' in prompt
+    for key in ("same_thing", "same_slot", "different_value", "non_conflict_reason"):
+        assert f'"{key}"' in prompt
+    assert '"hits"' not in prompt
+    assert "relationship" not in prompt
+    assert "diagnosis" not in prompt
+
+
+def test_checks_expand_to_one_judgment_per_candidate() -> None:
+    raws = _expand_sparse_batch(
+        {"checks": {"0": "-", "1": PASS, "2": {**PASS, "same_slot": False}}}, 3
+    )
+    assert raws[0] == {"contradicts": False}
+    assert raws[1] == {
+        "same_subject": True,
+        "non_conflict_reason": "none",
+        "contradicts": True,
+    }
+    assert raws[2] == {"contradicts": False}
+    assert _judge_contradiction(raws[1]) == (True, 0.90)
+
+
+def test_checks_need_every_answer_to_be_literally_true() -> None:
+    for key in ("same_thing", "same_slot", "different_value"):
+        for bad in (False, "true", 1, None):
+            raws = _expand_sparse_batch({"checks": {"0": {**PASS, key: bad}}}, 1)
+            assert raws == [{"contradicts": False}], (key, bad)
+
+
+def test_checks_missing_or_malformed_entries_are_clean() -> None:
+    raws = _expand_sparse_batch({"checks": {"1": "junk", 2: PASS}}, 4)
+    assert raws[0] == raws[1] == raws[3] == {"contradicts": False}
+    assert raws[2]["contradicts"] is True  # int keys tolerated
+
+
+def test_checks_reason_still_vetoes_through_the_shared_gate() -> None:
+    raws = _expand_sparse_batch(
+        {"checks": {"0": {**PASS, "non_conflict_reason": "refinement"}}}, 1
+    )
+    assert raws[0]["non_conflict_reason"] == "refinement"
+    verdict, _ = _judge_contradiction(raws[0])
+    assert verdict is False
 
 
 # ---------------------------------------------------------------------------
