@@ -2381,10 +2381,13 @@ class CoreStorageClient:
         tenant_id: str,
         fleet_id: str | None = None,
         reader: dict | None = None,
+        limit: int | None = None,
     ) -> dict:
         params: dict[str, Any] = {"tenant_id": tenant_id, **_entity_reader_params(reader)}
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
+        if limit is not None:
+            params["limit"] = limit
         return await self._get("/entities/full-graph", **params) or {}
 
     async def list_entities(

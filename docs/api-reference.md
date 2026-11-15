@@ -56,7 +56,7 @@ refused with `AGENT_IDENTITY_MISMATCH`. The same holds over MCP.
 | `/entities/upsert` | POST | Create or update entity |
 | `/entities/{id}` | GET | Entity detail with relations and linked memories |
 | `/relations/upsert` | POST | Create or update relation |
-| `/graph` | GET | Knowledge graph (entities + relations). Capped at `GRAPH_MAX_ENTITIES` entities (default 10,000) and `GRAPH_MAX_RELATIONS` relations (default 50,000): past a cap the newest entities and the heaviest relations among them come back, with `truncated: true` |
+| `/graph` | GET | Knowledge graph (entities + relations). Capped at `GRAPH_MAX_ENTITIES` entities (default 10,000) and `GRAPH_MAX_RELATIONS` relations (default 50,000): past a cap the newest entities and the heaviest relations among them come back, with `truncated: true`. `limit` lowers the entity cap for one call, never above it |
 
 </details>
 

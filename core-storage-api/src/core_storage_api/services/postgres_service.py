@@ -11957,6 +11957,7 @@ class PostgresService:
         caller_agent_id: str | None = None,
         caller_tenant_id: str | None = None,
         caller_fleet_ids: Sequence[str] | None = None,
+        limit: int | None = None,
     ) -> tuple[list[Entity], list[Relation], bool]:
         """Return a tenant's entities and relations (optionally by fleet), and whether
         either was cut short.
@@ -11976,7 +11977,12 @@ class PostgresService:
         relations among them, come back and the third value is ``True``. The edge
         filter runs in SQL, so the relation cap counts only edges between kept
         nodes; the node ids travel as one array parameter, however many there are.
+
+        ``limit`` lowers the entity cap for one read and never raises it, so a
+        caller drawing fifty nodes does not load ten thousand. Past it the newest
+        come back and the third value is ``True``, as past the cap.
         """
+        entity_cap = GRAPH_MAX_ENTITIES if limit is None else min(limit, GRAPH_MAX_ENTITIES)
         async with get_session() as session:
             entity_stmt = (
                 select(Entity)
@@ -12001,10 +12007,10 @@ class PostgresService:
             else:
                 entity_stmt = entity_stmt.where(_entity_visible_to_tenant(tenant_id))
             entity_stmt = entity_stmt.order_by(Entity.created_at.desc(), Entity.id)
-            entity_stmt = entity_stmt.limit(GRAPH_MAX_ENTITIES + 1)
+            entity_stmt = entity_stmt.limit(entity_cap + 1)
             entities = list((await session.execute(entity_stmt)).scalars().all())
-            truncated = len(entities) > GRAPH_MAX_ENTITIES
-            entities = entities[:GRAPH_MAX_ENTITIES]
+            truncated = len(entities) > entity_cap
+            entities = entities[:entity_cap]
 
             node_ids = bindparam(
                 "node_ids", [e.id for e in entities], type_=postgresql.ARRAY(postgresql.UUID(as_uuid=True))

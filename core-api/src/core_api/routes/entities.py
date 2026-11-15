@@ -146,13 +146,20 @@ async def list_entities(
 async def get_graph(
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),
+    limit: int | None = Query(
+        default=None,
+        ge=1,
+        description="At most this many entities, the newest. Never more than the server's cap.",
+    ),
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Return the knowledge graph (entities + relations) for a tenant.
 
     Capped (L-176): past ``GRAPH_MAX_ENTITIES`` entities or
     ``GRAPH_MAX_RELATIONS`` relations, the newest entities and the heaviest
-    relations among them come back and ``truncated`` is true.
+    relations among them come back and ``truncated`` is true. ``limit`` lowers
+    the entity cap for this call: storage reads that many and no more, rather
+    than the whole graph.
 
     Matches the read-widening contract used by memory reads — cross-tenant
     credentials may inspect the graph of any tenant in
@@ -170,7 +177,7 @@ async def get_graph(
     # Nodes and ``memory_count`` follow the same agent reader scope as
     # ``GET /entities`` (see there); storage also drops edges to hidden nodes.
     reader = await entity_reader_scope(tenant_id, auth.agent_id, auth.tenant_id)
-    graph = await sc.get_full_graph(tenant_id, fleet_id, reader=reader)
+    graph = await sc.get_full_graph(tenant_id, fleet_id, reader=reader, limit=limit)
 
     entities = graph.get("entities", [])
     relations = graph.get("relations", [])
