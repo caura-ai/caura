@@ -141,6 +141,12 @@ class ToolSpec:
     too. The default surface, ``/tool-descriptions`` and the plugin manifest
     always carry ``description``."""
 
+    directory_read_via: str | None = None
+    """For a tool that reads when called with no fields: the read-only tool the
+    directory surface serves that form through. There this tool is write-only,
+    and a call that sets nothing but ``agent_id`` is refused naming this one.
+    The default surface keeps the read form."""
+
     delegate: str | None = None
     """For a tool that narrows another one: the tool whose handler it calls.
     Its ops must be a subset of the delegate's, and its handler forwards to the

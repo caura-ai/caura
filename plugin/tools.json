@@ -1085,6 +1085,7 @@
       "NOT_FOUND",
       "PLAN_LIMIT_READ_ONLY",
       "REQUEST_BUDGET_EXCEEDED",
+      "TOOL_NOT_ON_SURFACE",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",

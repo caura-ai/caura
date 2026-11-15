@@ -55,6 +55,8 @@ EXPECTED_MCP_ONLY = {
     "caura_doc_read",
     "caura_doc_write",
     "caura_doc_delete",
+    # caura_tune's read form, split out on the directory surface.
+    "caura_tune_get",
 }
 
 EXPECTED_PLACEHOLDERS: set[str] = set()

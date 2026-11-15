@@ -44,8 +44,9 @@ its own entry point below:
    (``admission_codes``).
 8. Surface. Before admission, ``call_tool`` refuses a tool the connection's
    tool surface does not list (``_refuse_off_surface``), answering
-   ``TOOL_NOT_ON_SURFACE``. Only a tool missing from some surface can be
-   refused that way, so path 5 leaves that helper out too, and its codes go to
+   ``TOOL_NOT_ON_SURFACE``. Only a tool missing from some surface, or one whose
+   read form the directory surface refuses (``caura_tune``), can be refused
+   that way, so path 5 leaves that helper out too, and its codes go to
    those tools alone (``surface_codes``).
 
 Path 6 is a whole-program walk, so where it stops matters as much as what it
@@ -680,7 +681,11 @@ def surface_codes(function_name: str) -> frozenset[str]:
     from core_api.tools import ALL_SURFACES, REGISTRY
 
     spec = REGISTRY.get(function_name)
-    if spec is None or set(spec.surfaces) == set(ALL_SURFACES):
+    if spec is None:
+        return frozenset()
+    # Also a tool every surface lists whose read form one surface refuses
+    # (``ToolSpec.directory_read_via``: caura_tune).
+    if set(spec.surfaces) == set(ALL_SURFACES) and not spec.directory_read_via:
         return frozenset()
     return emitted_codes(_SURFACE_GATE)
 

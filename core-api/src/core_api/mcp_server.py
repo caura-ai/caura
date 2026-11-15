@@ -1221,19 +1221,55 @@ def _get_tool_surface() -> str:
     return _tool_surface_var.get(_DEFAULT_SURFACE)
 
 
-def _refuse_off_surface(tool: str) -> CallToolResult | None:
-    """Refuse a registered tool this connection's surface does not list.
+# Arguments that do not make a call change anything: who it is attributed to.
+_READ_FORM_IGNORED_ARGS = frozenset({"agent_id"})
+
+
+def _is_read_form(arguments: object) -> bool:
+    """True when a call sets nothing but its attribution — the read form of a
+    tool that reads when given no fields (``caura_tune``). Unset means absent,
+    null, false or empty, as the handler treats them."""
+    args = arguments if isinstance(arguments, dict) else {}
+    return all(_is_unset(value) for key, value in args.items() if key not in _READ_FORM_IGNORED_ARGS)
+
+
+def _is_unset(value: object) -> bool:
+    # By identity and type, not ``in (None, False, ...)``: ``0 == False``, and a
+    # knob set to 0 is a write the handler validates, not an absent field.
+    if value is None or value is False:
+        return True
+    return isinstance(value, str | list | dict) and not value
+
+
+def _refuse_off_surface(tool: str, arguments: object = None) -> CallToolResult | None:
+    """Refuse a registered tool this connection's surface does not list, or
+    the read form of a tool the directory surface serves as write-only.
 
     A tool is callable exactly where ``tools/list`` names it, so a client
     holding a stale or hand-written list gets a refusal that names the tool to
     use instead, rather than a call that works on one connection and not the
     other for no visible reason. A name the registry does not hold is left to
     the SDK's unknown-tool error.
+
+    ``ToolSpec.directory_read_via`` covers the one tool that is a read when
+    called with no fields (``caura_tune``): on the directory surface that form
+    belongs to the named read-only tool, so the tool itself only writes.
     """
     from core_api.tools import REGISTRY
 
     spec = REGISTRY.get(tool)
     surface = _get_tool_surface()
+    if (
+        spec is not None
+        and surface == _DIRECTORY_SURFACE
+        and spec.directory_read_via
+        and _is_read_form(arguments)
+    ):
+        message = (
+            f"{tool} only changes settings on this connection, and this call sets nothing. "
+            f"Use {spec.directory_read_via} to read the current values."
+        )
+        return _as_error_result(_error_response(TOOL_NOT_ON_SURFACE, message, tool=tool, surface=surface))
     if spec is None or surface in spec.surfaces:
         return None
     if surface == _DIRECTORY_SURFACE:
@@ -1249,7 +1285,8 @@ def _refuse_off_surface(tool: str) -> CallToolResult | None:
         )
     else:
         ops = "|".join(op.name for op in spec.ops)
-        hint = f" Use {spec.delegate} op={ops} instead." if spec.delegate else ""
+        target = f"{spec.delegate} op={ops}" if ops else f"{spec.delegate}"
+        hint = f" Use {target} instead." if spec.delegate else ""
         message = f"{tool} is not available on this connection.{hint}"
     return _as_error_result(_error_response(TOOL_NOT_ON_SURFACE, message, tool=tool, surface=surface))
 
@@ -1347,7 +1384,7 @@ class _InstrumentedMCPServer(MCPServer):
                 try:
                     # Before admission: a call refused for its surface ran
                     # nothing and is charged nothing.
-                    if (off_surface := _refuse_off_surface(tool_name)) is not None:
+                    if (off_surface := _refuse_off_surface(tool_name, arguments)) is not None:
                         status = "error"
                         return off_surface
                     async with asyncio.timeout(budget), _admitted(tool_name, arguments) as refusal:
@@ -4429,6 +4466,20 @@ async def caura_doc_delete(
 ) -> ToolReply:
     """``caura_doc`` op=delete."""
     return await caura_doc(op="delete", collection=collection, doc_id=doc_id, agent_id=agent_id)
+
+
+async def caura_tune_get(
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
+) -> ToolReply:
+    """``caura_tune``'s read form: the agent's current retrieval profile.
+
+    ``caura_tune`` called with no fields reads, which the directory surface
+    cannot list as one tool, so there it is write-only and this is the read.
+    A narrowing like the six above: it forwards to ``caura_tune`` with no
+    fields, the path REST ``GET /agents/{id}/tune`` mirrors (no write scope,
+    no agent row created).
+    """
+    return await caura_tune(agent_id=agent_id)
 
 
 async def caura_list(

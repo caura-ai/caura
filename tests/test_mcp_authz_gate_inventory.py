@@ -170,7 +170,15 @@ MUTATING_TOOLS = frozenset(
     {"caura_write", "caura_tune", "caura_evolve", "caura_insights"}
 )
 READONLY_TOOLS = frozenset(
-    {"caura_recall", "caura_list", "caura_stats", "caura_keystones", "caura_entity_get"}
+    {
+        "caura_recall",
+        "caura_list",
+        "caura_stats",
+        "caura_keystones",
+        "caura_entity_get",
+        # caura_tune's no-field read, as its own tool on the directory surface.
+        "caura_tune_get",
+    }
 )
 
 # Parameter names carrying a caller's ASSERTION about which agent it is.

@@ -65,6 +65,10 @@ NARROWINGS = {
     "caura_doc_delete",
 }
 
+# caura_tune reads when called with no fields; the directory surface serves
+# that form as its own read-only tool and caura_tune there only writes.
+READ_FORMS = {"caura_tune_get"}
+
 DEFAULT_TOOLS = {
     "caura_doc",
     "caura_entity_get",
@@ -92,6 +96,7 @@ CLASSIFICATION = {
     "caura_keystones": (True, False),
     "caura_memory_read": (True, False),
     "caura_doc_read": (True, False),
+    "caura_tune_get": (True, False),
     # A write can mark older memories outdated or conflicted (contradiction
     # detection), so it is not only additive.
     "caura_write": (False, True),
@@ -201,14 +206,14 @@ async def test_an_unknown_surface_value_is_never_stored() -> None:
 
 async def test_the_directory_surface_swaps_the_mixed_tools_for_the_narrowings() -> None:
     listed = {t.name for t in await _listed(DIRECTORY_SURFACE)}
-    assert listed == (DEFAULT_TOOLS - MIXED) | NARROWINGS
+    assert listed == (DEFAULT_TOOLS - MIXED) | NARROWINGS | READ_FORMS
 
 
 def test_specs_for_surface_agrees_with_tools_list() -> None:
     assert {s.name for s in specs_for_surface(DEFAULT_SURFACE)} == DEFAULT_TOOLS
     assert {s.name for s in specs_for_surface(DIRECTORY_SURFACE)} == (
         DEFAULT_TOOLS - MIXED
-    ) | NARROWINGS
+    ) | NARROWINGS | READ_FORMS
 
 
 def test_the_narrowings_stay_out_of_the_plugin_manifest_and_tool_descriptions() -> None:
@@ -219,9 +224,11 @@ def test_the_narrowings_stay_out_of_the_plugin_manifest_and_tool_descriptions() 
     names = {entry["name"] for entry in manifest}
     assert names == DEFAULT_TOOLS
     assert not any(
-        entry["plugin_exposed"] for entry in manifest if entry["name"] in NARROWINGS
+        entry["plugin_exposed"]
+        for entry in manifest
+        if entry["name"] in NARROWINGS | READ_FORMS
     )
-    for name in NARROWINGS:
+    for name in NARROWINGS | READ_FORMS:
         assert REGISTRY[name].plugin_exposed is False
 
 
@@ -291,7 +298,7 @@ def _body(fn) -> list[ast.stmt]:
     return body
 
 
-@pytest.mark.parametrize("name", sorted(NARROWINGS))
+@pytest.mark.parametrize("name", sorted(NARROWINGS | READ_FORMS))
 def test_a_narrowing_only_checks_op_and_forwards(name: str) -> None:
     spec = REGISTRY[name]
     delegate = REGISTRY[spec.delegate]
@@ -326,6 +333,11 @@ def test_a_narrowing_only_checks_op_and_forwards(name: str) -> None:
         assert literal == ops, (name, literal, ops)
         assert isinstance(check, ast.If) and isinstance(check.test, ast.Compare), name
         assert isinstance(check.test.ops[0], ast.NotIn), name
+        assert set(forwarded) == set(params), name
+    elif not ops:
+        # A read form (caura_tune_get) forwards its own parameters and nothing
+        # else: no fields is the delegate's read.
+        assert guard == [], name
         assert set(forwarded) == set(params), name
     else:
         # A single-op narrowing passes that op as a constant and does nothing else.
@@ -562,7 +574,7 @@ async def test_a_legacy_alias_of_a_mixed_tool_is_refused_too(surface) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", sorted(NARROWINGS))
+@pytest.mark.parametrize("name", sorted(NARROWINGS | READ_FORMS))
 async def test_a_narrowing_is_refused_on_the_default_surface(
     surface, name: str
 ) -> None:
@@ -636,7 +648,9 @@ async def test_tools_list_over_http_follows_the_gateway_header(monkeypatch) -> N
     plain_tools = {t["name"] for t in _payload(plain)["result"]["tools"]}
     directory_tools = _payload(directory)["result"]["tools"]
     assert plain_tools == DEFAULT_TOOLS
-    assert {t["name"] for t in directory_tools} == (DEFAULT_TOOLS - MIXED) | NARROWINGS
+    assert {t["name"] for t in directory_tools} == (
+        DEFAULT_TOOLS - MIXED
+    ) | NARROWINGS | READ_FORMS
     for tool in directory_tools:
         assert tool["title"] and tool["annotations"]["title"] == tool["title"], tool
         assert (
@@ -815,6 +829,93 @@ async def test_the_default_surface_serves_the_default_descriptions() -> None:
 async def test_directory_descriptions_are_served_where_set() -> None:
     by_name = {t.name: t for t in await _listed(DIRECTORY_SURFACE)}
     variants = {s.name for s in REGISTRY.values() if s.directory_description}
-    assert variants == {"caura_keystones", "caura_recall"}
+    assert variants == {"caura_keystones", "caura_recall", "caura_tune"}
     for name in variants:
         assert by_name[name].description == REGISTRY[name].directory_description
+
+
+# ---------------------------------------------------------------------------
+# 9. caura_tune: write-only on the directory surface, read via caura_tune_get
+# ---------------------------------------------------------------------------
+
+
+def test_caura_tune_names_its_directory_read_form() -> None:
+    tune, get = REGISTRY["caura_tune"], REGISTRY["caura_tune_get"]
+    assert tune.directory_read_via == "caura_tune_get"
+    assert set(tune.surfaces) == set(ALL_SURFACES)
+    assert get.delegate == "caura_tune" and get.read_only and not get.ops
+    assert get.surfaces == (DIRECTORY_SURFACE,)
+    assert get.plugin_exposed is False
+    assert get.title == "Get recall defaults"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [{}, {"agent_id": "agent-a"}, {"top_k": None, "reset": False, "reset_knobs": []}],
+)
+async def test_caura_tunes_read_form_is_refused_on_the_directory_surface(
+    surface, arguments: dict
+) -> None:
+    surface(DIRECTORY_SURFACE)
+    error = _error(await mcp_server.mcp.call_tool("caura_tune", arguments))
+    assert error["code"] == "TOOL_NOT_ON_SURFACE"
+    assert "caura_tune_get" in error["message"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"top_k": 5},
+        # 0 is a value the handler validates, not an absent field.
+        {"top_k": 0},
+        {"fts_weight": 0.0},
+        {"reset": True},
+        {"reset_knobs": ["top_k"]},
+    ],
+)
+def test_caura_tunes_write_form_passes_the_directory_surface(
+    surface, arguments: dict
+) -> None:
+    surface(DIRECTORY_SURFACE)
+    assert mcp_server._refuse_off_surface("caura_tune", arguments) is None
+
+
+@pytest.mark.parametrize("arguments", [{}, {"agent_id": "agent-a"}, {"top_k": 5}])
+def test_caura_tune_is_unchanged_on_the_default_surface(
+    surface, arguments: dict
+) -> None:
+    surface(DEFAULT_SURFACE)
+    assert mcp_server._refuse_off_surface("caura_tune", arguments) is None
+
+
+def test_every_tune_field_but_agent_id_counts_as_a_write() -> None:
+    """The read-form test reads the arguments the call names; it holds while
+    every ``caura_tune`` parameter other than ``agent_id`` is a change."""
+    params = set(inspect.signature(mcp_server.caura_tune).parameters)
+    assert params >= mcp_server._READ_FORM_IGNORED_ARGS
+    for param in params - mcp_server._READ_FORM_IGNORED_ARGS:
+        assert not mcp_server._is_read_form({param: 1}), param
+
+
+@pytest.mark.asyncio
+async def test_caura_tune_get_forwards_a_no_field_call(monkeypatch) -> None:
+    seen: list[dict] = []
+
+    async def _recorder(**kwargs):
+        seen.append(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(mcp_server, "caura_tune", _recorder)
+    assert await mcp_server.caura_tune_get(agent_id="agent-a") == "ok"
+    assert seen == [{"agent_id": "agent-a"}]
+
+
+@pytest.mark.asyncio
+async def test_caura_tune_get_dispatches_on_the_directory_surface(surface) -> None:
+    """Reaches caura_tune's handler (whose auth check answers an
+    unauthenticated caller), so the surface did not refuse it."""
+    surface(DIRECTORY_SURFACE)
+    mcp_server._tenant_id_var.set(mcp_server._UNAUTH)
+    error = _error(await mcp_server.mcp.call_tool("caura_tune_get", {}))
+    assert error["code"] == "UNAUTHORIZED"

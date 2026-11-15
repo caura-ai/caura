@@ -66,6 +66,13 @@ def _validate() -> None:
                     f"{name}: op={op_spec.name!r} trust_required={op_spec.trust_required} "
                     f"is below tool baseline {spec.trust_required}"
                 )
+        if spec.directory_read_via is not None:
+            reader = REGISTRY.get(spec.directory_read_via)
+            if reader is None or reader.delegate != name or not reader.read_only:
+                raise ValueError(
+                    f"{name}: directory_read_via {spec.directory_read_via!r} must be a read-only "
+                    f"tool that delegates to {name!r}"
+                )
         if spec.delegate is not None:
             target = REGISTRY.get(spec.delegate)
             if target is None:

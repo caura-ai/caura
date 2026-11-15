@@ -42,7 +42,7 @@ when to add or move an operation.
 | Heartbeat / fleet readiness | REST receives, plugin produces | Plugin is the natural producer (it knows the local node state). REST is the receiver. MCP doesn't need this — agents don't report their own runtime state. |
 | Server telemetry (`GET /telemetry`, `POST /telemetry/rotate`) | REST only | Operator transparency for the anonymous daily heartbeat ([telemetry.md](telemetry.md)): what this server would send, why it is off, and a fresh deployment id. An operator concern, not an agent one. |
 | Agent registration | OpenClaw plugin | Local-runtime concern. |
-| Claude connector directory tool set | MCP only (`caura_memory_read`, `caura_memory_update`, `caura_memory_delete`, `caura_doc_read`, `caura_doc_write`, `caura_doc_delete`) | The Claude connector directory requires that no tool mixes reads and writes. A connection the gateway marks `X-Caura-Tool-Surface: directory` is listed these six in place of `caura_manage` and `caura_doc`, split by effect; each forwards to the original handler, so the gates are identical. Every other connection, and the OpenClaw plugin, keeps the twelve-tool set. See [MCP tool surfaces](#mcp-tool-surfaces). |
+| Claude connector directory tool set | MCP only (`caura_memory_read`, `caura_memory_update`, `caura_memory_delete`, `caura_doc_read`, `caura_doc_write`, `caura_doc_delete`, `caura_tune_get`) | The Claude connector directory requires that no tool mixes reads and writes. A connection the gateway marks `X-Caura-Tool-Surface: directory` is listed the first six in place of `caura_manage` and `caura_doc`, split by effect, and `caura_tune_get` for `caura_tune`'s no-field read, which `caura_tune` refuses there; each forwards to the original handler, so the gates are identical. Every other connection, and the OpenClaw plugin, keeps the twelve-tool set. See [MCP tool surfaces](#mcp-tool-surfaces). |
 
 ## MCP tool surfaces
 
@@ -55,7 +55,7 @@ The MCP server serves one of two tool sets per connection. Every tool carries a
   the gateway, which sends `X-Caura-Tool-Surface: directory`). The header is
   honored only on the gateway-verified path, like `X-Agent-ID`; a direct caller
   always gets the default set. This set drops `caura_manage` and `caura_doc`,
-  which mix reads and writes, and adds six tools that each cover one effect:
+  which mix reads and writes, and adds seven tools that each cover one effect:
 
   | Tool | Ops | Read-only | Destructive |
   |------|-----|-----------|-------------|
@@ -65,6 +65,11 @@ The MCP server serves one of two tool sets per connection. Every tool carries a
   | `caura_doc_read` | `read`, `query`, `search`, `list_collections` | yes | no |
   | `caura_doc_write` | (write) | no | yes |
   | `caura_doc_delete` | (delete) | no | yes |
+  | `caura_tune_get` | (read the current profile) | yes | no |
+
+  On this surface `caura_tune` only writes: a call that sets nothing but
+  `agent_id` (which on the default surface returns the current profile) is
+  refused with `TOOL_NOT_ON_SURFACE` naming `caura_tune_get`.
 
   Each forwards its arguments to `caura_manage` or `caura_doc`, so trust,
   scope, fleet and plan checks are the same as calling the original op, and a

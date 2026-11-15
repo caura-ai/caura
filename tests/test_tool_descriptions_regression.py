@@ -25,7 +25,7 @@ pytestmark = pytest.mark.unit
 
 FIXTURES = Path(__file__).parent / "fixtures"
 EXPECTED_TOOL_COUNT = 12
-EXPECTED_DIRECTORY_ONLY_COUNT = 6
+EXPECTED_DIRECTORY_ONLY_COUNT = 7
 
 
 @pytest.mark.asyncio
@@ -56,8 +56,9 @@ async def test_tool_descriptions_enriched_matches_baseline():
 def test_registry_has_v1_spec_count():
     """The default tool surface registers exactly the expected number of specs.
 
-    The registry also holds the directory surface's six narrowings of
-    ``caura_manage`` / ``caura_doc``, which no default connection is listed;
+    The registry also holds the directory surface's seven narrowings (of
+    ``caura_manage``, ``caura_doc`` and ``caura_tune``'s read form), which no
+    default connection is listed;
     ``tests/test_tool_surfaces.py`` pins that set by name.
     """
     from core_api.tools import DEFAULT_SURFACE, REGISTRY, specs_for_surface
