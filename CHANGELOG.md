@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.52.3](https://github.com/caura-ai/caura/compare/backend-v3.52.2...backend-v3.52.3) (2026-11-15)
+
+
+### Bug Fixes
+
+* **graph:** honour a caller's limit instead of loading the whole graph ([#2439](https://github.com/caura-ai/caura/issues/2439)) ([d14bb06](https://github.com/caura-ai/caura/commit/d14bb06921d6311654b495399b6b4f4328c2651d))
+
 ## [3.52.2](https://github.com/caura-ai/caura/compare/backend-v3.52.1...backend-v3.52.2) (2026-11-15)
 
 
