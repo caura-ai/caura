@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.53.0](https://github.com/caura-ai/caura/compare/backend-v3.52.3...backend-v3.53.0) (2026-11-15)
+
+
+### Features
+
+* **core-api:** MCP tool annotations and a directory tool surface ([#2441](https://github.com/caura-ai/caura/issues/2441)) ([a3952a8](https://github.com/caura-ai/caura/commit/a3952a880af0793e18d9ff345d43ae33259c208f))
+
+
+### Bug Fixes
+
+* **contradiction:** retraction reads entity rows only where they settle the subject ([#2443](https://github.com/caura-ai/caura/issues/2443)) ([6fbfa8f](https://github.com/caura-ai/caura/commit/6fbfa8ffdf02f9948f4c8c24de6c62086fe57080))
+
 ## [3.52.3](https://github.com/caura-ai/caura/compare/backend-v3.52.2...backend-v3.52.3) (2026-11-15)
 
 
