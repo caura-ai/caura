@@ -407,6 +407,7 @@ async def get_full_graph(
     caller_tenant_id: str | None = None,
     caller_fleet_ids: list[str] | None = Query(default=None),
     caller_fleet_bound: bool = False,
+    limit: int | None = Query(default=None, ge=1),
 ) -> dict:
     entities, relations, truncated = await _svc.entity_get_full_graph(
         tenant_id,
@@ -414,6 +415,7 @@ async def get_full_graph(
         caller_agent_id=caller_agent_id,
         caller_tenant_id=caller_tenant_id,
         caller_fleet_ids=_reader_fleets(caller_fleet_ids, caller_fleet_bound),
+        limit=limit,
     )
     return {
         "entities": [orm_to_dict(e, ENTITY_FIELDS) for e in entities],

@@ -675,8 +675,8 @@ class GraphResponse(BaseModel):
     truncated: bool = Field(
         description=(
             "True when the graph was larger than the server's caps (GRAPH_MAX_ENTITIES, "
-            "GRAPH_MAX_RELATIONS): the newest entities and the heaviest relations among "
-            "them were returned, not all of them."
+            "GRAPH_MAX_RELATIONS) or the request's limit: the newest entities and the "
+            "heaviest relations among them were returned, not all of them."
         ),
     )
 
