@@ -27,6 +27,11 @@ def register(spec: ToolSpec) -> None:
     REGISTRY[spec.name] = spec
 
 
+def specs_for_surface(surface: str) -> list[ToolSpec]:
+    """The specs ``surface`` lists, in registration order."""
+    return [spec for spec in REGISTRY.values() if surface in spec.surfaces]
+
+
 def get_spec(name: str) -> ToolSpec:
     """Lookup helper with a clear error message for missing tools."""
     try:
@@ -61,6 +66,22 @@ def _validate() -> None:
                     f"{name}: op={op_spec.name!r} trust_required={op_spec.trust_required} "
                     f"is below tool baseline {spec.trust_required}"
                 )
+        if spec.directory_read_via is not None:
+            reader = REGISTRY.get(spec.directory_read_via)
+            if reader is None or reader.delegate != name or not reader.read_only:
+                raise ValueError(
+                    f"{name}: directory_read_via {spec.directory_read_via!r} must be a read-only "
+                    f"tool that delegates to {name!r}"
+                )
+        if spec.delegate is not None:
+            target = REGISTRY.get(spec.delegate)
+            if target is None:
+                raise ValueError(f"{name}: delegate {spec.delegate!r} is not a registered tool")
+            if target.delegate is not None:
+                raise ValueError(f"{name}: delegate {spec.delegate!r} must not delegate in turn")
+            extra = {op.name for op in spec.ops} - {op.name for op in target.ops}
+            if extra:
+                raise ValueError(f"{name}: ops {sorted(extra)} are not ops of delegate {spec.delegate!r}")
 
 
 _autoload_specs()

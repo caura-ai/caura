@@ -14,6 +14,7 @@ import inspect
 import typing
 from typing import Annotated, Any, get_args, get_origin
 
+from mcp.types import ToolAnnotations
 from pydantic.fields import FieldInfo
 
 from ._types import ToolSpec
@@ -33,14 +34,32 @@ def mcp_register(mcp, spec: ToolSpec) -> None:
     output enabled, the SDK would auto-generate a `{result: str}` schema
     from the `-> str` annotation and reject the `CallToolResult` at
     validation time, so disable it here.
+
+    Every tool carries its title twice, as the tool's own ``title`` and as
+    ``annotations.title``: clients read either (the spec's display precedence
+    is ``title``, then ``annotations.title``), and the Claude connector
+    directory requires a title and the applicable read-only/destructive hint
+    on every tool. Registration does not decide which surface lists the tool;
+    ``_InstrumentedMCPServer.list_tools`` filters on ``spec.surfaces``.
     """
     if spec.handler is None:
         return
     mcp.tool(
         name=spec.name,
+        title=spec.title,
         description=spec.description,
+        annotations=tool_annotations(spec),
         structured_output=False,  # mcp>=1.10 (PR #993); current pin >=1.26 covers it
     )(spec.handler)
+
+
+def tool_annotations(spec: ToolSpec) -> ToolAnnotations:
+    """The MCP ``annotations`` published for ``spec``."""
+    return ToolAnnotations(
+        title=spec.title,
+        read_only_hint=spec.read_only,
+        destructive_hint=spec.destructive_hint,
+    )
 
 
 def _python_type_name(annotation: Any) -> str:
@@ -127,7 +146,11 @@ def to_descriptor_json(spec: ToolSpec) -> dict[str, Any]:
     """Full descriptor for `/tool-descriptions` (new SoT shape)."""
     return {
         "name": spec.name,
+        "title": spec.title,
         "description": spec.description,
+        "read_only_hint": spec.read_only,
+        "destructive_hint": spec.destructive_hint,
+        "surfaces": list(spec.surfaces),
         "trust_required": spec.trust_required,
         "impl_status": spec.impl_status,
         "plugin_exposed": spec.plugin_exposed,

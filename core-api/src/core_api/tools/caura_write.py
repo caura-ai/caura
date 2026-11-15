@@ -22,6 +22,7 @@ _DESCRIPTION = (
 
 _SPEC = ToolSpec(
     name="caura_write",
+    title="Write memories",
     description=_DESCRIPTION,
     handler=mcp_server.caura_write,
     plugin_exposed=True,

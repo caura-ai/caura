@@ -16,9 +16,20 @@ _DESCRIPTION = (
     "For non-semantic browse use caura_list; for read-by-id use caura_manage op=read."
 )
 
+# The directory surface does not list caura_manage; it reads by id with
+# caura_memory_read, so the pointer names that tool there.
+_DIRECTORY_DESCRIPTION = (
+    "Find memories by meaning (hybrid semantic+keyword). "
+    "Set include_brief=true for an LLM summary paragraph. "
+    "For non-semantic browse use caura_list; for read-by-id use caura_memory_read op=read."
+)
+
 _SPEC = ToolSpec(
     name="caura_recall",
+    title="Recall memories",
+    read_only=True,
     description=_DESCRIPTION,
+    directory_description=_DIRECTORY_DESCRIPTION,
     handler=mcp_server.caura_recall,
     plugin_exposed=True,
     trust_required=0,

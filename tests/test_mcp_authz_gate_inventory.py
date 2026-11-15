@@ -170,7 +170,15 @@ MUTATING_TOOLS = frozenset(
     {"caura_write", "caura_tune", "caura_evolve", "caura_insights"}
 )
 READONLY_TOOLS = frozenset(
-    {"caura_recall", "caura_list", "caura_stats", "caura_keystones", "caura_entity_get"}
+    {
+        "caura_recall",
+        "caura_list",
+        "caura_stats",
+        "caura_keystones",
+        "caura_entity_get",
+        # caura_tune's no-field read, as its own tool on the directory surface.
+        "caura_tune_get",
+    }
 )
 
 # Parameter names carrying a caller's ASSERTION about which agent it is.
@@ -709,30 +717,47 @@ class _Tool(NamedTuple):
         return self.accepted_ops if self.accepted_ops is not None else self.declared_ops
 
 
+def _gated_handler(spec):
+    """The handler whose body applies ``spec``'s gates.
+
+    A directory-surface tool that narrows another (``ToolSpec.delegate``) checks
+    ``op`` against its subset and forwards every argument, by name, to the
+    delegate's handler — ``tests/test_tool_surfaces.py`` holds each one to
+    exactly that shape. Its gates are therefore the delegate's, read per op from
+    the delegate's body, and judged only for the ops the narrowing accepts.
+    """
+    if spec.delegate is None:
+        return spec.handler
+    return tools.REGISTRY[spec.delegate].handler
+
+
 def _tools() -> list[_Tool]:
     rows = []
     for name, spec in sorted(tools.REGISTRY.items()):
         handler = spec.handler
-        guarded, unconditional = _write_scope_coverage(handler)
-        calls = _reachable_calls(handler)
+        gated = _gated_handler(spec)
+        guarded, unconditional = _write_scope_coverage(gated)
+        calls = _reachable_calls(gated)
         rows.append(
             _Tool(
                 name=name,
                 spec=spec,
                 declared_ops=frozenset(op.name for op in (spec.ops or ())),
+                # The tool's OWN handler: a narrowing's op check is the one
+                # that decides which of the delegate's ops it can reach.
                 accepted_ops=_accepted_ops(handler),
                 guarded_ops=guarded,
                 gate_unconditional=unconditional,
                 calls=calls,
-                identity_params=_identity_params(handler),
-                rebound_params=_rebound_params(handler),
-                owned_params=_owned_params(handler),
+                identity_params=_identity_params(gated),
+                rebound_params=_rebound_params(gated),
+                owned_params=_owned_params(gated),
                 takes_memory_ids=bool(
                     set(inspect.signature(handler).parameters) & MEMORY_ID_PARAMS
                 ),
-                op_calls=_op_calls(handler),
-                op_gates=_op_gates(handler),
-                row_gates=_handler_gates(handler, calls),
+                op_calls=_op_calls(gated),
+                op_gates=_op_gates(gated),
+                row_gates=_handler_gates(gated, calls),
             )
         )
     return rows
@@ -783,10 +808,14 @@ def _row_scope(tool: _Tool) -> dict[str, tuple[frozenset[str], frozenset[str]]]:
             return {tool.name: (tool.calls, tool.row_gates)}
         return {}
     scope = {}
+    # A narrowing runs its delegate's branch for each op, so the op is keyed by
+    # the delegate: one ``ROW_GATE_ALLOWLIST`` reason covers the one branch,
+    # whichever tool name reached it.
+    owner = tool.spec.delegate or tool.name
     for op in sorted(tool.ops):
         calls = tool.op_calls.get(op, frozenset())
         if (tool.takes_memory_ids and op in MUTATING_OPS) or calls & MEMORY_ROW_SINKS:
-            scope[f"{tool.name}.{op}"] = (calls, tool.op_gates.get(op, frozenset()))
+            scope[f"{owner}.{op}"] = (calls, tool.op_gates.get(op, frozenset()))
     return scope
 
 
@@ -1227,7 +1256,14 @@ def test_the_rest_inventorys_tool_list_is_still_accurate() -> None:
         "paragraph — do not leave it matching nothing, which passes."
     )
     claimed = set(re.findall(r"caura_\w+", span.group(1)))
-    actual = {tool.name for tool in _tools() if WRITE_SCOPE_GATE in tool.calls}
+    # Narrowings (``ToolSpec.delegate``) reach the gate only through the
+    # handler they forward to, which the paragraph already names; it lists the
+    # handlers that guard themselves.
+    actual = {
+        tool.name
+        for tool in _tools()
+        if WRITE_SCOPE_GATE in tool.calls and tool.spec.delegate is None
+    }
     assert claimed == actual, (
         f"{sibling.name}'s docstring names the mutating MCP tools as "
         f"{sorted(claimed)}, but {sorted(actual)} call {WRITE_SCOPE_GATE}.\n"

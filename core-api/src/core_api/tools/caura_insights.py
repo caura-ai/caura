@@ -23,6 +23,7 @@ _DESCRIPTION = (
 
 _SPEC = ToolSpec(
     name="caura_insights",
+    title="Generate insights",
     description=_DESCRIPTION,
     handler=mcp_server.caura_insights,
     plugin_exposed=True,

@@ -42,6 +42,12 @@ its own entry point below:
    either is spent, but only for the tools ``_admission`` names. So path 5
    leaves ``_admitted`` out, and its codes go to those tools alone
    (``admission_codes``).
+8. Surface. Before admission, ``call_tool`` refuses a tool the connection's
+   tool surface does not list (``_refuse_off_surface``), answering
+   ``TOOL_NOT_ON_SURFACE``. Only a tool missing from some surface, or one whose
+   read form the directory surface refuses (``caura_tune``), can be refused
+   that way, so path 5 leaves that helper out too, and its codes go to
+   those tools alone (``surface_codes``).
 
 Path 6 is a whole-program walk, so where it stops matters as much as what it
 finds. It follows calls whose target resolves to a function or class defined
@@ -194,7 +200,7 @@ def dispatch_codes() -> frozenset[str]:
     Without ``_admitted``'s, which are path 7's: passed as already walked, so
     the walk stops there.
     """
-    return emitted_codes("call_tool", frozenset({_ADMISSION_GATE}))
+    return emitted_codes("call_tool", frozenset({_ADMISSION_GATE, _SURFACE_GATE}))
 
 
 # --- path 6: the service layer ----------------------------------------------
@@ -663,12 +669,34 @@ def admission_codes(function_name: str) -> frozenset[str]:
     return emitted_codes(_ADMISSION_GATE)
 
 
+# --- path 8: surface --------------------------------------------------------
+
+_SURFACE_GATE = "_refuse_off_surface"
+
+
+def surface_codes(function_name: str) -> frozenset[str]:
+    """Codes ``call_tool`` answers in place of running this handler on a
+    surface that does not list its tool. A handler is named for its tool, and
+    a tool every surface lists can never be refused this way."""
+    from core_api.tools import ALL_SURFACES, REGISTRY
+
+    spec = REGISTRY.get(function_name)
+    if spec is None:
+        return frozenset()
+    # Also a tool every surface lists whose read form one surface refuses
+    # (``ToolSpec.directory_read_via``: caura_tune).
+    if set(spec.surfaces) == set(ALL_SURFACES) and not spec.directory_read_via:
+        return frozenset()
+    return emitted_codes(_SURFACE_GATE)
+
+
 def tool_codes(function_name: str) -> frozenset[str]:
-    """Every code a caller of this handler can receive: paths 1-7."""
+    """Every code a caller of this handler can receive: paths 1-8."""
     own = emitted_codes(function_name)
     return (
         own
         | dispatch_codes()
         | service_codes(function_name)
         | admission_codes(function_name)
+        | surface_codes(function_name)
     )
