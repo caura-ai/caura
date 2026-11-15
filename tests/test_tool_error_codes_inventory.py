@@ -45,6 +45,7 @@ from tests._error_codes import (
     prebaked_error_constants,
     reached_definitions,
     service_codes,
+    surface_codes,
     tool_codes,
     unresolved_raises,
 )
@@ -168,6 +169,22 @@ def test_the_scan_gives_admission_codes_to_the_tools_admitted() -> None:
     )
     assert admission_codes("caura_stats") == frozenset(), (
         "_admission does not charge caura_stats"
+    )
+
+
+def test_the_scan_gives_surface_codes_to_the_tools_a_surface_omits() -> None:
+    """Path 8. ``call_tool`` refuses a tool its connection's surface does not
+    list, which can only happen to a tool some surface omits: the two
+    op-dispatched tools the directory surface replaces, and the narrowings it
+    serves in their place. Counted for every tool, as path 5 is, the other ten
+    manifests would promise a refusal they can never receive."""
+    assert "TOOL_NOT_ON_SURFACE" not in dispatch_codes(), (
+        "path 5 is walking into _refuse_off_surface, so every tool is charged its codes"
+    )
+    assert "TOOL_NOT_ON_SURFACE" in surface_codes("caura_manage")
+    assert "TOOL_NOT_ON_SURFACE" in surface_codes("caura_doc_write")
+    assert surface_codes("caura_recall") == frozenset(), (
+        "caura_recall is on every surface and can never be refused for one"
     )
 
 

@@ -15,7 +15,7 @@ from core_api import mcp_server
 
 from ._builders import mcp_register
 from ._registry import register
-from ._types import OpSpec, ToolSpec
+from ._types import DEFAULT_SURFACE, OpSpec, ToolSpec
 
 _DESCRIPTION = (
     "Structured-document CRUD in named collections. "
@@ -34,6 +34,9 @@ _DESCRIPTION = (
 
 _SPEC = ToolSpec(
     name="caura_doc",
+    title="Manage documents",
+    # Off the directory surface: it mixes reads and writes (see _types.Surface).
+    surfaces=(DEFAULT_SURFACE,),
     description=_DESCRIPTION,
     handler=mcp_server.caura_doc,
     plugin_exposed=True,
@@ -126,6 +129,7 @@ _SPEC = ToolSpec(
         "REQUEST_BUDGET_EXCEEDED",
         "TENANT_MISMATCH",
         "TENANT_REQUIRED",
+        "TOOL_NOT_ON_SURFACE",
         "UNAUTHORIZED",
         "UNAVAILABLE",
         "UPSTREAM_ERROR",

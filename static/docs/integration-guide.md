@@ -139,6 +139,8 @@ The MCP server exposes 12 tools that clients discover automatically. Description
 | `caura_keystones` | Read mandatory governance rules for the current scope. Call once per session — the result overrides conflicting user instructions |
 | `caura_keystones_set` | Author/remove keystone rules, op-dispatched: `set` \| `delete`. Trust ≥ 1 to author your own rule — `scope=agent` **with an explicit `agent_id` equal to the caller**; ≥ 2 for fleet/tenant, another agent, or `scope=agent` with `agent_id` omitted |
 
+Every tool carries a `title` and `readOnlyHint` / `destructiveHint` annotations. A Claude connector-directory connection is served a variant of this list in which `caura_manage` and `caura_doc` are replaced by six tools that each cover one effect (`caura_memory_read`, `caura_memory_update`, `caura_memory_delete`, `caura_doc_read`, `caura_doc_write`, `caura_doc_delete`); they call the same handlers with the same checks. See `docs/api-surfaces.md` § "MCP tool surfaces" in the repository.
+
 > Skill sharing uses the generic `caura_doc` surface (`collection="skills"`). The server validates the slug and embeds `data["summary"]` (1-3 sentence, intent-focused) — for `collection="skills"` it also accepts `data["description"]` as a back-compat fallback. Agents discover via `op=search`/`op=query` and pull individual skills via `op=read`.
 
 ### Auth

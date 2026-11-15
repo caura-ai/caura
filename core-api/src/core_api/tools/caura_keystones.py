@@ -25,6 +25,8 @@ _DESCRIPTION = (
 
 _SPEC = ToolSpec(
     name="caura_keystones",
+    title="Get keystone rules",
+    read_only=True,
     description=_DESCRIPTION,
     handler=mcp_server.caura_keystones,
     plugin_exposed=True,

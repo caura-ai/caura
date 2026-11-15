@@ -28,6 +28,8 @@ _DESCRIPTION = (
 
 _SPEC = ToolSpec(
     name="caura_stats",
+    title="Memory stats",
+    read_only=True,
     description=_DESCRIPTION,
     handler=mcp_server.caura_stats,
     plugin_exposed=True,

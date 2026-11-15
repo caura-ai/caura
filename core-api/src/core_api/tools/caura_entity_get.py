@@ -10,6 +10,8 @@ _DESCRIPTION = "Look up an entity by UUID. Use only when you have an entity_id f
 
 _SPEC = ToolSpec(
     name="caura_entity_get",
+    title="Get entity",
+    read_only=True,
     description=_DESCRIPTION,
     handler=mcp_server.caura_entity_get,
     plugin_exposed=True,

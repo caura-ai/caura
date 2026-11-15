@@ -18,6 +18,8 @@ _DESCRIPTION = (
 
 _SPEC = ToolSpec(
     name="caura_recall",
+    title="Recall memories",
+    read_only=True,
     description=_DESCRIPTION,
     handler=mcp_server.caura_recall,
     plugin_exposed=True,

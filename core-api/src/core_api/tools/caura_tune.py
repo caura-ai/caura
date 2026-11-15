@@ -14,6 +14,7 @@ _DESCRIPTION = (
 
 _SPEC = ToolSpec(
     name="caura_tune",
+    title="Tune recall defaults",
     description=_DESCRIPTION,
     handler=mcp_server.caura_tune,
     plugin_exposed=True,

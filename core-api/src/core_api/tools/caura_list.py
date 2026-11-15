@@ -34,6 +34,8 @@ _DESCRIPTION = (
 
 _SPEC = ToolSpec(
     name="caura_list",
+    title="List memories",
+    read_only=True,
     description=_DESCRIPTION,
     handler=mcp_server.caura_list,
     plugin_exposed=True,

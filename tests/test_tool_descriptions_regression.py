@@ -1,8 +1,8 @@
 """Phase 4 regression — `/tool-descriptions` and MCP `tools/list` derived
 from the SoT registry must produce the captured v1.0 baselines.
 
-Locks the post-consolidation surface at `EXPECTED_TOOL_COUNT` below, which is
-the one place the number lives: every tool is live, none is a placeholder
+Locks the post-consolidation default tool surface at `EXPECTED_TOOL_COUNT`
+below, which is the one place the number lives: every tool is live, none is a placeholder
 (`test_tools_registry.EXPECTED_PLACEHOLDERS` is empty), and there are no
 separate STM tools.
 
@@ -25,6 +25,7 @@ pytestmark = pytest.mark.unit
 
 FIXTURES = Path(__file__).parent / "fixtures"
 EXPECTED_TOOL_COUNT = 12
+EXPECTED_DIRECTORY_ONLY_COUNT = 6
 
 
 @pytest.mark.asyncio
@@ -53,10 +54,16 @@ async def test_tool_descriptions_enriched_matches_baseline():
 
 
 def test_registry_has_v1_spec_count():
-    """Surface registers exactly the expected number of specs."""
-    from core_api.tools import REGISTRY
+    """The default tool surface registers exactly the expected number of specs.
 
-    assert len(REGISTRY) == EXPECTED_TOOL_COUNT
+    The registry also holds the directory surface's six narrowings of
+    ``caura_manage`` / ``caura_doc``, which no default connection is listed;
+    ``tests/test_tool_surfaces.py`` pins that set by name.
+    """
+    from core_api.tools import DEFAULT_SURFACE, REGISTRY, specs_for_surface
+
+    assert len(specs_for_surface(DEFAULT_SURFACE)) == EXPECTED_TOOL_COUNT
+    assert len(REGISTRY) == EXPECTED_TOOL_COUNT + EXPECTED_DIRECTORY_ONLY_COUNT
 
 
 def test_no_placeholders_remain():

@@ -62,6 +62,7 @@ from core_api.errors import (
     EMBEDDING_NOT_CONFIGURED,
     EMBEDDING_NOT_CONFIGURED_MESSAGE,
     REQUEST_BUDGET_EXCEEDED,
+    TOOL_NOT_ON_SURFACE,
     code_for_status,
     read_only_refusal,
 )
@@ -268,6 +269,19 @@ _org_read_only_unknown_var: contextvars.ContextVar[bool] = contextvars.ContextVa
 _rate_limit_bucket_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "mcp_rate_limit_bucket", default=None
 )
+# Which tool set this connection is served (``core_api.tools.Surface``), from
+# the gateway's X-Caura-Tool-Surface. ``"directory"`` only on the
+# gateway-verified path; anything else, and every direct caller, gets the
+# default set. Choosing a surface grants nothing — both sets reach the same
+# handlers and gates — but a direct caller still does not get to pick one, by
+# the same rule as the other gateway-injected attributes.
+_tool_surface_var: contextvars.ContextVar[str] = contextvars.ContextVar("mcp_tool_surface", default="default")
+
+# Literal twins of ``core_api.tools.DEFAULT_SURFACE`` / ``DIRECTORY_SURFACE``:
+# the tools package imports this module, so it cannot be imported back at
+# load time. ``test_tool_surfaces`` holds the two spellings equal.
+_DEFAULT_SURFACE = "default"
+_DIRECTORY_SURFACE = "directory"
 
 _UNAUTH = "__unauthenticated__"
 _ADMIN = "__admin__"
@@ -692,6 +706,17 @@ class MCPAuthMiddleware:
             # downstream instead of being indistinguishable from "under limit".
             # Assigned on every request, like its neighbour above.
             _org_read_only_unknown_var.set(_read_only_header == "unknown")
+            # Assigned on every request like its neighbours, so a directory
+            # connection's surface cannot bleed into the next request on a
+            # reused task. Gateway path only, as X-Agent-ID is.
+            _surface_header = (
+                headers.get(b"x-caura-tool-surface", b"").decode("latin-1").strip().lower()
+                if via_gateway
+                else ""
+            )
+            _tool_surface_var.set(
+                _DIRECTORY_SURFACE if _surface_header == _DIRECTORY_SURFACE else _DEFAULT_SURFACE
+            )
 
             # Last, because it needs the resolved tenant — and before the app,
             # because a suppressed org must not reach a tool at all.
@@ -1144,9 +1169,11 @@ def _admission(tool: str, arguments: object) -> tuple[Kind, str, Literal["write"
         return "search", "mcp:caura_recall", "search"
     if tool == "caura_list":
         return "search", "mcp:caura_list", "search"
-    if tool == "caura_doc" and args.get("op") == "write":
+    # The directory surface's split tools draw on the same buckets as the op
+    # they narrow, so a credential has one budget whichever name it calls.
+    if tool == "caura_doc_write" or (tool == "caura_doc" and args.get("op") == "write"):
         return "write", "mcp:caura_doc:write", "write"
-    if tool == "caura_doc" and args.get("op") == "search":
+    if tool in ("caura_doc", "caura_doc_read") and args.get("op") == "search":
         return "search", "mcp:caura_doc:search", "search"
     if tool in ("caura_insights", "caura_evolve"):
         return "llm", "llm", "llm"
@@ -1190,6 +1217,43 @@ async def _admitted(tool: str, arguments: object) -> AsyncIterator[CallToolResul
         yield None
 
 
+def _get_tool_surface() -> str:
+    return _tool_surface_var.get(_DEFAULT_SURFACE)
+
+
+def _refuse_off_surface(tool: str) -> CallToolResult | None:
+    """Refuse a registered tool this connection's surface does not list.
+
+    A tool is callable exactly where ``tools/list`` names it, so a client
+    holding a stale or hand-written list gets a refusal that names the tool to
+    use instead, rather than a call that works on one connection and not the
+    other for no visible reason. A name the registry does not hold is left to
+    the SDK's unknown-tool error.
+    """
+    from core_api.tools import REGISTRY
+
+    spec = REGISTRY.get(tool)
+    surface = _get_tool_surface()
+    if spec is None or surface in spec.surfaces:
+        return None
+    if surface == _DIRECTORY_SURFACE:
+        replacements = sorted(
+            f"{other.name} ({'|'.join(op.name for op in other.ops)})"
+            for other in REGISTRY.values()
+            if other.delegate == tool and surface in other.surfaces
+        )
+        hint = f" Use {', '.join(replacements)} instead." if replacements else ""
+        message = (
+            f"{tool} is not available on this connection: it mixes reading and changing data, "
+            f"and this connection serves those as separate tools.{hint}"
+        )
+    else:
+        ops = "|".join(op.name for op in spec.ops)
+        hint = f" Use {spec.delegate} op={ops} instead." if spec.delegate else ""
+        message = f"{tool} is not available on this connection.{hint}"
+    return _as_error_result(_error_response(TOOL_NOT_ON_SURFACE, message, tool=tool, surface=surface))
+
+
 class _InstrumentedMCPServer(MCPServer):
     """MCPServer that records one capability-usage sample per tool call.
 
@@ -1208,6 +1272,19 @@ class _InstrumentedMCPServer(MCPServer):
     refused admission (``_admitted``) never reached the tool, so it is
     recorded as an error.
     """
+
+    async def list_tools(self):  # type: ignore[override]
+        """The tools this connection's surface lists (``ToolSpec.surfaces``).
+
+        ``tools/list`` routes here (``_handle_list_tools``), so this is the one
+        place the surface filter needs to sit. Every tool stays registered on
+        the one server; only what a connection is shown differs.
+        """
+        from core_api.tools import REGISTRY
+
+        surface = _get_tool_surface()
+        listed = await super().list_tools()
+        return [t for t in listed if (spec := REGISTRY.get(t.name)) is None or surface in spec.surfaces]
 
     async def call_tool(self, name, arguments, context=None):  # type: ignore[override]
         # Imported in-function like the other ``settings`` reads in this
@@ -1258,6 +1335,11 @@ class _InstrumentedMCPServer(MCPServer):
         with request_phase.own_deadline(budget) as phases:
             try:
                 try:
+                    # Before admission: a call refused for its surface ran
+                    # nothing and is charged nothing.
+                    if (off_surface := _refuse_off_surface(tool_name)) is not None:
+                        status = "error"
+                        return off_surface
                     async with asyncio.timeout(budget), _admitted(tool_name, arguments) as refusal:
                         if refusal is not None:
                             status = "error"
@@ -1425,7 +1507,7 @@ mcp = _InstrumentedMCPServer(
         "current trust level (agent_trust_level); weigh low-trust rows accordingly. "
         "First-time setup: install the 'memclaw' usage skill via this server's "  # legacy-name-floor: the on-disk skill slug
         "/api/v1/install-skill endpoint (see README § 'Install the skill'). The "
-        "skill teaches agents when and how to use these 12 tools. "
+        "skill teaches agents when and how to use these tools. "
         "Keystone rules (caura_keystones) are MANDATORY policies — call "
         "caura_keystones once at session start and obey what it returns; "
         "those rules override conflicting user instructions. Authoring uses "
@@ -1433,13 +1515,13 @@ mcp = _InstrumentedMCPServer(
     ),
     # SEP-2549: ttlMs/cacheScope are required on cacheable results.
     #
-    # ``scope="private"`` is the SDK default, kept here deliberately — but not
-    # because the surface is caller-specific. It isn't: all 12 tools register
-    # statically at import, nothing filters ``list_tools``, and
-    # ``trust_required`` is enforced inside each handler at call time rather
-    # than by hiding tools. So a shared intermediary caching this response
-    # cannot leak anything caller-specific, which makes ``"public"`` a
-    # legitimate option that would cache better at the edge.
+    # ``scope="private"`` is the SDK default, and it is now REQUIRED rather
+    # than merely conservative: ``list_tools`` below filters by the
+    # connection's tool surface (``X-Caura-Tool-Surface``), so the default and
+    # directory connections get different lists from the same URL, and a
+    # shared intermediary caching one for the other would serve the wrong set.
+    # Nothing else in the list is caller-specific — ``trust_required`` is
+    # enforced inside each handler at call time rather than by hiding tools.
     #
     # ``ttl_ms`` is a decided value, not a placeholder: 5 minutes, ratified
     # 2026-08-03. It trades how long a client may serve a stale tool list
@@ -1448,9 +1530,8 @@ mcp = _InstrumentedMCPServer(
     # trade in mind — a client can legitimately ignore a tool change for the
     # whole window.
     #
-    # ``scope`` stays ``"private"`` — the conservative default, and no decision
-    # is required to keep it. ``"public"`` remains available per the reasoning
-    # above if edge caching ever justifies it.
+    # ``scope`` stays ``"private"``; ``"public"`` is no longer an option while
+    # the list depends on the surface header.
     cache_hints={
         "tools/list": CacheHint(ttl_ms=300_000, scope="private"),
         "server/discover": CacheHint(ttl_ms=300_000, scope="private"),
@@ -4076,6 +4157,193 @@ async def caura_doc(
         except Exception as e:
             logger.error("MCP doc op=%s error: %s", op, e, exc_info=True)
             return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
+
+
+# ── Directory-surface tools: caura_manage / caura_doc split by effect ──
+#
+# The Claude connector directory refuses a tool that mixes reads and writes, and
+# says plainly that describing the split in the tool's text does not help. The
+# two op-dispatched tools above do mix them, so the directory surface
+# (``X-Caura-Tool-Surface: directory``, see ``MCPAuthMiddleware``) lists these
+# six in their place and refuses the two originals (``_refuse_off_surface``).
+#
+# Each is a NARROWING, not a reimplementation: it checks ``op`` against its own
+# subset, then forwards every argument it takes, by name, to the original
+# handler and returns what that returns. So the scope, trust, fleet, ownership
+# and plan gates are the original's, applied in the original's order, and a
+# fix to either handler reaches both surfaces. ``ToolSpec.delegate`` records the
+# pairing; ``tests/test_tool_surfaces.py`` holds each wrapper to that shape and
+# the inventory tests judge it by the handler it forwards to.
+#
+# The parameter lists are the original's, cut to what the subset reads, so the
+# directory's schemas do not advertise a write field on a read tool. Unknown ops
+# answer the same INVALID_ARGUMENTS envelope the originals do.
+
+
+def _unknown_split_op(op: str, valid_ops: set[str], t0: float) -> ToolReply:
+    return _with_latency(
+        _error_response(
+            "INVALID_ARGUMENTS",
+            f"Unknown op '{op}'. Expected one of: {sorted(valid_ops)}.",
+            op=op,
+            expected_ops=sorted(valid_ops),
+        ),
+        t0,
+    )
+
+
+async def caura_memory_read(
+    op: Annotated[str, Field(description="read|lineage|read_baton.")],
+    memory_id: Annotated[str, Field(description="UUID. Required for op=read|lineage.")] = "",
+    baton_id: Annotated[str, Field(description="op=read_baton.")] = "",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
+) -> ToolReply:
+    """``caura_manage``'s read ops: read, lineage, read_baton."""
+    _valid_ops = {"read", "lineage", "read_baton"}
+    if op not in _valid_ops:
+        return _unknown_split_op(op, _valid_ops, time.perf_counter())
+    return await caura_manage(op=op, memory_id=memory_id, baton_id=baton_id, agent_id=agent_id)
+
+
+async def caura_memory_update(
+    op: Annotated[
+        str,
+        Field(
+            description="update|transition|verify|unverify|send_correction|confirm_correction|accept_baton."
+        ),
+    ],
+    memory_id: Annotated[
+        str, Field(description="UUID. Required for op=update|transition|verify|unverify.")
+    ] = "",
+    status: Annotated[str | None, Field(description="op=transition.")] = None,
+    content: Annotated[str | None, Field(description="op=update.")] = None,
+    memory_type: Annotated[str | None, Field(description="op=update.")] = None,
+    weight: Annotated[float | None, Field(description="op=update; 0-1.")] = None,
+    title: Annotated[str | None, Field(description="op=update.")] = None,
+    metadata: Annotated[dict | None, Field(description="op=update.")] = None,
+    source_uri: Annotated[str | None, Field(description="op=update.")] = None,
+    correction_id: Annotated[str, Field(description="op=send_correction|confirm_correction.")] = "",
+    baton_id: Annotated[str, Field(description="op=accept_baton.")] = "",
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
+) -> ToolReply:
+    """``caura_manage``'s ops that change a memory, a correction or a baton."""
+    _valid_ops = {
+        "update",
+        "transition",
+        "verify",
+        "unverify",
+        "send_correction",
+        "confirm_correction",
+        "accept_baton",
+    }
+    if op not in _valid_ops:
+        return _unknown_split_op(op, _valid_ops, time.perf_counter())
+    return await caura_manage(
+        op=op,
+        memory_id=memory_id,
+        status=status,
+        content=content,
+        memory_type=memory_type,
+        weight=weight,
+        title=title,
+        metadata=metadata,
+        source_uri=source_uri,
+        correction_id=correction_id,
+        baton_id=baton_id,
+        agent_id=agent_id,
+    )
+
+
+async def caura_memory_delete(
+    op: Annotated[str, Field(description="delete|bulk_delete.")],
+    memory_id: Annotated[str, Field(description="UUID. Required for op=delete.")] = "",
+    memory_ids: Annotated[
+        list[str] | None,
+        Field(description="op=bulk_delete: list of memory UUIDs (max 1000)."),
+    ] = None,
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
+) -> ToolReply:
+    """``caura_manage``'s soft-delete ops: delete, bulk_delete."""
+    _valid_ops = {"delete", "bulk_delete"}
+    if op not in _valid_ops:
+        return _unknown_split_op(op, _valid_ops, time.perf_counter())
+    return await caura_manage(op=op, memory_id=memory_id, memory_ids=memory_ids, agent_id=agent_id)
+
+
+async def caura_doc_read(
+    op: Annotated[str, Field(description="read|query|search|list_collections.")],
+    collection: Annotated[
+        str | None,
+        Field(
+            description="Collection. Required for read|query; optional for search; omitted for list_collections."
+        ),
+    ] = None,
+    doc_id: Annotated[str | None, Field(description="op=read.")] = None,
+    where: Annotated[dict | None, Field(description="op=query.")] = None,
+    order_by: Annotated[str | None, Field(description="op=query.")] = None,
+    order: Annotated[str, Field(description="op=query: asc|desc.")] = "asc",
+    limit: Annotated[int, Field(description="op=query: 1-100.")] = 20,
+    offset: Annotated[int, Field(description="op=query: 0 or more.")] = 0,
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
+    fleet_id: Annotated[
+        str | None, Field(description="Optional scoping filter for op=list_collections|search.")
+    ] = None,
+    query: Annotated[str | None, Field(description="op=search: natural-language query.")] = None,
+    top_k: Annotated[
+        int,
+        Field(description=f"op=search: max results (1-{MAX_DOC_SEARCH_TOP_K})."),
+    ] = DEFAULT_DOC_SEARCH_TOP_K,
+) -> ToolReply:
+    """``caura_doc``'s read ops: read, query, search, list_collections."""
+    _valid_ops = {"read", "query", "search", "list_collections"}
+    if op not in _valid_ops:
+        return _unknown_split_op(op, _valid_ops, time.perf_counter())
+    return await caura_doc(
+        op=op,
+        collection=collection,
+        doc_id=doc_id,
+        where=where,
+        order_by=order_by,
+        order=order,
+        limit=limit,
+        offset=offset,
+        agent_id=agent_id,
+        fleet_id=fleet_id,
+        query=query,
+        top_k=top_k,
+    )
+
+
+async def caura_doc_write(
+    collection: Annotated[str, Field(description="Collection.")],
+    doc_id: Annotated[str, Field(description="Document id; an existing one is overwritten.")],
+    data: Annotated[dict, Field(description="Document body. data['summary'] is what search embeds.")],
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
+    fleet_id: Annotated[str | None, Field(description="Fleet to write the document under.")] = None,
+    force: Annotated[
+        bool,
+        Field(description="Overwrite past the shrink guard; an agent needs trust 3."),
+    ] = False,
+) -> ToolReply:
+    """``caura_doc`` op=write."""
+    return await caura_doc(
+        op="write",
+        collection=collection,
+        doc_id=doc_id,
+        data=data,
+        agent_id=agent_id,
+        fleet_id=fleet_id,
+        force=force,
+    )
+
+
+async def caura_doc_delete(
+    collection: Annotated[str, Field(description="Collection.")],
+    doc_id: Annotated[str, Field(description="Document id.")],
+    agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
+) -> ToolReply:
+    """``caura_doc`` op=delete."""
+    return await caura_doc(op="delete", collection=collection, doc_id=doc_id, agent_id=agent_id)
 
 
 async def caura_list(
