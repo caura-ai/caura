@@ -1,5 +1,5 @@
 {
-  ".": "3.52.0",
+  ".": "3.52.1",
   "plugin": "2.28.2",
-  "clients/collaboration": "0.7.0"
+  "clients/collaboration": "0.7.1"
 }

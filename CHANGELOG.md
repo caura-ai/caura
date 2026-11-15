@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.52.1](https://github.com/caura-ai/caura/compare/backend-v3.52.0...backend-v3.52.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **search:** detect 'before it was last changed' as a history question ([#2434](https://github.com/caura-ai/caura/issues/2434)) ([b251a7b](https://github.com/caura-ai/caura/commit/b251a7b8d95e2838af555bfb83e4e55602d508dd))
+
+
+### Dependencies
+
+* bump opentelemetry-api to 1.45.2 for CVE-2026-126360 ([#2435](https://github.com/caura-ai/caura/issues/2435)) ([1053bf4](https://github.com/caura-ai/caura/commit/1053bf429e458c2631a42869254833ebcf72ec88))
+
 ## [3.52.0](https://github.com/caura-ai/caura/compare/backend-v3.51.1...backend-v3.52.0) (2026-11-12)
 
 
