@@ -166,7 +166,15 @@ class MemoryFieldResponse(BaseModel):
         ),
     )
     computed_at: str
-    total: int = Field(description="Memories visible to the caller (points holds the newest `limit`).")
+    total: int = Field(
+        description=(
+            "Memories visible to the caller (points holds the newest `limit`), counted up to 50,000, "
+            "the most a map shows."
+        )
+    )
+    total_capped: bool = Field(
+        default=False, description="The caller sees more than 50,000 memories, so `total` is a lower bound."
+    )
     clusters: list[MemoryFieldCluster]
     points: list[MemoryFieldPoint]
     entities: list[MemoryFieldEntity] = Field(description="Entities linked from the returned points.")

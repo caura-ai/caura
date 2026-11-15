@@ -35,6 +35,7 @@ from core_storage_api.routers._validation import (
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import (
     FIELD_PAGE_EMBEDDINGS,
+    FIELD_SIGNATURE_MAX_WINDOW,
     MISSING_PROVENANCE_PREDICATE_SQL,
     BulkValidationError,
     ConflictReviewConflictError,
@@ -1868,13 +1869,24 @@ async def field_signature(request: Request) -> dict:
     Body: ``{tenant_id, caller_agent_id?, caller_tenant_id?, fleet_id?,
     include_scope_agent?}`` — the visibility arguments ``/list`` takes.
     Returns ``{count, embedded, newest, revision}`` over the rows the field
-    would place; ``revision`` moves on an edit.
+    would place; ``revision`` moves on an edit. Optional ``window`` (1-50000)
+    reads only the newest that many and adds ``more``, whether rows lie past
+    them; optional ``newer_than`` (ISO 8601 with a timezone) adds ``newer``,
+    the embedded rows among them written after it.
     """
     body: dict = await request.json()
     tenant_id = _require(body, "tenant_id")
     args = _field_scope_args(tenant_id, body)
+    window = _bounded_int(body, "window", 1, FIELD_SIGNATURE_MAX_WINDOW) if "window" in body else None
+    newer_than_raw = body.get("newer_than")
     try:
-        return await _svc.memory_field_signature(**args)
+        newer_than = datetime.fromisoformat(newer_than_raw) if newer_than_raw is not None else None
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"invalid newer_than: {exc}") from exc
+    if newer_than is not None and newer_than.tzinfo is None:
+        raise HTTPException(status_code=422, detail="newer_than must be timezone-aware")
+    try:
+        return await _svc.memory_field_signature(**args, window=window, newer_than=newer_than)
     except DBAPIError as exc:
         if getattr(exc.orig, "sqlstate", None) == "57014":
             logger.warning("Memory map signature exceeded its configured statement timeout")

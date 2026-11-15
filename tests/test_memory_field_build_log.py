@@ -15,6 +15,7 @@ import base64
 import contextlib
 import logging
 
+import httpx
 import numpy as np
 import pytest
 
@@ -58,6 +59,10 @@ class _Storage:
         self.positions: dict[tuple[str, str], tuple[float, float, int]] = {}
         self.claims = 0
         self.signatures = 0
+        self.signature_bodies: list[dict] = []
+        # Refuse a growth check's read (one with ``newer_than``) as storage
+        # does a signature past its statement timeout.
+        self.newer_busy = False
         self.fit_page_delay = 0.0
 
     def _visible(self, body: dict) -> list[dict]:
@@ -72,13 +77,32 @@ class _Storage:
 
     async def memory_field_signature(self, scope: dict) -> dict:
         self.signatures += 1
+        self.signature_bodies.append(dict(scope))
+        if self.newer_busy and scope.get("newer_than"):
+            request = httpx.Request("POST", "http://storage/field-signature")
+            raise httpx.HTTPStatusError(
+                "busy", request=request, response=httpx.Response(503, request=request)
+            )
         visible = self._visible(scope)
-        return {
-            "count": len(visible),
-            "embedded": len(visible),
+        # As storage reads it: over the newest ``window`` rows when one is
+        # given (rows are held newest first), saying whether more lie past it.
+        window = scope.get("window")
+        shown = visible[:window] if window else visible
+        sig = {
+            "count": len(shown),
+            "embedded": len(shown),
             "newest": "t",
             "revision": 1,
         }
+        if window:
+            sig["more"] = len(visible) > window
+        if scope.get("newer_than"):
+            sig["newer"] = sum(
+                1
+                for r in shown
+                if r["embedding_b64"] and r["created_at"] > scope["newer_than"]
+            )
+        return sig
 
     async def memory_field_page(self, body: dict) -> dict:
         if body.get("embeddings") == "all" and body.get("model_version"):
