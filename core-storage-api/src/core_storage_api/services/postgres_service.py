@@ -738,6 +738,9 @@ def _scored_search_row_filters(
 # Which rows of a field page ship their embedding (``memory_field_page``).
 FIELD_PAGE_EMBEDDINGS = frozenset({"all", "unplaced", "none"})
 
+# The most rows a windowed field signature reads: as many as a field shows.
+FIELD_SIGNATURE_MAX_WINDOW = 50_000
+
 # A memory row's version: PostgreSQL's ``xmin``, which every UPDATE of the row
 # changes and a physical replica reports unchanged. ``memories`` has no column
 # that moves exactly when the embedding does, so a saved field position names
@@ -9844,6 +9847,8 @@ class PostgresService:
         caller_tenant_id: str | None = None,
         fleet_id: str | None = None,
         include_scope_agent: bool = False,
+        window: int | None = None,
+        newer_than: datetime | None = None,
     ) -> dict:
         """Cheap change-detector for the field layout cache.
 
@@ -9854,6 +9859,13 @@ class PostgresService:
         a delete, a status flip or an edit moves at least one of the four, so
         core-api can serve a cached layout while all four hold. Recall
         counters are not tracked here; the cache TTL bounds their age.
+
+        ``window`` reads only the newest that many rows, newest first as the
+        field page reads them, and adds ``more``: whether rows lie past them.
+        A field never shows more than its window, so an edit past it need not
+        move the four, and the read costs the same for a tenant of any size.
+        Without one, every row is read. ``newer_than`` adds ``newer``: the
+        embedded rows written after it, within the window.
         """
         filters = self._field_scope_filters(
             tenant_id=tenant_id,
@@ -9884,14 +9896,41 @@ class PostgresService:
                 )
             ),
         )
-        stmt = select(
-            func.count(),
-            func.count().filter(Memory.embedding.isnot(None)),
-            func.max(
-                func.greatest(Memory.created_at, func.coalesce(Memory.status_changed_at, Memory.created_at))
-            ),
-            func.sum(func.hashtextextended(shown, literal_column("0"))),
-        ).where(*filters)
+        per_row = (
+            Memory.embedding.isnot(None).label("embedded"),
+            Memory.created_at.label("created_at"),
+            func.greatest(
+                Memory.created_at, func.coalesce(Memory.status_changed_at, Memory.created_at)
+            ).label("changed_at"),
+            func.hashtextextended(shown, literal_column("0")).label("shown"),
+        )
+        inside: ColumnElement[bool]
+        if window is None:
+            rows = select(*per_row).where(*filters).subquery()
+            inside = true()
+        else:
+            # One row past the window says whether more lie beyond it. The scan
+            # stops there: ``ix_memories_tenant_created_active`` holds this order.
+            newest_first = (Memory.created_at.desc(), Memory.id.desc())
+            rows = (
+                select(*per_row, func.row_number().over(order_by=newest_first).label("n"))
+                .where(*filters)
+                .order_by(*newest_first)
+                .limit(window + 1)
+                .subquery()
+            )
+            inside = rows.c.n <= window
+        measures: list[ColumnElement[Any]] = [
+            func.count().filter(inside),
+            func.count().filter(inside, rows.c.embedded),
+            func.max(rows.c.changed_at).filter(inside),
+            func.sum(rows.c.shown).filter(inside),
+        ]
+        if window is not None:
+            measures.append(func.count() > window)
+        if newer_than is not None:
+            measures.append(func.count().filter(inside, rows.c.embedded, rows.c.created_at > newer_than))
+        stmt = select(*measures)
         from core_storage_api.config import settings as _field_settings
 
         async with get_read_session() as session:
@@ -9902,13 +9941,18 @@ class PostgresService:
                     )
                 )
             )
-            count, embedded, newest, revision = (await session.execute(stmt)).one()
-        return {
+            count, embedded, newest, revision, *asked = (await session.execute(stmt)).one()
+        signature: dict = {
             "count": int(count or 0),
             "embedded": int(embedded or 0),
             "newest": newest.isoformat() if newest else None,
             "revision": str(revision) if revision is not None else None,
         }
+        if window is not None:
+            signature["more"] = bool(asked.pop(0))
+        if newer_than is not None:
+            signature["newer"] = int(asked.pop(0) or 0)
+        return signature
 
     async def memory_field_page(
         self,

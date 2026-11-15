@@ -1806,12 +1806,13 @@ class CoreStorageClient:
         return result  # type: ignore[return-value]
 
     async def memory_field_signature(self, data: dict) -> dict:
-        """``{count, embedded, newest}`` over the rows the memory field would
-        place — the field layout cache's change-detector.
+        """``{count, embedded, newest, revision}`` over the rows the memory
+        field would place — the field layout cache's change-detector.
 
         ``data`` carries ``{tenant_id, caller_agent_id?, caller_tenant_id?,
         fleet_id?, include_scope_agent?}``, the visibility arguments of
-        ``list_memories_by_filters``.
+        ``list_memories_by_filters``, plus optional ``window`` (only the newest
+        that many rows; adds ``more``) and ``newer_than`` (adds ``newer``).
         """
         result = await self._post("/memories/field-signature", data, read=True)
         if result is None:

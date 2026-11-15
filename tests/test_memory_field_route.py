@@ -444,6 +444,75 @@ async def test_storage_page_walks_by_cursor(sc):
     assert sig["embedded"] == sig["count"] - 1
 
 
+async def test_storage_signature_reads_only_the_newest_window(sc):
+    """With ``window`` the change check covers the newest rows only, so an edit
+    past them, which no map shows, does not move it."""
+    ids = await _seed(sc)
+    scope = {"tenant_id": ids["tenant"]}
+    whole = await sc.memory_field_signature(scope)
+    wide = await sc.memory_field_signature({**scope, "window": 1000})
+    assert {k: wide[k] for k in whole} == whole
+    assert wide["more"] is False
+
+    # The tenant-wide scope's newest three: the unembedded row, the fleet row
+    # and the newer refund row.
+    newest = await sc.memory_field_signature({**scope, "window": 3})
+    assert (newest["count"], newest["embedded"], newest["more"]) == (3, 2, True)
+
+    await _sql(
+        "UPDATE memories SET title = 'edited' WHERE id = CAST(:id AS uuid)",
+        id=ids["topic"][0],
+    )
+    assert (await sc.memory_field_signature({**scope, "window": 3})) == newest
+    assert (await sc.memory_field_signature(scope))["revision"] != whole["revision"]
+
+    await _sql(
+        "UPDATE memories SET title = 'edited' WHERE id = CAST(:id AS uuid)",
+        id=ids["fleet"],
+    )
+    moved = await sc.memory_field_signature({**scope, "window": 3})
+    assert moved["revision"] != newest["revision"]
+
+
+async def test_storage_signature_counts_what_was_written_after_a_time(sc):
+    """``newer_than`` counts the window's embedded rows written after it: what a
+    growth check measures against a layout's fit."""
+    ids = await _seed(sc)
+    scope = {"tenant_id": ids["tenant"], "window": 1000}
+    async with get_session() as session:
+        cut = (
+            await session.execute(
+                text("SELECT created_at FROM memories WHERE id = CAST(:id AS uuid)"),
+                {"id": ids["new"]},
+            )
+        ).scalar_one()
+    # After the newer refund row: the fleet row, and the unembedded row, which
+    # is not counted.
+    after = await sc.memory_field_signature({**scope, "newer_than": cut.isoformat()})
+    assert after["newer"] == 1
+    since_ever = await sc.memory_field_signature(
+        {**scope, "newer_than": "2000-01-01T00:00:00+00:00"}
+    )
+    assert since_ever["newer"] == since_ever["embedded"]
+    assert "newer" not in await sc.memory_field_signature(scope)
+
+
+async def test_storage_signature_checks_its_window_and_time(storage_http):
+    for extra in (
+        {"window": 0},
+        {"window": 50001},
+        {"window": "many"},
+        {"window": True},
+        {"newer_than": "soon"},
+        {"newer_than": "2026-11-10T00:00:00"},
+    ):
+        resp = await storage_http.post(
+            "/api/v1/storage/memories/field-signature",
+            json={"tenant_id": "t", **extra},
+        )
+        assert resp.status_code == 422, extra
+
+
 async def test_storage_field_routes_require_tenant(storage_http):
     for path in ("field-page", "field-signature"):
         resp = await storage_http.post(f"/api/v1/storage/memories/{path}", json={})

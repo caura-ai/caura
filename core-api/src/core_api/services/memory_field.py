@@ -644,6 +644,7 @@ def build_field(
     entities: dict[str, dict],
     *,
     total: int,
+    total_capped: bool = False,
     signature: str,
 ) -> dict[str, Any]:
     """The ``/memories/field`` response body for ``rows`` (newest first), laid
@@ -653,7 +654,9 @@ def build_field(
     version_src = "|".join(
         [FIELD_KIND, signature, *(f"{rid}:{int(has_vec[i])}" for i, rid in enumerate(ids))]
     )
-    return _assemble_field(rows, layout, entities, total=total, version_src=version_src)
+    return _assemble_field(
+        rows, layout, entities, total=total, total_capped=total_capped, version_src=version_src
+    )
 
 
 def _assemble_field(
@@ -662,6 +665,7 @@ def _assemble_field(
     entities: dict[str, dict],
     *,
     total: int,
+    total_capped: bool = False,
     version_src: str,
     layout_version: str | None = None,
     truncated: bool = False,
@@ -728,6 +732,7 @@ def _assemble_field(
         "truncated": truncated,
         "next_since": _next_since(rows, layout.cluster, since),
         "total": total,
+        "total_capped": total_capped,
         "clusters": clusters,
         "points": points,
         "entities": [
@@ -814,10 +819,12 @@ class FieldPreparingError(Exception):
 
 @dataclass
 class SavedModel:
-    """A tenant's saved fit: the version naming it, and the model itself."""
+    """A tenant's saved fit: the version naming it, the model itself, and when
+    storage saved it (None for a fit this process has only just made)."""
 
     version: str
     model: FieldModel
+    fitted_at: str | None = None
 
 
 # A fit needs four embeddings; fewer are laid out on each request (``build_field``).
@@ -858,10 +865,13 @@ SINCE_MAX = 1000
 # it is placed; one still unplaced after that (an embedding that failed) no
 # longer holds the map back.
 UNPLACED_WAIT_SECONDS = 600.0
-# A tenant whose shared embedded memories have grown by this factor since its
-# fit, and by at least ``REFIT_MIN_NEW``, is refitted in the background while
-# reads serve the layout they have. Reading the tenant-wide count is a
-# signature scan, so growth is checked at most every ``REFIT_CHECK_SECONDS``.
+# A tenant is refitted in the background, while reads serve the layout they
+# have, once the shared embedded memories written since its fit reach this
+# factor's share of the ones it was fitted on (a quarter), and at least
+# ``REFIT_MIN_NEW``. Both are counted among the newest ``FIELD_MAX_LIMIT``, so a
+# tenant past them, which never grows inside them, refits as they turn over.
+# Counting costs a storage read, so growth is checked at most every
+# ``REFIT_CHECK_SECONDS``.
 REFIT_GROWTH = 1.25
 REFIT_MIN_NEW = 100
 REFIT_CHECK_SECONDS = 300.0
@@ -918,7 +928,11 @@ async def _signature(scope: dict) -> dict:
         return cached
     read = _signatures.get(key)
     if read is None:
-        read = asyncio.create_task(get_storage_client().memory_field_signature(scope))
+        # Over the newest ``FIELD_MAX_LIMIT`` only, the most a map shows, so the
+        # read costs the same for a tenant of any size.
+        read = asyncio.create_task(
+            get_storage_client().memory_field_signature({**scope, "window": FIELD_MAX_LIMIT})
+        )
         _signatures[key] = read
 
         def _forget(done: asyncio.Task[dict]) -> None:
@@ -990,8 +1004,10 @@ async def _get_memory_field(scope: dict, *, limit: int, since: datetime | None =
     # Only the signature read occupies a search slot.
     async with per_tenant_slot("search", tenant):
         sig = await _signature(scope)
-    signature = f"{sig.get('count')}:{sig.get('embedded')}:{sig.get('newest')}:{sig.get('revision')}"
+    signature = f"{sig.get('count')}:{sig.get('embedded')}:{sig.get('newest')}:{sig.get('revision')}:{sig.get('more')}"
     embedded = int(sig.get("embedded") or 0)
+    # Counted over the newest ``FIELD_MAX_LIMIT``; ``more`` says the caller sees more.
+    total, total_capped = int(sig.get("count") or 0), bool(sig.get("more"))
     saved = await _saved_model(tenant)
     if saved is None and embedded >= MIN_FIT:
         outcome = _fit_outcome(tenant)
@@ -1011,7 +1027,7 @@ async def _get_memory_field(scope: dict, *, limit: int, since: datetime | None =
         await _maybe_refit(tenant, saved)
     if since is not None:
         return await _serve_since(
-            scope, saved, since=since, limit=min(limit, SINCE_MAX), total=int(sig.get("count") or 0)
+            scope, saved, since=since, limit=min(limit, SINCE_MAX), total=total, total_capped=total_capped
         )
     # Laid out on request although there are embeddings enough to fit: bound it.
     bounded = saved is None and embedded >= MIN_FIT
@@ -1025,7 +1041,7 @@ async def _get_memory_field(scope: dict, *, limit: int, since: datetime | None =
     serve = _serves.get(key)
     if serve is None:
         serve = asyncio.create_task(
-            _serve(scope, key, saved, limit=limit, total=int(sig.get("count") or 0), bounded=bounded)
+            _serve(scope, key, saved, limit=limit, total=total, total_capped=total_capped, bounded=bounded)
         )
         _serves[key] = serve
 
@@ -1051,7 +1067,7 @@ async def _saved_model(tenant: str, *, fresh: bool = False) -> SavedModel | None
         decoded = _decoded_models.get((tenant, version))
         if decoded is None:
             model = FieldModel.from_bytes(base64.b64decode(got["params_b64"]))
-            decoded = {"saved": SavedModel(version=version, model=model)}
+            decoded = {"saved": SavedModel(version=version, model=model, fitted_at=got.get("fitted_at"))}
             _decoded_models.put((tenant, version), decoded)
         saved = decoded["saved"]
     _current_model.put((tenant,), {"saved": saved})
@@ -1113,23 +1129,39 @@ def _start_fit(tenant: str, work: Coroutine[Any, Any, SavedModel | None]) -> asy
 
 
 async def _maybe_refit(tenant: str, saved: SavedModel) -> None:
-    """Start a background refit when the tenant has grown enough since
-    ``saved`` was fitted. Reads go on serving ``saved`` until the new model
-    is saved; a client sees ``layout_version`` change then."""
+    """Start a background refit when enough of the tenant's memories were
+    written since ``saved`` was fitted. Reads go on serving ``saved`` until
+    the new model is saved; a client sees ``layout_version`` change then."""
     due = _refit_due.get(tenant)
-    if (due is not None and due > time.monotonic()) or tenant in _fits:
+    if (due is not None and due > time.monotonic()) or tenant in _fits or saved.fitted_at is None:
         return
     _record_refit_check(tenant)
     try:
         async with per_tenant_slot("search", tenant):
-            shared = await _signature({"tenant_id": tenant})
+            written = await _written_since(tenant, saved.fitted_at)
     except FieldBusyError:
         return  # storage is busy; the read goes on, and the next check retries
-    current = int(shared.get("embedded") or 0)
-    fitted = float(saved.model.fitted_total)
-    if current < max(fitted * REFIT_GROWTH, fitted + REFIT_MIN_NEW):
+    # A model saved before fits stopped at the newest ``FIELD_MAX_LIMIT``
+    # counted the whole tenant.
+    fitted = min(float(saved.model.fitted_total), FIELD_MAX_LIMIT)
+    if written < max(fitted * (REFIT_GROWTH - 1), REFIT_MIN_NEW):
         return
-    _start_fit(tenant, _claim_and_fit(tenant, refit_from=saved.version, shared_embedded=current))
+    _start_fit(tenant, _claim_and_fit(tenant, refit_from=saved.version))
+
+
+async def _written_since(tenant: str, fitted_at: str) -> int:
+    """How many of the tenant's shared embedded memories, among its newest
+    ``FIELD_MAX_LIMIT``, were written after ``fitted_at``. Read uncached: the
+    growth check runs at most every ``REFIT_CHECK_SECONDS``."""
+    try:
+        got = await get_storage_client().memory_field_signature(
+            {"tenant_id": tenant, "window": FIELD_MAX_LIMIT, "newer_than": fitted_at}
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 503:
+            raise FieldBusyError from exc
+        raise
+    return int(got.get("newer") or 0)
 
 
 def _record_refit_check(tenant: str) -> None:
@@ -1273,9 +1305,9 @@ async def _fit(tenant: str, token: str, *, shared_embedded: int | None = None) -
             )
             laying_out = time.monotonic()
             model = await asyncio.to_thread(fit_model, vectors[sample])
-            # The tenant-wide count a refit is measured against: the caller's
-            # signature read of it, or what this fit paged (the same up to the
-            # newest ``FIELD_MAX_LIMIT``).
+            # What a refit is measured against: the caller's count of the
+            # tenant's shared embedded memories, or what this fit paged. Both
+            # stop at the newest ``FIELD_MAX_LIMIT``.
             model.fitted_total = np.array(float(shared_embedded or embedded.size))
             xy, cluster = await asyncio.to_thread(place, model, vectors)
             layout_s = time.monotonic() - laying_out
@@ -1353,7 +1385,14 @@ async def _fit(tenant: str, token: str, *, shared_embedded: int | None = None) -
 
 
 async def _serve(
-    scope: dict, key: tuple, saved: SavedModel | None, *, limit: int, total: int, bounded: bool = False
+    scope: dict,
+    key: tuple,
+    saved: SavedModel | None,
+    *,
+    limit: int,
+    total: int,
+    total_capped: bool = False,
+    bounded: bool = False,
 ) -> dict:
     """Read the caller's newest ``limit`` rows and assemble their map.
 
@@ -1374,7 +1413,14 @@ async def _serve(
                     vectors[i] = vec
             has_vec = np.array([v is not None for v in got.vectors], dtype=bool)
             payload = await asyncio.to_thread(
-                build_field, got.rows, vectors, has_vec, got.entities, total=total, signature=str(key[-3])
+                build_field,
+                got.rows,
+                vectors,
+                has_vec,
+                got.entities,
+                total=total,
+                total_capped=total_capped,
+                signature=str(key[-3]),
             )
         field_cache.put(key, payload)
         return payload
@@ -1407,7 +1453,13 @@ async def _serve(
         ]
     )
     payload = _assemble_field(
-        got.rows, layout, got.entities, total=total, version_src=version_src, layout_version=saved.version
+        got.rows,
+        layout,
+        got.entities,
+        total=total,
+        total_capped=total_capped,
+        version_src=version_src,
+        layout_version=saved.version,
     )
     field_cache.put(key, payload)
     return payload
@@ -1462,7 +1514,13 @@ async def _positions(
 
 
 async def _serve_since(
-    scope: dict, saved: SavedModel | None, *, since: datetime, limit: int, total: int
+    scope: dict,
+    saved: SavedModel | None,
+    *,
+    since: datetime,
+    limit: int,
+    total: int,
+    total_capped: bool = False,
 ) -> dict:
     """The memories written after ``since``, newest first, at most ``limit``,
     positioned on the saved layout for an open map to merge in.
@@ -1475,7 +1533,14 @@ async def _serve_since(
     if saved is None:
         layout = FieldLayout(x=[], y=[], cluster=[], anchors=[], sizes=[], members=[])
         return _assemble_field(
-            [], layout, {}, total=total, version_src=f"{FIELD_KIND}|since|none", truncated=True, since=since
+            [],
+            layout,
+            {},
+            total=total,
+            total_capped=total_capped,
+            version_src=f"{FIELD_KIND}|since|none",
+            truncated=True,
+            since=since,
         )
     got = await _page({**scope, "model_version": saved.version, "embeddings": "unplaced"}, limit=limit + 1)
     new = [
@@ -1496,6 +1561,7 @@ async def _serve_since(
         layout,
         got.entities,
         total=total,
+        total_capped=total_capped,
         version_src=version_src,
         layout_version=saved.version,
         truncated=truncated,
