@@ -70,6 +70,13 @@ The MCP server serves one of two tool sets per connection. Every tool carries a
   scope, fleet and plan checks are the same as calling the original op, and a
   rate-limited op draws on the same budget under either name.
 
+A directory connection is also served its own wording where the default text
+does not meet the directory's requirements: the server instructions and the
+`caura_keystones` description say to follow keystone rules and to tell the user
+about a conflict with their request, rather than that the rules override user
+instructions, and the instructions leave out the usage-skill install step.
+`caura_recall` points read-by-id at `caura_memory_read`.
+
 A tool is callable exactly where it is listed. Calling `caura_manage` or
 `caura_doc` on a directory connection, or one of the six on a default one,
 answers `TOOL_NOT_ON_SURFACE` with the tool to use instead. `GET

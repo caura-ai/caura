@@ -133,6 +133,14 @@ class ToolSpec:
     exactly where it is listed: ``call_tool`` refuses it elsewhere with
     ``TOOL_NOT_ON_SURFACE``."""
 
+    directory_description: str | None = None
+    """The description served on the directory surface, when the default one
+    says something the Claude connector directory does not accept (telling the
+    model to set aside user instructions, to call a tool unprompted, or naming
+    a tool that surface does not list). ``None`` serves ``description`` there
+    too. The default surface, ``/tool-descriptions`` and the plugin manifest
+    always carry ``description``."""
+
     delegate: str | None = None
     """For a tool that narrows another one: the tool whose handler it calls.
     Its ops must be a subset of the delegate's, and its handler forwards to the

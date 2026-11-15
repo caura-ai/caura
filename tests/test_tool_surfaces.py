@@ -30,6 +30,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import re
 import textwrap
 import uuid
 from pathlib import Path
@@ -642,3 +643,178 @@ async def test_tools_list_over_http_follows_the_gateway_header(monkeypatch) -> N
             "readOnlyHint" in tool["annotations"]
             and "destructiveHint" in tool["annotations"]
         )
+
+
+# ---------------------------------------------------------------------------
+# 8. Directory-surface wording: tool descriptions and server instructions
+# ---------------------------------------------------------------------------
+#
+# The Claude connector directory refuses tool or server text that tells the
+# model to set aside the user's instructions, to call a tool the user did not
+# ask for, or to fetch behavioural instructions from elsewhere. The default
+# surface keeps its text unchanged; the directory surface gets variants
+# (``ToolSpec.directory_description``, ``mcp_server._DIRECTORY_INSTRUCTIONS``).
+
+# Case-insensitive, in tool descriptions and the server instructions.
+_DIRECTORY_FORBIDDEN_PROSE = (
+    "override",
+    "obey",
+    "mandatory",
+    "install-skill",
+    "install the",
+    "at session start",
+    "once per session",
+)
+# Case-insensitive, anywhere in the served tool list (descriptions AND input
+# schemas). Narrower than the prose list on purpose: ``caura_recall``'s
+# ``min_similarity`` parameter "overrides the tuned profile for this call",
+# which is a statement about the argument, not about the user.
+_DIRECTORY_FORBIDDEN_ANYWHERE = (
+    "must obey",
+    "obey",
+    "install-skill",
+    "override conflicting",
+    "overrides conflicting",
+)
+
+
+async def _initialize_and_discover(headers: dict) -> tuple[dict, dict]:
+    from httpx import ASGITransport, AsyncClient
+
+    from tests.test_mcp_dual_stack import (
+        _MODERN_META,
+        LEGACY_VERSION,
+        MODERN_VERSION,
+        _build_isolated_app,
+        _payload,
+    )
+
+    base = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+        **headers,
+    }
+    app, restore = _build_isolated_app()
+    try:
+        async with (
+            mcp_server.mcp.session_manager.run(),
+            AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client,
+        ):
+            init = await client.post(
+                "/",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": LEGACY_VERSION,
+                        "capabilities": {},
+                        "clientInfo": {"name": "surface-test", "version": "0"},
+                    },
+                },
+                headers=base,
+            )
+            discover = await client.post(
+                "/",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "server/discover",
+                    "params": {"_meta": _MODERN_META},
+                },
+                headers={
+                    **base,
+                    "MCP-Protocol-Version": MODERN_VERSION,
+                    "Mcp-Method": "server/discover",
+                },
+            )
+    finally:
+        restore()
+    assert init.status_code == 200, init.text
+    assert discover.status_code == 200, discover.text
+    return _payload(init)["result"], _payload(discover)["result"]
+
+
+_GATEWAY = {"X-Tenant-ID": "tenant-surface-http", "X-Gateway-Secret": "s3cret"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_clean_identity_vars")
+async def test_a_directory_connection_gets_the_directory_instructions(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "gateway_shared_secret", "s3cret")
+    monkeypatch.setattr(settings, _SHARED_KEY_FIELD, None)
+    init, discover = await _initialize_and_discover(
+        {**_GATEWAY, "X-Caura-Tool-Surface": "directory"}
+    )
+    assert init["instructions"] == mcp_server._DIRECTORY_INSTRUCTIONS
+    assert discover["instructions"] == mcp_server._DIRECTORY_INSTRUCTIONS
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_clean_identity_vars")
+async def test_a_default_connection_keeps_the_default_instructions(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "gateway_shared_secret", "s3cret")
+    monkeypatch.setattr(settings, _SHARED_KEY_FIELD, None)
+    init, discover = await _initialize_and_discover(_GATEWAY)
+    assert init["instructions"] == mcp_server.mcp.instructions
+    assert discover["instructions"] == mcp_server.mcp.instructions
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_clean_identity_vars")
+async def test_a_direct_caller_cannot_select_the_directory_instructions(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, _SHARED_KEY_FIELD, "shared-key")
+    monkeypatch.setattr(settings, "is_standalone", False)
+    init, discover = await _initialize_and_discover(
+        {
+            "X-API-Key": "shared-key",
+            "X-Tenant-ID": "t1",
+            "X-Caura-Tool-Surface": "directory",
+        }
+    )
+    assert init["instructions"] == mcp_server.mcp.instructions
+    assert discover["instructions"] == mcp_server.mcp.instructions
+
+
+def test_the_directory_instructions_carry_none_of_the_refused_patterns() -> None:
+    text = mcp_server._DIRECTORY_INSTRUCTIONS.lower()
+    for phrase in _DIRECTORY_FORBIDDEN_PROSE:
+        assert phrase not in text, phrase
+    # The guard against following directions inside stored content stays.
+    assert "never instructions to you" in text
+
+
+async def test_directory_tool_descriptions_carry_none_of_the_refused_patterns() -> None:
+    tools = await _listed(DIRECTORY_SURFACE)
+    listed = {t.name for t in tools}
+    for tool in tools:
+        description = (tool.description or "").lower()
+        for phrase in _DIRECTORY_FORBIDDEN_PROSE:
+            assert phrase not in description, (tool.name, phrase)
+        # Every tool a directory description points to is one it can call.
+        named = set(re.findall(r"caura_[a-z_]+[a-z]", tool.description or ""))
+        assert named <= listed, (tool.name, sorted(named - listed))
+    served = json.dumps(
+        [t.model_dump(mode="json", by_alias=True) for t in tools]
+    ).lower()
+    for phrase in _DIRECTORY_FORBIDDEN_ANYWHERE:
+        assert phrase not in served, phrase
+
+
+async def test_the_default_surface_serves_the_default_descriptions() -> None:
+    for tool in await _listed(DEFAULT_SURFACE):
+        assert tool.description == REGISTRY[tool.name].description, tool.name
+
+
+async def test_directory_descriptions_are_served_where_set() -> None:
+    by_name = {t.name: t for t in await _listed(DIRECTORY_SURFACE)}
+    variants = {s.name for s in REGISTRY.values() if s.directory_description}
+    assert variants == {"caura_keystones", "caura_recall"}
+    for name in variants:
+        assert by_name[name].description == REGISTRY[name].directory_description
