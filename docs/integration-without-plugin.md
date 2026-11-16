@@ -55,7 +55,7 @@ Save `raw_key` immediately — it's only returned once. The returned credential 
 **Optional fields** on the provision request:
 
 - `initial_trust` — `0`, `1`, `2`, `3` (default `1`).
-- `initial_fleet` — fleet membership; absent = no fleet, and writes then land `fleet_id: null`, which is **tenant-shared by design**: every fleet's `search` and `recall` see the row. Note the asymmetry before you use counts as a health check — a fleet-filtered `GET /memories` or `/stats` does *not* return those rows today, so a fleet-less agent's writes answer teammates' searches while being absent from their listings.
+- `initial_fleet` — fleet membership; absent = no fleet, and writes then land `fleet_id: null`, which is **tenant-shared by design**: every fleet's `search` and `recall` see the row. Note the asymmetry before you use counts as a health check — a fleet-filtered `GET /memories` or `/stats` does *not* return those rows today, so a fleet-less agent's writes answer teammates' searches while being absent from their listings. Its own reads are scoped as a by-id read is: below trust 2, `search` and `recall` return fleet-less and `scope_org` rows (and its own), not another fleet's `scope_team` rows, which need trust 2.
 - `display_name` — human-readable name surfaced on the dashboard.
 
 ---

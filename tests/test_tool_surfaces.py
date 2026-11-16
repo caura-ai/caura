@@ -919,3 +919,43 @@ async def test_caura_tune_get_dispatches_on_the_directory_surface(surface) -> No
     mcp_server._tenant_id_var.set(mcp_server._UNAUTH)
     error = _error(await mcp_server.mcp.call_tool("caura_tune_get", {}))
     assert error["code"] == "UNAUTHORIZED"
+
+
+# ---------------------------------------------------------------------------
+# 10. Tools registered outside the registry
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def addon_tool():
+    """A tool added to the server outside ``core_api.tools.REGISTRY``, the way
+    ``core_api.bus_mcp.register_peer`` adds ``peer``: no spec, so no title,
+    hints or read/write split."""
+    name = "addon_probe"
+
+    async def addon_probe() -> dict:
+        return {"ok": True}
+
+    mcp_server.mcp.add_tool(addon_probe, name=name)
+    yield name
+    mcp_server.mcp.remove_tool(name)
+
+
+@pytest.mark.asyncio
+async def test_an_unclassified_tool_is_not_listed_on_the_directory_surface(addon_tool) -> None:
+    assert addon_tool in {t.name for t in await _listed(DEFAULT_SURFACE)}
+    assert addon_tool not in {t.name for t in await _listed(DIRECTORY_SURFACE)}
+
+
+@pytest.mark.asyncio
+async def test_an_unclassified_tool_is_refused_on_the_directory_surface(surface, addon_tool) -> None:
+    surface(DIRECTORY_SURFACE)
+    error = _error(await mcp_server.mcp.call_tool(addon_tool, {}))
+    assert error["code"] == "TOOL_NOT_ON_SURFACE"
+    assert error["details"] == {"tool": addon_tool, "surface": DIRECTORY_SURFACE}
+
+
+@pytest.mark.asyncio
+async def test_an_unclassified_tool_still_runs_on_the_default_surface(surface, addon_tool) -> None:
+    surface(DEFAULT_SURFACE)
+    assert mcp_server._refuse_off_surface(addon_tool) is None
