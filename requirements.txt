@@ -75,7 +75,7 @@ opentelemetry-api>=1.45.1,<2
 # match the service's; tests/test_manual_install_path_runs_the_services.py
 # fails when this file falls behind either service again.
 # Document chunking, imported at startup.
-markdown-it-py>=4.2.0,<5
+markdown-it-py>=4.3.0,<5
 tiktoken>=0.14.0,<1
 pysbd>=0.3.4,<1
 # The insights discover mode.
