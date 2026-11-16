@@ -711,3 +711,25 @@ async def test_judge_truncates_long_content_to_500_chars():
         f"expected truncation on 5000-char input; got {content_bytes} bytes "
         f"(both inputs passed through untrimmed)"
     )
+
+
+def test_entity_aware_prompt_asks_for_both_slots() -> None:
+    """The same entity is not yet a contradiction: the judge names the slot each
+    statement fills and may only flag a pair that fills the same one.
+
+    Measured on the fleet benchmark (2026-11-16): with a shared subject row the
+    prompt flagged 0.38 of pairs that should both be kept ("the dashboard for
+    the north region" / "... for the south region") before it compared slots,
+    and 0.14 after.
+    """
+    from core_api.services.contradiction_detector import (
+        ENTITY_AWARE_CONTRADICTION_PROMPT,
+    )
+
+    prompt = ENTITY_AWARE_CONTRADICTION_PROMPT
+    for field in ('"slot_a"', '"slot_b"', '"same_slot"'):
+        assert field in prompt
+    assert "If same_slot is false, contradicts MUST be false." in prompt
+    # The reply keys the parser reads are unchanged.
+    for field in ('"same_subject"', '"non_conflict_reason"', '"contradicts"'):
+        assert field in prompt

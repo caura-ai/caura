@@ -1475,6 +1475,18 @@ statements' CLAIMS about those entities are mutually exclusive.
     prefixes) are additional context about that ONE subject, NOT
     evidence of different subjects.
 
+    The same entity is NOT yet a contradiction. One entity has many
+    slots, and two statements conflict only when they give different
+    values for the SAME slot. A slot is an attribute together with what
+    its value applies to: the part, variant, environment, region,
+    audience, category or period of the entity that the claim is about.
+    "The dashboard for the north region refreshes at 08:00" and "the
+    dashboard for the south region refreshes at 09:00" share an entity
+    and fill two slots; so do "draft A is due on the 4th" / "draft B is
+    due on the 18th", "retries after network failures: 4" / "retries
+    after checksum failures: 2", and "the primary contact is X" / "the
+    backup contact is Y". Step 4 asks you to name both slots.
+
   * If the two RESOLVED-ENTITIES blocks have a subject-role entity with
     DIFFERENT ``entity_id`` values, the subjects are different entity
     rows. same_subject MUST be false, regardless of surface name
@@ -1527,7 +1539,25 @@ Follow these steps in order:
          -> same_subject=false. Two distinct resolved entities that
          happen to share a canonical name; this is the
          ``same_name_distinct_subject`` non-conflict reason.
-4. Decide non_conflict_reason. Even when same_subject is true, certain
+4. Name slot_a and slot_b: for each statement, the attribute it gives a
+   value for, with what that value applies to (part, variant,
+   environment, region, audience, category, or a named period such as
+   "the 2026 edition" or "on weekends"). Leave the value itself out of
+   the slot name, and leave out the moment a value takes effect: "since
+   July", "from 1 October", "now", "starting next week" and "no longer"
+   are how an update is worded, not a different slot. Decide same_slot
+   by comparing the two slot NAMES, never the values: "the reminder goes
+   out on the 3rd" / "the reminder now goes out on the 5th" is ONE slot
+   (send day) with two values, so same_slot=true and the statements
+   contradict; "the reminder for staff goes out on the 3rd" / "the
+   reminder for contractors goes out on the 5th" is TWO slots, so
+   same_slot=false. same_slot is true when both statements give a value
+   for the same attribute of the same part of the subject. When same_slot is false the two
+   claims both hold: non_conflict_reason is "scope_mismatch" (the same
+   attribute of different parts, variants or periods) or
+   "list_valued_predicate" (different attributes, or one more value of
+   an attribute that holds several).
+5. Decide non_conflict_reason. Even when same_subject is true, certain
    shapes describe two claims that BOTH hold and so are NOT a
    contradiction. Pick at most one value; pick "none" when the two
    statements really do assert mutually exclusive states.
@@ -1554,8 +1584,9 @@ Follow these steps in order:
        with different tense / aspect / synonyms.
      - "none": none of the above; the two statements assert mutually
        exclusive states about the same subject at the same time frame.
-5. Decide contradicts:
+6. Decide contradicts:
    - If same_subject is false, contradicts MUST be false.
+   - If same_slot is false, contradicts MUST be false.
    - If non_conflict_reason is not "none", contradicts MUST be false.
    - Otherwise contradicts is true only when the two statements assert
      mutually exclusive states about that subject in the same time
@@ -1566,6 +1597,9 @@ Reply with ONLY a JSON object, no prose, no markdown fences:
 {{"subject_a": "<canonical name from RESOLVED ENTITIES for A>",
   "subject_b": "<canonical name from RESOLVED ENTITIES for B>",
   "same_subject": true/false,
+  "slot_a": "<attribute of A, with what it applies to>",
+  "slot_b": "<attribute of B, with what it applies to>",
+  "same_slot": true/false,
   "non_conflict_reason": "none|temporal_supersession|list_valued_predicate|refinement|scope_mismatch|same_name_distinct_subject|conditional_unrealized|event_restatement",
   "contradicts": true/false,
   "reason": "one short phrase referencing the resolved subjects and the conflict (or its absence)"}}
