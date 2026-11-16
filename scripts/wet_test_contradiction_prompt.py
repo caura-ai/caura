@@ -161,31 +161,51 @@ CASES: list[Case] = [
     # ships (commit 3 of this PR), most of these will misfire — that is
     # the baseline this fixture set is here to measure.
     # ===================================================================
-    # ----- Shape 1: temporal_supersession (planned → shipped, etc.) -----
+    # ----- State changes (planned → shipped, open → closed): updates, MUST fire -----
+    # These three were written for CAURA-124 with ``expected=False`` and
+    # ``temporal_supersession``. A63 reversed that: a newer statement that changes
+    # a subject's CURRENT state is the update the product exists to flag, and both
+    # prompts now name "status: planned" vs "status: shipped" as a contradiction.
     Case(
         label="ts_planned_shipped",
         new_content="The Atlas feature shipped on 2026-09-12.",
         old_content="The Atlas feature is planned for Q3 2026.",
-        expected=False,
-        note="Plan-then-ship sequence; both true sequentially.",
-        shape="temporal_supersession",
-        expected_non_conflict_reason="temporal_supersession",
+        expected=True,
+        note="Plan-then-ship: the feature's current state changed (A63).",
+        shape="state_change",
     ),
     Case(
         label="ts_ticket_open_closed",
         new_content="Ticket OPS-4521 is closed.",
         old_content="Ticket OPS-4521 is open.",
-        expected=False,
-        note="State machine transition: open → closed is supersession.",
-        shape="temporal_supersession",
-        expected_non_conflict_reason="temporal_supersession",
+        expected=True,
+        note="State machine transition: open → closed replaces the state (A63).",
+        shape="state_change",
     ),
     Case(
         label="ts_draft_published",
         new_content="The Q3 board memo was published last Friday.",
         old_content="The Q3 board memo is in draft.",
+        expected=True,
+        note="Document lifecycle: draft → published replaces the state (A63).",
+        shape="state_change",
+    ),
+    # ----- Shape 1: temporal_supersession (records of past events; both stay true) -----
+    Case(
+        label="ts_hired_promoted",
+        new_content="Noa Peretz was promoted to staff engineer in 2023.",
+        old_content="Noa Peretz was hired as a software engineer in 2020.",
         expected=False,
-        note="Document lifecycle: draft → published is supersession.",
+        note="Two past events in one career; neither replaces the other.",
+        shape="temporal_supersession",
+        expected_non_conflict_reason="temporal_supersession",
+    ),
+    Case(
+        label="ts_v1_v2_shipped",
+        new_content="Version 2 of the Atlas SDK shipped in June.",
+        old_content="Version 1 of the Atlas SDK shipped in March.",
+        expected=False,
+        note="Two release records; both remain true as history.",
         shape="temporal_supersession",
         expected_non_conflict_reason="temporal_supersession",
     ),
