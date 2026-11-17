@@ -79,6 +79,14 @@ The MCP server serves one of two tool sets per connection. Every tool carries a
   (the collaboration build's `peer`) is neither listed nor callable there, and
   a call to it is refused with `TOOL_NOT_ON_SURFACE`.
 
+  List results there carry their rows once, under `items`. The default surface
+  also repeats them under the `results` alias for existing parsers, which a
+  directory client does not have, and the copy only doubled what reached its
+  model. `caura_recall` and `caura_write` are described there by what they hold
+  ("the team's shared memory: decisions, facts, outcomes…") and the questions
+  they answer, since Claude clients with many connectors find tools by searching
+  those descriptions.
+
 A directory connection is also served its own wording where the default text
 does not meet the directory's requirements: the server instructions and the
 `caura_keystones` description say to follow keystone rules and to tell the user

@@ -678,6 +678,12 @@ _DIRECTORY_FORBIDDEN_PROSE = (
     "install the",
     "at session start",
     "once per session",
+    # Describing what a tool answers helps a client's tool search find it;
+    # telling the model when it must call it is the line the directory draws.
+    "always call",
+    "always use",
+    "before answering",
+    "before every",
 )
 # Case-insensitive, anywhere in the served tool list (descriptions AND input
 # schemas). Narrower than the prose list on purpose: ``caura_recall``'s
@@ -829,7 +835,7 @@ async def test_the_default_surface_serves_the_default_descriptions() -> None:
 async def test_directory_descriptions_are_served_where_set() -> None:
     by_name = {t.name: t for t in await _listed(DIRECTORY_SURFACE)}
     variants = {s.name for s in REGISTRY.values() if s.directory_description}
-    assert variants == {"caura_keystones", "caura_recall", "caura_tune"}
+    assert variants == {"caura_keystones", "caura_recall", "caura_tune", "caura_write"}
     for name in variants:
         assert by_name[name].description == REGISTRY[name].directory_description
 
@@ -965,3 +971,46 @@ async def test_an_unclassified_tool_still_runs_on_the_default_surface(
 ) -> None:
     surface(DEFAULT_SURFACE)
     assert mcp_server._refuse_off_surface(addon_tool) is None
+
+
+# ---------------------------------------------------------------------------
+# 11. Found by the questions people ask; one copy of each row
+# ---------------------------------------------------------------------------
+
+
+def test_recall_and_write_describe_what_they_hold_in_peoples_words() -> None:
+    """Claude clients with many connectors find tools by searching names and
+    descriptions, so the directory wording names the memory and the questions
+    it answers rather than the retrieval method alone."""
+    recall = REGISTRY["caura_recall"].directory_description.lower()
+    for phrase in ("shared memory", "decisions", "what did we decide"):
+        assert phrase in recall, phrase
+    write = REGISTRY["caura_write"].directory_description.lower()
+    for phrase in ("shared memory", "decisions", "remember that"):
+        assert phrase in write, phrase
+    # The default wording is unchanged for every other client.
+    assert REGISTRY["caura_write"].directory_description.endswith(
+        REGISTRY["caura_write"].description
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "keys"),
+    [(DEFAULT_SURFACE, {"results", "items"}), (DIRECTORY_SURFACE, {"items"})],
+)
+def test_list_keys_by_surface(surface, value, keys) -> None:
+    """``items`` is canonical everywhere; the ``results`` alias, the same list
+    a second time, stays only where existing parsers read it."""
+    surface(value)
+    rows = [{"id": "m1"}]
+    envelope = mcp_server._list_keys(rows)
+    assert set(envelope) == keys
+    assert envelope["items"] is rows
+
+
+def test_every_list_envelope_goes_through_list_keys() -> None:
+    """No envelope spells the alias by hand, so no tool can drift back to
+    sending the directory surface every row twice."""
+    source = inspect.getsource(mcp_server)
+    body = source.split("def _list_keys", 1)[1].split("\ndef ", 1)[1]
+    assert '"results":' not in body
