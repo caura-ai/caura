@@ -25,6 +25,7 @@ skill-write validator are patched at the module seam; no DB.
 """
 
 import logging
+from hashlib import sha256
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -32,7 +33,7 @@ from httpx import ASGITransport, AsyncClient, HTTPStatusError, Request, Response
 
 from core_api import errors
 from core_api.app import http_exception_handler as _http_exception_handler
-from core_api.auth import AuthContext, get_auth_context
+from core_api.auth import ADMIN_KEY_CREDENTIAL, AuthContext, get_auth_context
 from core_api.clients import storage_client
 from core_api.middleware import standalone_tenant
 from core_api.middleware.standalone_tenant import StandaloneTenantMiddleware
@@ -100,7 +101,10 @@ def forge_doc(**data_overrides) -> dict:
         "updated_at": "2026-07-18T07:00:00+00:00",
     }
     data.update(data_overrides)
+    if "content_hash" not in data_overrides:
+        data["content_hash"] = "sha256:" + sha256(data["content"].encode()).hexdigest()
     return {
+        "updated_at": "2026-07-18T07:00:00+00:00",
         "doc_id": f"forge/{data['slug']}",
         "fleet_id": "fleet-a",
         "data": data,
@@ -172,7 +176,14 @@ class FakeStorage:
             return self.doc_sequence.pop(0)
         return self.docs.get(doc_id)
 
-    async def upsert_document(self, payload: dict, *, expected_status=None):
+    async def upsert_document(
+        self,
+        payload: dict,
+        *,
+        expected_status=None,
+        expected_content_hash=None,
+        expected_updated_at=None,
+    ):
         self.expected_statuses.append(
             None if expected_status is None else list(expected_status)
         )
@@ -183,6 +194,15 @@ class FakeStorage:
                 raise storage_client.DocumentStatusChangedError(
                     f"{payload['doc_id']} is {status!r}"
                 )
+        stored = self.docs.get(payload["doc_id"])
+        if expected_content_hash is not None and (
+            not stored or stored["data"].get("content_hash") != expected_content_hash
+        ):
+            raise storage_client.DocumentStatusChangedError("content changed")
+        if expected_updated_at is not None and (
+            not stored or stored.get("updated_at") != expected_updated_at
+        ):
+            raise storage_client.DocumentStatusChangedError("row changed")
         self.upserts.append(payload)
         self.docs[payload["doc_id"]] = {
             "doc_id": payload["doc_id"],
@@ -285,7 +305,7 @@ def make_client(
     # every pre-existing test in this file keeps exercising the same caller.
     capabilities: set[str] | None = None,
     is_demo: bool = False,
-    user_id: str | None = None,
+    user_id: str | None = "inbox-reviewer",
     # Mount ``StandaloneTenantMiddleware`` in front of the router, as a
     # standalone deployment does (#1028). It injects nothing unless the test
     # also patches ``get_standalone_tenant_id``.
@@ -308,7 +328,9 @@ def make_client(
         is_admin=is_admin,
         capabilities=capabilities,
         is_demo=is_demo,
-        user_id=user_id,
+        user_id=None if is_admin else user_id,
+        is_person=not is_admin and user_id is not None,
+        credential_id=ADMIN_KEY_CREDENTIAL if is_admin else None,
     )
 
     async def _auth_dep():
@@ -321,11 +343,21 @@ def make_client(
 BASE = "/api/v1/skills-inbox"
 SLUG = "forge/summarize-oncall-handoff"
 
+
+def _review_body(storage, extra=None):
+    return {
+        "expected_content_hash": (storage.docs.get(SLUG) or forge_doc())["data"].get(
+            "content_hash"
+        ),
+        **(extra or {}),
+    }
+
+
 # The five mutating actions and a minimal valid body for each. Shared by
 # every parametrized action test — admin-plane, write-gate, and
 # over-refusal — so a sixth action is added in one place.
 _ACTIONS = [
-    ("approve", None),
+    ("approve", {"expected_content_hash": forge_doc()["data"]["content_hash"]}),
     ("defer", None),
     ("edit", {"summary": "x"}),
     ("quarantine", {"reason": "r"}),
@@ -406,7 +438,7 @@ async def test_list_returns_enriched_golden_card(storage, settings):
     assert card["origin"]["cluster_size"] == 5
     assert card["status"] == "staged"
     assert card["fingerprint"] == "fp:v1:abc123"
-    assert card["content_hash"] == "sha256:9b2e"
+    assert card["content_hash"] == forge_doc()["data"]["content_hash"]
     assert card["deferred_at"] is None
 
 
@@ -581,7 +613,9 @@ async def test_legacy_is_admin_flag_also_grants_actions(
 
 _NON_WRITING = [
     pytest.param(
-        {"capabilities": {"read"}}, errors.AUTH_READ_ONLY_KEY, id="read-only-key"
+        {"capabilities": {"read"}, "user_id": None},
+        errors.AUTH_READ_ONLY_KEY,
+        id="read-only-key",
     ),
     pytest.param({"is_demo": True}, errors.AUTH_DEMO_SANDBOX, id="demo-sandbox"),
 ]
@@ -768,7 +802,7 @@ async def test_approve_happy_path(storage, settings, side_effects):
         )
     )
     async with make_client() as client:
-        r = await client.post(f"{BASE}/{SLUG}/approve")
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=_review_body(storage))
     assert r.status_code == 200, r.text
     assert r.json() == {
         "slug": SLUG,
@@ -792,7 +826,7 @@ async def test_approve_happy_path(storage, settings, side_effects):
 async def test_approve_only_from_staged(storage, settings, side_effects, status):
     storage.seed(forge_doc(status=status))
     async with make_client() as client:
-        r = await client.post(f"{BASE}/{SLUG}/approve")
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=_review_body(storage))
     assert r.status_code == 409, r.text
     assert storage.upserts == []
 
@@ -800,7 +834,7 @@ async def test_approve_only_from_staged(storage, settings, side_effects, status)
 async def test_approve_missing_content_hash_422(storage, settings, side_effects):
     storage.seed(forge_doc(content_hash=None))
     async with make_client() as client:
-        r = await client.post(f"{BASE}/{SLUG}/approve")
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=_review_body(storage))
     assert r.status_code == 422
     assert "content_hash" in r.json()["detail"]
 
@@ -809,7 +843,7 @@ async def test_approve_dirty_rescan_422(storage, settings, side_effects):
     side_effects.scan.result = QUARANTINE_SCAN
     storage.seed(forge_doc())
     async with make_client() as client:
-        r = await client.post(f"{BASE}/{SLUG}/approve")
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=_review_body(storage))
     assert r.status_code == 422
     assert "rescan refused" in r.json()["detail"]
     assert storage.upserts == []
@@ -825,7 +859,7 @@ async def test_approve_concurrent_edit_409(storage, settings, side_effects):
         forge_doc(content_hash="sha256:DRIFTED"),  # reload 2 — drift detected
     ]
     async with make_client() as client:
-        r = await client.post(f"{BASE}/{SLUG}/approve")
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=_review_body(storage))
     assert r.status_code == 409
     assert "modified during the rescan" in r.json()["detail"]
     assert storage.upserts == []
@@ -837,7 +871,7 @@ async def test_approve_concurrent_status_flip_409(storage, settings, side_effect
         forge_doc(status="rejected"),  # reload: concurrently rejected
     ]
     async with make_client() as client:
-        r = await client.post(f"{BASE}/{SLUG}/approve")
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=_review_body(storage))
     assert r.status_code == 409
     assert "concurrently transitioned" in r.json()["detail"]
 
@@ -857,7 +891,7 @@ async def test_l223_approve_refuses_a_folder_an_active_skill_uses(
     storage.seed({"doc_id": other, "fleet_id": "fleet-b", "data": {"status": "active"}})
 
     async with make_client() as client:
-        r = await client.post(f"{BASE}/{SLUG}/approve")
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=_review_body(storage))
 
     assert r.status_code == 409, r.text
     assert r.json()["error"]["code"] == "SKILL_FOLDER_TAKEN"
@@ -868,7 +902,7 @@ async def test_l223_approve_refuses_a_folder_an_active_skill_uses(
     # holds the folder.
     storage.docs[other]["data"]["status"] = "rejected"
     async with make_client() as client:
-        r = await client.post(f"{BASE}/{SLUG}/approve")
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=_review_body(storage))
     assert r.status_code == 200, r.text
 
 
@@ -935,7 +969,9 @@ async def test_an_override_approves_a_quarantined_skill_and_is_audited(
     side_effects.scan.result = OVERRIDABLE_SCAN
     storage.seed(quarantined_doc())
     async with make_client() as client:
-        r = await client.post(f"{BASE}/{SLUG}/approve", json=OVERRIDE)
+        r = await client.post(
+            f"{BASE}/{SLUG}/approve", json=_review_body(storage, OVERRIDE)
+        )
     assert r.status_code == 200, r.text
     assert r.json()["previous_status"] == "quarantined"
     assert r.json()["new_status"] == "active"
@@ -956,7 +992,7 @@ async def test_an_override_approves_a_quarantined_skill_and_is_audited(
     ("client_kw", "approver"),
     [
         ({"user_id": "user-7"}, "user-7"),
-        ({"org_role": None, "is_admin": True}, "admin-api-key"),
+        ({"org_role": None, "is_admin": True}, ADMIN_KEY_CREDENTIAL),
     ],
     ids=["gateway_user", "admin_key"],
 )
@@ -968,7 +1004,9 @@ async def test_an_override_always_names_its_approver(
     side_effects.scan.result = OVERRIDABLE_SCAN
     storage.seed(quarantined_doc())
     async with make_client(**client_kw) as client:
-        r = await client.post(f"{BASE}/{SLUG}/approve", json=OVERRIDE)
+        r = await client.post(
+            f"{BASE}/{SLUG}/approve", json=_review_body(storage, OVERRIDE)
+        )
     assert r.status_code == 200, r.text
     assert storage.upserts[0]["data"]["quarantine_override"]["approved_by"] == approver
     ((_, audit),) = side_effects.log.calls
@@ -983,7 +1021,9 @@ async def test_an_override_moves_the_quarantine_markers_into_its_record(
     side_effects.scan.result = OVERRIDABLE_SCAN
     storage.seed(quarantined_doc())
     async with make_client() as client:
-        r = await client.post(f"{BASE}/{SLUG}/approve", json=OVERRIDE)
+        r = await client.post(
+            f"{BASE}/{SLUG}/approve", json=_review_body(storage, OVERRIDE)
+        )
     assert r.status_code == 200, r.text
     data = storage.upserts[0]["data"]
     assert "quarantined_at" not in data and "quarantine_reason" not in data
@@ -998,7 +1038,9 @@ async def test_an_override_approves_a_staged_skill_whose_rescan_is_critical(
     side_effects.scan.result = OVERRIDABLE_SCAN
     storage.seed(forge_doc())
     async with make_client() as client:
-        r = await client.post(f"{BASE}/{SLUG}/approve", json=OVERRIDE)
+        r = await client.post(
+            f"{BASE}/{SLUG}/approve", json=_review_body(storage, OVERRIDE)
+        )
     assert r.status_code == 200, r.text
     assert storage.upserts[0]["data"]["status"] == "active"
 
@@ -1009,7 +1051,9 @@ async def test_an_override_approves_a_staged_skill_whose_rescan_is_critical(
 async def test_an_override_needs_a_reason(storage, settings, side_effects, body):
     storage.seed(quarantined_doc())
     async with make_client() as client:
-        r = await client.post(f"{BASE}/{SLUG}/approve", json=body)
+        r = await client.post(
+            f"{BASE}/{SLUG}/approve", json=_review_body(storage, body)
+        )
     assert r.status_code == 422, r.text
     assert storage.upserts == []
 
@@ -1028,7 +1072,9 @@ async def test_an_override_never_lifts_a_fatal_finding(storage, settings, side_e
     )
     storage.seed(quarantined_doc())
     async with make_client() as client:
-        r = await client.post(f"{BASE}/{SLUG}/approve", json=OVERRIDE)
+        r = await client.post(
+            f"{BASE}/{SLUG}/approve", json=_review_body(storage, OVERRIDE)
+        )
     assert r.status_code == 422, r.text
     assert "rescan refused" in r.json()["detail"]
     assert storage.upserts == []

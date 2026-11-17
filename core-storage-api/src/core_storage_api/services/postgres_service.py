@@ -14112,6 +14112,8 @@ class PostgresService:
         system: bool = False,
         force: bool = False,
         expected_status: Sequence[str | None] | None = None,
+        expected_content_hash: str | None = None,
+        expected_updated_at: str | None = None,
         session: AsyncSession | None = None,
     ) -> Document:
         """INSERT ... ON CONFLICT DO UPDATE. Returns the upserted Document.
@@ -14140,6 +14142,8 @@ class PostgresService:
         status another writer set in between was silently replaced. The check
         is the write's own ``WHERE``, so nothing lands between them; a miss
         raises ``DocumentStatusChangedError`` and writes nothing.
+        Review writes may also bind the stored content hash and row timestamp;
+        these predicates require an existing document and share the UPDATE.
         """
         if collection.startswith("_") and not system:
             raise ValueError(f"Collection '{collection}' is system-managed; use the dedicated endpoint.")
@@ -14155,6 +14159,8 @@ class PostgresService:
                     system=system,
                     force=force,
                     expected_status=expected_status,
+                    expected_content_hash=expected_content_hash,
+                    expected_updated_at=expected_updated_at,
                     session=own,
                 )
         if not force:
@@ -14171,8 +14177,24 @@ class PostgresService:
         }
         allowed = [status for status in expected_status or () if status is not None]
         status_matches = Document.data["status"].astext.in_(allowed)
+        predicates = [status_matches] if expected_status is not None else []
+        if expected_content_hash is not None:
+            if not isinstance(expected_content_hash, str) or not expected_content_hash:
+                raise ValueError("expected_content_hash must be a non-empty string")
+            predicates.append(Document.data["content_hash"].astext == expected_content_hash)
+        if expected_updated_at is not None:
+            if not isinstance(expected_updated_at, str):
+                raise ValueError("expected_updated_at must be an ISO timestamp")
+            reviewed_at = datetime.fromisoformat(expected_updated_at)
+            if reviewed_at.tzinfo is None:
+                raise ValueError("expected_updated_at must include a timezone")
+            predicates.append(Document.updated_at == reviewed_at)
         stmt: Any
-        if expected_status is not None and None not in expected_status:
+        if (
+            expected_content_hash is not None
+            or expected_updated_at is not None
+            or (expected_status is not None and None not in expected_status)
+        ):
             # The document has to exist, so an upsert, which would insert it,
             # is the wrong statement.
             stmt = (
@@ -14181,7 +14203,7 @@ class PostgresService:
                     Document.tenant_id == tenant_id,
                     Document.collection == collection,
                     Document.doc_id == doc_id,
-                    status_matches,
+                    *predicates,
                 )
                 .values(**new_values)
                 .returning(Document)

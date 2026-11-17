@@ -266,7 +266,7 @@ class TestRunForgeCronTick:
         assert run_promote.await_args.kwargs["auto_promote_clean"] is False
 
     @pytest.mark.asyncio
-    async def test_auto_promote_clean_flag_threaded_when_enabled(self):
+    async def test_legacy_auto_promote_clean_flag_is_ignored(self):
         from core_api.services.forge.cron_handler import run_forge_cron_tick
 
         fake_forge_result = ForgeRunResult(
@@ -295,7 +295,7 @@ class TestRunForgeCronTick:
             scanned=1,
             promoted=1,
             held=0,
-            auto_approved=1,  # the one candidate auto-activated
+            auto_approved=0,  # the candidate waits for review
         )
 
         with (
@@ -349,10 +349,9 @@ class TestRunForgeCronTick:
                 run_label="forge-cron-t1-20260610T0000",
             )
 
-        # The flag from org_settings.sentinel.auto_promote_clean is
-        # threaded into the promoter.
-        assert run_promote.await_args.kwargs["auto_promote_clean"] is True
-        assert stats["auto_approved"] == 1
+        # A stale stored opt-in never reaches the promoter as an activation choice.
+        assert run_promote.await_args.kwargs["auto_promote_clean"] is False
+        assert stats["auto_approved"] == 0
 
     @pytest.mark.asyncio
     async def test_missing_llm_provider_raises_runtime_error(self):

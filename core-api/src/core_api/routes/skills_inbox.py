@@ -31,6 +31,7 @@ turned the Skill Factory on needs the inbox too. The flag turns the Forge on.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -56,6 +57,7 @@ from core_api.services.forge.sentinel_scan import scan_skill_doc
 from core_api.services.organization_settings import get_settings_for_display
 from core_api.services.skill_lifecycle import (
     SkillWriteContext,
+    is_forge_skill,
     validate_and_normalize_skill_write,
 )
 
@@ -350,22 +352,23 @@ _QUARANTINE_MARKERS = ("quarantined_at", "quarantine_reason")
 
 
 def _approver(auth: AuthContext) -> str:
-    """Who approved an override (M-120), for the doc and the audit row.
-
-    The gateway user when there is one, else the calling agent. The admin API key
-    carries neither, so it is named by its credential, as is a tenant key.
-    """
-    if auth.user_id:
-        return auth.user_id
-    if auth.agent_id:
-        return str(auth.agent_id)
-    return "admin-api-key" if auth.is_admin else "tenant-api-key"
+    """Require the same attributable administrator as delivery approval."""
+    auth.enforce_not_agent_credential("approve skill activation")
+    auth.enforce_tenant_admin_credential("approve skill activation")
+    if not auth.is_org_admin or auth.is_install_credential or auth.agent_id:
+        raise HTTPException(403, "An organization or system administrator must approve activation")
+    approver = auth.credential_id if auth.is_admin else auth.user_id
+    if not approver:
+        raise HTTPException(403, "An attributable administrator is required")
+    return approver
 
 
 class ApproveRequest(BaseModel):
-    """Approve's optional body: only an override needs one (M-120)."""
+    """Forge approval binds to the content hash shown to the reviewer."""
 
     model_config = STRICT_WRITE_BODY
+
+    expected_content_hash: str | None = Field(default=None, min_length=1, max_length=128)
 
     override_quarantine: bool = Field(
         default=False,
@@ -635,6 +638,8 @@ async def _write_skill(
     data: dict,
     decided_on: str,
     force: bool = False,
+    expected_content_hash: str | None = None,
+    expected_updated_at: str | None = None,
 ) -> None:
     """Write the whole skill doc, but only over the status the handler decided on.
 
@@ -647,6 +652,11 @@ async def _write_skill(
     the caller with its status and reason, as ``POST /documents`` passes it,
     instead of an opaque 500. A 5xx still goes to the upstream handler.
     """
+    preconditions: dict[str, Any] = {"expected_status": [decided_on]}
+    if expected_content_hash is not None:
+        preconditions["expected_content_hash"] = expected_content_hash
+    if expected_updated_at is not None:
+        preconditions["expected_updated_at"] = expected_updated_at
     try:
         await get_storage_client().upsert_document(
             {
@@ -657,12 +667,15 @@ async def _write_skill(
                 "data": data,
                 "force": force,
             },
-            expected_status=[decided_on],
+            **preconditions,
         )
     except DocumentStatusChangedError as exc:
         raise HTTPException(
             status_code=409,
-            detail=f"skill {slug!r} was concurrently moved out of status={decided_on!r}; reload and retry",
+            detail=(
+                f"skill {slug!r} was concurrently moved out of status={decided_on!r} "
+                "or modified since review; reload and retry"
+            ),
         ) from exc
     except httpx.HTTPStatusError as exc:
         if not exc.response.is_client_error:
@@ -681,6 +694,8 @@ async def _persist_status_transition(
     new_status: str,
     extra_data_patches: dict | None = None,
     remove_keys: tuple[str, ...] = (),
+    expected_content_hash: str | None = None,
+    expected_updated_at: str | None = None,
 ) -> tuple[str, dict]:
     """Patch ``data.status`` (plus any extras) and write it over the status
     ``doc`` holds. Returns ``(previous_status, new_data)`` for audit +
@@ -708,7 +723,13 @@ async def _persist_status_transition(
     for key in remove_keys:
         data.pop(key, None)
     await _write_skill(
-        tenant_id=tenant_id, fleet_id=fleet_id, slug=slug, data=data, decided_on=previous_status
+        tenant_id=tenant_id,
+        fleet_id=fleet_id,
+        slug=slug,
+        data=data,
+        decided_on=previous_status,
+        expected_content_hash=expected_content_hash,
+        expected_updated_at=expected_updated_at,
     )
     return previous_status, data
 
@@ -842,6 +863,7 @@ async def approve(
     tenant_id = _require_tenant(auth, tenant_id)
     settings = await _inbox_settings(tenant_id)
     _require_inbox_admin(auth)
+    approver = _approver(auth)
     sf = (settings or {}).get("skills_factory") if isinstance(settings, dict) else {}
     body_max = (sf or {}).get("body_max_bytes", 40_000)
     desc_max = (sf or {}).get("description_max_bytes", 160)
@@ -869,12 +891,8 @@ async def approve(
     # rescan result onto the new content (post-edit). Reload, then
     # scan the canonical doc.
     #
-    # A second concurrent Edit between THIS reload and the upsert is
-    # still theoretically possible; the storage layer's per-row
-    # ordering keeps last write wins and an Edit during Approve is
-    # the operator's prerogative anyway. We narrow the window from
-    # "across rescan" to "across a single upsert", which is the
-    # tightest we can get without a per-doc lock.
+    # The final write additionally compares the reviewed hash and storage row
+    # version in SQL, so an Edit after the last reload cannot be overwritten.
     doc = await _reload_and_assert_status(tenant_id=tenant_id, slug=slug, expected_statuses=approvable)
     data = doc.get("data") or {}
     # Snapshot the content_hash BEFORE the rescan. After the rescan
@@ -898,27 +916,36 @@ async def approve(
             ),
         )
 
+    if is_forge_skill(doc) and body.expected_content_hash is None:
+        raise HTTPException(422, "expected_content_hash is required for Forge approval")
+    if body.expected_content_hash is not None and body.expected_content_hash != pre_scan_content_hash:
+        raise HTTPException(409, "Skill content changed since review; reload and review again")
+
     # Third TOCTOU reload — catches Reject/Quarantine races (status
     # changed away from 'staged'). Plus the content_hash check below
     # catches Edit races (status stayed 'staged' but content changed).
     doc = await _reload_and_assert_status(tenant_id=tenant_id, slug=slug, expected_statuses=approvable)
     third_data = doc.get("data") or {}
+    if is_forge_skill(doc) and body.expected_content_hash is None:
+        raise HTTPException(422, "expected_content_hash is required for Forge approval")
     if third_data.get("content_hash") != pre_scan_content_hash:
         raise HTTPException(
             status_code=409,
             detail=(f"skill {slug!r} content was modified during the rescan; reload and retry approve"),
         )
 
-    # Scan against ``third_data`` (the post-reload canonical doc), not
-    # the earlier ``data`` snapshot. The reload above already proved
-    # ``third_data.content_hash == pre_scan_content_hash`` so the
-    # content bytes are guaranteed identical to what we snapshotted,
-    # but scanning ``third_data`` is the honest shape: the ``data.scan``
-    # payload we persist is computed against the bytes we're about to
-    # crystallize. Call ``scan_skill_doc`` directly so the allow-verdict
-    # AND the persisted ``data.scan`` come from the SAME ``ScanResult``
-    # (``as_doc_field()`` rehydrates the full ``scanned_at`` / counters /
-    # findings shape).
+    content = third_data.get("content")
+    if not isinstance(content, str):
+        raise HTTPException(422, "Skill has no reviewable content")
+    actual_hash = "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if actual_hash != pre_scan_content_hash:
+        raise HTTPException(409, "Stored content hash does not match the skill bytes; reload and repair")
+    reviewed_version = doc.get("updated_at")
+    if not isinstance(reviewed_version, str) or not reviewed_version:
+        raise HTTPException(422, "Skill has no storage row version; reload and repair")
+
+    # Scan the canonical post-reload bytes. Persist that same ScanResult with
+    # activation, under the reviewed version's storage preconditions.
     scan_result = await scan_skill_doc(
         third_data, mode="pre-apply", body_max_bytes=body_max, description_max_bytes=desc_max
     )
@@ -939,12 +966,19 @@ async def approve(
     rescan_payload = scan_result.as_doc_field()
     # The rescan's verdict is persisted either way, so an overridden skill keeps
     # the findings it was approved over, next to who approved it and why.
-    patches: dict[str, Any] = {"scan": rescan_payload}
+    patches: dict[str, Any] = {
+        "scan": rescan_payload,
+        "activation_approval": {
+            "approved_by": approver,
+            "approved_at": datetime.now(UTC).isoformat(),
+            "content_hash": actual_hash,
+        },
+    }
     if override:
         patches["quarantine_override"] = {
             "reason": body.reason,
             "critical_codes": [f.code for f in scan_result.findings if f.severity == "critical"],
-            "approved_by": _approver(auth),
+            "approved_by": approver,
             **{key: third_data[key] for key in _QUARANTINE_MARKERS if key in third_data},
         }
 
@@ -955,6 +989,8 @@ async def approve(
         doc=doc,
         new_status="active",
         extra_data_patches=patches,
+        expected_content_hash=actual_hash,
+        expected_updated_at=reviewed_version,
         # Approving crystallizes the doc to ``active``; clear the
         # transient defer markers so an active skill never carries
         # a stale "deferred_at" timestamp. Mirrors the same pop in

@@ -3825,6 +3825,7 @@ async def caura_doc(
                     )
 
                     sf_ctx = SkillWriteContext(
+                        doc_id=doc_id,
                         caller_agent_id=agent_id,
                         is_admin=False,
                         is_internal_forge=False,

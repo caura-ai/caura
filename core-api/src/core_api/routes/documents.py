@@ -571,6 +571,7 @@ async def _upsert_document_claimed(
         # external source='forge' attempt.
         is_internal_forge = False
         sf_ctx = SkillWriteContext(
+            doc_id=body.doc_id,
             caller_agent_id=author,
             is_admin=auth.is_org_admin,
             is_internal_forge=is_internal_forge,

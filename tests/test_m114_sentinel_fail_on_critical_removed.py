@@ -62,13 +62,13 @@ async def test_a_value_stored_before_the_removal_is_not_shown(client) -> None:
     assert _REMOVED_KEY not in resp.json()["skills_factory"]["sentinel"]
 
 
-async def test_auto_promote_clean_still_writes(client) -> None:
-    """The control: the rest of the sentinel block still writes and reads back."""
+async def test_other_factory_settings_still_write(client) -> None:
+    """The control: an unrelated factory setting still writes and reads back."""
     tenant_id, headers = _new_tenant()
 
     resp = await client.put(
         f"/api/v1/settings?tenant_id={tenant_id}",
-        json={"skills_factory": {"sentinel": {"auto_promote_clean": True}}},
+        json={"skills_factory": {"inbox_max_pending": 20}},
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
@@ -77,4 +77,4 @@ async def test_auto_promote_clean_still_writes(client) -> None:
         f"/api/v1/settings?tenant_id={tenant_id}", headers=headers
     )
     assert reloaded.status_code == 200, reloaded.text
-    assert reloaded.json()["skills_factory"]["sentinel"]["auto_promote_clean"] is True
+    assert reloaded.json()["skills_factory"]["inbox_max_pending"] == 20
