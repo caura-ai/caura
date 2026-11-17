@@ -75,6 +75,10 @@ The MCP server serves one of two tool sets per connection. Every tool carries a
   scope, fleet and plan checks are the same as calling the original op, and a
   rate-limited op draws on the same budget under either name.
 
+  The directory set is an allowlist: a tool a deployment adds outside these
+  (the collaboration build's `peer`) is neither listed nor callable there, and
+  a call to it is refused with `TOOL_NOT_ON_SURFACE`.
+
 A directory connection is also served its own wording where the default text
 does not meet the directory's requirements: the server instructions and the
 `caura_keystones` description say to follow keystone rules and to tell the user

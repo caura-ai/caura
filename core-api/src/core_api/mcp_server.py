@@ -88,6 +88,7 @@ from core_api.schemas import (
 from core_api.services import baton_notices
 from core_api.services.agent_service import (
     authorize_memory_access,
+    bound_to_no_fleet,
     broker_owned_agent_id,
     enforce_broker_agent_ownership,
     enforce_delete,
@@ -100,6 +101,7 @@ from core_api.services.agent_service import (
     enforce_visibility_write,
     lookup_agent,
     memory_reader,
+    readable_without_a_fleet,
     refuse_restricted_reader,
     resolve_write_agent,
 )
@@ -1270,6 +1272,12 @@ def _refuse_off_surface(tool: str, arguments: object = None) -> CallToolResult |
             f"Use {spec.directory_read_via} to read the current values."
         )
         return _as_error_result(_error_response(TOOL_NOT_ON_SURFACE, message, tool=tool, surface=surface))
+    if spec is None and surface == _DIRECTORY_SURFACE:
+        # The directory surface is an allowlist: a tool registered on the
+        # server outside the registry (an optional add-on such as ``peer``)
+        # carries no classification, so it is neither listed nor callable here.
+        message = f"{tool} is not available on this connection."
+        return _as_error_result(_error_response(TOOL_NOT_ON_SURFACE, message, tool=tool, surface=surface))
     if spec is None or surface in spec.surfaces:
         return None
     if surface == _DIRECTORY_SURFACE:
@@ -1324,6 +1332,11 @@ class _InstrumentedMCPServer(MCPServer):
         served = []
         for tool in listed:
             spec = REGISTRY.get(tool.name)
+            if spec is None and surface == _DIRECTORY_SURFACE:
+                # Only classified tools reach the directory surface: an add-on
+                # registered outside the registry (``peer``) has no title or
+                # hints and may both read and change data.
+                continue
             if spec is not None and surface not in spec.surfaces:
                 continue
             # A directory-surface wording, where the default one has text the
@@ -1966,6 +1979,8 @@ async def caura_recall(
         # agent that omits fleet_ids is scoped to its own fleet, and a single
         # explicit fleet goes through the cross-fleet trust ladder. Closes the
         # recall side of the cross-fleet content leak.
+        # Nothing to pin to: the hits are filtered after the search instead.
+        fleetless_reader = bound_to_no_fleet(_ag, fleet_ids)
         if _ag is not None and not fleet_ids:
             ag_fleet = _ag.get("fleet_id")
             ag_trust = _ag.get("trust_level", 0)
@@ -2028,6 +2043,8 @@ async def caura_recall(
             verified_only=verified_only,
             baton_id=baton_id,
         )
+        if fleetless_reader and results:
+            results = [hit for hit in results if readable_without_a_fleet(hit)]
         # Cross-tenant read audit (F2): emit one event per source tenant when
         # the credential widened beyond home. Async queue — non-blocking.
         readable = _get_readable_tenants()

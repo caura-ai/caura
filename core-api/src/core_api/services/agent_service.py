@@ -518,6 +518,35 @@ async def enforce_crystallize(tenant_id: str, agent_id: AgentIdentity) -> None:
         )
 
 
+def bound_to_no_fleet(agent: dict | None, fleet_ids: Sequence[str] | None) -> bool:
+    """True for a search the fleet pin cannot narrow: a registered agent below
+    trust 2 that has no home fleet and named none.
+
+    The pin (``fleet_ids = [home fleet]``) needs a fleet to pin to, so such a
+    search reached storage unfiltered and came back with other fleets'
+    ``scope_team`` rows, the rows a by-id read of the same memory refuses
+    (``authorize_memory_access``: another fleet needs trust 2). Its hits go
+    through :func:`readable_without_a_fleet` instead. An unregistered identity
+    keeps its soft-pass, as it does on the by-id read.
+    """
+    return (
+        agent is not None
+        and not fleet_ids
+        and not agent.get("fleet_id")
+        and agent.get("trust_level", DEFAULT_TRUST_LEVEL) < 2
+    )
+
+
+def readable_without_a_fleet(hit: Any) -> bool:
+    """Whether an agent bound to no fleet may read this search hit: a
+    fleet-less row (tenant-shared by contract D4) or a ``scope_org`` one, the
+    same rows ``authorize_memory_access`` admits for it by id."""
+    return (
+        getattr(hit, "fleet_id", None) is None
+        or getattr(hit, "visibility", None) == MEMORY_VISIBILITY_SCOPE_ORG
+    )
+
+
 def refuse_restricted_reader(agent: dict | None, agent_id: str) -> None:
     """Refuse a read by an agent at trust level 0.
 
