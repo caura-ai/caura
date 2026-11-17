@@ -10,6 +10,22 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.53.1](https://github.com/caura-ai/caura/compare/backend-v3.53.0...backend-v3.53.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **contradiction:** the batch judge states each check before its verdict ([#2442](https://github.com/caura-ai/caura/issues/2442)) ([4736542](https://github.com/caura-ai/caura/commit/473654290d5ed847d3a2c9621ccea11caab4ff4d))
+* **contradiction:** the entity-aware judge compares slots, not only entities ([#2458](https://github.com/caura-ai/caura/issues/2458)) ([b9d8481](https://github.com/caura-ai/caura/commit/b9d8481736f8aa5a37f74c275f02c2c77c753976))
+
+
+### Dependencies
+
+* **clients:** bump prettier from 3.9.10 to 3.10.1 in /clients/typescript in the clients-npm-minor-patch group across 1 directory ([#2450](https://github.com/caura-ai/caura/issues/2450)) ([8c098f5](https://github.com/caura-ai/caura/commit/8c098f5f8b82de92130ba4fd93c9faf1a33a681e))
+* **docker:** bump python from `a0f5706` to `5e2bdb1` in /core-storage-api ([#2453](https://github.com/caura-ai/caura/issues/2453)) ([e02f728](https://github.com/caura-ai/caura/commit/e02f7284fb34b3dda42d16933551b80bd8adbdb1))
+* update google-genai requirement from &gt;=2.34.0 to &gt;=3.3.0 ([#2448](https://github.com/caura-ai/caura/issues/2448)) ([903d449](https://github.com/caura-ai/caura/commit/903d449f9a6691d5f0257f5018ecf76a1eee6b94))
+* update markdown-it-py requirement from &lt;5,&gt;=4.2.0 to &gt;=4.3.0,&lt;5 ([#2446](https://github.com/caura-ai/caura/issues/2446)) ([b164a2a](https://github.com/caura-ai/caura/commit/b164a2ad5fd967e1a7a7b13cadf80600e87538c2))
+
 ## [3.53.0](https://github.com/caura-ai/caura/compare/backend-v3.52.3...backend-v3.53.0) (2026-11-15)
 
 
