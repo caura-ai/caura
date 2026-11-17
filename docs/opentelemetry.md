@@ -30,8 +30,14 @@ which records nothing and sends nothing.
 
 ```bash
 OTEL_EXPORTER_OTLP_ENDPOINT=https://cloud.langfuse.com/api/public/otel
-OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(printf '%s' "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" | base64)"
+# tr: GNU base64 wraps long output, and a header can't hold a newline
+OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic%20$(printf '%s' "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" | base64 | tr -d '\n')"
 ```
+
+Without `tr`, the header breaks on Linux: a Langfuse key pair encodes to
+more than 76 characters, GNU `base64` splits it across two lines, and
+OpenTelemetry's Python exporter drops the header and logs its value, keys
+included.
 
 ### Phoenix, Jaeger, or an OpenTelemetry Collector
 
