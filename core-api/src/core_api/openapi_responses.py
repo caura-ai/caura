@@ -712,6 +712,11 @@ class WriteSettings(BaseModel):
         description="Tenant switch for contradiction detection; null means on. False skips "
         "every detection path for the tenant, so no row is marked outdated/conflicted."
     )
+    conflict_records_enabled: bool | None = Field(
+        description="Record every confirmed conflict for review (memory_conflicts); null "
+        "follows the deployment's CONTRADICTION_WRITE_CONFLICT_RECORD. An unlinked loser "
+        "and a dispute are recorded either way.",
+    )
 
 
 class SettingsResponse(BaseModel):

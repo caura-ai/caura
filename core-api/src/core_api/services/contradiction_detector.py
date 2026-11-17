@@ -368,14 +368,20 @@ async def _record_conflicts(
 ) -> None:
     """Write the ``memory_conflicts`` records a detection loop owes, after its flush.
 
-    A55 1d records every confirmed pair when ``contradiction_write_conflict_record``
-    is on (off by default). An unlinked loser (M-34) is recorded whatever the flag:
-    its record is all that still names the memory that replaced it. ``unlinked`` is
-    drawn from ``pairs``, so no pair is written twice. A dispute (``_outranked``) is
-    recorded whatever the flag too: nothing else shows it, and the review queue is
-    where it is settled. ``by_author`` puts both authors' trust on each record.
+    A55 1d records every confirmed pair when the tenant's
+    ``conflict_records_enabled`` is on: its ``write.conflict_records_enabled``,
+    or the deployment's ``contradiction_write_conflict_record`` (off by default)
+    where it set none or no config was passed. An unlinked loser (M-34) is
+    recorded whatever the flag: its record is all that still names the memory
+    that replaced it. ``unlinked`` is drawn from ``pairs``, so no pair is written
+    twice. A dispute (``_outranked``) is recorded whatever the flag too: nothing
+    else shows it, and the review queue is where it is settled. ``by_author``
+    puts both authors' trust on each record.
     """
-    to_record = pairs if settings.contradiction_write_conflict_record else unlinked
+    record_all = getattr(tenant_config, "conflict_records_enabled", None)
+    if not isinstance(record_all, bool):
+        record_all = settings.contradiction_write_conflict_record
+    to_record = pairs if record_all else unlinked
     if not to_record and not disputed:
         return
     # Not a top-level import: the resolver's relationship module imports this one.

@@ -502,6 +502,7 @@ class Settings(BaseSettings):
     # classification record for each confirmed conflict (via the resolver).
     # Additive: it never changes the status/supersedes effect, so retrieval is
     # unaffected. Default False; enable to start populating conflict records.
+    # A tenant's ``write.conflict_records_enabled`` overrides it for that tenant.
     contradiction_write_conflict_record: bool = False
     # A58 — Path D (basis invalidation) in SHADOW mode: after Path A, one
     # bridge LLM call proposes <=3 other predicates of the same subject whose
