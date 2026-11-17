@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.54.0](https://github.com/caura-ai/caura/compare/backend-v3.53.2...backend-v3.54.0) (2026-11-17)
+
+
+### Features
+
+* **core-api:** record every conflict for review per tenant ([#2460](https://github.com/caura-ai/caura/issues/2460)) ([99831bd](https://github.com/caura-ai/caura/commit/99831bd73ddb8119b23ba81cb2530c2593d43821))
+
+
+### Bug Fixes
+
+* **core-api:** directory surface allowlist and fleet-less search scope ([#2457](https://github.com/caura-ai/caura/issues/2457)) ([43d14c1](https://github.com/caura-ai/caura/commit/43d14c17d43d62bdccd857d343da4c9a26fe3b43))
+
 ## [3.53.2](https://github.com/caura-ai/caura/compare/backend-v3.53.1...backend-v3.53.2) (2026-11-17)
 
 
