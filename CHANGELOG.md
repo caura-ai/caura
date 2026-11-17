@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.55.0](https://github.com/caura-ai/caura/compare/backend-v3.54.0...backend-v3.55.0) (2026-11-17)
+
+
+### Features
+
+* **lifecycle:** count lifecycle failures by reason for the deploy gate ([#2462](https://github.com/caura-ai/caura/issues/2462)) ([298875f](https://github.com/caura-ai/caura/commit/298875f7c88432c0b2c5939e067bc58cd4a46d09))
+
 ## [3.54.0](https://github.com/caura-ai/caura/compare/backend-v3.53.2...backend-v3.54.0) (2026-11-17)
 
 
