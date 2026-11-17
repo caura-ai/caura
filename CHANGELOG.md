@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.55.2](https://github.com/caura-ai/caura/compare/backend-v3.55.1...backend-v3.55.2) (2026-11-17)
+
+
+### Documentation
+
+* keep the Langfuse OTLP header on one line on Linux ([#2467](https://github.com/caura-ai/caura/issues/2467)) ([97bac5c](https://github.com/caura-ai/caura/commit/97bac5c014c063333187e5008c8d397bd1708e8c))
+
 ## [3.55.1](https://github.com/caura-ai/caura/compare/backend-v3.55.0...backend-v3.55.1) (2026-11-17)
 
 
