@@ -74,11 +74,17 @@ class _Hit:
         self.mid, self.fleet_id, self.visibility = mid, fleet_id, visibility
 
     def model_dump(self, mode: str = "python"):
-        return {"id": self.mid, "fleet_id": self.fleet_id, "visibility": self.visibility}
+        return {
+            "id": self.mid,
+            "fleet_id": self.fleet_id,
+            "visibility": self.visibility,
+        }
 
 
 async def _fake_resolve_config(_tenant_id):
-    return SimpleNamespace(recall_boost=False, graph_expand=False, entity_retrieval=False)
+    return SimpleNamespace(
+        recall_boost=False, graph_expand=False, entity_retrieval=False
+    )
 
 
 async def _recall(mcp_env, monkeypatch, agent: dict, **kwargs) -> set[str]:
@@ -90,21 +96,27 @@ async def _recall(mcp_env, monkeypatch, agent: dict, **kwargs) -> set[str]:
     ]
     monkeypatch.setattr(mcp_server, "resolve_config", _fake_resolve_config)
     monkeypatch.setattr(mcp_server, "lookup_agent", AsyncMock(return_value=agent))
-    monkeypatch.setattr(mcp_server, "enforce_fleet_read_many", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        mcp_server, "enforce_fleet_read_many", AsyncMock(return_value=None)
+    )
     payload = parse_envelope(await mcp_server.caura_recall(query="merger", **kwargs))
     return {row["id"] for row in payload["results"]}
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_recall_drops_other_fleets_rows_for_a_fleetless_trust_1_agent(mcp_env, monkeypatch):
+async def test_recall_drops_other_fleets_rows_for_a_fleetless_trust_1_agent(
+    mcp_env, monkeypatch
+):
     ids = await _recall(mcp_env, monkeypatch, {"fleet_id": None, "trust_level": 1})
     assert ids == {"shared", "other-org"}
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_recall_keeps_every_row_for_a_fleetless_trust_2_agent(mcp_env, monkeypatch):
+async def test_recall_keeps_every_row_for_a_fleetless_trust_2_agent(
+    mcp_env, monkeypatch
+):
     ids = await _recall(mcp_env, monkeypatch, {"fleet_id": None, "trust_level": 2})
     assert ids == {"shared", "other-team", "other-org"}
 
@@ -115,7 +127,10 @@ async def test_recall_leaves_a_named_fleet_to_the_ladder(mcp_env, monkeypatch):
     """A fleet the agent names goes through ``enforce_fleet_read_many``; what
     that admits is not filtered again here."""
     ids = await _recall(
-        mcp_env, monkeypatch, {"fleet_id": None, "trust_level": 1}, fleet_ids=["fleet-x"]
+        mcp_env,
+        monkeypatch,
+        {"fleet_id": None, "trust_level": 1},
+        fleet_ids=["fleet-x"],
     )
     assert ids == {"shared", "other-team", "other-org"}
 
@@ -135,7 +150,9 @@ def as_agent(monkeypatch):
     def _install(tenant_id: str, agent_id: str):
         async def _dep():
             set_current_tenant(tenant_id)
-            return AuthContext(tenant_id=tenant_id, agent_id=agent_id, readable_tenant_ids=[tenant_id])
+            return AuthContext(
+                tenant_id=tenant_id, agent_id=agent_id, readable_tenant_ids=[tenant_id]
+            )
 
         app.dependency_overrides[get_auth_context] = _dep
 
@@ -170,15 +187,26 @@ async def _search_as(client, sc, as_agent, *, trust: int, query: str) -> str:
 
     tenant_id, _ = get_test_auth()
     reader = f"fleetless-reader-{_uid()}"
-    await sc.create_or_update_agent({"tenant_id": tenant_id, "agent_id": reader, "fleet_id": None, "trust_level": trust})
+    await sc.create_or_update_agent(
+        {
+            "tenant_id": tenant_id,
+            "agent_id": reader,
+            "fleet_id": None,
+            "trust_level": trust,
+        }
+    )
     as_agent(tenant_id, reader)
-    resp = await client.post("/api/v1/search", json={"tenant_id": tenant_id, "query": query})
+    resp = await client.post(
+        "/api/v1/search", json={"tenant_id": tenant_id, "query": query}
+    )
     assert resp.status_code == 200, resp.text
     return resp.text
 
 
 @pytest.mark.integration
-async def test_rest_search_hides_another_fleets_row_from_a_fleetless_trust_1_agent(client, sc, as_agent):
+async def test_rest_search_hides_another_fleets_row_from_a_fleetless_trust_1_agent(
+    client, sc, as_agent
+):
     """The trust-2 search is the control: the row is findable by this query,
     so its absence from the trust-1 answer is the filter, not a miss."""
     from tests.conftest import uid as _uid
@@ -190,7 +218,9 @@ async def test_rest_search_hides_another_fleets_row_from_a_fleetless_trust_1_age
 
 
 @pytest.mark.integration
-async def test_rest_search_keeps_a_fleetless_row_for_a_fleetless_trust_1_agent(client, sc, as_agent):
+async def test_rest_search_keeps_a_fleetless_row_for_a_fleetless_trust_1_agent(
+    client, sc, as_agent
+):
     shared = f"fleetless {uuid.uuid4().hex} tenant shared note"
     await _seed(client, sc, shared, None)
     assert shared in await _search_as(client, sc, as_agent, trust=1, query=shared)

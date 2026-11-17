@@ -942,13 +942,17 @@ def addon_tool():
 
 
 @pytest.mark.asyncio
-async def test_an_unclassified_tool_is_not_listed_on_the_directory_surface(addon_tool) -> None:
+async def test_an_unclassified_tool_is_not_listed_on_the_directory_surface(
+    addon_tool,
+) -> None:
     assert addon_tool in {t.name for t in await _listed(DEFAULT_SURFACE)}
     assert addon_tool not in {t.name for t in await _listed(DIRECTORY_SURFACE)}
 
 
 @pytest.mark.asyncio
-async def test_an_unclassified_tool_is_refused_on_the_directory_surface(surface, addon_tool) -> None:
+async def test_an_unclassified_tool_is_refused_on_the_directory_surface(
+    surface, addon_tool
+) -> None:
     surface(DIRECTORY_SURFACE)
     error = _error(await mcp_server.mcp.call_tool(addon_tool, {}))
     assert error["code"] == "TOOL_NOT_ON_SURFACE"
@@ -956,6 +960,8 @@ async def test_an_unclassified_tool_is_refused_on_the_directory_surface(surface,
 
 
 @pytest.mark.asyncio
-async def test_an_unclassified_tool_still_runs_on_the_default_surface(surface, addon_tool) -> None:
+async def test_an_unclassified_tool_still_runs_on_the_default_surface(
+    surface, addon_tool
+) -> None:
     surface(DEFAULT_SURFACE)
     assert mcp_server._refuse_off_surface(addon_tool) is None
