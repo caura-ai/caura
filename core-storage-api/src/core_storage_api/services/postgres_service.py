@@ -17267,17 +17267,29 @@ class PostgresService:
         This is intentionally an aggregate rather than a capped row listing: a
         large fanout must not push an early failure out of the response and turn
         a partial outage into a green deployment probe.
+
+        ``failure_reasons`` counts each action's failures by the reason the op
+        named (``stats.reason``, from ``PermanentOpError(reason=...)``), so a
+        deployment probe can tell an upstream outage such as ``llm_unavailable``
+        from a broken pipeline. Failures that name none aren't in it, and other
+        statuses group under NULL, so a skip's ``recent_success`` can't split
+        them.
         """
+        failure_reason = case(
+            (LifecycleAudit.status == "failure", LifecycleAudit.stats["reason"].astext),
+            else_=None,
+        ).label("failure_reason")
         stmt = (
             select(
                 LifecycleAudit.action,
                 LifecycleAudit.status,
+                failure_reason,
                 func.count().label("row_count"),
                 func.max(LifecycleAudit.started_at).label("latest_started_at"),
                 func.max(LifecycleAudit.finished_at).label("latest_finished_at"),
             )
             .where(LifecycleAudit.started_at > func.now() - timedelta(hours=since_hours))
-            .group_by(LifecycleAudit.action, LifecycleAudit.status)
+            .group_by(LifecycleAudit.action, LifecycleAudit.status, failure_reason)
         )
         if triggered_by is not None:
             stmt = stmt.where(LifecycleAudit.triggered_by == triggered_by)
@@ -17288,19 +17300,23 @@ class PostgresService:
             rows = (await session.execute(stmt)).all()
 
         actions: dict[str, dict[str, Any]] = {}
-        for action, status, row_count, latest_started_at, latest_finished_at in rows:
+        for action, status, reason, row_count, latest_started_at, latest_finished_at in rows:
             summary = actions.setdefault(
                 action,
                 {
                     "total": 0,
                     "statuses": {},
+                    "failure_reasons": {},
                     "latest_started_at": None,
                     "latest_finished_at": None,
                 },
             )
             count = int(row_count)
             summary["total"] += count
-            summary["statuses"][status] = count
+            # A status now spans one group per failure reason, so add, don't assign.
+            summary["statuses"][status] = summary["statuses"].get(status, 0) + count
+            if reason is not None:
+                summary["failure_reasons"][reason] = summary["failure_reasons"].get(reason, 0) + count
             if summary["latest_started_at"] is None or latest_started_at > summary["latest_started_at"]:
                 summary["latest_started_at"] = latest_started_at
             if latest_finished_at is not None and (

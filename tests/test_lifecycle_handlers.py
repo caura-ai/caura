@@ -485,6 +485,27 @@ async def test_terminal_op_error_marks_failure_but_does_not_reraise():
 
 
 @pytest.mark.asyncio
+async def test_a_terminal_failure_records_the_reason_it_names():
+    """A ``PermanentOpError`` that names a reason puts it in ``stats.reason``.
+
+    The deploy gate reads the audit summary, which only counted rows by
+    status, so "no model provider answered for one org" looked the same as a
+    broken pipeline. On 17 Nov one Vertex 429 failed a production promotion
+    that way. ``stats.reason`` is what the summary counts failures by.
+    """
+
+    err = PermanentOpError("no LLM provider answered", reason="llm_unavailable")
+    adapter = _FakeAdapter(raise_on_op=err)
+    handler = _bind(adapter, action="archive-expired")
+
+    await handler(_archive_event(Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED))
+
+    final = adapter.audit_calls[-1]
+    assert final[1] == "failure"
+    assert final[2] == {"terminal": True, "reason": "llm_unavailable"}
+
+
+@pytest.mark.asyncio
 async def test_terminal_failure_is_not_recorded_as_a_recent_success():
     """The reason the verdict matters: ``has_recent_lifecycle_success`` gates
     re-runs on a SUCCESS row. A terminal failure must leave that gate open so the

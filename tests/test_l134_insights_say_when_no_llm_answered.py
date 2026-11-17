@@ -110,6 +110,9 @@ async def test_the_nightly_run_records_a_terminal_failure():
             "core_api.services.insights_service.generate_insights",
             new=AsyncMock(return_value=skipped),
         ),
-        pytest.raises(PermanentOpError, match="llm_unavailable"),
+        pytest.raises(PermanentOpError, match="llm_unavailable") as caught,
     ):
         await _CoreApiLifecycleAdapter(_Storage()).insights(org_id="t1", fleet_id=None)
+    # The runner records it in ``stats.reason``, which the audit summary counts
+    # failures by, so the deploy gate can tell an outage from a broken pipeline.
+    assert caught.value.reason == "llm_unavailable"
