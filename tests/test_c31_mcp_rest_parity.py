@@ -117,8 +117,12 @@ def test_rest_accepts_all_canonical_names():
 
 def test_mcp_recall_source_dual_emits_items():
     """Grep-guard on the payload build: results + items + count must all be
-    emitted (dual-emit per D1; removal is a future announced wave)."""
+    emitted on the default surface (dual-emit per D1; removal there is a
+    future announced wave). The keys come from ``_list_keys``, which drops the
+    ``results`` alias only on the directory surface, whose clients are new."""
     import pathlib
+
+    from core_api import mcp_server
 
     src = (
         pathlib.Path(__file__).resolve().parents[1]
@@ -127,6 +131,10 @@ def test_mcp_recall_source_dual_emits_items():
     recall_section = src.split("async def caura_recall(")[1].split("async def caura_")[
         0
     ]
-    assert '"results": _rows' in recall_section
-    assert '"items": _rows' in recall_section
+    assert "**_list_keys(_rows)" in recall_section
     assert '"count": len(_rows)' in recall_section
+    token = mcp_server._tool_surface_var.set(mcp_server._DEFAULT_SURFACE)
+    try:
+        assert set(mcp_server._list_keys([])) == {"results", "items"}
+    finally:
+        mcp_server._tool_surface_var.reset(token)

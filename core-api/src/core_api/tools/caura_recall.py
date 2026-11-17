@@ -18,9 +18,20 @@ _DESCRIPTION = (
 
 # The directory surface does not list caura_manage; it reads by id with
 # caura_memory_read, so the pointer names that tool there.
+#
+# Claude clients with many connectors load tools on demand, by searching their
+# names and descriptions against what the person asked. "Hybrid semantic +
+# keyword" matched nothing a person says, so a question such as "what did we
+# decide about pricing?" never found this tool unless the person named Caura.
+# This wording says what the tool holds and which questions it answers, in the
+# words people use. It describes the tool; it tells the model nothing to do.
 _DIRECTORY_DESCRIPTION = (
-    "Find memories by meaning (hybrid semantic+keyword). "
-    "Set include_brief=true for an LLM summary paragraph. "
+    "Search the team's shared memory: decisions, facts, outcomes, preferences and "
+    "project context that people and agents recorded in earlier sessions. Answers "
+    'questions such as "what did we decide about X?", "what do we know about Y?" or '
+    '"what happened last time we tried Z?", matching by meaning and by keyword. '
+    "Returns the matching memories under items, each with its author (agent_id) and "
+    "the author's trust level. Set include_brief=true for a summary paragraph. "
     "For non-semantic browse use caura_list; for read-by-id use caura_memory_read op=read."
 )
 

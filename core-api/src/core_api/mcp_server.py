@@ -1223,6 +1223,20 @@ def _get_tool_surface() -> str:
     return _tool_surface_var.get(_DEFAULT_SURFACE)
 
 
+def _list_keys(rows: list) -> dict:
+    """The list keys of a result envelope: ``items`` (canonical, C31/D1) and,
+    on the default surface, its permanent ``results`` alias.
+
+    Both keys name the same list, so a JSON response carries every row twice.
+    A directory connection is a new client with no parser to keep working,
+    and the copy doubles what lands in its model's context, so it gets
+    ``items`` alone. Every other connection keeps both.
+    """
+    if _get_tool_surface() == _DIRECTORY_SURFACE:
+        return {"items": rows}
+    return {"results": rows, "items": rows}
+
+
 # Arguments that do not make a call change anything: who it is attributed to.
 _READ_FORM_IGNORED_ARGS = frozenset({"agent_id"})
 
@@ -2079,8 +2093,7 @@ async def caura_recall(
         # ``recall_tracked`` is the same field REST /search reports — see the
         # ``recall_ctx`` note above.
         payload: dict = {
-            "results": _rows,
-            "items": _rows,
+            **_list_keys(_rows),
             "count": len(_rows),
             # Against the CLAMPED value, so a negative top_k is not reported as
             # a truncation of a larger request.
@@ -4048,8 +4061,7 @@ async def caura_doc(
                                 {
                                     "collection": collection,
                                     "count": 0,
-                                    "items": [],
-                                    "results": [],
+                                    **_list_keys([]),
                                 }
                             ),
                             t0,
@@ -4104,7 +4116,7 @@ async def caura_doc(
                 return _with_latency(
                     # ``items`` is canonical everywhere (D1); ``results`` stays for
                     # existing callers, as on REST /documents/search (L-108).
-                    _dumps({"collection": collection, "count": len(items), "items": items, "results": items}),
+                    _dumps({"collection": collection, "count": len(items), **_list_keys(items)}),
                     t0,
                 )
             if op == "search":
@@ -4203,8 +4215,7 @@ async def caura_doc(
                         {
                             "collection": collection,  # None if broad search
                             "count": len(items),
-                            "items": items,
-                            "results": items,
+                            **_list_keys(items),
                         }
                     ),
                     t0,
@@ -4724,8 +4735,7 @@ async def caura_list(
             # two keys; ``results`` stays as a permanent alias.
             payload = {
                 "count": len(items),
-                "results": items,
-                "items": items,
+                **_list_keys(items),
                 "next_cursor": next_cursor,
                 "scope": scope,
             }
