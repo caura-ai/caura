@@ -331,6 +331,15 @@ DEFAULT_SETTINGS: dict = {
         # from this schema is rejected by ``_check_keys`` and so is unsettable
         # (the pm-0918-c-04 lesson).
         "contradiction_detection_enabled": None,
+        # The tenant's own ``contradiction_write_conflict_record``: whether the
+        # detector writes a ``memory_conflicts`` record for every confirmed
+        # conflict, for a person to review. ``None`` (the default) follows the
+        # deployment's setting. True records every conflict for this tenant on
+        # a deployment that records none; false records only what is always
+        # recorded (an unlinked loser, a dispute) on one that records all. It
+        # adds no LLM call: a record reuses the detector's verdict. Detection,
+        # and what it does to a memory's status, are unchanged either way.
+        "conflict_records_enabled": None,
     },
     "agents": {
         "require_agent_approval": None,
@@ -900,6 +909,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "write.bulk_subject_batching": bool,
     "write.retraction_enabled": bool,
     "write.contradiction_detection_enabled": bool,
+    "write.conflict_records_enabled": bool,
     # Skill Factory SF-006 — type validators for the skills_factory namespace.
     "skills_factory.enabled": bool,
     "skills_factory.description_max_bytes": int,
@@ -1614,6 +1624,17 @@ class ResolvedConfig:
         """
         val = self._ts.get("write", {}).get("contradiction_detection_enabled")
         return bool(val) if val is not None else True
+
+    @property
+    def conflict_records_enabled(self) -> bool:
+        """Does the detector record every confirmed conflict for this tenant?
+
+        The tenant's ``write.conflict_records_enabled`` where it set one,
+        otherwise the deployment's ``contradiction_write_conflict_record``.
+        An unlinked loser and a dispute are recorded either way.
+        """
+        val = self._ts.get("write", {}).get("conflict_records_enabled")
+        return bool(val) if val is not None else global_settings.contradiction_write_conflict_record
 
     # Agents
     @property
