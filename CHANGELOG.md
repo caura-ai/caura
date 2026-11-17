@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.53.2](https://github.com/caura-ai/caura/compare/backend-v3.53.1...backend-v3.53.2) (2026-11-17)
+
+
+### Dependencies
+
+* **docker:** bump python from `a0f5706` to `5e2bdb1` in /core-api ([#2451](https://github.com/caura-ai/caura/issues/2451)) ([6d6bdc3](https://github.com/caura-ai/caura/commit/6d6bdc397bb7b55af009b3f45f4a5f2a7eff4017))
+* **docker:** bump python from `a0f5706` to `5e2bdb1` in /core-operations ([#2452](https://github.com/caura-ai/caura/issues/2452)) ([72c87f4](https://github.com/caura-ai/caura/commit/72c87f492a502262d77d351236c490f15260ef8a))
+* **docker:** bump python from `a0f5706` to `5e2bdb1` in /core-worker ([#2454](https://github.com/caura-ai/caura/issues/2454)) ([4a0949c](https://github.com/caura-ai/caura/commit/4a0949cb4ef79f66909f3c1dda47fe084707348e))
+* update fastapi requirement from &lt;1,&gt;=0.162.0 to &gt;=0.162.5,&lt;1 ([#2449](https://github.com/caura-ai/caura/issues/2449)) ([70d32f8](https://github.com/caura-ai/caura/commit/70d32f82bf23bd2b65523a6ad13443363c5cd5be))
+* update google-auth requirement from &lt;3,&gt;=2.30 to &gt;=2.62.2,&lt;3 ([#2445](https://github.com/caura-ai/caura/issues/2445)) ([e7d5747](https://github.com/caura-ai/caura/commit/e7d5747bfb65d5893d143ef7230f79c9c91378ab))
+* update python-multipart requirement from &lt;1,&gt;=0.0.32 to &gt;=0.0.33,&lt;1 ([#2447](https://github.com/caura-ai/caura/issues/2447)) ([c668092](https://github.com/caura-ai/caura/commit/c668092f447cb97b9c1f227b5443bb5843aa487c))
+
 ## [3.53.1](https://github.com/caura-ai/caura/compare/backend-v3.53.0...backend-v3.53.1) (2026-11-17)
 
 
