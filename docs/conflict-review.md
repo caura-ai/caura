@@ -59,3 +59,23 @@ resolved rows while retaining the original detector evidence.
 repair and operator scripts are separate work. This change performs no
 historical-data sweep and needs no schema migration. Database regressions run
 in isolated CI; local checks use only mock-backed unit tests.
+
+## Which conflicts are recorded for review
+
+The detector always records two kinds of conflict: one whose losing memory
+nothing else points at, and a dispute, where a lower-trust writer contradicts
+a higher-trust fact. It records every other confirmed conflict only where
+recording is on. The deployment sets that with
+`CONTRADICTION_WRITE_CONFLICT_RECORD` (off by default), and a tenant can
+override it with `write.conflict_records_enabled`:
+
+```http
+PUT /api/v1/settings?tenant_id=tenant-a
+{"write": {"conflict_records_enabled": true}}
+```
+
+`true` records every conflict for that tenant on a deployment that records
+none, and `false` records only the two kinds above on one that records all.
+Send `null` to return the tenant to the deployment's setting. Recording adds a
+row per conflict and no LLM call. Detection, and what it does to a memory's
+status, are the same either way.
