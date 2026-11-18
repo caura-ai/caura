@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.55.5](https://github.com/caura-ai/caura/compare/backend-v3.55.4...backend-v3.55.5) (2026-11-18)
+
+
+### Bug Fixes
+
+* **core-api:** a refused conflict review answers with storage's reason ([#2473](https://github.com/caura-ai/caura/issues/2473)) ([d161838](https://github.com/caura-ai/caura/commit/d161838bcdedb10f2317406118e1b45708ba618a))
+
+
+### Documentation
+
+* Caura Rail clients in Datadog ([#2476](https://github.com/caura-ai/caura/issues/2476)) ([6ec468c](https://github.com/caura-ai/caura/commit/6ec468cff5d396696220ff46999bdcd2885f8868))
+
 ## [3.55.4](https://github.com/caura-ai/caura/compare/backend-v3.55.3...backend-v3.55.4) (2026-11-18)
 
 
