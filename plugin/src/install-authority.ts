@@ -1,0 +1,247 @@
+/** Operator-only installation authority. No plugin runtime imports this module. */
+import {
+  closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync,
+  mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync,
+} from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { hostname, homedir } from "node:os";
+import { dirname } from "node:path";
+import { getInstallAuthorityPath, getOpenClawBaseDir, getPluginDir } from "./paths.js";
+import { isLoopbackHost, isValidSafeId } from "./validation.js";
+import { withUserAgent } from "./user-agent.js";
+
+type Mode = "register" | "handoff" | "resume";
+type Input = { bootstrap_credential?: string; registration_key?: string; install_credential?: string };
+interface Journal {
+  schema_version: 1;
+  status: "pending" | "credential_saved" | "verified" | "held";
+  mode: "register" | "handoff";
+  gateway: string;
+  api_prefix: "/api/v1";
+  hostname: string;
+  platform: string;
+  arch: string;
+  created_at: string;
+  expected_tenant: string;
+  expected_fleet?: string;
+  install_uuid?: string;
+  machine_fingerprint?: string;
+  install_credential?: string;
+  tenant_id?: string;
+  fleet_id?: string | null;
+  org_id?: string;
+  expires_at?: string | null;
+}
+export class EnrollmentError extends Error {}
+function fail(code: string): never { throw new EnrollmentError(`enrollment_${code}`); }
+const text = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 4096;
+const secret = (v: unknown): v is string => text(v) && /^[\x21-\x7e]+$/.test(v);
+const uuid = (v: unknown): v is string => typeof v === "string" &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v);
+const date = (v: unknown): v is string => typeof v === "string" &&
+  /^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(v) && Number.isFinite(Date.parse(v));
+const expired = (j: Journal) => !!j.expires_at && Date.parse(j.expires_at) <= Date.now();
+
+/** These permissions and durable directory writes require a supported POSIX host. */
+export function assertEnrollmentPlatform(): void {
+  if (!["darwin", "linux"].includes(process.platform) || !["x64", "arm64"].includes(process.arch))
+    fail("platform_unsupported");
+}
+
+function gateway(value: string): string {
+  let u: URL;
+  try { u = new URL(value); } catch { return fail("gateway_invalid"); }
+  if (u.username || u.password || u.search || u.hash || u.pathname !== "/" ||
+      !(u.protocol === "https:" || (u.protocol === "http:" && isLoopbackHost(u.hostname))))
+    fail("gateway_invalid");
+  return u.origin;
+}
+
+// Refuse unsafe existing components; do not chmod/reset another installation.
+function privateDirectory(create: boolean): void {
+  for (const p of [homedir(), getOpenClawBaseDir(), dirname(getPluginDir()), getPluginDir()]) {
+    if (!existsSync(p)) {
+      if (!create) return;
+      try { mkdirSync(p, {mode: 0o700}); } catch { fail("state_unwritable"); }
+    }
+    const s = lstatSync(p);
+    if (!s.isDirectory() || s.isSymbolicLink() || (s.mode & 0o022) ||
+        (process.getuid && s.uid !== process.getuid())) fail("state_unsafe");
+  }
+}
+
+function readJournal(): Journal | null {
+  privateDirectory(false);
+  const path = getInstallAuthorityPath();
+  let fd: number;
+  try {
+    const s = lstatSync(path);
+    if (!s.isFile() || s.isSymbolicLink() || s.nlink !== 1 || (s.mode & 0o777) !== 0o600 ||
+        s.size > 65536 || (process.getuid && s.uid !== process.getuid())) fail("state_unsafe");
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    if (fstatSync(fd).ino !== s.ino) { closeSync(fd); fail("state_unsafe"); }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if (e instanceof EnrollmentError) throw e;
+    return fail("state_unsafe");
+  }
+  let j: Journal;
+  try { j = JSON.parse(readFileSync(fd, "utf8")); }
+  catch { return fail("state_invalid"); }
+  finally { closeSync(fd); }
+  if (!j || j.schema_version !== 1 || !["pending", "credential_saved", "verified", "held"].includes(j.status) ||
+      !["register", "handoff"].includes(j.mode) || !text(j.gateway) || gateway(j.gateway) !== j.gateway ||
+      j.api_prefix !== "/api/v1" || !text(j.hostname) || !text(j.platform) || !text(j.arch) ||
+      !date(j.created_at) || !isValidSafeId(j.expected_tenant) ||
+      (j.expected_fleet !== undefined && !isValidSafeId(j.expected_fleet)) ||
+      (j.install_uuid !== undefined && !uuid(j.install_uuid)) ||
+      (j.mode === "register" && (!uuid(j.install_uuid) || !text(j.machine_fingerprint))) ||
+      (j.install_credential !== undefined && !secret(j.install_credential)) ||
+      (["credential_saved", "verified"].includes(j.status) && !secret(j.install_credential)) ||
+      (j.expires_at != null && !date(j.expires_at)) ||
+      (j.fleet_id != null && !isValidSafeId(j.fleet_id)) ||
+      (j.status === "verified" && (!uuid(j.install_uuid) || !isValidSafeId(j.org_id) ||
+        !isValidSafeId(j.tenant_id) || j.tenant_id !== j.expected_tenant || j.fleet_id === undefined ||
+        (j.expected_fleet !== undefined && j.expected_fleet !== j.fleet_id))))
+    fail("state_invalid");
+  return j;
+}
+
+function syncDirectory(path: string): void {
+  const fd = openSync(dirname(path), constants.O_RDONLY);
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+function save(j: Journal): void {
+  const path = getInstallAuthorityPath();
+  const tmp = `${path}.${randomUUID()}.tmp`;
+  let fd: number | undefined;
+  try {
+    fd = openSync(tmp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    writeFileSync(fd, JSON.stringify(j) + "\n"); fsyncSync(fd); closeSync(fd); fd = undefined;
+    renameSync(tmp, path); syncDirectory(path);
+  } catch { fail("state_unwritable"); }
+  finally {
+    if (fd !== undefined) closeSync(fd);
+    rmSync(tmp, {force: true});
+  }
+}
+
+function withLock<T>(action: () => Promise<T>): Promise<T> {
+  privateDirectory(true);
+  const path = `${getInstallAuthorityPath()}.lock`;
+  let fd: number;
+  try { fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600); }
+  catch (e) { return fail((e as NodeJS.ErrnoException).code === "EEXIST" ? "locked" : "state_unwritable"); }
+  const inode = fstatSync(fd).ino;
+  return action().finally(() => {
+    closeSync(fd);
+    // A hard crash intentionally leaves a lock for explicit operator recovery.
+    if (lstatSync(path).ino === inode) { rmSync(path); syncDirectory(path); }
+  });
+}
+
+async function request(j: Journal, path: string, key: string | undefined, body?: object): Promise<Record<string, unknown>> {
+  try {
+    const res = await fetch(`${j.gateway}${j.api_prefix}${path}`, {
+      method: body ? "POST" : "GET", redirect: "error", signal: AbortSignal.timeout(10_000),
+      headers: withUserAgent({...body ? {"Content-Type": "application/json"} : {}, ...key ? {"X-API-Key": key} : {}}),
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) { await res.body?.cancel(); fail(`http_${res.status}`); }
+    const reader = res.body?.getReader();
+    if (!reader) fail("response_invalid");
+    const chunks: Uint8Array[] = []; let bytes = 0;
+    try {
+      while (true) {
+        const {done, value} = await reader.read(); if (done) break;
+        bytes += value.byteLength;
+        if (bytes > 65536) fail("response_invalid");
+        chunks.push(value);
+      }
+    } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+    let result: unknown;
+    try { result = JSON.parse(new TextDecoder("utf-8", {fatal: true}).decode(Buffer.concat(chunks))); }
+    catch { return fail("response_invalid"); }
+    if (!result || typeof result !== "object" || Array.isArray(result)) fail("response_invalid");
+    return result as Record<string, unknown>;
+  } catch (e) {
+    if (e instanceof EnrollmentError) throw e;
+    return fail("request_failed");
+  }
+}
+
+function hold(j: Journal, code: string): never { j.status = "held"; save(j); return fail(code); }
+
+/** Read-only; unverified, held or expired authority never becomes usable. */
+export function readVerifiedInstallAuthority(): Readonly<Journal> | null {
+  assertEnrollmentPlatform();
+  if (existsSync(`${getInstallAuthorityPath()}.lock`)) return null;
+  const j = readJournal();
+  return j?.status === "verified" && !expired(j) && j.hostname === hostname() ? j : null;
+}
+
+export async function enrollInstallation(options: {
+  mode: Mode; gateway: string; expectedTenant: string; expectedFleet?: string; input: Input;
+}): Promise<void> {
+  assertEnrollmentPlatform();
+  const {mode, input, expectedTenant, expectedFleet} = options;
+  const origin = gateway(options.gateway);
+  const keys = Object.keys(input);
+  if (!isValidSafeId(expectedTenant) || (expectedFleet !== undefined && !isValidSafeId(expectedFleet)) ||
+      (mode === "resume" ? keys.length !== 0 : keys.length !== 1 ||
+        !(mode === "register" ? ["bootstrap_credential", "registration_key"] : ["install_credential"]).includes(keys[0]) ||
+        !secret(input[keys[0] as keyof Input]))) fail("input_invalid");
+  await withLock(async () => {
+    let j = readJournal();
+    if (j && (j.gateway !== origin || j.expected_tenant !== expectedTenant ||
+        (expectedFleet !== undefined && j.expected_fleet !== expectedFleet))) fail("scope_mismatch");
+    if (j?.status === "held") fail("held");
+    if (j && j.hostname !== hostname()) fail("scope_mismatch");
+    if (!j) {
+      if (mode === "resume") fail("state_invalid");
+      const platform = process.platform;
+      const arch = process.arch === "x64" ? "amd64" : process.arch;
+      j = {schema_version: 1, status: "pending", mode, gateway: origin, api_prefix: "/api/v1",
+        hostname: hostname(), platform, arch, created_at: new Date().toISOString(), expected_tenant: expectedTenant,
+        ...(expectedFleet !== undefined ? {expected_fleet: expectedFleet} : {})};
+      if (mode === "register") {
+        j.install_uuid = randomUUID();
+        j.machine_fingerprint = createHash("sha256").update(
+          [j.install_uuid, j.hostname, platform, arch].join("\0")).digest("hex");
+      }
+      if (mode === "handoff") { j.install_credential = input.install_credential; j.status = "credential_saved"; }
+      save(j);
+    } else if (mode !== "resume" && (j.mode !== mode || j.status !== "pending")) fail("state_invalid");
+    if (j.status === "pending") {
+      if (mode !== "register") fail("input_invalid");
+      const result = await request(j, "/installs/register", input.bootstrap_credential, {
+        install_uuid: j.install_uuid, machine_fingerprint: j.machine_fingerprint,
+        hostname: j.hostname, platform: j.platform, arch: j.arch,
+        ...(input.registration_key ? {registration_key: input.registration_key} : {}),
+      });
+      if (!secret(result.install_credential) || !isValidSafeId(result.tenant_id) || !date(result.issued_at) ||
+          (result.expires_at != null && !date(result.expires_at)) ||
+          (result.fleet_id != null && !isValidSafeId(result.fleet_id))) fail("response_invalid");
+      j.install_credential = result.install_credential; j.tenant_id = result.tenant_id;
+      j.fleet_id = result.fleet_id as string | null | undefined;
+      j.expires_at = result.expires_at as string | null | undefined;
+      j.status = "credential_saved"; save(j);
+    }
+    if (expired(j)) hold(j, "credential_expired");
+    if ((j.tenant_id && j.tenant_id !== expectedTenant) ||
+        (j.mode === "register" && j.expected_fleet !== undefined && j.fleet_id !== j.expected_fleet)) hold(j, "scope_mismatch");
+    // Withdraw the previous verification before a new explicit check; failures
+    // must not leave an old verified snapshot available to future consumers.
+    if (j.status === "verified") { j.status = "credential_saved"; save(j); }
+    const context = await request(j, "/admin/agent-connect-context", j.install_credential);
+    if (!uuid(context.install_uuid) || !isValidSafeId(context.org_id) || !isValidSafeId(context.tenant_id) || !text(context.hostname))
+      hold(j, "response_invalid");
+    if (context.tenant_id !== expectedTenant || (j.tenant_id && context.tenant_id !== j.tenant_id) ||
+        (j.install_uuid && context.install_uuid !== j.install_uuid) || context.hostname !== j.hostname ||
+        (j.org_id && context.org_id !== j.org_id)) hold(j, "scope_mismatch");
+    j.install_uuid = context.install_uuid; j.org_id = context.org_id; j.tenant_id = context.tenant_id;
+    if (j.fleet_id === undefined) hold(j, "fleet_unknown");
+    j.status = "verified"; save(j);
+  });
+}
