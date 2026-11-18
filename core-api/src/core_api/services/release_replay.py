@@ -13,7 +13,8 @@ Released, the memory gets that work, as if it had been written live:
   a strong write, which ``GovernanceDecision`` governed before it was written;
   then the facts kept on the row become children.
 - **Either way:** the near-duplicate merge the write meant to make, entity
-  extraction, and contradiction detection.
+  extraction, and contradiction detection, which needs the row's vector: one
+  the hold cost it is asked for again.
 
 Rejecting a held write runs none of this.
 """
@@ -102,10 +103,9 @@ async def replay_released_write(memory_id: str, tenant_id: str) -> None:
 
     embedding = memory.get("embedding")
     if embedding:
-        # Without one yet, the EMBEDDED back-channel runs it when the vector
-        # lands, as for any write: the row is live by then. No ``new_memory``:
-        # the detector reads the row back itself, and an enrichment that ran
-        # above may have applied a governance drop this function can't see.
+        # No ``new_memory``: the detector reads the row back itself, and an
+        # enrichment that ran above may have applied a governance drop this
+        # function can't see.
         from core_api.services.contradiction import Trigger, run_contradiction_detection
 
         await run_contradiction_detection(
@@ -116,6 +116,23 @@ async def replay_released_write(memory_id: str, tenant_id: str) -> None:
             content=content,
             embedding=embedding,
         )
+    else:
+        # Without one yet, detection runs when the vector lands, as for any
+        # write: the row is live by then. But nothing may be bringing one. A
+        # write held at its insert lost its vector (``_reembed_memories_bulk``
+        # reads its rows back, and a held one reads as gone), so ask, or the row
+        # waits for the daily embed backfill.
+        from core_api.services.memory_service import _content_hash, _schedule_embed_or_reembed
+
+        try:
+            await _schedule_embed_or_reembed(
+                UUID(memory_id),
+                content,
+                tenant_id,
+                content_hash=_content_hash(tenant_id, fleet_id, content),
+            )
+        except Exception as exc:
+            await _step_failed("embedding request", memory_id, tenant_id, exc)
 
 
 async def _enrich_or_govern(sc, memory, metadata, system, config, memory_id, tenant_id) -> bool:

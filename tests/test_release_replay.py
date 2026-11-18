@@ -10,6 +10,7 @@ what it calls and with what, not what those calls do.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -57,6 +58,7 @@ def calls(monkeypatch):
         "merge": AsyncMock(),
         "extract": AsyncMock(),
         "contradict": AsyncMock(),
+        "embed": AsyncMock(),
         "record": AsyncMock(),
     }
     monkeypatch.setattr(
@@ -92,6 +94,9 @@ def calls(monkeypatch):
     monkeypatch.setattr(
         "core_api.services.contradiction.run_contradiction_detection",
         found["contradict"],
+    )
+    monkeypatch.setattr(
+        "core_api.services.memory_service._schedule_embed_or_reembed", found["embed"]
     )
     return found
 
@@ -148,6 +153,8 @@ async def test_a_fast_write_enriched_while_held_is_governed_then_fanned_out(call
     assert outcome.visibility == "scope_agent"
     calls["extract"].assert_awaited_once()
     calls["contradict"].assert_awaited_once()
+    # It has its vector, so detection runs now and nothing asks for another.
+    calls["embed"].assert_not_awaited()
 
 
 async def test_a_strong_write_is_not_governed_twice(calls):
@@ -226,12 +233,37 @@ async def test_a_near_duplicate_it_did_not_mean_to_merge_stays(calls):
     calls["merge"].assert_not_awaited()
 
 
-async def test_without_an_embedding_contradictions_wait_for_it(calls):
-    """The EMBEDDED back-channel runs them when the vector lands."""
-    await _replay(calls, _row(system={"write_mode": "fast"}, embedding=None))
+async def test_without_an_embedding_it_asks_for_one(calls):
+    """The EMBEDDED back-channel runs detection when the vector lands, so ask.
 
+    A write the broker's gate held reaches its release without a vector: the
+    bulk re-embed reads its rows back, a held row reads as gone, and the vector
+    is dropped. Nothing asked again, so the row waited for the daily embed
+    backfill. On the pilot dry run (2026-11-17) a pair released at 22:26 and
+    22:28 UTC was first checked by the semantic pass at 04:00.
+    """
+    row = _row(system={"write_mode": "fast"}, embedding=None)
+
+    await _replay(calls, row)
+
+    calls["embed"].assert_awaited_once_with(
+        uuid.UUID(row["id"]),
+        row["content"],
+        "t",
+        # Provenance: the hash of what is embedded, over the row's own fleet.
+        content_hash=hashlib.sha256(f"t:f1:{row['content']}".encode()).hexdigest(),
+    )
     calls["contradict"].assert_not_awaited()
     calls["extract"].assert_awaited_once()
+
+
+async def test_a_failed_embedding_request_is_recorded(calls):
+    calls["embed"].side_effect = RuntimeError("bus down")
+    row = _row(system={"write_mode": "fast"}, embedding=None)
+
+    await _replay(calls, row)
+
+    assert _recorded(calls, row) == "embedding request failed: RuntimeError: bus down"
 
 
 async def test_entity_extraction_follows_the_tenant_switch(calls):
