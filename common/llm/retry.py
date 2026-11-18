@@ -80,6 +80,43 @@ async def _release_background_reservation(reservation: dict) -> None:
         )
 
 
+def _parse_admission(decision: object) -> tuple[str, int] | None:
+    """``None`` if storage admits the attempt, else its ``(reason, delay)``.
+
+    Raises ``ValueError`` for an answer that is neither, and each caller
+    decides what that means: a reservation refuses, a check lets the call
+    through to the reservation.
+    """
+    if not isinstance(decision, dict) or type(decision.get("allowed")) is not bool:
+        raise ValueError("invalid reservation decision")
+    if decision["allowed"]:
+        return None
+    delay = decision.get("retry_after_seconds", 60)
+    if type(delay) is not int or not 1 <= delay <= 3600:
+        raise ValueError("invalid retry interval")
+    reason = (
+        decision["reason"]
+        if decision.get("reason") in {"tenant_slots_busy", "reservation_released"}
+        else "budget_exhausted"
+    )
+    return reason, delay
+
+
+def _deferred(scope, reason: str, delay: int, **extra) -> BackgroundWorkDeferred:
+    # Never include provider/storage bodies or raw exception tracebacks here.
+    logger.info(
+        "background model work deferred",
+        extra={
+            "reason": reason,
+            "tenant_id": scope.tenant_id,
+            "operation": scope.operation,
+            "retry_after_seconds": delay,
+            **extra,
+        },
+    )
+    return BackgroundWorkDeferred(reason, delay)
+
+
 async def _admit_background_attempt() -> dict | None:
     scope = current_scope()
     if scope is None or not scope.background:
@@ -97,39 +134,17 @@ async def _admit_background_attempt() -> dict | None:
                 ),
                 timeout=5,
             )
-            if (
-                not isinstance(decision, dict)
-                or type(decision.get("allowed")) is not bool
-            ):
-                raise ValueError("invalid reservation decision")
-            if decision["allowed"]:
+            refusal = _parse_admission(decision)
+            if refusal is None:
                 return reservation
-            delay = decision.get("retry_after_seconds", 60)
-            if type(delay) is not int or not 1 <= delay <= 3600:
-                raise ValueError("invalid retry interval")
-            reason = (
-                decision["reason"]
-                if decision.get("reason")
-                in {"tenant_slots_busy", "reservation_released"}
-                else "budget_exhausted"
-            )
+            reason, delay = refusal
         except asyncio.CancelledError:
             await _release_background_reservation(reservation)
             raise
         except Exception:
             await _release_background_reservation(reservation)
             reason, delay = "budget_unavailable", 60
-    # Never include provider/storage bodies or raw exception tracebacks here.
-    logger.info(
-        "background model work deferred",
-        extra={
-            "reason": reason,
-            "tenant_id": scope.tenant_id,
-            "operation": scope.operation,
-            "retry_after_seconds": delay,
-        },
-    )
-    raise BackgroundWorkDeferred(reason, delay) from None
+    raise _deferred(scope, reason, delay) from None
 
 
 async def require_background_admission() -> None:
@@ -150,34 +165,15 @@ async def require_background_admission() -> None:
     if scope is None or not scope.background or not (scope.tenant_id or "").strip():
         return
     try:
-        decision = await asyncio.wait_for(
-            check_background_admission(tenant_id=scope.tenant_id), timeout=2
+        refusal = _parse_admission(
+            await asyncio.wait_for(
+                check_background_admission(tenant_id=scope.tenant_id), timeout=2
+            )
         )
-    except asyncio.CancelledError:
-        raise
     except Exception:
         return
-    if not isinstance(decision, dict) or decision.get("allowed") is not False:
-        return
-    delay = decision.get("retry_after_seconds", 60)
-    if type(delay) is not int or not 1 <= delay <= 3600:
-        delay = 60
-    reason = (
-        "tenant_slots_busy"
-        if decision.get("reason") == "tenant_slots_busy"
-        else "budget_exhausted"
-    )
-    logger.info(
-        "background model work deferred",
-        extra={
-            "reason": reason,
-            "tenant_id": scope.tenant_id,
-            "operation": scope.operation,
-            "retry_after_seconds": delay,
-            "stage": "precheck",
-        },
-    )
-    raise BackgroundWorkDeferred(reason, delay)
+    if refusal is not None:
+        raise _deferred(scope, *refusal, stage="precheck")
 
 
 async def _run_reserved_attempt(

@@ -77,10 +77,19 @@ async def test_a_spent_allowance_defers_until_the_window_frees(monkeypatch):
         None,
         {},
         {"allowed": 0},
+        {"allowed": False, "retry_after_seconds": -1},
         RuntimeError("storage unavailable"),
         TimeoutError(),
     ],
-    ids=["allowed", "no-checker", "empty", "not-a-bool", "error", "timeout"],
+    ids=[
+        "allowed",
+        "no-checker",
+        "empty",
+        "not-a-bool",
+        "bad-delay",
+        "error",
+        "timeout",
+    ],
 )
 async def test_the_check_fails_open(monkeypatch, answer):
     """The reservation still gates the model call, so an unclear answer is not a refusal."""
