@@ -36,7 +36,11 @@ from core_api.cache import cache_delete_if, cache_set_nx
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.constants import CONTRADICTED_STATUSES, SINGLE_VALUE_PREDICATES
-from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
+from core_api.providers._retry import (
+    call_with_fallback,
+    deliberate_fake_provider,
+    require_background_admission,
+)
 from core_api.schemas import ContradictionInfo
 from core_api.services.background_admission import FairGate, Permit
 from core_api.services.background_retry import defer_work
@@ -426,6 +430,30 @@ async def _acquire_detection_slot(tenant_id: str) -> tuple[Permit, int]:
     t0 = time.monotonic()
     permit = await _detection_gate().acquire(tenant_id)
     return permit, round((time.monotonic() - t0) * 1000)
+
+
+async def _require_judge_admission(tenant_id: str) -> None:
+    """Defer the run before its storage reads when the judge would get no model slot.
+
+    Both detectors query for candidates before the judge, and a judge refused by
+    the tenant's background budget (#2418) defers the whole run, whose replay
+    queries again. Checked first, a run the budget cannot serve costs one check.
+    Before this, a single memory's entity-overlap query ran 301 times in 48
+    hours on the read pool. A judge that makes no model call (``fake``,
+    ``none``) needs no slot and is not checked. See
+    ``require_background_admission`` for what the check can and cannot promise.
+    """
+    from core_api.services.organization_settings import resolve_config
+
+    try:
+        provider = _judge_provider(await resolve_config(tenant_id))
+    except Exception:
+        # Unknown judge: check anyway. The check fails open, so this costs at
+        # most one round trip.
+        provider = None
+    if provider in (ProviderName.FAKE, ProviderName.NONE):
+        return
+    await require_background_admission()
 
 
 # ---------------------------------------------------------------------------
@@ -887,6 +915,9 @@ async def detect_contradictions_async(
     abstentions = _JudgeAbstentions()
     abstentions_token = _judge_abstentions.set(abstentions)
     try:
+        # Before any storage read: a run the judge's budget cannot serve
+        # defers here rather than after its candidate search.
+        await _require_judge_admission(tenant_id)
         if new_memory is None:
             sc = get_storage_client()
             # ``read=False``: the row was committed moments ago and the read
@@ -3464,6 +3495,9 @@ async def detect_contradictions_by_entities_async(
     abstentions = _JudgeAbstentions()
     abstentions_token = _judge_abstentions.set(abstentions)
     try:
+        # Before any storage read, as in Path A: a run the judge's budget
+        # cannot serve defers here rather than after the overlap query.
+        await _require_judge_admission(tenant_id)
         # The row is fetched BEFORE the lock is taken, unlike Path A. The lock
         # key carries a fingerprint of the content this run will examine (H-06)
         # and Path C — unlike Path A — is not handed that content by its

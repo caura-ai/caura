@@ -291,10 +291,19 @@ async def test_a_failed_settings_read_keeps_detection_on(entry):
     from core_api.services import contradiction_detector as cd
 
     mid = uuid4()
+    reads = 0
+
+    async def _resolve(_tenant_id):
+        # The switch's read fails; every later one (the judge-admission check,
+        # the run's own) answers, however many the run makes.
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError("storage down")
+        return _cfg()
+
     with _Probe(_cfg(), mid) as probe:
-        with patch(
-            _RESOLVE, AsyncMock(side_effect=[RuntimeError("storage down"), _cfg()])
-        ):
+        with patch(_RESOLVE, AsyncMock(side_effect=_resolve)):
             if entry == "content":
                 await cd.detect_contradictions_async(mid, "t1", "f1", "x", _EMB)
             else:
