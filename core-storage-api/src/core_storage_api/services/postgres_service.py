@@ -4482,6 +4482,17 @@ class PostgresService:
         400 (ValueError) rather than a DB CHECK violation at flush. This records
         the classification only — the memory-row effect (``status`` /
         ``supersedes_id``) is applied separately and is unchanged.
+
+        A pair that already has a pending record, in either direction, gets that
+        record back instead of a second one. Each detection run de-duplicates its
+        own pairs, but the semantic and entity-overlap passes, and detection run
+        for each memory of a pair, all record it again. Review then refuses to
+        resolve any of them while another counts as applied ("Another verdict
+        still holds this pair"). Only a record that agrees on ``effect_applied``
+        absorbs one: a dispute says detection changed nothing, an applied verdict
+        says it did, and dismissal undoes a verdict only when its record says it
+        was applied. A reviewed record absorbs nothing, since detection applying
+        the verdict again is a new decision.
         """
         from common.models.memory_conflict import (
             ACTIONS,
@@ -4507,12 +4518,49 @@ class PostgresService:
             v = payload.get(key)
             return float(v) if v is not None else None
 
+        def _applied(metadata: object) -> bool | None:
+            # Review's reading: no metadata is an applied verdict. Provenance it
+            # cannot read matches nothing.
+            if metadata is not None and not isinstance(metadata, dict):
+                return None
+            return (metadata or {}).get("effect_applied") is not False
+
+        tenant_id = payload["tenant_id"]
+        new_id = UUID(str(payload["new_memory_id"]))
+        old_id = UUID(str(payload["old_memory_id"]))
+        applied = _applied(payload.get("metadata"))
         async with get_session() as session:
+            # Parents first, in the order review and deletion take them. Two
+            # detections recording one pair at once queue here; without it both
+            # read "no record" below and both insert.
+            await session.execute(_ordered_memory_lock_select([new_id, old_id], tenant_id))
+            held = (
+                await session.execute(
+                    select(MemoryConflict)
+                    .where(
+                        MemoryConflict.tenant_id == tenant_id,
+                        MemoryConflict.review_status == "pending",
+                        tuple_(MemoryConflict.new_memory_id, MemoryConflict.old_memory_id).in_(
+                            [(new_id, old_id), (old_id, new_id)]
+                        ),
+                    )
+                    .order_by(MemoryConflict.created_at, MemoryConflict.id)
+                )
+            ).scalars()
+            for existing in held:
+                if applied is not None and _applied(existing.metadata_) == applied:
+                    logger.info(
+                        "memory_conflicts: pair %s/%s is already pending as %s; not recorded again",
+                        new_id,
+                        old_id,
+                        existing.id,
+                    )
+                    return existing
             row = MemoryConflict(
-                tenant_id=payload["tenant_id"],
+                tenant_id=tenant_id,
                 fleet_id=payload.get("fleet_id"),
-                new_memory_id=UUID(str(payload["new_memory_id"])),
-                old_memory_id=UUID(str(payload["old_memory_id"])),
+                new_memory_id=new_id,
+                old_memory_id=old_id,
                 relationship=relationship,
                 relationship_confidence=_conf("relationship_confidence"),
                 diagnosis=diagnosis,
