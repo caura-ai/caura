@@ -57,9 +57,12 @@ RANK_API_KEY: str = os.environ.get("RANK_API_KEY", "")
 # staying far under the turn's multi-second LLM cost. Tune per deployment.
 RANK_TIMEOUT_SECONDS: float = float(os.environ.get("RANK_TIMEOUT_SECONDS", "0.5"))
 
-# Retry budget. Default 1 (no retry) — a reranker miss degrades, it does
-# not warrant spending more of the turn's latency budget.
-RANK_RETRY_ATTEMPTS: int = int(os.environ.get("RANK_RETRY_ATTEMPTS", "1"))
+# Total ranking attempts per search, including the first one (not a count
+# of retries). Default 1 (a single attempt, no retry) — a reranker miss
+# degrades, it does not warrant spending more of the turn's latency budget.
+# Clamped to at least 1: 0 or a negative value would skip the provider
+# entirely and log "Ranking failed after 0 attempt(s)" on every search.
+RANK_RETRY_ATTEMPTS: int = max(1, int(os.environ.get("RANK_RETRY_ATTEMPTS", "1")))
 RANK_RETRY_DELAY_S: float = float(os.environ.get("RANK_RETRY_DELAY_S", "0.5"))
 
 # Max candidates re-scored in one call. Bounds cross-encoder compute (the
