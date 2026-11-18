@@ -47,8 +47,11 @@ archived or otherwise unavailable pair members, a changed external chain,
 another successor/verdict still holding the pair, or a suppressed tenant
 produce 409 without changing the review. A no-op cannot restore a later manual
 status change. A missing/foreign conflict remains 404; an already reviewed
-conflict remains 409. Pending-state compare-and-set permits one reviewer to
-commit. Any failure between effects and the decision rolls everything back.
+conflict remains 409. core-api's `PATCH /api/v1/conflicts/{id}/resolve` answers
+each refusal with storage's reason as its `detail`, so a client can tell an
+already reviewed conflict from one it may still review. Pending-state
+compare-and-set permits one reviewer to commit. Any failure between effects and
+the decision rolls everything back.
 
 The detector's `action`, reason and provenance remain intact. Separate
 `review_effect_applied`, `review_winner_id` and `review_loser_id` metadata record

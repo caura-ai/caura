@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core_api import openapi_responses as _oar
@@ -97,6 +98,32 @@ async def get_conflict(
 def _storage_status(exc: Exception) -> int | None:
     """The HTTP status a storage call failed with, when it carried one."""
     return getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+
+
+_REFUSED_REVIEW_DETAIL = {
+    400: "Conflict review is invalid",
+    404: "Conflict not found",
+    409: "Conflict could not be reviewed",
+}
+
+
+def _refused_review_detail(exc: Exception, status: int) -> str:
+    """Storage's reason for refusing a review, or a fixed stand-in.
+
+    Never ``str(exc)``: for the client's ``httpx.HTTPStatusError`` that is
+    "Client error '409 Conflict' for url '<storage>/...'", which drops the reason
+    the reviewer needs (already reviewed, or another record of the pair holds the
+    verdict) and names storage's internal address. Defensive about the body, as
+    ``storage_client._storage_detail`` is, because this runs on an error path.
+    """
+    response = getattr(exc, "response", None)
+    if not isinstance(response, httpx.Response):
+        return _REFUSED_REVIEW_DETAIL[status]
+    try:
+        detail = response.json().get("detail")
+    except (AttributeError, ValueError):
+        detail = None
+    return detail if isinstance(detail, str) and detail else _REFUSED_REVIEW_DETAIL[status]
 
 
 async def _undo_dismissed_verdict(sc, conflict: dict) -> str:
@@ -292,7 +319,7 @@ async def resolve_conflict(
     except Exception as exc:  # storage 4xx surfaced with its own status
         status = _storage_status(exc)
         if status in (400, 404, 409):
-            raise HTTPException(status_code=status, detail=str(exc)) from exc
+            raise HTTPException(status_code=status, detail=_refused_review_detail(exc, status)) from exc
         raise
     if row is None:
         # L-228: storage's answer for an unknown or foreign id. Nothing was
