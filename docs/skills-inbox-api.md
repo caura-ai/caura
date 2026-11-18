@@ -25,14 +25,15 @@ agents' skills here too. The flag turns the Forge on.
 - **Scripts / CLI** authenticate with a Bearer JWT:
   `Authorization: Bearer <token>`.
 - **Self-hosted / standalone** deployments that hit core-api directly
-  use the `X-API-Key` header (admin key or `CAURA_API_KEY`); in
+  use the `X-API-Key` header (admin key or `CAURA_API_KEY` for actions other than approval); in
   standalone mode the resolved context is already `orgRole=admin`. The
   admin key is tenant-less, so it has to name the tenant it is acting
   on — see below.
 
 **Authorization.** The five action endpoints
 (`approve`/`defer`/`edit`/`quarantine`/`reject`) require an admin
-caller — `orgRole=admin` (or the admin API key). A non-admin caller
+caller — `orgRole=admin` (or the admin API key). Approval additionally
+requires the named principal described below. A non-admin caller
 gets `403 SKILLS_INBOX_FORBIDDEN`. The `GET` list endpoint is readable
 by any authenticated tenant member, so non-admin operators can still
 see what's in flight.
@@ -214,7 +215,9 @@ one may only name its own.
 
 ### `approve` — staged → active
 
-No body, except for an override (below). Runs a **pre-apply Sentinel rescan** against the exact
+Forge approval requires `{ "expected_content_hash": "sha256:<reviewed hash>" }`,
+using the hash on the card the administrator reviewed. Missing Forge hashes
+return `422`; stale hashes return `409`. Runs a **pre-apply Sentinel rescan** against the exact
 content being crystallized; the transition is refused (`422`) unless
 the rescan comes back **clean with zero critical findings** (a dirty
 or quarantine-grade verdict blocks it). A staged doc missing its
@@ -224,14 +227,35 @@ the approve is in flight, the call returns `409` — reload and retry.
 
 ```bash
 curl -X POST "$BASE/api/v1/skills-inbox/forge/abc-123/approve" \
-  -H "Authorization: Bearer $TOKEN"
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"expected_content_hash":"sha256:<reviewed hash>"}'
 ```
+
+Activation requires a named organization admin or the explicit system-admin
+credential. Agent, install, member and shared tenant keys cannot approve.
+`data.activation_approval` records `approved_by`, the server's UTC `approved_at`
+and the actual `content_hash` in the same write as `active`. The storage write
+compares status, hash and the final reviewed row version; changes after the
+last reload cannot receive the approval. Ordinary approval keeps this durable
+stamp even if best-effort event logging is unavailable. Already-active skills
+are not deactivated or given an invented approval history.
+
+**Rollout:** approval callers must retain and send the card's hash. Older strict
+servers reject this new request field, so coordinate an acceptance stage or
+client/server rollout before deploying enforcement. Do not retry a stale
+approval using a newly fetched hash without another review.
+
+Deploy the storage implementation with review predicates first, and drain old
+storage revisions before enabling this application version. Older storage
+handlers ignore the additional predicate fields; they cannot supply the
+reviewed-version guarantee. Source merge alone does not establish this rollout
+prerequisite.
 
 **Override a quarantine.** A reviewer who has read the findings and
 judged them safe approves with an override:
 
 ```json
-{ "override_quarantine": true, "reason": "the rm -rf targets the build directory" }
+{ "expected_content_hash": "sha256:<reviewed hash>", "override_quarantine": true, "reason": "the rm -rf targets the build directory" }
 ```
 
 - **What it allows:** approving a `quarantined` skill (→ `active`), or a
@@ -244,8 +268,8 @@ judged them safe approves with an override:
   - The rescan's verdict is stored as usual, so the active skill keeps
     the findings it was approved over.
   - `data.quarantine_override` holds the reason, the overridden
-    `critical_codes` and `approved_by`: the user, else the calling agent,
-    else `admin-api-key` (or `tenant-api-key`) for a credential with neither.
+    `critical_codes` and `approved_by`: the named administrator or the
+    system-admin credential's own ID. Unattributed approval is refused.
     The quarantine markers, `quarantined_at` and `quarantine_reason`, move
     into it, so the active skill no longer looks quarantined.
   - The `skill_inbox_approve` audit row carries the same with
@@ -295,8 +319,7 @@ same slug: a non-admin write to a rejected slug is refused.
 
 Rejecting an `active` skill rolls it back: agents drop it on their
 next sync, and for a Forge skill the cooloff ledger stops Forge
-deriving it again. That is the rollback `auto_promote_clean` relies
-on. Deleting the document instead writes no ledger row, so the next
+deriving it again. Deleting the document instead writes no ledger row, so the next
 Forge tick mints the same slug again.
 
 ```bash

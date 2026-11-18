@@ -100,16 +100,8 @@ async def _resolve_forge_config(org_id: str) -> ForgeConfig:
 
 
 async def _resolve_auto_promote_clean(org_id: str) -> bool:
-    """Read ``skills_factory.sentinel.auto_promote_clean`` for a tenant.
-
-    Default False (HITL preserved). ``get_settings_for_display`` is
-    cached (5-min TTL), so the second fetch within a tick — alongside
-    ``_resolve_forge_config`` — is a cache hit, not a second round-trip.
-    """
-    settings = await get_settings_for_display(org_id)
-    sf = (settings or {}).get("skills_factory") or {}
-    sentinel = sf.get("sentinel") or {}
-    return bool(sentinel.get("auto_promote_clean", False))
+    """Retired opt-in: legacy stored values never skip review."""
+    return False
 
 
 # ── Injectable factories ──────────────────────────────────────────
@@ -415,10 +407,7 @@ async def run_forge_cron_tick(
     stats = {
         "candidates_written": forge_result.candidates_written,
         "promoted": promote_result.promoted,
-        # Subset of ``promoted`` that skipped the Inbox and went
-        # straight to ``active`` (opt-in ``auto_promote_clean`` +
-        # clean Sentinel scan). ``promoted - auto_approved`` is the
-        # count that landed in ``staged`` for human review.
+        # Compatibility field; all passing candidates now wait in staged.
         "auto_approved": promote_result.auto_approved,
         "scanned": promote_result.scanned,
         "held": promote_result.held,

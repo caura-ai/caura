@@ -408,18 +408,8 @@ DEFAULT_SETTINGS: dict = {
         # A ``fail_on_critical`` key used to sit here and was read by nothing
         # (M-114): ``false`` promised that critical findings would reach the
         # inbox, and every such skill was quarantined all the same.
-        "sentinel": {
-            # When True, a Forge candidate that passes ALL six
-            # auto-gates AND carries a clean Sentinel scan
-            # (``scan.state='clean'``, ``critical=0``) is promoted
-            # straight to ``status='active'`` — skipping the HITL
-            # Inbox approve step. Default False keeps the human in
-            # the loop. Flipping this true means the tenant TRUSTS
-            # the Sentinel scanner as the sole gate before a skill
-            # goes live; dirty / quarantined / warn-only candidates
-            # still route to ``staged`` and require human review.
-            "auto_promote_clean": False,
-        },
+        # Reserved block for scanner settings; automatic activation is retired.
+        "sentinel": {},
         # Forge resident knobs. Phase 0 publishes the topic + stub
         # handler; Phase 1 lands the real worker that reads these.
         # ``min_cluster_size`` default 3 is the demo value (plan §5);
@@ -833,6 +823,12 @@ def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
 
     Recurses into nested dicts so sub-keys are also validated.
     """
+    if (
+        path == "skills_factory"
+        and isinstance(payload.get("sentinel"), dict)
+        and "auto_promote_clean" in payload["sentinel"]
+    ):
+        raise ValueError("Settings key 'skills_factory.sentinel.auto_promote_clean' is retired")
     unknown = set(payload) - set(schema)
     if unknown:
         prefix = f"{path}." if path else ""
@@ -845,7 +841,9 @@ def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
                 continue
             if not isinstance(v, dict):
                 raise ValueError(f"Settings key {full_key!r} must be an object, got {type(v).__name__}")
-            if schema_v:
+            # Retiring its last option must not turn Sentinel into a free-form
+            # map that accepts previously refused scanner settings.
+            if schema_v or full_key == "skills_factory.sentinel":
                 _check_keys(v, schema_v, path=f"{path}.{k}" if path else k)
 
 
@@ -916,7 +914,6 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "skills_factory.body_max_bytes": int,
     "skills_factory.inbox_max_pending": int,
     "skills_factory.rejection_cooloff_days": int,
-    "skills_factory.sentinel.auto_promote_clean": bool,
     "skills_factory.forge.cron_interval_hours": int,
     "skills_factory.forge.min_cluster_size": int,
     "skills_factory.forge.min_distinct_agents": int,
@@ -1879,6 +1876,7 @@ def _is_display_mask(value: object) -> bool:
 #: still in the tenant's row, and showing it would present a control that does
 #: nothing.
 _RETIRED_KEYS: tuple[tuple[str, ...], ...] = (
+    ("skills_factory", "sentinel", "auto_promote_clean"),
     ("skills_factory", "sentinel", "fail_on_critical"),
     ("skills_factory", "forge", "llm_tokens_per_run"),
     ("skills_factory", "openclaw_bridge"),

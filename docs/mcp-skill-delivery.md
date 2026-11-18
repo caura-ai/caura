@@ -11,7 +11,7 @@ the `caura_doc` tool it already has. There is no filesystem install,
 no plugin runtime, no registration step.
 
 ```
-1. Skill becomes status='active'   (approve, or auto_promote_clean)
+1. Skill becomes status='active'   (explicit Inbox review for Forge)
 2. Agent asks: "is there a skill for X?"
 3. caura_doc op=search collection=skills query="…"
 4. Server returns the matching ACTIVE skill; agent reads
@@ -53,8 +53,7 @@ agent-direct skill write flows through the planned lifecycle instead of
 landing in an unvalidated limbo:
 
 - **status defaults to `staged`** — the doc lands in the HITL Inbox, not
-  agent-visible, until an operator approves it to `active` (or
-  `auto_promote_clean` does). No caller-supplied status is needed or
+  agent-visible, until an operator approves it to `active`. No caller-supplied status is needed or
   honored for promotion.
 - **status RBAC** — MCP callers carry no admin/forge identity (there is
   no such accessor on this surface), so a caller-supplied
@@ -62,6 +61,13 @@ landing in an unvalidated limbo:
   This is what closes self-promotion. An admin who legitimately authors
   an `active` skill uses the REST/dashboard path, which has the real
   auth context.
+- **Forge review** — generic writes cannot activate Forge content, relabel an
+  existing Forge document to bypass review, or supply server-owned
+  `activation_approval` / `quarantine_override` provenance. Forge activation uses
+  the Inbox's reviewed-hash compare-and-set. Previously active documents are not
+  migrated or backfilled.
+  Non-Forge read-modify-write may echo identical stored review fields; new or
+  changed values are refused, including null values for a missing stored key.
 - **source RBAC** — `source='forge'` (internal-only) and `source='manual'`
   (admin-only) are 403'd; agents write `source='agent'`.
 - **Sentinel pre-scan + content_hash + byte/slug caps** — a dirty scan
@@ -74,7 +80,7 @@ The validator runs for every tenant, and an agent needs trust level 2 to
 write a skill at all.
 
 This is the single mechanism that turns *"an operator approved it"*
-into *"agents can find it."* Approval (or `auto_promote_clean`) is what
+into *"agents can find it."* Approval is what
 flips a skill to `active`; this filter is what makes `active` mean
 discoverable.
 

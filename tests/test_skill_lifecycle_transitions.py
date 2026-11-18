@@ -629,7 +629,7 @@ class TestAutoPromoteClean:
         assert result.attempts[0].target_status == "staged"
 
     @pytest.mark.asyncio
-    async def test_flag_on_clean_candidate_goes_straight_to_active(self):
+    async def test_legacy_flag_on_clean_candidate_still_waits_for_review(self):
         updates: list[tuple] = []
 
         async def updater(t, c, d, s):
@@ -647,11 +647,11 @@ class TestAutoPromoteClean:
                 freshness_window_days=14,
                 auto_promote_clean=True,
             )
-        # Clean scan + flag on → active, skipping the inbox entirely.
-        assert updates == [("t1", "skills", "forge/clean", "active")]
+        # The retired opt-in cannot skip explicit approval.
+        assert updates == [("t1", "skills", "forge/clean", "staged")]
         assert result.promoted == 1
-        assert result.auto_approved == 1
-        assert result.attempts[0].target_status == "active"
+        assert result.auto_approved == 0
+        assert result.attempts[0].target_status == "staged"
 
     @pytest.mark.asyncio
     async def test_flag_on_but_warn_scan_is_held_for_review(self):

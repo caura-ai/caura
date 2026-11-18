@@ -105,55 +105,25 @@ passes all 6 auto-gates (volume, diversity, freshness, poison, scan,
 hash-binding) lands in `staged` within the same tick — operators
 don't have to wait a second cron firing.
 
-## Auto-approve clean candidates (skip the HITL inbox)
+## Explicit activation review
 
-Setting `org_settings.skills_factory.sentinel.auto_promote_clean=true`
-(default **false**) makes a candidate that passes **all 6 auto-gates
-AND carries a clean Sentinel scan** (`scan.state='clean'`,
-`scan.critical=0`) promote straight to `status='active'` —
-**skipping the human Inbox approval step entirely**.
+Every passing Forge candidate lands `staged`, including candidates with no
+scan findings. The former `skills_factory.sentinel.auto_promote_clean` opt-in
+is retired: new settings writes refuse it, display omits legacy values, and
+stored `true` values no longer bypass review. `auto_approved` remains in the
+cron result for compatibility and is always zero.
 
-**This is a trust decision.** Flipping it true means the tenant treats
-the Sentinel scanner + the 6 auto-gates as a sufficient gate before a
-skill goes live to agents. Use it only for fleets where:
+A named organization admin or the system-admin credential approves a candidate
+through the Skills Inbox with the `expected_content_hash` shown during review.
+The endpoint rescans the current bytes, then writes activation and the server's
+principal/time/hash stamp together, only if the reviewed status/hash/storage
+version still match. A stale review returns `409`; a missing Forge hash returns
+`422`. Fatal scan findings still refuse, and quarantine overrides still need a
+reason. Generic REST/MCP writes cannot substitute for Forge approval.
 
-- the Sentinel rule-set is tuned for the tenant's content, and
-- the cost of a bad skill reaching agents is low / quickly reversible
-  (an inbox admin can still Reject an active skill: agents drop it on
-  their next sync, and its poisoned fingerprint stops re-derivation).
-
-What it does **not** bypass:
-
-- **The 6 auto-gates.** A candidate that fails volume / diversity /
-  freshness / poison / scan / hash-binding is held exactly as before —
-  the flag only changes the destination of an *already-passing*
-  candidate, never whether it passes.
-- **The Sentinel scan.** A candidate with a dirty scan
-  (quarantined, or any critical finding) never reaches the promotion
-  branch — gate G5 holds it in `candidate`, and even if a future gate
-  refactor let it through, the promoter re-asserts scan cleanliness at
-  the auto-approve decision site. Scans in a non-clean state
-  (`quarantined`, `warn`, `dirty`) or with any critical finding are
-  not auto-promoted; they always route to `staged` for human review.
-  A clean scan may carry `warn`-count > 0 and still auto-promote —
-  warns are surfaced on the operator card but do not block activation
-  (matching the inbox approve semantics; see
-  `test_flag_on_but_warn_scan_still_auto_activates`).
-  The scan reads the skill body (`content`) — the file agents load —
-  plus `summary` and `description`: prompt-injection markers and shell
-  patterns such as a download piped into a shell are critical (no
-  auto-promotion); links to paste or webhook-capture hosts are a warn,
-  so they do **not** stop auto-promotion on their own.
-
-Audit visibility: the `forge cron tick:` log line's `auto_approved`
-counts how many of that tick's promotions skipped the inbox; `promoted
-- auto_approved` is the count that landed in `staged`. The lifecycle-audit
-row keeps only the total, `stats.candidates_produced`.
-
-**To pause:** flip back to `false`. The next tick's clean candidates
-route to `staged` again — already-active skills are unaffected (no
-automatic rollback; Reject any you want gone), and the inbox resumes
-as the gate.
+Already-active skills are left unchanged, with no inferred approval backfill
+or automatic deactivation. Activation and node delivery approval remain separate.
+See [Skills Inbox API](skills-inbox-api.md#approve--staged--active).
 
 ## Dedup safety
 

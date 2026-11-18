@@ -2692,17 +2692,30 @@ class CoreStorageClient:
     # =====================================================================
 
     async def upsert_document(
-        self, data: dict, *, expected_status: Sequence[str | None] | None = None
+        self,
+        data: dict,
+        *,
+        expected_status: Sequence[str | None] | None = None,
+        expected_content_hash: str | None = None,
+        expected_updated_at: str | None = None,
     ) -> dict:
         """Write a whole document.
 
         ``expected_status`` (L-24) lists the ``data.status`` values the stored
         document may hold for the write to land, ``None`` among them meaning it
         may not exist yet. Otherwise storage writes nothing and this raises
-        ``DocumentStatusChangedError``. Without it the write replaces whatever
-        is stored.
+        ``DocumentStatusChangedError``. Optional content-hash and storage
+        timestamp predicates bind review writes to an existing version; a
+        mismatch also writes nothing. Without predicates the write replaces
+        whatever is stored.
         """
-        body = data if expected_status is None else {**data, "expected_status": list(expected_status)}
+        body = dict(data)
+        if expected_status is not None:
+            body["expected_status"] = list(expected_status)
+        if expected_content_hash is not None:
+            body["expected_content_hash"] = expected_content_hash
+        if expected_updated_at is not None:
+            body["expected_updated_at"] = expected_updated_at
         try:
             return await self._post("/documents", body)  # type: ignore[return-value]
         except httpx.HTTPStatusError as exc:
