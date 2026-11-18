@@ -925,16 +925,27 @@ async def check_near_duplicates(request: Request) -> dict:
     lists separable here.
     """
     body: dict = await request.json()
-    rows = await _svc.memory_find_near_duplicate_pairs(
-        tenant_id=body["tenant_id"],
-        fleet_id=body.get("fleet_id"),
-        batch_size=_bounded_int(body, "batch_size", 100, 5000),
-        # This service-authenticated sweep must page the whole tenant, even
-        # past the public list offset cap. Batch size and fan-out stay bounded.
-        offset=_int_at_least(body, "offset", 0, 0),
-        threshold=body.get("threshold", 0.95),
-        neighbor_limit=_bounded_int(body, "neighbor_limit", 5, 100),
-    )
+    try:
+        rows = await _svc.memory_find_near_duplicate_pairs(
+            tenant_id=body["tenant_id"],
+            fleet_id=body.get("fleet_id"),
+            batch_size=_bounded_int(body, "batch_size", 100, 5000),
+            # This service-authenticated sweep must page the whole tenant, even
+            # past the public list offset cap. Batch size and fan-out stay bounded.
+            offset=_int_at_least(body, "offset", 0, 0),
+            threshold=body.get("threshold", 0.95),
+            neighbor_limit=_bounded_int(body, "neighbor_limit", 5, 100),
+        )
+    except DBAPIError as exc:
+        # 57014 is query_canceled: the batch's statement_timeout fired (see
+        # Settings.near_duplicates_statement_timeout_ms). 504, as scored search
+        # answers, so the crystallizer reads it as a batch too large to finish
+        # and retries the window smaller.
+        if getattr(exc.orig, "sqlstate", None) == "57014":
+            raise HTTPException(
+                status_code=504, detail="near-duplicate batch exceeded its statement timeout"
+            ) from exc
+        raise
 
     candidate_ids: list[str] = []
     seen: set[str] = set()

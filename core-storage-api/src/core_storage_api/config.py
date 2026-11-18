@@ -128,6 +128,18 @@ class Settings(BaseSettings):
     # Env: ENTITY_OVERLAP_STATEMENT_TIMEOUT_MS.
     entity_overlap_statement_timeout_ms: int = Field(default=15_000, ge=0)
 
+    # Postgres ``statement_timeout`` for one /memories/near-duplicates batch
+    # (the crystallizer's dedup sweep), set with SET LOCAL on its transaction.
+    # Its callers give up at 120s: core-api's storage read timeout and the
+    # writer's Cloud Run request timeout. Without a cap the batch runs on
+    # after both. In prod one tenant's 500-row batch ran 770s on the primary
+    # every night (2026-11-18 02:00 UTC, Query Insights), a core's worth of
+    # CPU for 13 minutes, and its result went nowhere. 60s is far above a
+    # healthy batch (under 2s) and leaves the 504 time to reach core-api,
+    # which retries the window smaller. 0 disables the cap.
+    # Env: NEAR_DUPLICATES_STATEMENT_TIMEOUT_MS.
+    near_duplicates_statement_timeout_ms: int = Field(default=60_000, ge=0)
+
     # Field-signature timeouts surface as storage 503 / core-api 429. Tune this
     # for large corpora whose full visible-row signature needs more time. The
     # 30s default matches scored search and stays below core-api's 45s budget.
