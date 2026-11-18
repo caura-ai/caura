@@ -114,6 +114,20 @@ class Settings(BaseSettings):
     # Env: SCORED_SEARCH_STATEMENT_TIMEOUT_MS.
     scored_search_statement_timeout_ms: int = Field(default=30_000, ge=0)
 
+    # Postgres ``statement_timeout`` for /memories/entity-overlap-candidates,
+    # set the same way as the scored-search cap above. The only caller is the
+    # background contradiction pass, which records a timeout as a missed check
+    # and moves on, so this can be tighter than a search's cap. On 2026-11-18
+    # this query took 80% of the read pool's execution time and pinned its CPU
+    # at 100%; requests ran to Cloud Run's 120s limit and kept running after it.
+    # In that week's unsaturated bursts the median call took 3.9s and 4% ran
+    # past 15s; in the saturated hours over half did. The tenant filter on the
+    # query's entities is the fix and should leave this cap rarely firing; the
+    # cap bounds what a plan regression can cost. A timed-out query answers
+    # 504. 0 disables the cap.
+    # Env: ENTITY_OVERLAP_STATEMENT_TIMEOUT_MS.
+    entity_overlap_statement_timeout_ms: int = Field(default=15_000, ge=0)
+
     # Postgres ``statement_timeout`` for one /memories/near-duplicates batch
     # (the crystallizer's dedup sweep), set with SET LOCAL on its transaction.
     # Its callers give up at 120s: core-api's storage read timeout and the

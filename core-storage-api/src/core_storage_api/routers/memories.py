@@ -521,16 +521,26 @@ async def agent_scope_probe(request: Request) -> dict:
 @router.post("/entity-overlap-candidates")
 async def find_entity_overlap_candidates(request: Request) -> list[dict]:
     body: dict = await request.json()
-    memories = await _svc.memory_find_entity_overlap_candidates(
-        memory_id=UUID(body["memory_id"]),
-        tenant_id=body["tenant_id"],
-        fleet_id=body.get("fleet_id"),
-        visibility=body.get("visibility", "scope_team"),
-        limit=body.get("limit", 8),
-        include_supersedes=bool(body.get("include_supersedes", False)),
-        # A54 — owner identity, applied only for the scope_agent tier.
-        agent_id=body.get("agent_id"),
-    )
+    try:
+        memories = await _svc.memory_find_entity_overlap_candidates(
+            memory_id=UUID(body["memory_id"]),
+            tenant_id=body["tenant_id"],
+            fleet_id=body.get("fleet_id"),
+            visibility=body.get("visibility", "scope_team"),
+            limit=body.get("limit", 8),
+            include_supersedes=bool(body.get("include_supersedes", False)),
+            # A54 — owner identity, applied only for the scope_agent tier.
+            agent_id=body.get("agent_id"),
+        )
+    except DBAPIError as exc:
+        # 57014 is query_canceled: the query's statement_timeout fired (see
+        # Settings.entity_overlap_statement_timeout_ms). 504, as scored search
+        # answers, so the caller reads a timeout rather than a crash.
+        if getattr(exc.orig, "sqlstate", None) == "57014":
+            raise HTTPException(
+                status_code=504, detail="entity overlap candidates exceeded their statement timeout"
+            ) from exc
+        raise
     # No vectors (L-189): contradiction detection never reads a candidate's.
     return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 
