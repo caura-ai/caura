@@ -486,10 +486,22 @@ def _reopen_sweep(stack: ExitStack):
     return organization_settings._reopen_dedup_sweep(TENANT), sc.reset_dedup_checked
 
 
-def _replay(stack: ExitStack, system: dict, *, cfg: Any = None, **over: Any):
-    """``replay_released_write`` over one released row, under the tenant's ``cfg``."""
+def _replay(
+    stack: ExitStack, system: dict, *, cfg: Any = None, embed: Any = None, **over: Any
+):
+    """``replay_released_write`` over one released row, under the tenant's ``cfg``.
+
+    The row has no vector, so the replay asks for one through ``embed``: a quiet
+    stand-in unless the scenario injects its fault there. A real request would
+    wait out its timeout here and only slow the scenario down.
+    """
     from core_api.services import release_replay
 
+    stack.enter_context(
+        patch.object(
+            memory_service, "_schedule_embed_or_reembed", new=embed or AsyncMock()
+        )
+    )
     row = _row(metadata_={**over.pop("metadata_", {}), "_system": system}, **over)
     sc = _storage()
     sc.get_memory = AsyncMock(return_value=row)
@@ -571,6 +583,12 @@ def _replay_extraction(stack: ExitStack):
     )
     cfg = _config(entity_extraction_enabled=True)
     return _replay(stack, {"write_mode": "strong"}, cfg=cfg), fault
+
+
+def _replay_embed(stack: ExitStack):
+    """A released row without a vector asks for one (the row's default)."""
+    fault = AsyncMock(side_effect=_boom())
+    return _replay(stack, {"write_mode": "strong"}, embed=fault), fault
 
 
 def _replay_contradiction(stack: ExitStack):
@@ -735,6 +753,7 @@ ROSTER: dict[str, dict[str, Any]] = {
             Scenario("release-replay-cascade", "release_replay", _replay_cascade),
             Scenario("release-replay-fanout", "release_replay", _replay_fanout),
             Scenario("release-replay-extraction", "release_replay", _replay_extraction),
+            Scenario("release-replay-embed", "release_replay", _replay_embed),
             Scenario(
                 "release-replay-contradiction",
                 "release_replay",
