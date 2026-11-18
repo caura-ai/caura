@@ -88,10 +88,12 @@ The MCP server serves one of two tool sets per connection. Every tool carries a
   those descriptions.
 
 A directory connection is also served its own wording where the default text
-does not meet the directory's requirements: the server instructions and the
-`caura_keystones` description say to follow keystone rules and to tell the user
-about a conflict with their request, rather than that the rules override user
-instructions, and the instructions leave out the usage-skill install step.
+does not meet the directory's requirements: the server instructions say to
+follow keystone rules and to tell the user about a conflict with their request,
+rather than that the rules override user instructions, and leave out the
+usage-skill install step. The `caura_keystones` description only says what the
+tool returns, since the directory's tool descriptions describe and do not
+direct.
 `caura_recall` points read-by-id at `caura_memory_read`.
 
 A tool is callable exactly where it is listed. Calling `caura_manage` or

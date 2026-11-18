@@ -978,6 +978,21 @@ async def test_an_unclassified_tool_still_runs_on_the_default_surface(
 # ---------------------------------------------------------------------------
 
 
+def test_the_directory_keystones_description_only_describes() -> None:
+    """The directory's review criteria: describe what the tool does, don't tell
+    the model how to behave. How to treat keystones lives in the directory
+    server instructions, which say to follow them and to surface a conflict."""
+    text = REGISTRY["caura_keystones"].directory_description.lower()
+    for phrase in ("follow them", "tell the user", "instead of silently"):
+        assert phrase not in text, phrase
+    assert "standing rules" in text
+    instructions = mcp_server._DIRECTORY_INSTRUCTIONS.lower()
+    assert (
+        "follow them" in instructions
+        and "tell the user about the conflict" in instructions
+    )
+
+
 def test_recall_and_write_describe_what_they_hold_in_peoples_words() -> None:
     """Claude clients with many connectors find tools by searching names and
     descriptions, so the directory wording names the memory and the questions
