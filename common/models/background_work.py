@@ -68,6 +68,10 @@ class BackgroundModelWork(Base):
     attempts: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
     )
+    # Consecutive scheduling deferrals, for their backoff. Migration 081.
+    deferrals: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
     terminal_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     __table_args__ = (
         CheckConstraint(

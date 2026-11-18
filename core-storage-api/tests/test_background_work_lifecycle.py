@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 
 from core_storage_api.config import settings
+from core_storage_api.routers.background_work import DEFERRAL_BASE_SECONDS, DEFERRAL_CAP_SECONDS
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 _PREFIX = "/api/v1/storage/background-work"
@@ -318,7 +319,7 @@ async def test_scheduling_deferrals_survive_many_claims_and_finish_is_idempotent
     tenant, memory = f"budget-{uuid4()}", str(uuid4())
     body = {"tenant_id": tenant, "memory_id": memory, "kind": "extraction"}
     await _post(client, "/defer", body)
-    for _ in range(10):
+    for n in range(10):
         past = datetime.now(UTC) - timedelta(seconds=1)
         await _retry_row(tenant, memory, available_at=past, lease_until=past)
         [claim] = (await _post(client, "/claim", {"tenant_id": tenant}))["items"]
@@ -336,7 +337,9 @@ async def test_scheduling_deferrals_survive_many_claims_and_finish_is_idempotent
         assert once.attempts == twice.attempts == 0
         assert once.generation == twice.generation > claim["generation"]
         assert once.available_at == twice.available_at
-        assert 2 <= (once.available_at - once.lease_until).total_seconds() <= 3
+        # The second finish is stale, so it neither counts nor reschedules.
+        assert once.deferrals == twice.deferrals == n + 2
+        assert 3 <= (once.available_at - once.lease_until).total_seconds() <= DEFERRAL_CAP_SECONDS
         assert twice.terminal_reason is None
 
 
@@ -436,3 +439,116 @@ async def test_due_discovery_skips_duplicate_backlogs_and_preserves_byte_order(c
         found.extend(page)
         cursor = page[-1]
     assert found == expected
+
+
+# ── checking admission without reserving ──────────────────────────────────
+
+
+async def test_admission_answers_as_reserve_would_without_spending_anything(client, monkeypatch):
+    monkeypatch.setattr(settings, "background_llm_concurrency", 1)
+    monkeypatch.setattr(settings, "background_llm_attempts_per_minute", 2)
+    tenant = f"budget-{uuid4()}"
+    ask = {"tenant_id": tenant}
+    assert await _post(client, "/admission", ask) == {"allowed": True, "retry_after_seconds": 0}
+    first = {"tenant_id": tenant, "attempt_id": str(uuid4()), "operation": "contradiction"}
+    assert (await _post(client, "/reserve", first))["allowed"]
+    for _ in range(5):
+        busy = await _post(client, "/admission", ask)
+        assert busy == {"allowed": False, "retry_after_seconds": 1, "reason": "tenant_slots_busy"}
+    await _post(client, "/release", {"tenant_id": tenant, "attempt_id": first["attempt_id"]})
+    # Six checks so far and one reservation, against an allowance of two: only
+    # the reservation counted, so a second one is still admitted.
+    assert (await _post(client, "/admission", ask))["allowed"]
+    second = {**first, "attempt_id": str(uuid4())}
+    assert (await _post(client, "/reserve", second))["allowed"]
+    await _post(client, "/release", {"tenant_id": tenant, "attempt_id": second["attempt_id"]})
+    spent = await _post(client, "/admission", ask)
+    assert spent["allowed"] is False and "reason" not in spent
+    assert 1 <= spent["retry_after_seconds"] <= 60
+    assert spent == await _post(client, "/reserve", {**first, "attempt_id": str(uuid4())})
+
+
+# ── consecutive deferrals back off ────────────────────────────────────────
+
+
+def _deferral_band(n: int) -> tuple[int, int]:
+    """Where the n-th consecutive deferral may land: the upper half of its step."""
+    step = min(DEFERRAL_CAP_SECONDS, DEFERRAL_BASE_SECONDS * 2 ** (n - 1))
+    return step // 2, step
+
+
+async def test_consecutive_deferred_replays_back_off_to_a_cap(client):
+    """The replay loop: a check whose tenant stays busy is deferred on every claim.
+    It used to come back after the one-second hint each time."""
+    from datetime import UTC, datetime, timedelta
+
+    tenant, memory = f"budget-{uuid4()}", str(uuid4())
+    body = {"tenant_id": tenant, "memory_id": memory, "kind": "contradiction_entity"}
+    await _post(client, "/defer", {**body, "retry_after_seconds": 1})
+    row = await _retry_row(tenant, memory)
+    delays = [row.available_at - row.lease_until]
+    for _ in range(8):
+        past = datetime.now(UTC) - timedelta(seconds=1)
+        await _retry_row(tenant, memory, available_at=past, lease_until=past)
+        [claim] = (await _post(client, "/claim", {"tenant_id": tenant}))["items"]
+        await _post(
+            client,
+            "/finish",
+            {
+                **body,
+                "generation": claim["generation"],
+                "retry": True,
+                "deferred": True,
+                "retry_after_seconds": 1,
+            },
+        )
+        row = await _retry_row(tenant, memory)
+        delays.append(row.available_at - row.lease_until)
+    seconds = [delay.total_seconds() for delay in delays]
+    for n, delay in enumerate(seconds, start=1):
+        low, high = _deferral_band(n)
+        assert low - 1 <= delay <= high + 1, (n, seconds)
+    # Each step starts where the last one ended, so the wait never shrinks
+    # until the cap applies (step 7), and the cap holds.
+    assert seconds[:6] == sorted(seconds[:6]), seconds
+    assert max(seconds) <= DEFERRAL_CAP_SECONDS + 1
+    row = await _retry_row(tenant, memory)
+    assert (row.attempts, row.deferrals, row.terminal_reason) == (0, 9, None)
+
+
+async def test_a_new_trigger_does_not_pull_a_backed_off_item_forward(client):
+    tenant, memory = f"budget-{uuid4()}", str(uuid4())
+    body = {
+        "tenant_id": tenant,
+        "memory_id": memory,
+        "kind": "contradiction_entity",
+        "retry_after_seconds": 1,
+    }
+    for n in range(1, 7):
+        await _post(client, "/defer", body)
+        row = await _retry_row(tenant, memory)
+        low, high = _deferral_band(n)
+        assert row.deferrals == n
+        assert low - 1 <= (row.available_at - row.lease_until).total_seconds() <= high + 1, n
+
+
+async def test_a_failure_ends_a_run_of_deferrals(client):
+    from datetime import UTC, datetime, timedelta
+
+    tenant, memory = f"budget-{uuid4()}", str(uuid4())
+    body = {"tenant_id": tenant, "memory_id": memory, "kind": "extraction"}
+    for _ in range(4):
+        await _post(client, "/defer", {**body, "retry_after_seconds": 1})
+    past = datetime.now(UTC) - timedelta(seconds=1)
+    await _retry_row(tenant, memory, available_at=past, lease_until=past)
+    [claim] = (await _post(client, "/claim", {"tenant_id": tenant}))["items"]
+    await _post(client, "/finish", {**body, "generation": claim["generation"], "retry": True})
+    failed = await _retry_row(tenant, memory)
+    # The failure backoff, not the deferral one, and the count starts over.
+    assert failed.deferrals == 0
+    assert 59 <= (failed.available_at - failed.lease_until).total_seconds() <= 60
+    await _post(client, "/defer", {**body, "retry_after_seconds": 1})
+    low, high = _deferral_band(1)
+    again = await _retry_row(tenant, memory)
+    assert again.deferrals == 1
+    assert low - 1 <= (again.available_at - again.lease_until).total_seconds() <= high + 1

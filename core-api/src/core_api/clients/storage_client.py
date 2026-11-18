@@ -881,6 +881,10 @@ class CoreStorageClient:
     async def release_background_attempt(self, **payload) -> dict:
         return await self._post("/background-work/release", payload, idempotent=True)  # type: ignore[return-value]
 
+    async def check_background_admission(self, **payload) -> dict:
+        # A read: it reserves nothing, so a replay cannot double-count.
+        return await self._post("/background-work/admission", payload, idempotent=True)  # type: ignore[return-value]
+
     async def defer_background_work(self, payload: dict) -> dict:
         return await self._post("/background-work/defer", payload, idempotent=True)  # type: ignore[return-value]
 

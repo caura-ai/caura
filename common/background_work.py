@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 Reserver = Callable[..., Awaitable[dict]]
 _reserver: Reserver | None = None
 _releaser: Reserver | None = None
+_checker: Reserver | None = None
 
 
 class BackgroundWorkDeferred(Exception):
@@ -19,10 +20,12 @@ class BackgroundWorkDeferred(Exception):
 
 
 def set_background_reserver(
-    reserver: Reserver | None, releaser: Reserver | None = None
+    reserver: Reserver | None,
+    releaser: Reserver | None = None,
+    checker: Reserver | None = None,
 ) -> None:
-    global _reserver, _releaser
-    _reserver, _releaser = reserver, releaser
+    global _reserver, _releaser, _checker
+    _reserver, _releaser, _checker = reserver, releaser, checker
 
 
 async def reserve_background_attempt(**payload) -> dict:
@@ -34,3 +37,14 @@ async def reserve_background_attempt(**payload) -> dict:
 async def release_background_attempt(**payload) -> None:
     if _releaser is not None:
         await _releaser(**payload)
+
+
+async def check_background_admission(**payload) -> dict | None:
+    """Whether a reservation would be admitted now, without reserving one.
+
+    ``None`` when the service registered no checker: the caller then has no
+    answer and goes on to the reservation, which still decides.
+    """
+    if _checker is None:
+        return None
+    return await _checker(**payload)

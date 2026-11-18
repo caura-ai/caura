@@ -27,6 +27,7 @@ from uuid import uuid4
 
 from common.background_work import (
     BackgroundWorkDeferred,
+    check_background_admission,
     release_background_attempt,
     reserve_background_attempt,
 )
@@ -129,6 +130,54 @@ async def _admit_background_attempt() -> dict | None:
         },
     )
     raise BackgroundWorkDeferred(reason, delay) from None
+
+
+async def require_background_admission() -> None:
+    """Defer now if a background model call would be refused now.
+
+    For work that reads storage before its first model call. Without this, the
+    contradiction checks ran their candidate queries, then met a full tenant
+    budget at the judge, deferred, and on replay ran the same queries again,
+    as often as once a second.
+
+    Asks without reserving, so it spends none of the tenant's allowance and
+    holds no slot. The model call still reserves, and can still be refused if
+    the slots fill in between. Fails open: outside a background scope, with no
+    checker registered, or when the check errors or answers nonsense, it
+    returns and leaves the decision to the reservation.
+    """
+    scope = current_scope()
+    if scope is None or not scope.background or not (scope.tenant_id or "").strip():
+        return
+    try:
+        decision = await asyncio.wait_for(
+            check_background_admission(tenant_id=scope.tenant_id), timeout=2
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return
+    if not isinstance(decision, dict) or decision.get("allowed") is not False:
+        return
+    delay = decision.get("retry_after_seconds", 60)
+    if type(delay) is not int or not 1 <= delay <= 3600:
+        delay = 60
+    reason = (
+        "tenant_slots_busy"
+        if decision.get("reason") == "tenant_slots_busy"
+        else "budget_exhausted"
+    )
+    logger.info(
+        "background model work deferred",
+        extra={
+            "reason": reason,
+            "tenant_id": scope.tenant_id,
+            "operation": scope.operation,
+            "retry_after_seconds": delay,
+            "stage": "precheck",
+        },
+    )
+    raise BackgroundWorkDeferred(reason, delay)
 
 
 async def _run_reserved_attempt(

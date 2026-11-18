@@ -75,8 +75,9 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # scope); a metadata-created schema must have these before stamping.
 # 080 creates the three background-model tables and
 # builds its due-time and C-collated tenant-discovery indexes in the same
-# transaction, so both indexes, valid, join the probe.
-_HEAD_FINGERPRINT_REVISION = "080"
+# transaction, so both indexes, valid, join the probe. 081 adds
+# ``background_model_work.deferrals``, so the column joins the probe.
+_HEAD_FINGERPRINT_REVISION = "081"
 _HEAD_FINGERPRINT_SQL: str | None = (
     "SELECT (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -129,7 +130,9 @@ _HEAD_FINGERPRINT_SQL: str | None = (
     "AND c.relname = 'ix_background_model_work_due' AND i.indisvalid) "
     "AND EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' "
-    "AND c.relname = 'ix_background_model_work_tenant_due' AND i.indisvalid)"
+    "AND c.relname = 'ix_background_model_work_tenant_due' AND i.indisvalid) "
+    "AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' "
+    "AND table_name = 'background_model_work' AND column_name = 'deferrals')"
 )
 
 _engine: AsyncEngine | None = None

@@ -443,6 +443,7 @@ async def lifespan(app):
     set_background_reserver(
         lambda **payload: get_storage_client().reserve_background_attempt(**payload),
         lambda **payload: get_storage_client().release_background_attempt(**payload),
+        lambda **payload: get_storage_client().check_background_admission(**payload),
     )
 
     # Increase default thread pool for concurrent LLM calls via asyncio.to_thread()
