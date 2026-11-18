@@ -5968,7 +5968,18 @@ class PostgresService:
         Default ``False`` preserves the back-compat behaviour for every
         existing caller.
         """
+        from core_storage_api.config import settings as _overlap_settings
+
+        _statement_timeout_ms = _overlap_settings.entity_overlap_statement_timeout_ms
         async with get_session() as session:
+            if _statement_timeout_ms:
+                # SET LOCAL on this transaction, as scored search does, so a
+                # query whose caller has given up stops instead of holding a
+                # read-pool backend. The route maps the cancellation to 504.
+                # See Settings.entity_overlap_statement_timeout_ms.
+                await session.execute(
+                    select(func.set_config("statement_timeout", f"{_statement_timeout_ms}ms", True))
+                )
             # Scope the seed as well as the candidates: a foreign seed must
             # not reveal entity-name overlap or a supersedes chain.
             new_mel = MemoryEntityLink.__table__.alias("new_mel")
@@ -6020,6 +6031,23 @@ class PostgresService:
                 )
                 .where(
                     func.lower(other_ent.c.canonical_name).in_(select(new_entity_names)),
+                    # Where the plan starts rests on this. Without it, finding
+                    # the seed's names meant scanning every tenant's entities
+                    # (no index leads with the name), so on a large table the
+                    # planner walked this tenant's memories and all their links
+                    # instead: on 2026-11-18, 90k memories and 282k links for 31
+                    # matching rows, 23s on the read pool. With it, an index
+                    # leading with tenant_id (ix_entities_tenant_id, or
+                    # uq_entities_tenant_type_name_fleet where 001's is absent)
+                    # finds the names, and the plan starts from them.
+                    #
+                    # It drops no legitimate match: every writer of
+                    # memory_entity_links requires the memory and the entity to
+                    # share a tenant (_owned_link_endpoints, and the
+                    # entity-resolution insert's own tenant predicates), so a
+                    # link that crosses tenants is historical data, and one is
+                    # not a reason to call two memories related.
+                    other_ent.c.tenant_id == tenant_id,
                     Memory.tenant_id == tenant_id,
                     Memory.id != memory_id,
                     Memory.deleted_at.is_(None),

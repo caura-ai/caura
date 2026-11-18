@@ -25,6 +25,8 @@ from datetime import datetime
 from typing import Any, NamedTuple
 from uuid import UUID
 
+import httpx
+
 from common.background_work import BackgroundWorkDeferred
 from common.constants import predicate_cluster
 from common.llm.untrusted import UNTRUSTED_DATA_RULE, data_block, quote_untrusted
@@ -3546,19 +3548,37 @@ async def detect_contradictions_by_entities_async(
             concluded = True
             return
 
-        candidates = await sc.find_entity_overlap_candidates(
-            {
-                "memory_id": str(memory_id),
-                "tenant_id": tenant_id,
-                "fleet_id": fleet_id,
-                # Same visibility scoping as the semantic path above.
-                "visibility": new_memory.get("visibility", "scope_team"),
-                # A54 — pins the OWNER for the scope_agent tier. The tier alone
-                # matches any agent's private rows, so without this a writer can
-                # mark another agent's private memory conflicted.
-                "agent_id": new_memory.get("agent_id"),
-            }
-        )
+        try:
+            candidates = await sc.find_entity_overlap_candidates(
+                {
+                    "memory_id": str(memory_id),
+                    "tenant_id": tenant_id,
+                    "fleet_id": fleet_id,
+                    # Same visibility scoping as the semantic path above.
+                    "visibility": new_memory.get("visibility", "scope_team"),
+                    # A54 — pins the OWNER for the scope_agent tier. The tier alone
+                    # matches any agent's private rows, so without this a writer can
+                    # mark another agent's private memory conflicted.
+                    "agent_id": new_memory.get("agent_id"),
+                }
+            )
+        except (httpx.HTTPStatusError, httpx.TimeoutException) as exc:
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code != 504:
+                raise
+            # Storage caps this query (entity_overlap_statement_timeout_ms) and
+            # answers 504 when the cap fires, which it does by design when the
+            # read pool is loaded. That is a skipped check, not a defect: a
+            # WARNING instead of the ERROR traceback below. It is still
+            # recorded as unchecked in the ``finally``, and the lock is
+            # released so a later trigger can run the check.
+            logger.warning(
+                "PATH_C_DETECTION candidates_timeout memory=%s tenant=%s error=%s",
+                memory_id,
+                tenant_id,
+                type(exc).__name__,
+            )
+            failure, failure_tb = exc, traceback.format_exc()
+            return
         n_candidates = len(candidates) if candidates else 0
         # CAURA-132 diag — surface Path C invocation + initial candidate
         # count. The wet-test miss class (links=2/2, no contradiction)
