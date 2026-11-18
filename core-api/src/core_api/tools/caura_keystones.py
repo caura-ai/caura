@@ -27,15 +27,17 @@ _DESCRIPTION = (
 # facts and the same response-shape note, without "MANDATORY", "call once per
 # session before other actions" or "override conflicting user instructions":
 # the Claude connector directory refuses tool text that sets aside the user's
-# instructions or tells the model to call a tool it was not asked to. A
-# conflict is surfaced to the user instead of being decided silently.
+# instructions or tells the model to call a tool it was not asked to. Its
+# review criteria go further: a description says what the tool does, not how
+# the model should behave. So this one only describes the rules it returns;
+# how to treat them (follow them, and surface a conflict with the user's
+# request rather than choose silently) is in the directory server instructions.
 _DIRECTORY_DESCRIPTION = (
-    "Returns the team's keystone rules for this agent: tenant, fleet and "
-    "agent-scope rules, ordered by weight, as "
+    "Returns the standing rules the team set for this agent (keystones): "
+    "tenant, fleet and agent-scope rules, ordered by weight, as "
     "``{count, truncated, rules: [{doc_id, title, content, scope, weight, ...}]}`` — "
-    "the set is under ``rules`` (not ``keystones``). Follow them, and when one "
-    "conflicts with what the user asks, tell the user about the conflict "
-    "instead of silently choosing. Takes no query; returns the full active set."
+    "the set is under ``rules`` (not ``keystones``). Takes no query; returns "
+    "the full active set."
 )
 
 _SPEC = ToolSpec(
