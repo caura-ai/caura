@@ -7075,8 +7075,24 @@ class PostgresService:
         is excluded until someone decides otherwise. Pairs are kept inside one
         fleet (``NULL`` pairs only with ``NULL``) because the nightly run passes
         no fleet and the crystal would otherwise be readable across fleets.
+
+        The batch is capped by ``statement_timeout``
+        (``Settings.near_duplicates_statement_timeout_ms``), so it stops once
+        its caller has given up instead of running on; the route answers 504.
         """
+        from core_storage_api.config import settings as _dedup_settings
+
         async with get_session() as session:
+            if _dedup_settings.near_duplicates_statement_timeout_ms:
+                await session.execute(
+                    select(
+                        func.set_config(
+                            "statement_timeout",
+                            f"{_dedup_settings.near_duplicates_statement_timeout_ms}ms",
+                            True,
+                        )
+                    )
+                )
             cand_scope, params = _scope_sql(tenant_id, fleet_id)
             nb_scope, _ = _scope_sql(tenant_id, fleet_id, table="n")
             # The threshold applies to each candidate's nearest neighbours,
