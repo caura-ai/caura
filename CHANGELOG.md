@@ -10,6 +10,15 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.55.6](https://github.com/caura-ai/caura/compare/backend-v3.55.5...backend-v3.55.6) (2026-11-18)
+
+
+### Bug Fixes
+
+* **core-api:** a released held write asks for its embedding ([#2477](https://github.com/caura-ai/caura/issues/2477)) ([0e3a974](https://github.com/caura-ai/caura/commit/0e3a9742244dc32f2e904aeff8bc8224e4929bcf))
+* **core-storage-api:** the entity-overlap query starts from the seed's entities ([#2478](https://github.com/caura-ai/caura/issues/2478)) ([38f9a90](https://github.com/caura-ai/caura/commit/38f9a905502027bfaf80e6c1beda0a88337b5ee6))
+* **crystallizer:** a dedup batch that times out no longer sinks the sweep ([#2479](https://github.com/caura-ai/caura/issues/2479)) ([7ac3180](https://github.com/caura-ai/caura/commit/7ac3180c7ad9df9ae32a5e618a8c29ab7dee5278))
+
 ## [3.55.5](https://github.com/caura-ai/caura/compare/backend-v3.55.4...backend-v3.55.5) (2026-11-18)
 
 
