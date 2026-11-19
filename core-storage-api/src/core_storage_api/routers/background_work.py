@@ -344,6 +344,16 @@ async def claim(request: Request) -> dict:
     tenant_id = _require(data, "tenant_id")
     async with get_session() as session:
         now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+        # Every kind here is deferred work that calls a model. While the
+        # tenant's budget would refuse that call, a claimed item would only
+        # read its memory, meet the refusal and defer again, a few storage
+        # round trips per item per poll. Claiming nothing costs one query per
+        # poll instead, and the items keep their place: none is claimed, so
+        # none counts an attempt or a deferral. The cost is that an item which
+        # would not have needed a slot (an embedding still pending) waits too.
+        refusal, _, _ = await _refusal(session, tenant_id, now)
+        if refusal is not None:
+            return {"items": []}
         works = (
             (
                 await session.execute(
