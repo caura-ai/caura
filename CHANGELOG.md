@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.55.7](https://github.com/caura-ai/caura/compare/backend-v3.55.6...backend-v3.55.7) (2026-11-18)
+
+
+### Bug Fixes
+
+* **core-api:** a deferred contradiction check no longer re-runs its queries every second ([#2481](https://github.com/caura-ai/caura/issues/2481)) ([7b8c7a6](https://github.com/caura-ai/caura/commit/7b8c7a6884a8f9b845d02c8dffd07689747dc036))
+
 ## [3.55.6](https://github.com/caura-ai/caura/compare/backend-v3.55.5...backend-v3.55.6) (2026-11-18)
 
 
