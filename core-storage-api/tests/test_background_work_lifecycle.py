@@ -552,3 +552,58 @@ async def test_a_failure_ends_a_run_of_deferrals(client):
     again = await _retry_row(tenant, memory)
     assert again.deferrals == 1
     assert low - 1 <= (again.available_at - again.lease_until).total_seconds() <= high + 1
+
+
+# ── claims wait while the tenant's model budget would refuse ──────────────
+
+
+async def _due_work(client, tenant: str) -> str:
+    from datetime import UTC, datetime, timedelta
+
+    memory = str(uuid4())
+    await _post(client, "/defer", {"tenant_id": tenant, "memory_id": memory, "kind": "contradiction_entity"})
+    past = datetime.now(UTC) - timedelta(seconds=1)
+    await _retry_row(tenant, memory, available_at=past, lease_until=past)
+    return memory
+
+
+async def test_a_tenant_with_busy_slots_claims_nothing_until_one_frees(client, monkeypatch):
+    """A claim used to hand the item out anyway, and its replay read the memory,
+    met the refusal and deferred again."""
+    monkeypatch.setattr(settings, "background_llm_concurrency", 1)
+    tenant, other = f"budget-{uuid4()}", f"budget-{uuid4()}"
+    memory = await _due_work(client, tenant)
+    other_memory = await _due_work(client, other)
+    attempt = str(uuid4())
+    await _post(
+        client, "/reserve", {"tenant_id": tenant, "attempt_id": attempt, "operation": "contradiction"}
+    )
+    before = await _retry_row(tenant, memory)
+    assert (await _post(client, "/claim", {"tenant_id": tenant}))["items"] == []
+    after = await _retry_row(tenant, memory)
+    # Not claimed at all: no attempt counted, no lease taken, its place kept.
+    assert (after.attempts, after.generation, after.lease_until, after.available_at) == (
+        before.attempts,
+        before.generation,
+        before.lease_until,
+        before.available_at,
+    )
+    # The gate is the tenant's own: another tenant's work is claimed as usual.
+    [claimed] = (await _post(client, "/claim", {"tenant_id": other}))["items"]
+    assert str(claimed["memory_id"]) == other_memory
+    await _post(client, "/release", {"tenant_id": tenant, "attempt_id": attempt})
+    [claimed] = (await _post(client, "/claim", {"tenant_id": tenant}))["items"]
+    assert str(claimed["memory_id"]) == memory
+
+
+async def test_a_tenant_with_its_allowance_spent_claims_nothing(client, monkeypatch):
+    monkeypatch.setattr(settings, "background_llm_attempts_per_minute", 1)
+    tenant = f"budget-{uuid4()}"
+    await _due_work(client, tenant)
+    attempt = str(uuid4())
+    await _post(
+        client, "/reserve", {"tenant_id": tenant, "attempt_id": attempt, "operation": "contradiction"}
+    )
+    # Released, but an admitted attempt stays spent for its 60-second window.
+    await _post(client, "/release", {"tenant_id": tenant, "attempt_id": attempt})
+    assert (await _post(client, "/claim", {"tenant_id": tenant}))["items"] == []

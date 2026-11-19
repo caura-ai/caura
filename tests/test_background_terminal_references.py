@@ -35,6 +35,9 @@ async def test_exhaustion_parks_the_reference_without_deleting_it(monkeypatch, p
         yield session
 
     monkeypatch.setattr(router, "get_session", transaction)
+    # /claim asks for admission first; the tenant's budget is not this test's
+    # subject, so it admits.
+    monkeypatch.setattr(router, "_refusal", AsyncMock(return_value=(None, 0, None)))
     body = {"tenant_id": work.tenant_id}
     if path == "finish":
         body.update(
