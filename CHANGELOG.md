@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.55.8](https://github.com/caura-ai/caura/compare/backend-v3.55.7...backend-v3.55.8) (2026-11-19)
+
+
+### Bug Fixes
+
+* **core-storage-api:** a tenant out of model budget claims no replays ([#2484](https://github.com/caura-ai/caura/issues/2484)) ([d5a2db4](https://github.com/caura-ai/caura/commit/d5a2db4ceda2c7f4014043a451963f85c890d55b))
+
+
+### Code Refactoring
+
+* **core-api:** one parser for background admission answers ([#2483](https://github.com/caura-ai/caura/issues/2483)) ([45217cd](https://github.com/caura-ai/caura/commit/45217cda350dade9f4dab3fd209e4de9ef6af4f1))
+
 ## [3.55.7](https://github.com/caura-ai/caura/compare/backend-v3.55.6...backend-v3.55.7) (2026-11-18)
 
 
