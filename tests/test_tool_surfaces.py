@@ -171,6 +171,9 @@ async def test_every_listed_tool_carries_a_title_and_its_hints(
             tool.name,
             annotations,
         )
+        # Every tool stays inside the caller's tenant (OpenAI's review asks
+        # for all three hints; MCP's unstated default is true).
+        assert annotations.get("openWorldHint") is False, (tool.name, annotations)
 
 
 def test_a_read_only_tool_has_only_reading_ops() -> None:
@@ -1029,3 +1032,48 @@ def test_every_list_envelope_goes_through_list_keys() -> None:
     source = inspect.getsource(mcp_server)
     body = source.split("def _list_keys", 1)[1].split("\ndef ", 1)[1]
     assert '"results":' not in body
+
+
+# ---------------------------------------------------------------------------
+# 12. Directory responses carry no internal fields
+# ---------------------------------------------------------------------------
+
+
+_ROW = {
+    "id": "m1",
+    "content": "we chose Postgres",
+    "agent_id": "claude-dana",
+    "agent_trust_level": 1,
+    "trace_id": "mcp-abc",
+    "tool_call_id": "t1",
+    "score_parts": {"vec_sim": 0.7},
+    "system_metadata": {"llm_ms": 900},
+    "metadata": {
+        "_system": {"llm_ms": 900},
+        "llm_ms": 900,
+        "write_latency_ms": 12,
+        "summary": "Chose Postgres",
+        "embedding_pending": False,
+        "project": "atlas",
+    },
+    "evidence": {"trace": "mcp-abc", "why": "vector match"},
+}
+
+
+@pytest.mark.parametrize("value", [DEFAULT_SURFACE, DIRECTORY_SURFACE])
+def test_internal_fields_reach_only_default_connections(surface, value) -> None:
+    surface(value)
+    sent = json.loads(mcp_server._dumps({"items": [_ROW], "count": 1}))
+    row = sent["items"][0]
+    if value == DEFAULT_SURFACE:
+        assert row == json.loads(json.dumps(_ROW))
+        return
+    for gone in ("trace_id", "tool_call_id", "score_parts", "system_metadata"):
+        assert gone not in row, gone
+    assert row["metadata"] == {
+        "summary": "Chose Postgres",
+        "embedding_pending": False,
+        "project": "atlas",
+    }
+    assert row["evidence"] == {"why": "vector match"}
+    assert row["content"] == "we chose Postgres" and row["agent_trust_level"] == 1
