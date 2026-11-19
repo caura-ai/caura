@@ -10,6 +10,23 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.56.0](https://github.com/caura-ai/caura/compare/backend-v3.55.8...backend-v3.56.0) (2026-11-19)
+
+
+### Features
+
+* **core-api:** openWorldHint on every tool; directory responses without internal fields ([#2486](https://github.com/caura-ai/caura/issues/2486)) ([4e09abb](https://github.com/caura-ai/caura/commit/4e09abb8309dba052819c2bb3ec5c601ea329519))
+
+
+### Bug Fixes
+
+* **core-storage-api:** reopen a dropped connect; a read that loses its connection answers 503 ([#2488](https://github.com/caura-ai/caura/issues/2488)) ([7a5a7b4](https://github.com/caura-ai/caura/commit/7a5a7b4a788b9a971172a4a275c47976d73b0dfd))
+
+
+### Documentation
+
+* `docs/api-surfaces.md`. ([4e09abb](https://github.com/caura-ai/caura/commit/4e09abb8309dba052819c2bb3ec5c601ea329519))
+
 ## [3.55.8](https://github.com/caura-ai/caura/compare/backend-v3.55.7...backend-v3.55.8) (2026-11-19)
 
 
