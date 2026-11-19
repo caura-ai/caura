@@ -200,8 +200,59 @@ logger = logging.getLogger(__name__)
 _JSON_COMPACT: dict = {"separators": (",", ":"), "ensure_ascii": False, "default": str}
 
 
+# Internal fields a directory connection (Claude, ChatGPT, Codex over MCP OAuth)
+# is not sent: ranking internals, tracing ids and write telemetry. Directory
+# reviews ask that a tool return only what the request needs, with no
+# telemetry or internal identifiers, and these were most of a recalled row.
+# Kept: content, ids, authorship and trust, status, weight, the summary and
+# the embedding/enrichment-pending flags the write tool's description tells
+# callers to read.
+_INTERNAL_FIELDS = frozenset({"system_metadata", "score_parts", "trace_id", "tool_call_id"})
+_INTERNAL_METADATA_FIELDS = frozenset(
+    {
+        "_system",
+        "llm_ms",
+        "write_latency_ms",
+        "semantic_dedup_ms",
+        "dedup_lookup_ms",
+        "write_mode",
+        "weight_source",
+        "memory_type_agent_set",
+        "governance_llm_uncertain",
+        "pii_flagged_by",
+        "retrieval_hint",
+        "atomic_facts",
+    }
+)
+
+
+def _without_internals(value):
+    """``value`` with ``_INTERNAL_FIELDS`` dropped at every depth, telemetry
+    dropped from every ``metadata`` dict, and the trace id from ``evidence``."""
+    if isinstance(value, list):
+        return [_without_internals(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    out = {}
+    for key, item in value.items():
+        if key in _INTERNAL_FIELDS:
+            continue
+        if key == "metadata" and isinstance(item, dict):
+            item = {k: v for k, v in item.items() if k not in _INTERNAL_METADATA_FIELDS}
+        elif key == "evidence" and isinstance(item, dict):
+            item = {k: v for k, v in item.items() if k != "trace"}
+        out[key] = _without_internals(item)
+    return out
+
+
 def _dumps(payload) -> str:
-    """Serialise an MCP response body for an LLM consumer."""
+    """Serialise an MCP response body for an LLM consumer. A directory
+    connection gets it without internal fields (``_without_internals``)."""
+    # Looked up by name: module-level constants are serialised with this
+    # before the surface var below is defined, and those are never directory.
+    surface_var = globals().get("_tool_surface_var")
+    if surface_var is not None and surface_var.get("default") == "directory":
+        payload = _without_internals(payload)
     return json.dumps(payload, **_JSON_COMPACT)
 
 

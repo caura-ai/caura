@@ -59,6 +59,10 @@ def tool_annotations(spec: ToolSpec) -> ToolAnnotations:
         title=spec.title,
         read_only_hint=spec.read_only,
         destructive_hint=spec.destructive_hint,
+        # Every tool works inside the caller's own tenant, never the open
+        # internet. MCP's default is true, so it is stated; OpenAI's plugin
+        # review requires all three hints.
+        open_world_hint=False,
     )
 
 

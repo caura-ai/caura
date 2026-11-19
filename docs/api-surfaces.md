@@ -47,7 +47,8 @@ when to add or move an operation.
 ## MCP tool surfaces
 
 The MCP server serves one of two tool sets per connection. Every tool carries a
-`title` and the `readOnlyHint` / `destructiveHint` annotations on both.
+`title` and the `readOnlyHint` / `destructiveHint` annotations on both, and
+`openWorldHint: false`: every tool works inside the caller's tenant.
 
 - **default** — API-key agents, the OpenClaw plugin, and any connection the
   gateway does not mark. The twelve tools listed in the README, unchanged.
@@ -78,6 +79,13 @@ The MCP server serves one of two tool sets per connection. Every tool carries a
   The directory set is an allowlist: a tool a deployment adds outside these
   (the collaboration build's `peer`) is neither listed nor callable there, and
   a call to it is refused with `TOOL_NOT_ON_SURFACE`.
+
+  Responses there leave out internal fields: `trace_id`, `tool_call_id`,
+  `score_parts`, `system_metadata`, `evidence.trace`, and write telemetry in
+  `metadata` (`_system`, timings, write mode, weight source and the like). The
+  content, ids, authorship and trust, status, weight, `metadata.summary`, the
+  `embedding_pending` / `enrichment_pending` flags and the caller's own metadata
+  stay.
 
   List results there carry their rows once, under `items`. The default surface
   also repeats them under the `results` alias for existing parsers, which a
