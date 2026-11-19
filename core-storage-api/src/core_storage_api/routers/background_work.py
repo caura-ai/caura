@@ -139,33 +139,22 @@ async def _refusal(
     """
     # Count the last 60 seconds, not a wall-clock minute: adjacent bursts
     # cannot get two windows' allowance. Released reservations still count as
-    # spent attempts.
-    recent, oldest = (
+    # spent attempts. Active leases come from the same pass over the tenant's
+    # reservations, since this runs on every check as well as every reserve.
+    in_window = Reservation.admitted_at > now - timedelta(seconds=60)
+    recent, oldest, active = (
         await session.execute(
             select(
-                func.count(),
-                func.min(Reservation.admitted_at),
-            ).where(
-                Reservation.tenant_id == tenant_id,
-                Reservation.admitted_at > now - timedelta(seconds=60),
-            )
+                func.count().filter(in_window),
+                func.min(Reservation.admitted_at).filter(in_window),
+                func.count().filter(Reservation.released.is_(False), Reservation.expires_at > now),
+            ).where(Reservation.tenant_id == tenant_id)
         )
     ).one()
     if recent >= settings.background_llm_attempts_per_minute:
         window_start = oldest or now
         retry_after = max(1, math.ceil((window_start + timedelta(seconds=60) - now).total_seconds()))
         return {"allowed": False, "retry_after_seconds": retry_after}, recent, oldest
-    active = (
-        await session.execute(
-            select(func.count())
-            .select_from(Reservation)
-            .where(
-                Reservation.tenant_id == tenant_id,
-                Reservation.released.is_(False),
-                Reservation.expires_at > now,
-            )
-        )
-    ).scalar_one()
     if active >= settings.background_llm_concurrency:
         return {"allowed": False, "retry_after_seconds": 1, "reason": "tenant_slots_busy"}, recent, oldest
     return None, recent, oldest
