@@ -10,6 +10,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from core_storage_api.config import db_connect_args, settings
+from core_storage_api.database.connection_loss import retry_dropped_connects
 
 logger = logging.getLogger(__name__)
 
@@ -210,15 +211,17 @@ def schema_bootstrap_action(
 
 
 def _build_engine(url: str) -> AsyncEngine:
-    return create_async_engine(
-        url,
-        # Request and migration pools share the same TLS floor.
-        connect_args=db_connect_args(url),
-        pool_size=settings.db_pool_size,
-        max_overflow=settings.db_max_overflow,
-        pool_timeout=settings.db_pool_timeout,
-        pool_recycle=settings.db_pool_recycle,
-        pool_pre_ping=True,
+    return retry_dropped_connects(
+        create_async_engine(
+            url,
+            # Request and migration pools share the same TLS floor.
+            connect_args=db_connect_args(url),
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout,
+            pool_recycle=settings.db_pool_recycle,
+            pool_pre_ping=True,
+        )
     )
 
 
