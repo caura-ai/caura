@@ -7592,6 +7592,19 @@ class PostgresService:
     #: within seconds, so a day of history is far more than dedupe needs.
     USAGE_BATCH_RETENTION_HOURS = 24
 
+    @staticmethod
+    def _in_key_order(rows: list[dict], dims: tuple[str, ...]) -> list[dict]:
+        """A flush's rows in their unique key's order, the same for every writer.
+
+        Several instances flush a tenant's same minute rows at once, and an
+        upserted row stays locked until its flush commits. Each in its own
+        order, two flushes could each wait on a row the other held, and
+        Postgres failed one with "deadlock detected" (prod, 2026-11).
+        ``astimezone(UTC)`` compares the instant asyncpg sends, whether
+        ``minute`` is naive or not.
+        """
+        return sorted(rows, key=lambda r: (r["minute"].astimezone(UTC), *(r[d] for d in dims)))
+
     async def usage_flush(
         self, tenant_id: str, batch_id: UUID, llm_rows: list[dict], value_rows: list[dict]
     ) -> bool:
@@ -7631,7 +7644,9 @@ class PostgresService:
                 return False
             # Every column named, none taken from the caller's keys: the row
             # dimensions are inserted, and only the counts are ever updated.
-            for r in llm_rows:
+            for r in self._in_key_order(
+                llm_rows, ("agent_id", "fleet_id", "operation", "kind", "provider", "model")
+            ):
                 llm = pg_insert(LlmUsageMinute).values(
                     minute=r["minute"],
                     tenant_id=tenant_id,
@@ -7669,7 +7684,7 @@ class PostgresService:
                         },
                     )
                 )
-            for r in value_rows:
+            for r in self._in_key_order(value_rows, ("agent_id", "fleet_id", "operation", "metric")):
                 val = pg_insert(ValueUsageMinute).values(
                     minute=r["minute"],
                     tenant_id=tenant_id,
