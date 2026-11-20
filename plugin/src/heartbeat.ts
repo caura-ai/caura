@@ -832,6 +832,7 @@ async function processCommand(cmd: {
           "educate.ts", "context-engine.ts", "agent-auth.ts",
           "health.ts", "install-id.ts", "identity.ts",
           "install-authority.ts", "enroll-installation.ts",
+          "private-install-state.ts", "install-agent-auth.ts",
           "reconcile-skills.ts",
           "skill-installations.ts",
           // ``keystones.ts`` MUST be in this list. ``context-engine.ts``
