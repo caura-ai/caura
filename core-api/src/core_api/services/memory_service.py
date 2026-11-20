@@ -122,7 +122,13 @@ from core_api.search_trim import (
     resolve_include_derived,
     trim_reserving_fts_matches,
 )
-from core_api.services.auto_capture import CAPTURE_KEY, capture_of, stamp_capture
+from core_api.services.auto_capture import (
+    CAPTURE_KEY,
+    CAPTURED_VISIBILITY,
+    capture_of,
+    stamp_broker_capture,
+    stamp_capture,
+)
 from core_api.services.background_retry import defer_work
 from core_api.services.contradiction_detector import _pick_older, revert_unheld_loser
 from core_api.services.entity_extraction_worker import process_entity_extraction
@@ -1762,6 +1768,12 @@ async def create_memories_bulk(
     for item in items:
         if item.metadata:
             item.metadata = sanitize_caller_metadata(item.metadata)
+    # The tool output the broker captured on its own is made private and marked
+    # here, once its metadata is the caller's alone, as the plugin's captures
+    # are on a single write; the scan below reads the mark (``auto_capture``).
+    captured = (
+        {i for i, item in enumerate(items) if stamp_broker_capture(item.metadata)} if from_broker else set()
+    )
     # Handoff batons (D5), as for a single write; the broker's captures and
     # platform batches are nobody's handoff work.
     if not (from_broker or is_inferred or system_values):
@@ -1894,13 +1906,19 @@ async def create_memories_bulk(
     # missing, so the verdict was computed and discarded).
     governance_errors: dict[int, str] = {}
     gov_pii = tenant_config.governance_pii
-    if gov_pii.enabled:
+    if gov_pii.enabled or captured:
+        # A capture is masked even with the gate off (``GovernanceScanContent``).
+        from core_api.pipeline.steps.write.governance_scan_content import CAPTURED_ROW_POLICY
+
         for i in valid_indices:
+            policy = gov_pii if gov_pii.enabled else CAPTURED_ROW_POLICY if i in captured else None
+            if policy is None:
+                continue
             item = items[i]
-            findings = scan(item.content, enabled_categories=gov_pii.enabled_categories)
+            findings = scan(item.content, enabled_categories=policy.enabled_categories)
             if not findings:
                 continue
-            if gov_pii.action == "drop":
+            if policy.action == "drop":
                 await emit_governance_audit(
                     tenant_id=data.tenant_id,
                     agent_id=data.agent_id,
@@ -1911,7 +1929,7 @@ async def create_memories_bulk(
                     critical=True,
                 )
                 governance_errors[i] = "rejected by content policy: sensitive data detected"
-            elif gov_pii.action == "mask":
+            elif policy.action == "mask":
                 await emit_governance_audit(
                     tenant_id=data.tenant_id,
                     agent_id=data.agent_id,
@@ -2446,7 +2464,7 @@ async def create_memories_bulk(
             "ts_valid_start": ts_valid_start.isoformat() if ts_valid_start else None,
             "ts_valid_end": ts_valid_end.isoformat() if ts_valid_end else None,
             "status": status,
-            "visibility": data.visibility or "scope_team",
+            "visibility": CAPTURED_VISIBILITY if i in captured else data.visibility or "scope_team",
             "entity_links": entity_link_dicts,
             # A62 — batch-level, because the only caller that passes True writes
             # a batch that is entirely system-materialised (insights). Absent
