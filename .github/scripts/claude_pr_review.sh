@@ -51,7 +51,12 @@ if ! [[ "$MAX_BUDGET_USD" =~ ^[0-9]*\.?[0-9]+$ ]] \
   exit 1
 fi
 
-post() { gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="$1" >/dev/null; }
+# Every comment goes through here, and each one is recorded once it is posted: the workflow's
+# last step comments only when this run put nothing on the pull request.
+post() {
+  gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" -f body="$1" >/dev/null
+  echo "posted=true" >> "${GITHUB_OUTPUT:-/dev/null}"
+}
 
 # The posted review names the commit it judged, so a later push cannot inherit its verdict.
 # The head is read on both sides of the diff: a push in between would pair this diff with the
