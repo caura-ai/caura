@@ -252,15 +252,23 @@ def get_llm_provider(
             )
         except (TypeError, ValueError):
             request_timeout = _DEFAULT_OPENAI_TIMEOUT
+        _send_temp_raw = os.environ.get("OPENAI_CHAT_SEND_TEMPERATURE", "true").lower()
+        if _send_temp_raw not in ("true", "false"):
+            raise ValueError(
+                f"OPENAI_CHAT_SEND_TEMPERATURE={_send_temp_raw!r} "
+                "must be 'true' or 'false'."
+            )
+        send_temperature = _send_temp_raw == "true"
         model = model_override_for_provider(name, model_override, model)
         return _cached_provider(
-            (name, base_url, model, api_key, request_timeout),
+            (name, base_url, model, api_key, request_timeout, send_temperature),
             lambda: OpenAILLMProvider(
                 api_key=api_key,
                 model=model,
                 base_url=base_url,
                 provider_name=name,
                 request_timeout_seconds=request_timeout,
+                send_temperature=send_temperature,
             ),
         )
 
