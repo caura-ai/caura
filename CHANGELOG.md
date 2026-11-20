@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.56.1](https://github.com/caura-ai/caura/compare/backend-v3.56.0...backend-v3.56.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* **ci:** an [@claude](https://github.com/claude) whose review never ran gets a comment saying so ([#2489](https://github.com/caura-ai/caura/issues/2489)) ([0ad053c](https://github.com/caura-ai/caura/commit/0ad053cb3fadafb407b098cf676636b1b4567070))
+* **core-api:** the broker's tool-output captures are private ([#2491](https://github.com/caura-ai/caura/issues/2491)) ([86b1fad](https://github.com/caura-ai/caura/commit/86b1fadb36dcc531bce622761e06f6daac8d3736))
+
 ## [3.56.0](https://github.com/caura-ai/caura/compare/backend-v3.55.8...backend-v3.56.0) (2026-11-19)
 
 
