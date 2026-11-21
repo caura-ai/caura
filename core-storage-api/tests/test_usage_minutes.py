@@ -8,6 +8,7 @@ day, agent or operation.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
@@ -119,6 +120,34 @@ async def test_the_read_groups_by_day_agent_and_operation(client: AsyncClient):
     assert by_agent == {"a1": 6, "a2": 2}
     by_op = {r["operation"]: r["calls"] for r in (await _query(client, tenant, ["operation"]))["model_calls"]}
     assert by_op == {"enrichment": 6, "embed": 2}
+
+
+@pytest.mark.parametrize("kind", ["llm", "value"])
+async def test_concurrent_flushes_of_the_same_rows_both_land(client: AsyncClient, kind: str):
+    # Two instances flush one tenant's same minute rows at once, each in its
+    # own order. An upserted row stays locked until its flush commits, so in
+    # opposite orders each waited on a row the other held, and Postgres failed
+    # one with "deadlock detected": a 500 (prod, 2026-11-12, 11-14 and 11-20).
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    agents = [f"a{i:03d}" for i in range(100)]
+    if kind == "llm":
+        rows = [_llm(tenant, agent_id=a) for a in agents]
+    else:
+        rows = [_value(tenant, "recall.source_tokens", 1, agent_id=a) for a in agents]
+    await asyncio.gather(_flush(client, **{kind: rows}), _flush(client, **{kind: rows[::-1]}))
+    totals = await _query(client, tenant, ["agent_id"])
+    if kind == "llm":
+        assert {r["agent_id"]: r["calls"] for r in totals["model_calls"]} == dict.fromkeys(agents, 4)
+    else:
+        assert {r["agent_id"]: r["quantity"] for r in totals["savings"]} == dict.fromkeys(agents, 2)
+
+
+async def test_a_flush_mixing_naive_and_aware_minutes_lands(client: AsyncClient):
+    # Ordering the rows compares their minutes, and Python refuses to compare
+    # a naive datetime with an aware one.
+    tenant = f"t-{uuid.uuid4().hex[:8]}"
+    await _flush(client, llm=[_llm(tenant), _llm(tenant, agent_id="a2", minute="2026-10-11T12:31:00")])
+    assert len((await _query(client, tenant, ["agent_id"]))["model_calls"]) == 2
 
 
 async def test_savings_are_always_broken_out_by_metric(client: AsyncClient):
