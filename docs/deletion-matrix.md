@@ -12,8 +12,9 @@ Three deletions are covered:
   clears its text, title, embedding and triple at once.
 - **Retention purge**: the daily lifecycle purge, per organization. It
   hard-deletes memories that have been deleted for longer than the org's
-  `lifecycle.memory_retention_days` (1 to 30, default 30), at most 500 per org
-  per run. It also deletes the graph only those memories supported, recall-log
+  `lifecycle.memory_retention_days` (1 to 30; an org with no value of its own
+  uses the deployment's `LIFECYCLE_MEMORY_RETENTION_DAYS`, default 30), at most
+  500 per org per run. It also deletes the graph only those memories supported, recall-log
   events older than the same window, and expired idempotency responses.
 - **Organization purge**: `POST /api/v1/admin/org/purge-data`, which deletes
   every row of each tenant except those listed as retained.
