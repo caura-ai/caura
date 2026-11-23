@@ -70,6 +70,10 @@ def test_tenant_key_may_still_trigger_a_canonical_redeploy():
         "CAURA_TENANT_ID",
         "CAURA_ALLOW_INSECURE_HTTP",
         "CAURA_REQUIRE_SIGNED_COMMANDS",
+        "CAURA_AUTH_MODE",
+        "CAURA_MANUAL_AGENT_API_KEY",
+        "CAURA_MANUAL_AGENT_ID",
+        "CAURA_MANUAL_TENANT_ID",
         "MEMCLAW_API_URL",  # legacy-name-ok: rule 3 dual-read alias
         "caura_api_key",
     ],

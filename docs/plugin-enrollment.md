@@ -125,3 +125,23 @@ blindly delete the lock, journal, or pending entry to retry. A metadata listing
 cannot reconstruct a lost raw key, and zero matches cannot prove that a timed-out
 write did not commit. There is no automatic replay, reset or recovery command.
 Server-side create idempotency remains a separate future contract decision.
+
+## Preparatory request authority selection
+
+`runtime-auth` is an inert adapter for later integration. Import and construction
+perform no I/O; explicit initialization and authorization use supplied options,
+without reading environment settings. No current runtime imports it, and these
+settings do not switch current requests: `CAURA_AUTH_MODE`,
+`CAURA_MANUAL_AGENT_API_KEY`, `CAURA_MANUAL_AGENT_ID`, `CAURA_MANUAL_TENANT_ID`.
+Remote deployment cannot change any of them. Missing or blank mode reports
+`runtime_auth_mode_required`; unknown mode reports `runtime_auth_mode_invalid`.
+
+Managed API-v1 operation requires verified installation authority and bound agent
+delegation. Public descriptions, manifest and source select `none`; node authority
+has a method/path allowlist. Standalone is explicit shared-key/keyless OSS access.
+Manual is tools-only, unavailable on OSS: a dedicated key must prove its configured
+tenant/agent through the API-v1 gateway's `/whoami`. Missing or mismatched gateway
+proof holds, and any manual 401/403 holds until an explicit restart/operator action.
+This adapter performs no enrollment, node migration, legacy-key revocation or
+cache adoption. Complete runtime integration and operator instructions still
+precede the coordinated compatible release.
