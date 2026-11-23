@@ -11,7 +11,7 @@
 ARG DD_APM_ENABLED=false
 # Pinned by digest (tag :1 floats) so the embedded binary is reproducible.
 # datadog/serverless-init:1 as of 2026-06-30; bump deliberately.
-FROM datadog/serverless-init:1@sha256:6cb81a6eb0af744cbcda72047db3d1bd97ea5743d4e61dc7fe04a630b7b5100f AS dd-bin
+FROM datadog/serverless-init:1@sha256:b3e42ded76db9c506973132bac1f4af9db073215ba252b6fddd533f0977f5ab5 AS dd-bin
 # python:3.12-slim (3.12.15 on 2026-10-07) and uv are pinned by digest, as their
 # tags move (L-67); Dependabot's docker updates propose each new digest.
 FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS dd-apm-true
