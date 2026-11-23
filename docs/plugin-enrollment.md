@@ -81,3 +81,47 @@ Diagnostics contain bounded codes, not server bodies or credential prefixes.
 Missing endpoints and HTTP failures never choose a legacy endpoint or tenant
 credential. No fleet join/leave, host transfer, node rebind, key issuance or
 rotation, delivery-grant migration, cutoff, tag or release is performed here.
+
+## Preparatory installation-bound credential broker
+
+`install-agent-auth` provides explicit callable resolution and owned rotation
+for a later managed runtime. Nothing in the current plugin imports it. Merely
+enrolling or having its cache on disk does not change current runtime behavior.
+The coordinated compatible release still requires runtime integration and
+operator-controlled migration instructions.
+
+The broker requires verified, unexpired installation authority on the recorded
+host and a fresh `agent-connect-context` check. It uses only that installation's
+canonical credential routes. Warm use also checks the exact owned credential's
+current metadata. Missing routes, inactive parents, scope drift and server errors
+refuse without another authority or endpoint. No tenant-key discovery, legacy
+cache adoption, identity rename, trust change or fleet change is performed.
+
+Private `.installation-agent-keys.json` stores versioned bindings, server expiry
+and provenance, raw agent keys, and operation nonces. Treat it and the enrollment
+journal as secrets. Atomic private writes and a single-writer lock precede every
+create or rotation. Success is returned only after the acknowledged key is
+durably saved. The default resolver refuses expired keys; explicit `renew: true`
+uses canonical creation for an expired, still-owned, non-revoked credential.
+Rotation names the stored owned credential and never extends its deadline.
+State and each JSON response are capped at 64 KiB. Full or invalid state refuses
+instead of silently evicting pending operations.
+
+Read-only failures release `.installation-agent-keys.json.lock` without changing
+the cache, so later calls can revalidate normally. A pending save that fails
+before replacing the cache also releases the lock and sends no mutation. After
+pending state replaces the cache, failures before durable ready acknowledgement
+retain the lock, including uncertain directory durability. Pending rotation and renewal
+entries preserve the previous raw key and validated metadata for operator
+inspection, but never allow their use or automatic replay. A validated successor
+replaces it in the ready entry; uncertain final persistence still holds the lock.
+Once a valid mutation response arrives, its key is saved before rechecking local
+enrollment authority. An authority change still refuses to return the key, but
+does not discard the durable acknowledgement or retain the broker lock. Later
+use requires fresh enrollment authority, context and owned-credential checks.
+A hard crash can also leave a pending operation. Stop
+all broker callers and involve the operator/support before recovery; do not
+blindly delete the lock, journal, or pending entry to retry. A metadata listing
+cannot reconstruct a lost raw key, and zero matches cannot prove that a timed-out
+write did not commit. There is no automatic replay, reset or recovery command.
+Server-side create idempotency remains a separate future contract decision.

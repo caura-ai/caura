@@ -1,12 +1,9 @@
 /** Operator-only installation authority. No plugin runtime imports this module. */
-import {
-  closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync,
-  mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync,
-} from "node:fs";
+import {existsSync} from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { hostname, homedir } from "node:os";
-import { dirname } from "node:path";
-import { getInstallAuthorityPath, getOpenClawBaseDir, getPluginDir } from "./paths.js";
+import { hostname } from "node:os";
+import { getInstallAuthorityPath } from "./paths.js";
+import {privateInstallState} from "./private-install-state.js";
 import { isLoopbackHost, isValidSafeId } from "./validation.js";
 import { withUserAgent } from "./user-agent.js";
 
@@ -57,38 +54,12 @@ function gateway(value: string): string {
   return u.origin;
 }
 
-// Refuse unsafe existing components; do not chmod/reset another installation.
-function privateDirectory(create: boolean): void {
-  for (const p of [homedir(), getOpenClawBaseDir(), dirname(getPluginDir()), getPluginDir()]) {
-    if (!existsSync(p)) {
-      if (!create) return;
-      try { mkdirSync(p, {mode: 0o700}); } catch { fail("state_unwritable"); }
-    }
-    const s = lstatSync(p);
-    if (!s.isDirectory() || s.isSymbolicLink() || (s.mode & 0o022) ||
-        (process.getuid && s.uid !== process.getuid())) fail("state_unsafe");
-  }
-}
-
+const state = privateInstallState(getInstallAuthorityPath, fail, e => e instanceof EnrollmentError);
+const {save, withLock} = state;
 function readJournal(): Journal | null {
-  privateDirectory(false);
-  const path = getInstallAuthorityPath();
-  let fd: number;
-  try {
-    const s = lstatSync(path);
-    if (!s.isFile() || s.isSymbolicLink() || s.nlink !== 1 || (s.mode & 0o777) !== 0o600 ||
-        s.size > 65536 || (process.getuid && s.uid !== process.getuid())) fail("state_unsafe");
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    if (fstatSync(fd).ino !== s.ino) { closeSync(fd); fail("state_unsafe"); }
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
-    if (e instanceof EnrollmentError) throw e;
-    return fail("state_unsafe");
-  }
-  let j: Journal;
-  try { j = JSON.parse(readFileSync(fd, "utf8")); }
-  catch { return fail("state_invalid"); }
-  finally { closeSync(fd); }
+  const raw = state.read();
+  if (raw === undefined) return null;
+  const j = raw as Journal;
   if (!j || j.schema_version !== 1 || !["pending", "credential_saved", "verified", "held"].includes(j.status) ||
       !["register", "handoff"].includes(j.mode) || !text(j.gateway) || gateway(j.gateway) !== j.gateway ||
       j.api_prefix !== "/api/v1" || !text(j.hostname) || !text(j.platform) || !text(j.arch) ||
@@ -107,41 +78,7 @@ function readJournal(): Journal | null {
   return j;
 }
 
-function syncDirectory(path: string): void {
-  const fd = openSync(dirname(path), constants.O_RDONLY);
-  try { fsyncSync(fd); } finally { closeSync(fd); }
-}
-
-function save(j: Journal): void {
-  const path = getInstallAuthorityPath();
-  const tmp = `${path}.${randomUUID()}.tmp`;
-  let fd: number | undefined;
-  try {
-    fd = openSync(tmp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-    writeFileSync(fd, JSON.stringify(j) + "\n"); fsyncSync(fd); closeSync(fd); fd = undefined;
-    renameSync(tmp, path); syncDirectory(path);
-  } catch { fail("state_unwritable"); }
-  finally {
-    if (fd !== undefined) closeSync(fd);
-    rmSync(tmp, {force: true});
-  }
-}
-
-function withLock<T>(action: () => Promise<T>): Promise<T> {
-  privateDirectory(true);
-  const path = `${getInstallAuthorityPath()}.lock`;
-  let fd: number;
-  try { fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600); }
-  catch (e) { return fail((e as NodeJS.ErrnoException).code === "EEXIST" ? "locked" : "state_unwritable"); }
-  const inode = fstatSync(fd).ino;
-  return action().finally(() => {
-    closeSync(fd);
-    // A hard crash intentionally leaves a lock for explicit operator recovery.
-    if (lstatSync(path).ino === inode) { rmSync(path); syncDirectory(path); }
-  });
-}
-
-async function request(j: Journal, path: string, key: string | undefined, body?: object): Promise<Record<string, unknown>> {
+export async function requestInstallJson(j: Pick<Journal, "gateway" | "api_prefix">, path: string, key: string | undefined, body?: object): Promise<Record<string, unknown>> {
   try {
     const res = await fetch(`${j.gateway}${j.api_prefix}${path}`, {
       method: body ? "POST" : "GET", redirect: "error", signal: AbortSignal.timeout(10_000),
@@ -215,7 +152,7 @@ export async function enrollInstallation(options: {
     } else if (mode !== "resume" && (j.mode !== mode || j.status !== "pending")) fail("state_invalid");
     if (j.status === "pending") {
       if (mode !== "register") fail("input_invalid");
-      const result = await request(j, "/installs/register", input.bootstrap_credential, {
+      const result = await requestInstallJson(j, "/installs/register", input.bootstrap_credential, {
         install_uuid: j.install_uuid, machine_fingerprint: j.machine_fingerprint,
         hostname: j.hostname, platform: j.platform, arch: j.arch,
         ...(input.registration_key ? {registration_key: input.registration_key} : {}),
@@ -234,7 +171,7 @@ export async function enrollInstallation(options: {
     // Withdraw the previous verification before a new explicit check; failures
     // must not leave an old verified snapshot available to future consumers.
     if (j.status === "verified") { j.status = "credential_saved"; save(j); }
-    const context = await request(j, "/admin/agent-connect-context", j.install_credential);
+    const context = await requestInstallJson(j, "/admin/agent-connect-context", j.install_credential);
     if (!uuid(context.install_uuid) || !isValidSafeId(context.org_id) || !isValidSafeId(context.tenant_id) || !text(context.hostname))
       hold(j, "response_invalid");
     if (context.tenant_id !== expectedTenant || (j.tenant_id && context.tenant_id !== j.tenant_id) ||

@@ -35,3 +35,8 @@ export function getInstallStatePath(): string {
 export function getInstallAuthorityPath(): string {
   return join(getPluginDir(), ".installation-authority.json");
 }
+
+/** Bound agent keys and pending operations; never adopted by the legacy runtime. */
+export function getInstallAgentKeysPath(): string {
+  return join(getPluginDir(), ".installation-agent-keys.json");
+}
