@@ -149,18 +149,36 @@ async def test_connect_retries_stop_after_three_attempts() -> None:
             await engine.dispose()
 
 
-async def test_a_connect_that_fails_slowly_is_not_retried(monkeypatch) -> None:
-    # Retrying would make the request take several times as long to fail.
+async def test_a_connect_that_fails_slowly_is_retried(monkeypatch) -> None:
+    # Prod 2026-11-20 to 11-23: the proxy's IAM check failed 6 connects at its
+    # 5s deadline, past the retry window, and each request answered 500. The
+    # next connect would have passed.
     monkeypatch.setattr(connection_loss, "_CONNECT_RETRY_WINDOW_S", 0.2)
     async with _ResettingProxy() as proxy:
         engine = _build_engine(proxy.url)
         try:
             proxy.drop_opening = 1
             proxy.drop_opening_after = 0.3
-            with pytest.raises(DBAPIError):
+            async with engine.connect() as conn:
+                assert (await conn.execute(text("SELECT 1"))).scalar() == 1
+            assert proxy.accepted == 2
+        finally:
+            await engine.dispose()
+
+
+async def test_a_connect_that_keeps_failing_slowly_is_retried_only_once(monkeypatch) -> None:
+    # More retries would make the request take several times as long to fail.
+    monkeypatch.setattr(connection_loss, "_CONNECT_RETRY_WINDOW_S", 0.2)
+    async with _ResettingProxy() as proxy:
+        engine = _build_engine(proxy.url)
+        try:
+            proxy.drop_opening = 3
+            proxy.drop_opening_after = 0.3
+            with pytest.raises(DBAPIError) as raised:
                 async with engine.connect():
                     pass
-            assert proxy.accepted == 1
+            assert is_connection_loss(raised.value)
+            assert proxy.accepted == 2
         finally:
             await engine.dispose()
 
