@@ -7126,6 +7126,25 @@ class PostgresService:
             # The threshold applies to each candidate's nearest neighbours,
             # outside the scan: Postgres never pushes a WHERE into a subquery
             # with a LIMIT. See ``_scan_past_other_tenants``.
+            #
+            # The neighbours come from two branches, one per kind of candidate
+            # fleet, and only one can return rows: ``n.fleet_id = c.fleet_id``
+            # matches nothing for a NULL fleet, and the NULL branch is gated on
+            # ``c.fleet_id IS NULL``. Each branch's fleet match is then a plain
+            # index condition on ``ix_memories_tenant_fleet``. The single
+            # ``n.fleet_id IS NOT DISTINCT FROM c.fleet_id`` this replaces is not
+            # indexable, and an ``OR`` of the two arms stays a filter under a
+            # plain index scan. So the nightly sweep, which passes no fleet, read
+            # every live shared row of the tenant for each candidate and dropped
+            # the other fleets' rows afterwards: ~0.57s per candidate on a
+            # 231k-row prod tenant, and a 500-row batch outran its statement
+            # timeout.
+            nb_live = f"""{nb_scope}
+                              AND n.embedding IS NOT NULL
+                              AND n.deleted_at IS NULL
+                              AND n.status = ANY(:live_statuses)
+                              AND n.visibility = ANY(:shared_visibilities)
+                              AND n.id != c.id"""
             await _scan_past_other_tenants(session)
             result = await session.execute(
                 text(f"""
@@ -7148,18 +7167,26 @@ class PostgresService:
                 LEFT JOIN LATERAL (
                     SELECT nearest.id, nearest.similarity
                     FROM (
-                        SELECT n.id AS id,
-                               1 - (n.embedding <=> c.embedding) AS similarity
-                        FROM memories n
-                        WHERE {nb_scope}
-                          AND n.embedding IS NOT NULL
-                          AND n.deleted_at IS NULL
-                          AND n.status = ANY(:live_statuses)
-                          AND n.visibility = ANY(:shared_visibilities)
-                          AND n.fleet_id IS NOT DISTINCT FROM c.fleet_id
-                          AND n.id != c.id
-                        ORDER BY n.embedding <=> c.embedding
-                        LIMIT :k
+                        (
+                            SELECT n.id AS id,
+                                   1 - (n.embedding <=> c.embedding) AS similarity
+                            FROM memories n
+                            WHERE {nb_live}
+                              AND n.fleet_id = c.fleet_id
+                            ORDER BY n.embedding <=> c.embedding
+                            LIMIT :k
+                        )
+                        UNION ALL
+                        (
+                            SELECT n.id AS id,
+                                   1 - (n.embedding <=> c.embedding) AS similarity
+                            FROM memories n
+                            WHERE {nb_live}
+                              AND c.fleet_id IS NULL
+                              AND n.fleet_id IS NULL
+                            ORDER BY n.embedding <=> c.embedding
+                            LIMIT :k
+                        )
                     ) nearest
                     WHERE nearest.similarity >= :threshold
                 ) nb ON TRUE
