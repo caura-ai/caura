@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.56.3](https://github.com/caura-ai/caura/compare/backend-v3.56.2...backend-v3.56.3) (2026-11-23)
+
+
+### Bug Fixes
+
+* **core-storage-api:** the dedup sweep finds each neighbour through the fleet index ([#2506](https://github.com/caura-ai/caura/issues/2506)) ([9b59290](https://github.com/caura-ai/caura/commit/9b59290493f41e925a52a5f58c933bc173c74433))
+
+
+### Dependencies
+
+* **docker:** bump datadog/serverless-init from `6cb81a6` to `b3e42de` in /core-storage-api ([#2504](https://github.com/caura-ai/caura/issues/2504)) ([6c35c0d](https://github.com/caura-ai/caura/commit/6c35c0d58524c493a977aea5c0b1c3815c962ffd))
+* **docker:** bump datadog/serverless-init from `6cb81a6` to `b3e42de` in /core-worker ([#2505](https://github.com/caura-ai/caura/issues/2505)) ([b75bba9](https://github.com/caura-ai/caura/commit/b75bba94bb747d4226265725596884a2d0d2041f))
+
 ## [3.56.2](https://github.com/caura-ai/caura/compare/backend-v3.56.1...backend-v3.56.2) (2026-11-21)
 
 
