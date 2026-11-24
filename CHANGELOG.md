@@ -10,6 +10,25 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.56.4](https://github.com/caura-ai/caura/compare/backend-v3.56.3...backend-v3.56.4) (2026-11-24)
+
+
+### Bug Fixes
+
+* **core-storage-api:** retry a dropped connect once even when it failed slowly ([#2510](https://github.com/caura-ai/caura/issues/2510)) ([1a98f60](https://github.com/caura-ai/caura/commit/1a98f60a0c1e4f15eb02bc09669bb854bba0b7d9))
+
+
+### Dependencies
+
+* **actions:** bump the actions group with 2 updates ([#2501](https://github.com/caura-ai/caura/issues/2501)) ([0a2d9c4](https://github.com/caura-ai/caura/commit/0a2d9c42cb674482a955bf8e8ad839c9c283a583))
+* bump @playwright/test from 1.65.0 to 1.65.1 in the npm-minor-patch group ([#2495](https://github.com/caura-ai/caura/issues/2495)) ([4c82c75](https://github.com/caura-ai/caura/commit/4c82c75f63645d3124ac73a127e1bf3822625136))
+* **docker:** bump datadog/serverless-init from `6cb81a6` to `b3e42de` in /core-api ([#2502](https://github.com/caura-ai/caura/issues/2502)) ([83c66fa](https://github.com/caura-ai/caura/commit/83c66fa58920b0d1ee01c189445168eb012bf518))
+* **docker:** bump datadog/serverless-init from `6cb81a6` to `b3e42de` in /core-operations ([#2503](https://github.com/caura-ai/caura/issues/2503)) ([80393cf](https://github.com/caura-ai/caura/commit/80393cfd000471954850d38c0aacfe0f6a9f0bb8))
+* update fastapi requirement from &lt;1,&gt;=0.162.5 to &gt;=0.165.0,&lt;1 ([#2496](https://github.com/caura-ai/caura/issues/2496)) ([0fb56f6](https://github.com/caura-ai/caura/commit/0fb56f62a348c5b6f4b7522541c2f4863850b903))
+* update openai requirement from &lt;4,&gt;=3.46.0 to &gt;=3.57.0,&lt;4 ([#2497](https://github.com/caura-ai/caura/issues/2497)) ([32ca222](https://github.com/caura-ai/caura/commit/32ca2227ba89ede8e4bbf4b403d6a5f3345d104b))
+* update pydantic requirement from &lt;3,&gt;=2.14.3 to &gt;=2.14.4,&lt;3 ([#2500](https://github.com/caura-ai/caura/issues/2500)) ([9f59c39](https://github.com/caura-ai/caura/commit/9f59c399d5748bcf3229e8b605768b11bc605a2e))
+* update sqlalchemy requirement from &lt;2.2,&gt;=2.1.8 to &gt;=2.1.9,&lt;2.2 ([#2499](https://github.com/caura-ai/caura/issues/2499)) ([81aba83](https://github.com/caura-ai/caura/commit/81aba83bf1b52c1b810d94557a5fa70620e23c2c))
+
 ## [3.56.3](https://github.com/caura-ai/caura/compare/backend-v3.56.2...backend-v3.56.3) (2026-11-23)
 
 
