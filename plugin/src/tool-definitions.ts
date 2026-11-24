@@ -20,7 +20,7 @@
  */
 
 import { randomUUID } from "crypto";
-import { apiCall, textResult } from "./transport.js";
+import { apiCall, textResult, withAgentAuthority } from "./transport.js";
 import {
   CAURA_FLEET_ID,
   CAURA_AGENT_ID,
@@ -913,7 +913,8 @@ export function createToolFromSpec(name: string, run?: ToolRunContext): AgentToo
     // came from, so it is never sent as ``tool_call_id``: that field is the
     // evidence a fact was observed, and the agent names it when it has one.
     async execute(_toolCallId, params, signal) {
-      const result = await execute(withRunIdentity(params, run), signal, run);
+      const result = await withAgentAuthority(toolAgentId(undefined, run?.sessionKey),
+        () => execute(withRunIdentity(params, run), signal, run));
       return textResult(JSON.stringify(result, null, 2));
     },
   };

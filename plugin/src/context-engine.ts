@@ -1,7 +1,7 @@
 /**
  * Caura ContextEngine — lifecycle hooks for OpenClaw memory integration.
  *
- * Provides: bootstrap (smoke test), ingest (message buffering +
+ * Provides: bootstrap (read-only probe), ingest (message buffering +
  * persistence), assemble (token-budget-aware recall injection),
  * afterTurn (auto-write), compact (persist summary + delegate to
  * OpenClaw runtime via ``openclaw-sdk-bridge``).
@@ -19,13 +19,13 @@
  */
 
 import { createHash } from "crypto";
-import { apiCall, parseSearchItems } from "./transport.js";
+import { apiCall, nodeApiCall, parseSearchItems } from "./transport.js";
 import { PLUGIN_ID } from "./config.js";
 import {
   CAURA_FLEET_ID,
   CAURA_TENANT_ID,
-  CAURA_AUTO_WRITE_TURNS,
-  ensureTenantId,
+  CAURA_AUTO_WRITE_TURNS, getAuthMode,
+  ensureTenantId, initializeRuntimeAuth,
   RECALL_CACHE_TTL_MS,
   RECALL_TIMEOUT_MS,
   MIN_TURN_CONTENT_LENGTH,
@@ -727,7 +727,7 @@ export class CauraContextEngine {
   }
 
   async bootstrap(): Promise<void> {
-    // Process-level memoization: smoke test runs once per Node process,
+    // Process-level memoization: read-only probe runs once per Node process,
     // shared across every engine instance OpenClaw constructs. See
     // ``_processBootstrapPromise`` docstring at top of file for the why.
     // Concurrent callers all await the same in-flight promise (Node is
@@ -760,77 +760,10 @@ export class CauraContextEngine {
         `config keys=${Object.keys(this.config || {}).join(",") || "(empty)"}`,
     );
 
-    const testContent = `memclaw-smoke-${Date.now()}`; // legacy-name-floor: floor
-    let writtenId: string | null = null;
-    // Hoisted out of the try so the finally-block cleanup DELETE can pass
-    // the tenant_id the backend requires (see below).
-    let tid: string | null = null;
     try {
-      tid = await ensureTenantId();
-      const wr = (await apiCall("POST", "/memories", {
-        tenant_id: tid,
-        agent_id: "__health_check__",
-        content: testContent,
-        memory_type: "fact",
-        // SAFE-01: ``tags`` is not a MemoryCreate field and never has been —
-        // the server dropped it in silence on every one of these writes. The
-        // caller-owned bag is ``metadata`` (its ``tags`` key is explicitly
-        // preserved from enrichment overwrite, C25), and POST /memories now
-        // 422s on an undeclared top-level key.
-        metadata: { tags: ["__smoke_test__"] },
-      })) as Record<string, unknown>;
-      writtenId =
-        (wr?.id as string) ||
-        ((wr?.memory as Record<string, unknown>)?.id as string) ||
-        ((wr?.data as Record<string, unknown>)?.id as string) ||
-        null;
-      if (!writtenId) {
-        console.warn("[caura] bootstrap: could not extract memory ID — smoke test memory may not be cleaned up");
-      }
-
-      let top: Record<string, unknown> | undefined;
-      let score = 0;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        await new Promise((r) => setTimeout(r, 500));
-        const sr = (await apiCall("POST", "/search", {
-          tenant_id: tid,
-          query: testContent,
-          top_k: 1,
-        })) as Record<string, unknown> | Record<string, unknown>[];
-        const firstResult = parseSearchItems(sr)[0];
-        top = firstResult as Record<string, unknown> | undefined;
-        score = (top?.score as number) ?? (top?.similarity as number) ?? 0;
-        if (top && score >= 0.7) break;
-      }
-
-      if (!top) {
-        console.error(
-          "[caura] SMOKE TEST FAILED: search returned no results — check EMBEDDING_PROVIDER",
-        );
-      } else if (score < 0.7) {
-        console.error(
-          `[caura] SMOKE TEST WARNING: score ${score.toFixed(3)} < 0.7 — embeddings may be degraded`,
-        );
-      } else {
-        console.log(
-          `[caura] Smoke test passed (score: ${score.toFixed(3)})`,
-        );
-      }
-    } catch (e: unknown) {
-      logErrorCritical("SMOKE TEST ERROR", e);
-    } finally {
-      // DELETE /memories/{id} requires tenant_id as a query param
-      // (core-api ``tenant_id: str = Query(...)``); omitting it returns 422
-      // and the smoke-test memory leaks into the tenant on every restart.
-      if (writtenId && tid) {
-        apiCall(
-          "DELETE",
-          `/memories/${encodeURIComponent(writtenId)}`,
-          undefined,
-          { tenant_id: tid },
-        ).catch(() => {});
-      }
-    }
+      await initializeRuntimeAuth();
+      if (getAuthMode() !== "manual") {await ensureTenantId(); await nodeApiCall("GET", "/whoami");}
+    } catch (e) {logErrorCritical("BOOTSTRAP PROBE ERROR", e);}
     // No need to set a flag here — the resolved ``_processBootstrapPromise``
     // serves as the "done" signal; subsequent ``await``s are instant.
   }
@@ -872,7 +805,7 @@ export class CauraContextEngine {
     // Persist user messages as episode memories (async, non-blocking).
     // Capped at MAX_INGEST_WRITES_PER_SESSION to prevent memory spam in long sessions.
     // The in-memory buffer still receives all messages for buildQueryFromMessages.
-    if (CAURA_AUTO_WRITE_TURNS && captureSession && message.role === "user") {
+    if (getAuthMode() !== "manual" && CAURA_AUTO_WRITE_TURNS && captureSession && message.role === "user") {
       const content =
         typeof message.content === "string"
           ? message.content
@@ -915,7 +848,7 @@ export class CauraContextEngine {
           },
           undefined,
           undefined,
-          undefined,
+          agentId,
           // The conversation it came from, which core-api records on the row.
           sessionHeader(ingestSession),
         );
@@ -1120,7 +1053,7 @@ export class CauraContextEngine {
     const staticSection =
       educationText + identityBlock + operatorBlock + keystoneBlock;
 
-    if (!decision.recall) {
+    if (getAuthMode() === "manual" || !decision.recall) {
       const tokens = estimateTokens(staticSection);
       // OpenClaw 2026.5.4 AssembleResult contract: must include
       // ``messages`` (echo of input is safe — reference equality means
@@ -1210,7 +1143,7 @@ export class CauraContextEngine {
           searchBody,
           undefined,
           controller.signal,
-          undefined,
+          agentId,
           // Value metering: this recall belongs to the OpenClaw session.
           sessionHeader(sessionKey),
         )) as Record<string, unknown> | Record<string, unknown>[];
@@ -1233,7 +1166,7 @@ export class CauraContextEngine {
                     `/batons/${encodeURIComponent(b.baton_id)}`,
                     undefined,
                     { tenant_id: tid, agent_id: agentId },
-                    controller.signal,
+                    controller.signal, agentId,
                   ),
                 );
                 if (detail) details.set(b.baton_id, detail);
@@ -1376,7 +1309,7 @@ export class CauraContextEngine {
     // swallowed; never let it cascade into "compaction failed."
     const summary = context?.summary || context?.compactionSummary;
     const compactSession = captureSessionKey(context);
-    if (CAURA_AUTO_WRITE_TURNS && compactSession && summary && typeof summary === "string") {
+    if (getAuthMode() !== "manual" && CAURA_AUTO_WRITE_TURNS && compactSession && summary && typeof summary === "string") {
       try {
         const tid = await ensureTenantId();
         const agentId = resolveAgentId(
@@ -1401,7 +1334,7 @@ export class CauraContextEngine {
           },
           undefined,
           undefined,
-          undefined,
+          agentId,
           sessionHeader(compactSession),
         );
       } catch (e: unknown) {
@@ -1572,7 +1505,7 @@ export class CauraContextEngine {
     const sessionKey = sessionKeyOf(context);
     recordTurn(sessionKey, context?.messages as Array<{ role: string } & Record<string, unknown>> | undefined);
     const captureSession = captureSessionKey(context);
-    if (!CAURA_AUTO_WRITE_TURNS || !captureSession) return;
+    if (getAuthMode() === "manual" || !CAURA_AUTO_WRITE_TURNS || !captureSession) return;
 
     const lastAssistant = context?.messages
       ?.filter((m) => m.role === "assistant")
@@ -1617,7 +1550,7 @@ export class CauraContextEngine {
         },
         undefined,
         undefined,
-        undefined,
+        agentId,
         sessionHeader(captureSession),
       );
     } catch (e: unknown) {

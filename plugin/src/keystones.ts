@@ -28,7 +28,7 @@
  */
 import { apiCall } from "./transport.js";
 import {
-  ensureTenantId,
+  ensureTenantId, getAuthMode,
   KEYSTONES_TIMEOUT_MS,
   CAURA_KEYSTONES_CACHE_TTL_MS,
   CAURA_KEYSTONES_ENABLED,
@@ -70,6 +70,7 @@ interface KeystonesPayload {
 export async function fetchKeystonesPayload(
   query: Record<string, string>,
   signal?: AbortSignal,
+  actor?: string,
 ): Promise<KeystonesPayload> {
   let serverTruncated = false;
   const raw = await apiCall(
@@ -78,7 +79,7 @@ export async function fetchKeystonesPayload(
     undefined,
     { ...query, envelope: "true" },
     signal,
-    undefined,
+    actor,
     undefined,
     (headers) => { serverTruncated = headers.get("X-Truncated") === "true"; },
   );
@@ -279,7 +280,7 @@ export async function fetchKeystonesBlock(opts: {
   agentId: string;
   fleetId: string | undefined;
 }): Promise<string> {
-  if (!CAURA_KEYSTONES_ENABLED) return "";
+  if (getAuthMode() === "manual" || !CAURA_KEYSTONES_ENABLED) return "";
 
   // Check the tenant-fail back-off first so an ongoing tenant-resolution
   // outage skips the expensive ``ensureTenantId`` retry on every turn.
@@ -372,7 +373,7 @@ async function _fetchAndCache(
       query.fleet_id = opts.fleetId;
       if (opts.agentId) query.agent_id = opts.agentId;
     }
-    const payload = await fetchKeystonesPayload(query, controller.signal);
+    const payload = await fetchKeystonesPayload(query, controller.signal, opts.agentId);
     if (payload.truncated) {
       // Log even when the local token cap prevents any rule from fitting.
       logError("keystones: incomplete rule set", "server truncated the response; additional rules are not shown");

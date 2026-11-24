@@ -174,17 +174,17 @@ for (const header of ["X-API-Key", "x-api-key", "X-Tenant-ID", "X-Agent-ID", "X-
 test("ordinary per-attempt headers survive authority selection", () => {
   const r = fixture().run({request: {extraHeaders: {"X-Bulk-Attempt-Id": "attempt-a"}}}); ok(r); assert.equal(r.harmlessHeader, "attempt-a");
 });
-test("import and construction are inert; no current runtime graph imports the preparatory module", () => {
+test("selector construction is inert; runtime cannot import the operator CLI", () => {
   const f = fixture(), r = f.run({action: "import"}); assert.equal(r.ok, true); assert.deepEqual(f.requests(), []); assert.ok(!existsSync(f.cache));
   const seen = new Set<string>();
   function inspect(name: string, runtime: boolean) {
     const tag = runtime + name; if (seen.has(tag)) return; seen.add(tag);
-    if (runtime) assert.notEqual(name, "runtime-auth.ts"); else assert.notEqual(name, "env.ts");
+    if (runtime) assert.notEqual(name, "enroll-installation.ts"); else assert.notEqual(name, "env.ts");
     const source = readFileSync(join(SRC, name), "utf8");
     for (const m of source.matchAll(/(?:from\s+|import\s*\()\s*["']\.\/([^"']+)\.js["']/g)) {
       const child = m[1] + ".ts"; if (existsSync(join(SRC, child))) inspect(child, runtime);
     }
   }
-  for (const root of ["index.ts", "transport.ts", "agent-auth.ts", "heartbeat.ts"]) inspect(root, true);
+  for (const root of ["index.ts", "transport.ts", "heartbeat.ts"]) inspect(root, true);
   inspect("runtime-auth.ts", false);
 });

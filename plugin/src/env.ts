@@ -14,6 +14,7 @@ import {
   reportKeyTransportPolicy,
 } from "./validation.js";
 import { withUserAgent } from "./user-agent.js";
+import {createRuntimeAuth, RUNTIME_AUTH_SETTINGS, RuntimeAuthError} from "./runtime-auth.js";
 
 /**
  * Keys a plugin ``.env`` file may inject into ``process.env``. Fully anchored
@@ -102,6 +103,39 @@ export const CAURA_FLEET_ID = readEnv(["CAURA_FLEET_ID", "MEMCLAW_FLEET_ID"]) ||
 export let CAURA_TENANT_ID = readEnv(["CAURA_TENANT_ID", "MEMCLAW_TENANT_ID"]) || "";  // legacy-name-ok: rule 3 dual-read alias
 export const CAURA_NODE_NAME = readEnv(["CAURA_NODE_NAME", "MEMCLAW_NODE_NAME"]) || "";  // legacy-name-ok: rule 3 dual-read alias
 export let CAURA_AGENT_ID = readEnv(["CAURA_AGENT_ID", "MEMCLAW_AGENT_ID"]) || "";  // legacy-name-ok: rule 3 dual-read alias
+const authorityConfig: Record<string, unknown> = {};
+let runtimeAuth: ReturnType<typeof createRuntimeAuth> | undefined;
+const setting = (key: string) => Object.hasOwn(authorityConfig, key) ? authorityConfig[key] : readEnv([key]);
+export const getAuthMode = () => setting(RUNTIME_AUTH_SETTINGS.mode);
+function auth() {
+  return runtimeAuth ??= createRuntimeAuth({mode: getAuthMode(), gateway: CAURA_API_URL, apiPrefix: CAURA_API_PREFIX,
+    tenantId: CAURA_TENANT_ID, fleetId: CAURA_FLEET_ID, standaloneKey: CAURA_API_KEY,
+    manualKey: setting(RUNTIME_AUTH_SETTINGS.manualKey) as string | undefined,
+    manualAgentId: setting(RUNTIME_AUTH_SETTINGS.manualAgentId) as string | undefined,
+    manualTenantId: setting(RUNTIME_AUTH_SETTINGS.manualTenantId) as string | undefined,
+    allowInsecureHttp: CAURA_ALLOW_INSECURE_HTTP});
+}
+export async function initializeRuntimeAuth(): Promise<void> {await auth().initialize();}
+/** All outbound calls choose authority before any credential is attached. */
+export async function apiFetch(authority: "none" | "agent" | "install", method: string,
+  resource: string, init: RequestInit = {}, agentId?: string): Promise<Response> {
+  const url = new URL(`${CAURA_API_PREFIX}${resource}`, CAURA_API_URL);
+  if (!resource.startsWith("/") || resource.startsWith("//") || url.origin !== new URL(CAURA_API_URL).origin)
+    throw new RuntimeAuthError("runtime_auth_request_invalid");
+  if (getAuthMode() === "standalone" && CAURA_API_KEY) assertKeyTransportAllowed();
+  const client = auth(); await client.initialize();
+  const selected = await client.authorize({authority, method, path: url.pathname.slice(CAURA_API_PREFIX.length),
+    agentId, extraHeaders: Object.fromEntries(new Headers(init.headers))});
+  if (CAURA_TENANT_ID && selected.tenantId && selected.tenantId !== CAURA_TENANT_ID)
+    throw new RuntimeAuthError("runtime_auth_scope_mismatch");
+  const headers = withUserAgent(init.headers instanceof Headers || Array.isArray(init.headers) ?
+    Object.fromEntries(new Headers(init.headers)) : init.headers);
+  if (selected.headers["x-api-key"]) headers["X-API-Key"] = selected.headers["x-api-key"];
+  const res = await fetch(url, {...init, method, headers, redirect: "error",
+    signal: init.signal ?? AbortSignal.timeout(10_000)});
+  if (authority !== "none") client.observeResponse(res.status);
+  return res;
+}
 
 /**
  * Apply the plugin's own config block, which OpenClaw hands ``register(api)``
@@ -116,6 +150,11 @@ export let CAURA_AGENT_ID = readEnv(["CAURA_AGENT_ID", "MEMCLAW_AGENT_ID"]) || "
 export function applyPluginConfig(config: unknown): void {
   if (!config || typeof config !== "object") return;
   const block = config as Record<string, unknown>;
+  for (const key of Object.values(RUNTIME_AUTH_SETTINGS)) {
+    if (!Object.hasOwn(block, key)) continue;
+    if (runtimeAuth && setting(key) !== block[key]) throw new RuntimeAuthError("runtime_auth_restart_required");
+    authorityConfig[key] = block[key];
+  }
   for (const key of ["CAURA_AGENT_ID", "MEMCLAW_AGENT_ID"]) {  // legacy-name-ok: rule 3 dual-read alias
     const value = block[key];
     if (typeof value === "string" && value.trim()) {
@@ -250,6 +289,12 @@ export function assertKeyTransportAllowed(): void {
 const TENANT_RESOLVE_TIMEOUT_MS = 10_000;
 
 export async function resolveTenantId(): Promise<string> {
+  await initializeRuntimeAuth();
+  if (getAuthMode() === "managed") {
+    const selected = await auth().authorize({authority: "install", method: "GET", path: "/whoami"});
+    return CAURA_TENANT_ID = selected.tenantId!;
+  }
+  if (getAuthMode() === "manual") return CAURA_TENANT_ID = setting(RUNTIME_AUTH_SETTINGS.manualTenantId) as string;
   if (CAURA_TENANT_ID) return CAURA_TENANT_ID;
   if (!CAURA_API_KEY) return "";
   assertKeyTransportAllowed();
@@ -259,12 +304,10 @@ export async function resolveTenantId(): Promise<string> {
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const res = await fetch(
-        new URL(`${CAURA_API_PREFIX}/whoami`, CAURA_API_URL).toString(),
+      const res = await apiFetch("install", "GET", "/whoami",
         {
           method: "GET",
           redirect: "error",
-          headers: withUserAgent({ "X-API-Key": CAURA_API_KEY }),
           // Bound per-attempt wall-clock; see TENANT_RESOLVE_TIMEOUT_MS
           // docstring above for why this is critical to liveness.
           signal: AbortSignal.timeout(TENANT_RESOLVE_TIMEOUT_MS),
@@ -361,6 +404,7 @@ let _tenantPromise: Promise<string> | null = null;
 let _tenantFailedAt: number | null = null;
 
 export async function ensureTenantId(): Promise<string> {
+  await initializeRuntimeAuth();
   if (CAURA_TENANT_ID) return CAURA_TENANT_ID;
   if (!_tenantPromise) {
     if (_tenantFailedAt !== null && Date.now() - _tenantFailedAt < TENANT_FAILURE_COOLDOWN_MS) {
@@ -382,29 +426,26 @@ export async function ensureTenantId(): Promise<string> {
 
 let toolDescriptions: Record<string, string> = {};
 
-export async function fetchToolDescriptions(): Promise<void> {
+export async function fetchToolDescriptions(): Promise<boolean> {
   try {
-    const headers: Record<string, string> = withUserAgent();
-    if (CAURA_API_KEY) {
-      assertKeyTransportAllowed();
-      headers["X-API-Key"] = CAURA_API_KEY;
-    }
-    const res = await fetch(
-      new URL(`${CAURA_API_PREFIX}/tool-descriptions`, CAURA_API_URL).toString(),
+    const res = await apiFetch("none", "GET", "/tool-descriptions",
       // Bound the fetch — same rationale as resolveTenantId. Less
       // critical here (cold path, called at registration not per-turn)
       // but a hung registration still blocks plugin load.
-      { headers, redirect: "error", signal: AbortSignal.timeout(TENANT_RESOLVE_TIMEOUT_MS) },
+      { signal: AbortSignal.timeout(TENANT_RESOLVE_TIMEOUT_MS) },
     );
     if (res.ok) {
       toolDescriptions = (await res.json()) as Record<string, string>;
+      return true;
     }
-  } catch {
+  } catch (e) {
+    if (e instanceof RuntimeAuthError) throw e;
     // Every tool falls back to its description in tools.json. A table here was
     // keyed by pre-v1 tool names no tool has, so it never matched (L-218).
     console.warn("[caura] Failed to fetch tool descriptions, using the ones in tools.json");
     toolDescriptions = {};
   }
+  return false;
 }
 
 export function getToolDescription(name: string, fallback: string): string {

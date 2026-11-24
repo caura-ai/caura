@@ -2,6 +2,42 @@
 
 **Audience:** operators running OpenClaw with the memclaw plugin against a Caura server (caura.ai, on-prem). <!-- legacy-name-floor: "memclaw" is the frozen plugin id --> Two flows are documented: the **automatic** path (heartbeat-driven) and the **manual** path (`/api/v1/install-plugin`).
 
+## Explicit runtime authority
+
+Every existing installation and every fresh `/install-plugin` install stops
+outbound calls until its operator sets `CAURA_AUTH_MODE`. Missing or blank mode
+reports `runtime_auth_mode_required`; unknown mode reports `runtime_auth_mode_invalid`.
+The installer does not choose a mode. Restart after changing authority settings.
+
+- `managed`: explicitly enroll through `enroll-installation`; verified installation
+  authority handles node traffic and delegates bound agent keys for agent requests.
+- `standalone`: explicit shared-key/keyless OSS deployment. It is never a fallback.
+- `manual`: tools only, unavailable on OSS. Privately supply `CAURA_MANUAL_AGENT_API_KEY`,
+  `CAURA_MANUAL_AGENT_ID` and `CAURA_MANUAL_TENANT_ID`. Startup `/whoami` must prove the
+  exact gateway identity and `agent_key` kind. Any 401/403 holds until restart.
+
+`CAURA_API_KEY` retains its local RPC/HMAC meanings. No automatic enrollment,
+legacy-cache adoption, host transfer or agent rename occurs. For a managed migration:
+
+1. Choose the intended tenant/fleet and stop the old heartbeat so it cannot reclaim the node.
+2. Enroll explicitly, then have an administrator rebind the preserved node UUID/name
+   through `/fleet/nodes/{node_id}/release?bind_install_uuid=...`.
+3. Renew owner/version/recipient-bound delivery grants and resolve retained pending
+   reports; never discard reports or prune existing skills to bypass a refusal.
+4. Verify managed operation, then revoke the old legacy agent keys through the server
+   admin path and remove the old local `.agent-keys.json`. The plugin performs neither step.
+
+For legacy `main`, defer migration or deliberately choose a nonreserved identity
+and review history/access migration with the operator. The deployment owner chooses; no automatic rename,
+history transfer, trust/fleet reset or reserved-ID exception is provided.
+
+Updates (`update_plugin` and `deploy`) fetch manifest/source from the serving
+core-api; fresh installs use that same source. Serving this change delivers the
+new runtime through those paths. The enterprise OSS pin updates automatically,
+so its next promotion includes the change. A plugin tag does not gate this path:
+merging the runtime change is effectively the v3 rollout decision. Coordinate
+operator instructions and customer communication before that rollout.
+
 ## When auto-upgrade runs
 
 After the manifest-aware deploy work (CAURA-444 / #113), the server tracks per-node `plugin_version` from each heartbeat and queues a `deploy` command when it's below `MIN_RECOMMENDED_PLUGIN_VERSION`. Cycle:

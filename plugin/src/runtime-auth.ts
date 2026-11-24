@@ -1,4 +1,4 @@
-/** Preparatory request authority. No runtime imports, environment reads or startup I/O. */
+/** Explicit request authority; construction and import perform no I/O or environment reads. */
 import {EnrollmentError, readVerifiedInstallAuthority, requestInstallJson} from "./install-authority.js";
 import {InstallAgentError, resolveInstallAgentKey} from "./install-agent-auth.js";
 import {isLoopbackHost, isValidSafeId} from "./validation.js";
@@ -47,7 +47,7 @@ function checkedRequest(r: AuthorityRequest): Headers {
   if (r.authority === "agent" && !isValidSafeId(r.agentId)) fail("agent_required");
   const headers = new Headers(r.extraHeaders);
   for (const key of headers.keys()) {
-    if (/^(?:authorization|proxy-authorization|cookie|x-(?:api-key|tenant-|agent-|install-|caura-|gateway-|org-|user-|auth-|capabilities|readable-))/i.test(key))
+    if (key !== "x-caura-session-id" && /^(?:authorization|proxy-authorization|cookie|x-(?:api-key|tenant-|agent-|install-|caura-|gateway-|org-|user-|auth-|capabilities|readable-))/i.test(key))
       fail("header_forbidden");
   }
   return headers;
@@ -67,7 +67,7 @@ export function createRuntimeAuth(config: RuntimeAuthConfig) {
     try {u = new URL(c.gateway);} catch {return fail("gateway_invalid");}
     if (u.origin !== c.gateway || u.username || u.password || u.pathname !== "/" || u.search || u.hash ||
         !(u.protocol === "https:" || (u.protocol === "http:" && (isLoopbackHost(u.hostname) ||
-          (selected === "standalone" && c.allowInsecureHttp === true)))) ||
+          (selected === "standalone" && (c.allowInsecureHttp === true || !c.standaloneKey))))) ||
         typeof c.apiPrefix !== "string" || !/^\/(?:[\w-]+\/)*[\w-]+$/.test(c.apiPrefix)) fail("gateway_invalid");
   }
   function localInstall() {

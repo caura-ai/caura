@@ -7,16 +7,11 @@
  * - API key refused over plain HTTP to a non-loopback host
  */
 
-import { CAURA_API_PREFIX, CAURA_API_URL, CAURA_API_KEY, assertKeyTransportAllowed } from "./env.js";
-import {
-  AGENT_KEY_REVOKED,
-  evictAgentKey,
-  isAgentRevoked,
-  isRevocation,
-  markAgentRevoked,
-  resolveAgentKey,
-} from "./agent-auth.js";
-import { withUserAgent } from "./user-agent.js";
+import {AsyncLocalStorage} from "node:async_hooks";
+import {CAURA_API_PREFIX, CAURA_API_URL, apiFetch, getAuthMode} from "./env.js";
+const runAgent = new AsyncLocalStorage<string>();
+/** Trusted host tool-run boundary; payload filters never establish the principal. */
+export function withAgentAuthority<T>(agent: string, action: () => Promise<T>): Promise<T> {return runAgent.run(agent, action);}
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -49,21 +44,11 @@ async function skillResponseText(res: Response): Promise<string> {
     reader.releaseLock();
   }
 }
-function revokedDelivery(text: string): boolean {
-  try { return JSON.parse(text)?.detail === AGENT_KEY_REVOKED; }
-  catch { return false; }
-}
-
-// Shaped like the other errors here, so a revoked agent counts as a refusal
-// (a 4xx), not as the backend being unreachable.
-function revokedAgentError(agentId: string): Error {
-  return new Error(
-    `Caura API 401: ${AGENT_KEY_REVOKED} (agent '${agentId}' was revoked; ` +
-      "an admin turns it back on by issuing it a key)",
-  );
-}
-
-export async function apiCall(
+type CallArgs = Parameters<typeof call> extends [unknown, ...infer Args] ? Args : never;
+export const apiCall = (...args: CallArgs) => call("agent", ...args);
+export const nodeApiCall = (...args: CallArgs) => call("install", ...args);
+async function call(
+  authority: "agent" | "install",
   method: string,
   path: string,
   body?: Record<string, unknown>,
@@ -95,30 +80,10 @@ export async function apiCall(
     }
   }
 
-  // Refuse before resolving (and possibly provisioning) any credential when
-  // it would cross the network in cleartext.
-  if (CAURA_API_KEY) assertKeyTransportAllowed();
-
-  // Resolve agent-scoped credential, or fall back to the tenant-scoped key
-  const effectiveAgentId = agentId || (body?.agent_id as string) || (query?.agent_id as string);
-  let effectiveKey = CAURA_API_KEY;
-  if (effectiveAgentId) {
-    const agentKey = await resolveAgentKey(effectiveAgentId);
-    if (agentKey) effectiveKey = agentKey;
-    // The tenant key would still act as a revoked agent (L-79).
-    else if (isAgentRevoked(effectiveAgentId)) throw revokedAgentError(effectiveAgentId);
-  }
-
-  const headers: Record<string, string> = withUserAgent();
-  if (body) headers["Content-Type"] = "application/json";
-  if (effectiveKey) {
-    assertKeyTransportAllowed();
-    headers["X-API-Key"] = effectiveKey;
-  }
-  // Caller-supplied headers (e.g. the per-attempt `X-Bulk-Attempt-Id`
-  // required by POST /memories/bulk). Applied after the defaults so a
-  // caller can override them deliberately if ever needed.
-  if (extraHeaders) Object.assign(headers, extraHeaders);
+  const actor = agentId ?? runAgent.getStore();
+  if (authority === "agent" && getAuthMode() === "manual" && !runAgent.getStore())
+    throw new Error("runtime_auth_manual_tools_only");
+  const headers = {...extraHeaders, ...(body ? {"Content-Type": "application/json"} : {})};
 
   // Use caller's signal if provided, otherwise create a default timeout
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -140,33 +105,28 @@ export async function apiCall(
       body: body ? JSON.stringify(body) : undefined,
       signal: effectiveSignal,
     };
-    let res = await fetch(url.toString(), requestInit);
+    const res = await apiFetch(authority, method, normalized + url.search, requestInit, actor);
 
     const skillResponse = normalized === "/skills/installable" || normalized === "/skills/installations";
     let deliveryText = skillResponse ? await skillResponseText(res) : undefined;
 
-    // A rejected agent credential gets exactly one fallback attempt with the
-    // tenant key. Retrying in this frame avoids re-deriving ``agent_id`` from
-    // the body/query and recursively provisioning the same rejected key. A
-    // revoked agent gets none: the tenant key would still act as it (L-79).
-    if (res.status === 401 && effectiveKey !== CAURA_API_KEY && effectiveAgentId) {
-      if (deliveryText === undefined ? await isRevocation(res) : revokedDelivery(deliveryText)) {
-        markAgentRevoked(effectiveAgentId);
-        throw revokedAgentError(effectiveAgentId);
-      }
-      evictAgentKey(effectiveAgentId);
-      console.warn(`[caura] Agent key rejected for '${effectiveAgentId}', retrying with tenant key`);
-      const retryHeaders = { ...headers };
-      if (CAURA_API_KEY) retryHeaders["X-API-Key"] = CAURA_API_KEY;
-      else delete retryHeaders["X-API-Key"];
-      res = await fetch(url.toString(), { ...requestInit, headers: retryHeaders });
-      deliveryText = skillResponse ? await skillResponseText(res) : undefined;
-    }
-
     if (!res.ok) {
       const text = deliveryText ?? await res.text();
-      // Truncate server error body to avoid leaking internal details
-      const safeText = text.length > 200 ? text.slice(0, 200) + "..." : text;
+      // Authentication errors never echo server bodies. Other 4xx retain bounded, redacted detail.
+      let safeText = res.status >= 500 ? "server error" : "request refused";
+      if (res.status === 401 || res.status === 403) {
+        if (text.includes("agent_key_revoked")) safeText = "agent_key_revoked";
+      } else if (res.status >= 400 && res.status < 500) {
+        const echoText = text.replace(/\\"/g, '"');
+        const credentialEcho = /\bheaders?["']?\s*[:=]\s*[\[{]/i.test(echoText) ||
+          /\b(?:authorization|proxy-authorization|cookie|x-api-key|x-gateway-secret|(?:api[_-]?)?key|token|credential)["']?\s*[:=]\s*["']?[^\s"',}\]]/i.test(echoText) ||
+          /^\s*(?:authorization|proxy-authorization|cookie|x-api-key|x-gateway-secret)\s+(?:(?:Bearer|Basic)\s+)?\S+\s*$/i.test(echoText) ||
+          /\[\s*["'](?:authorization|proxy-authorization|cookie|x-api-key|x-gateway-secret)["']\s*,\s*["'][^"']+/i.test(echoText);
+        if (!credentialEcho) safeText = text.replace(/\b(?:mc[a-z]?_|caura_|sk[-_]|gh[pousr]_|github_pat_|xox[baprs]-)[\w.+~/-]+/gi, "[redacted]")
+          .replace(/\\\//g, "/")
+          .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]*@[^\s"'<>]*/gi, "[redacted-url]")
+          .replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 200);
+      }
       throw new Error(`Caura API ${res.status}: ${safeText}`);
     }
 
