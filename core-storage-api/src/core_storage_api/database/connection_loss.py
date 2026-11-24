@@ -11,6 +11,12 @@ the 7 days to 2026-11-19 it failed 6 requests with a 500:
 * 1 while a statement ran (``GET /tenants/active``). SQLAlchemy marks that
   error ``connection_invalidated``. The app answers 503 for a read so core-api's
   GET retry repeats it, and keeps the 500 for anything else (``app.py``).
+
+The proxy's IAM check gives up at its 5s deadline, so a connect it fails takes
+that long. From 2026-11-20 to 11-23 that failed 6 more requests in prod, each
+5.03s in, and none was retried: the retry window had already closed. Each was
+the only failed connect on its instance at the time, so the next connect would
+have passed. The first retry now runs however long the attempt took.
 """
 
 from __future__ import annotations
@@ -25,9 +31,9 @@ from sqlalchemy.util import await_
 
 logger = logging.getLogger(__name__)
 
-# Three attempts, 0.1s then 0.2s apart. No retry starts more than 2s after the
-# first attempt, so an outage, or a connect that fails slowly, fails about as
-# fast as it did without retries and still reaches the alerts.
+# Three attempts, 0.1s then 0.2s apart. The first retry runs however long the
+# failed attempt took. A later one starts only within 2s of the first attempt, so
+# an outage fails within two slow attempts and still reaches the alerts.
 _CONNECT_ATTEMPTS = 3
 _CONNECT_BACKOFF_S = 0.1
 _CONNECT_RETRY_WINDOW_S = 2.0
@@ -72,7 +78,7 @@ def retry_dropped_connects(engine: AsyncEngine) -> AsyncEngine:
                 if (
                     attempt >= _CONNECT_ATTEMPTS
                     or not is_connection_loss(exc)
-                    or time.monotonic() - started + delay > _CONNECT_RETRY_WINDOW_S
+                    or (attempt > 1 and time.monotonic() - started + delay > _CONNECT_RETRY_WINDOW_S)
                 ):
                     raise
                 logger.warning(
