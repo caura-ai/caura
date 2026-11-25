@@ -1383,6 +1383,25 @@ def _enforce_code_delivery_policy(body: "CommandIn", auth: AuthContext) -> None:
         )
 
 
+# ``educate`` appends its prompt to the HEARTBEAT.md of every agent workspace
+# on the node (``plugin/src/educate.ts``): a standing instruction to each of
+# those agents. That is as much a change to what runs there as custom source,
+# so the same org-admin rule applies.
+_INSTRUCTION_COMMANDS = frozenset({"educate"})
+
+
+def _enforce_instruction_policy(body: "CommandIn", auth: AuthContext) -> None:
+    if body.command in _INSTRUCTION_COMMANDS and not auth.is_org_admin:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                errors.AUTH_ORG_ADMIN_REQUIRED,
+                "Sending instructions to a node's agents requires an org admin.",
+                remediation="Send the educate command from an org-admin session.",
+            ),
+        )
+
+
 @router.post(
     "/fleet/commands",
     status_code=201,
@@ -1438,6 +1457,7 @@ async def create_command(
     auth.enforce_not_agent_credential("queue fleet commands")
     auth.enforce_tenant_admin_credential("queue fleet commands")
     _enforce_code_delivery_policy(body, auth)
+    _enforce_instruction_policy(body, auth)
 
     sc = get_storage_client()
     try:
@@ -1457,7 +1477,18 @@ async def create_command(
         if exc.response.status_code == 404:
             raise HTTPException(status_code=404, detail="Node not found") from exc
         raise
-    return {"id": str(cmd.get("id", "")), "status": cmd.get("status", "pending")}
+    command_id = str(cmd.get("id", ""))
+    # The row names the node and the command; ``log_action`` adds the caller.
+    # The payload stays out: an educate prompt is up to 64 KB of free text.
+    await log_action(
+        tenant_id=tenant_id,
+        action="create",
+        resource_type="fleet_command",
+        resource_id=command_id,
+        detail={"node_id": str(body.node_id), "command": body.command},
+        critical=True,
+    )
+    return {"id": command_id, "status": cmd.get("status", "pending")}
 
 
 # ── Command history ──
