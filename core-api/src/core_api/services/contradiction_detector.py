@@ -1954,6 +1954,10 @@ C. DIFFERENT VALUE? Is the NEW statement's value different from the
    Wording such as "now", "moved from X to Y", "changed", "switched", "raised
    to", "extended to", "instead of" marks an update, and an update of the
    same slot IS a contradiction.
+   No when the NEW statement adds to the candidate's value without replacing
+   it: the cause of what the candidate reports, an exception to it, a further
+   detail, or the history of how the candidate's value came about ("was cut
+   from 60 to 10 minutes" agrees with "is 10 minutes").
 D. CAN BOTH HOLD? Name the reason both statements can be true at once, or
    "none" when the NEW value replaces the candidate's:
    - "list_valued_predicate": the attribute naturally holds several values
@@ -2000,8 +2004,8 @@ STRING) to one of two values:
      false;
   "different_value": your answer to C. false when same_slot is false;
   "non_conflict_reason": your answer to D, one of the names above;
-  "change": "<candidate's value> -> <NEW statement's value>", or "" when
-     nothing is replaced.
+  "change": "<candidate's value> -> <NEW statement's value>", each in the
+     words its own statement uses, or "" when nothing is replaced.
 Shape, for a batch where candidate <i> is an update and <k> a look-alike:
 {{"checks": {{"<i>": {{"things": "<thing> / <same thing>", "same_thing": true, "slots": "<attribute> / <same attribute>", "one_value_only": true, "same_slot": true, "different_value": true, "non_conflict_reason": "none", "change": "<old value> -> <new value>"}}, "<j>": "-", "<k>": {{"things": "<thing, qualifier 1> / <thing, qualifier 2>", "same_thing": false, "slots": "", "one_value_only": false, "same_slot": false, "different_value": false, "non_conflict_reason": "none", "change": ""}}}}}}
 Calibration: judge every candidate on its own, exactly as if it were the only
@@ -2014,7 +2018,134 @@ wrong as a true fact marked.
 )
 
 
-def _expand_sparse_batch(obj: object, n: int) -> list[dict]:
+_VALUE_WORD = re.compile(r"[a-z0-9]+")
+_VALUE_NUMBER = re.compile(r"\d+")
+# Words that carry no value of their own, so "the rate limit" and "rate limit"
+# compare equal.
+_VALUE_FILLER = frozenset(
+    "a an and are as at be by for from in is it its of on or per the to was were with".split()  # noqa: SIM905
+)
+# Words whose arrival or removal is itself the change ("allowed" -> "not
+# allowed"), so a value that only adds one still differs.
+_VALUE_NEGATIONS = frozenset({"not", "no", "never", "none", "nor", "cannot", "without", "off", "disabled"})
+
+
+def _value_words(text: str) -> set[str]:
+    return {w for w in _VALUE_WORD.findall(text.lower()) if w not in _VALUE_FILLER}
+
+
+def _value_numbers(text: str) -> set[int]:
+    return {int(n) for n in _VALUE_NUMBER.findall(text)}
+
+
+def _value_stems(words: set[str]) -> set[str]:
+    # A five-letter prefix matches "retries" to "retried" and "acquired" to
+    # "acquiring", so a word in another tense or number counts as the same.
+    return {w[:5] for w in words}
+
+
+def _shares_a_word(value: set[str], text: str) -> bool:
+    return bool(_value_stems(value) & _value_stems(_value_words(text)))
+
+
+def _same_value(old: str, new: str) -> bool:
+    """True when one value only restates or narrows the other: the same
+    numbers in the same order, and one's words (in any tense) all within the
+    other's, as "Postgres" / "Postgres table" or "acquired last March" / "is
+    acquiring". A negation added or dropped ("allowed" / "not allowed") is a
+    change, and so are other numbers ("v1" / "v1.1")."""
+    if _VALUE_NUMBER.findall(old) != _VALUE_NUMBER.findall(new):
+        return False
+    old_words, new_words = _value_words(old), _value_words(new)
+    if (old_words ^ new_words) & _VALUE_NEGATIONS:
+        return False
+    old_stems, new_stems = _value_stems(old_words), _value_stems(new_words)
+    return old_stems <= new_stems or new_stems <= old_stems
+
+
+def _change_problems(change: str, new_text: str | None, candidate_text: str | None) -> list[str]:
+    """What is wrong with a checks entry's ``change`` ("<candidate's value> ->
+    <NEW statement's value>"), or [] when nothing is.
+
+    It must name both values, split by one arrow ("->" or "→"); they must
+    differ (``_same_value``); and each must come from its own statement: every
+    number in it appears in that statement, and it shares a word with it.
+
+    Replayed on staging's judge (Vertex gemini-3.1-flash-lite, 2026-11-25),
+    every reply that passed a real update gave its change this way (36 of 36),
+    while passed look-alikes gave "60 minutes -> 10 minutes" for a candidate
+    that says "10 minutes" (the 60 is the NEW statement's history, "was cut
+    from 60 to 10 minutes"), "absent -> present" for statements that use
+    neither word, "Postgres -> Postgres table", "acquired last March -> is
+    acquiring", and "silent timeout / emits export_duration_seconds" with no
+    arrow.
+    """
+    if not change.strip():
+        return ["change is empty"]
+    parts = change.replace("→", "->").split("->")
+    if len(parts) != 2:
+        return ["change doesn't give the two values as '<candidate's> -> <NEW's>'"]
+    if _same_value(parts[0], parts[1]):
+        return ["change keeps the candidate's value"]
+    problems: list[str] = []
+    for whose, value, text in (
+        ("candidate's", parts[0], candidate_text),
+        ("NEW statement's", parts[1], new_text),
+    ):
+        if text is None:
+            continue
+        if not _value_numbers(value) <= _value_numbers(text):
+            problems.append(f"the {whose} value has a number its statement lacks")
+        elif not _shares_a_word(_value_words(value), text):
+            problems.append(f"the {whose} value shares no word with its statement")
+    return problems
+
+
+def _checks_entry_unsupported(
+    entry: dict,
+    index: int,
+    new_text: str | None = None,
+    candidate_text: str | None = None,
+) -> bool:
+    """True when a checks entry's own fields don't support its three yes
+    answers, so they can't be trusted.
+
+    The prompt makes ``same_slot`` false "when one_value_only is false", and
+    ``change`` "" "when nothing is replaced"; it asks for each value of
+    ``change`` in its own statement's words. A reply that says the slot holds
+    several values, that names no change, or whose change isn't one between
+    the two statements (``_change_problems``) is as incoherent as the replies
+    Gate 1 and Gate 2 overrule. ``new_text`` and ``candidate_text`` are the
+    statements as the judge saw them; without them the values aren't checked
+    against the statements.
+
+    A key that is absent is no evidence either way, so only a stated opposite
+    fires: a provider answering without these keys is judged as before.
+    """
+    problems: list[str] = []
+    if "one_value_only" in entry and entry["one_value_only"] is not True:
+        problems.append("one_value_only is false")
+    change = entry.get("change")
+    if isinstance(change, str):
+        problems.extend(_change_problems(change, new_text, candidate_text))
+    if problems:
+        # WARNING, like the two gates: the model broke its own contract.
+        logger.warning(
+            "Contradiction batch judge answered yes to every check for candidate %d,"
+            " but %s; not a contradiction",
+            index,
+            "; ".join(problems),
+        )
+    return bool(problems)
+
+
+def _expand_sparse_batch(
+    obj: object,
+    n: int,
+    *,
+    new_text: str | None = None,
+    candidate_texts: Sequence[str] | None = None,
+) -> list[dict]:
     """Expand a batch judge reply into one raw judgment dict per candidate,
     aligned to input order (E4).
 
@@ -2032,6 +2163,10 @@ def _expand_sparse_batch(obj: object, n: int) -> list[dict]:
     Detection order matters: ``clean``/``hits`` keys mark the sparse shape;
     otherwise top-level index keys are read densely; anything else expands to
     the safe default for every candidate.
+
+    ``new_text`` and ``candidate_texts`` (aligned to the candidates) are the
+    statements as the judge saw them, so a "checks" entry's ``change`` can be
+    held to them (``_checks_entry_unsupported``).
     """
     if not isinstance(obj, dict):
         return [{"contradicts": False} for _ in range(n)]
@@ -2047,8 +2182,15 @@ def _expand_sparse_batch(obj: object, n: int) -> list[dict]:
             entry = checks.get(str(i))
             if entry is None:
                 entry = checks.get(i)  # tolerate int keys
-            passed = isinstance(entry, dict) and all(
-                entry.get(key) is True for key in ("same_thing", "same_slot", "different_value")
+            passed = (
+                isinstance(entry, dict)
+                and all(entry.get(key) is True for key in ("same_thing", "same_slot", "different_value"))
+                and not _checks_entry_unsupported(
+                    entry,
+                    i,
+                    new_text,
+                    candidate_texts[i] if candidate_texts is not None and i < len(candidate_texts) else None,
+                )
             )
             # The reason is handed on as written, so ``_judge_contradiction``
             # applies the same veto set (and the same A63 exception) as it does
@@ -2098,16 +2240,15 @@ async def _llm_contradiction_check_batch(
     so the safety gates are identical to the per-candidate path. E4: the reply
     is sparse — see ``_expand_sparse_batch``."""
     provider_name = _judge_provider(tenant_config)
-    candidates_block = data_block(
-        "\n".join(f"[{i}] {quote_untrusted(c.get('content', '')[:500])}" for i, c in enumerate(candidates))
-    )
+    texts = [c.get("content", "")[:500] for c in candidates]
+    candidates_block = data_block("\n".join(f"[{i}] {quote_untrusted(t)}" for i, t in enumerate(texts)))
     prompt = BATCH_CONTRADICTION_PROMPT.format(
         new_content=data_block(new_content[:500]), candidates_block=candidates_block
     )
 
     async def _do_check(llm) -> list[dict]:
         raw = await llm.complete_json(prompt, **_judge_effort_kwargs())
-        return _expand_sparse_batch(raw, len(candidates))
+        return _expand_sparse_batch(raw, len(candidates), new_text=new_content[:500], candidate_texts=texts)
 
     return await call_with_fallback(
         primary_provider_name=provider_name,
