@@ -37,6 +37,8 @@ export const REMOTE_ENV_DENYLIST_SUFFIXES = [
   "_ALLOW_INSECURE_HTTP",
   "_REQUIRE_SIGNED_COMMANDS",
   "_TASK_DB_PATH",
+  "_AUTH_MODE",
+  "_MANUAL_AGENT_ID",
 ];
 
 export function isRemoteEnvDenied(key: string): boolean {

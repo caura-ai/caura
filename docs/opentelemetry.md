@@ -30,8 +30,14 @@ which records nothing and sends nothing.
 
 ```bash
 OTEL_EXPORTER_OTLP_ENDPOINT=https://cloud.langfuse.com/api/public/otel
-OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(printf '%s' "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" | base64)"
+# tr: GNU base64 wraps long output, and a header can't hold a newline
+OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic%20$(printf '%s' "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" | base64 | tr -d '\n')"
 ```
+
+Without `tr`, the header breaks on Linux: a Langfuse key pair encodes to
+more than 76 characters, GNU `base64` splits it across two lines, and
+OpenTelemetry's Python exporter drops the header and logs its value, keys
+included.
 
 ### Phoenix, Jaeger, or an OpenTelemetry Collector
 
@@ -56,6 +62,40 @@ There are two ways:
 
 If both are configured, ddtrace wins and the OTLP endpoint is ignored, so
 spans are never sent twice.
+
+#### Caura Rail clients
+
+An application that calls Caura through
+[Caura Rail](https://github.com/caura-ai/caura-rail) sends its spans to Datadog
+through its own tracer, and the `traceparent` Rail sends makes core-api's spans
+part of the same trace. The Rail guide's
+[Datadog section](https://github.com/caura-ai/caura-rail/blob/main/docs/guide.md#datadog)
+covers the setups: ddtrace with `DD_TRACE_OTEL_ENABLED=true`, dd-trace's
+`TracerProvider` in Node.js, or an OpenTelemetry SDK exporting to a Datadog
+Agent or to Datadog's OTLP traces intake. In the client, as in core-api,
+ddtrace belongs with its OpenTelemetry bridge on, not beside an SDK: with the
+bridge off, ddtrace's HTTP client integration replaces Rail's `traceparent`,
+and core-api's spans join ddtrace's trace instead of the turn's.
+
+Checked on 2026-11-18: a Python Rail client exporting to the OTLP intake,
+against the staging core-api under ddtrace, put the turn, Rail's memory calls,
+core-api's request spans and its memory spans under one trace id in Datadog,
+with no memory text in any span. The ddtrace and Node.js setups were checked
+against a stand-in Agent. Exporting to an Agent's OTLP ingest is expected to
+work but was not checked.
+
+Behind Google Cloud Run, core-api's request span does not nest under the
+client's memory call. Cloud Run's front end replaces the parent span id in
+`traceparent` with one of its own, which Datadog never receives, and keeps
+the trace id, so core-api's spans still join the client's trace.
+
+Datadog assembles a trace from one organization's spans. When the client and
+core-api report to different organizations, as a customer's application does
+against Caura's hosted service, each holds its half under the same trace id.
+The customer sees each turn and how long every memory call took from the
+client's side. In core-api's organization, the trace id finds the server's
+side of that turn: its spans for 15 minutes, and after that the ones a
+retention filter indexed, and its log lines when `DD_LOGS_INJECTION=true`.
 
 ## One trace per agent turn
 

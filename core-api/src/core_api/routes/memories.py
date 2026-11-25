@@ -98,6 +98,7 @@ from core_api.services.agent_identity import reserved_write_refusal
 from core_api.services.agent_scope import explain_agent_scope
 from core_api.services.agent_service import (
     authorize_memory_access,
+    bound_to_no_fleet,
     broker_label,
     broker_owned_agent_id,
     enforce_delete,
@@ -109,6 +110,7 @@ from core_api.services.agent_service import (
     get_or_create_agent,
     lookup_agent,
     memory_reader,
+    readable_without_a_fleet,
     refuse_restricted_reader,
     resolve_read_fleet_gate,
     resolve_write_agent,
@@ -3121,6 +3123,7 @@ async def _search_inner(
     # asking later would report every typo as a known agent. Stays empty for an
     # admin credential, which skips the block entirely.
     _agent_reg: dict = {}
+    _fleetless = False
     if auth.tenant_id:  # skip for admin
         if eff_agent_id:
             fleet_id_hint = body.fleet_ids[0] if body.fleet_ids and len(body.fleet_ids) == 1 else None
@@ -3131,6 +3134,8 @@ async def _search_inner(
             # that agent (see ``_gate_fleet_read``).
             if not auth.is_person:
                 refuse_restricted_reader(_agent, eff_agent_id)
+            # No fleet to pin to: filtered after the search instead (as MCP recall).
+            _fleetless = not auth.is_person and bound_to_no_fleet(_agent, body.fleet_ids)
             if not body.fleet_ids and _agent.get("fleet_id") and _agent.get("trust_level", 0) < 2:
                 body.fleet_ids = [_agent["fleet_id"]]  # Force fleet scoping for trust < 2
             # EVERY requested fleet, not just the single-fleet case. Gating only
@@ -3234,6 +3239,8 @@ async def _search_inner(
             verified_only=body.verified_only,
             baton_id=body.baton_id,
         )
+        if _fleetless and results:
+            results = [hit for hit in results if readable_without_a_fleet(hit)]
     except HTTPException:
         # Auth / tenant errors raised downstream are expected outcomes,
         # not DB/network failures — don't flag them as ``error=True``.
@@ -3624,6 +3631,7 @@ async def recall_endpoint(
     await enforce_named_agent_ownership(auth, eff_agent_id)
     _agent = None
     _agent_reg: dict = {}  # CAURA-723 — see /search
+    _fleetless = False
     if auth.tenant_id:
         if eff_agent_id:
             fleet_id_hint = body.fleet_ids[0] if body.fleet_ids and len(body.fleet_ids) == 1 else None
@@ -3633,6 +3641,8 @@ async def recall_endpoint(
             # Trust 0 reads nothing, as on /search.
             if not auth.is_person:
                 refuse_restricted_reader(_agent, eff_agent_id)
+            # No fleet to pin to: filtered after the search instead (as MCP recall).
+            _fleetless = not auth.is_person and bound_to_no_fleet(_agent, body.fleet_ids)
             if not body.fleet_ids and _agent.get("fleet_id") and _agent.get("trust_level", 0) < 2:
                 body.fleet_ids = [_agent["fleet_id"]]
             # Both halves matter and they are independent: EVERY requested
@@ -3728,6 +3738,8 @@ async def recall_endpoint(
         verified_only=body.verified_only,
         baton_id=body.baton_id,
     )
+    if _fleetless and memories:
+        memories = [hit for hit in memories if readable_without_a_fleet(hit)]
 
     # CAURA-723 — same shape as /search, and before the LLM brief so a
     # misconfigured recall still gets its explanation.

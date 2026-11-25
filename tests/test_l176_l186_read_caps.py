@@ -118,6 +118,56 @@ async def test_l176_the_graph_route_says_when_it_was_cut_short(client, sc, monke
     assert [n["id"] for n in resp.json()["nodes"]] == [newer]
 
 
+async def test_l176_a_limit_reads_only_the_newest_entities(client, sc):
+    # The nightly load test asks for limit=50; the route used to drop it and load
+    # the whole graph, up to the cap, on every call.
+    tenant, (oldest, middle, newest) = await _entities(sc, 3)
+    await _relate(sc, tenant, middle, newest, 0.9, "manages")
+    await _relate(sc, tenant, oldest, middle, 0.5, "mentions")
+
+    resp = await client.get(
+        "/api/v1/graph",
+        params={"tenant_id": tenant, "limit": 2},
+        headers=get_admin_headers(),
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body.get("truncated") is True
+    assert {n["id"] for n in body["nodes"]} == {middle, newest}
+    # The edge to the node left out is left out with it.
+    assert [(e["source"], e["target"]) for e in body["edges"]] == [(middle, newest)]
+
+
+async def test_l176_a_limit_never_raises_the_cap(sc, monkeypatch):
+    tenant, (_oldest, middle, newest) = await _entities(sc, 3)
+    monkeypatch.setattr(postgres_service, "GRAPH_MAX_ENTITIES", 2, raising=False)
+
+    graph = await sc.get_full_graph(tenant, limit=50)
+
+    assert graph.get("truncated") is True
+    assert {str(e["id"]) for e in graph["entities"]} == {middle, newest}
+
+
+async def test_l176_a_limit_the_graph_fits_in_is_not_truncated(sc):
+    tenant, ids = await _entities(sc, 2)
+
+    graph = await sc.get_full_graph(tenant, limit=2)
+
+    assert graph.get("truncated") is False
+    assert {str(e["id"]) for e in graph["entities"]} == set(ids)
+
+
+async def test_l176_a_limit_below_one_is_a_422(client):
+    resp = await client.get(
+        "/api/v1/graph",
+        params={"tenant_id": new_tenant_id(), "limit": 0},
+        headers=get_admin_headers(),
+    )
+
+    assert resp.status_code == 422, resp.text
+
+
 # -- L-186: the agent list ---------------------------------------------------------
 
 

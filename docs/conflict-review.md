@@ -47,8 +47,11 @@ archived or otherwise unavailable pair members, a changed external chain,
 another successor/verdict still holding the pair, or a suppressed tenant
 produce 409 without changing the review. A no-op cannot restore a later manual
 status change. A missing/foreign conflict remains 404; an already reviewed
-conflict remains 409. Pending-state compare-and-set permits one reviewer to
-commit. Any failure between effects and the decision rolls everything back.
+conflict remains 409. core-api's `PATCH /api/v1/conflicts/{id}/resolve` answers
+each refusal with storage's reason as its `detail`, so a client can tell an
+already reviewed conflict from one it may still review. Pending-state
+compare-and-set permits one reviewer to commit. Any failure between effects and
+the decision rolls everything back.
 
 The detector's `action`, reason and provenance remain intact. Separate
 `review_effect_applied`, `review_winner_id` and `review_loser_id` metadata record
@@ -59,3 +62,23 @@ resolved rows while retaining the original detector evidence.
 repair and operator scripts are separate work. This change performs no
 historical-data sweep and needs no schema migration. Database regressions run
 in isolated CI; local checks use only mock-backed unit tests.
+
+## Which conflicts are recorded for review
+
+The detector always records two kinds of conflict: one whose losing memory
+nothing else points at, and a dispute, where a lower-trust writer contradicts
+a higher-trust fact. It records every other confirmed conflict only where
+recording is on. The deployment sets that with
+`CONTRADICTION_WRITE_CONFLICT_RECORD` (off by default), and a tenant can
+override it with `write.conflict_records_enabled`:
+
+```http
+PUT /api/v1/settings?tenant_id=tenant-a
+{"write": {"conflict_records_enabled": true}}
+```
+
+`true` records every conflict for that tenant on a deployment that records
+none, and `false` records only the two kinds above on one that records all.
+Send `null` to return the tenant to the deployment's setting. Recording adds a
+row per conflict and no LLM call. Detection, and what it does to a memory's
+status, are the same either way.

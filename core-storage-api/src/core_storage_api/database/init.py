@@ -10,6 +10,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from core_storage_api.config import db_connect_args, settings
+from core_storage_api.database.connection_loss import retry_dropped_connects
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +76,9 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # scope); a metadata-created schema must have these before stamping.
 # 080 creates the three background-model tables and
 # builds its due-time and C-collated tenant-discovery indexes in the same
-# transaction, so both indexes, valid, join the probe.
-_HEAD_FINGERPRINT_REVISION = "080"
+# transaction, so both indexes, valid, join the probe. 081 adds
+# ``background_model_work.deferrals``, so the column joins the probe.
+_HEAD_FINGERPRINT_REVISION = "081"
 _HEAD_FINGERPRINT_SQL: str | None = (
     "SELECT (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -129,7 +131,9 @@ _HEAD_FINGERPRINT_SQL: str | None = (
     "AND c.relname = 'ix_background_model_work_due' AND i.indisvalid) "
     "AND EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
     "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' "
-    "AND c.relname = 'ix_background_model_work_tenant_due' AND i.indisvalid)"
+    "AND c.relname = 'ix_background_model_work_tenant_due' AND i.indisvalid) "
+    "AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' "
+    "AND table_name = 'background_model_work' AND column_name = 'deferrals')"
 )
 
 _engine: AsyncEngine | None = None
@@ -207,15 +211,17 @@ def schema_bootstrap_action(
 
 
 def _build_engine(url: str) -> AsyncEngine:
-    return create_async_engine(
-        url,
-        # Request and migration pools share the same TLS floor.
-        connect_args=db_connect_args(url),
-        pool_size=settings.db_pool_size,
-        max_overflow=settings.db_max_overflow,
-        pool_timeout=settings.db_pool_timeout,
-        pool_recycle=settings.db_pool_recycle,
-        pool_pre_ping=True,
+    return retry_dropped_connects(
+        create_async_engine(
+            url,
+            # Request and migration pools share the same TLS floor.
+            connect_args=db_connect_args(url),
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout,
+            pool_recycle=settings.db_pool_recycle,
+            pool_pre_ping=True,
+        )
     )
 
 

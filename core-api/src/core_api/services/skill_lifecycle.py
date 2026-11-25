@@ -165,6 +165,16 @@ class SkillWriteContext:
     # enforces admin via ``_require_inbox_admin``, so relaxing both
     # source checks under this flag is safe.
     is_inbox_edit: bool = False
+    # The document namespace is server request context, not an incoming data label.
+    doc_id: str | None = None
+
+
+def is_forge_skill(doc: dict) -> bool:
+    """Recognize Forge ownership even when an incoming writer changes source."""
+    data = doc.get("data") or {}
+    return str(doc.get("doc_id") or "").startswith("forge/") or (
+        isinstance(data, dict) and data.get("source") == "forge"
+    )
 
 
 def _now_iso() -> str:
@@ -215,6 +225,23 @@ async def validate_and_normalize_skill_write(
     # under their feet. Nested mutations (origin, scan) are explicit
     # below.
     out: dict[str, Any] = dict(data)
+
+    # Read-modify-write may echo existing server provenance, never create or
+    # alter it. Membership matters: an absent key is not an existing null value.
+    live_data = (live_skill_doc or {}).get("data")
+    for key in ("activation_approval", "quarantine_override"):
+        if (
+            key in out
+            and not ctx.is_inbox_edit
+            and (not isinstance(live_data, dict) or key not in live_data or out[key] != live_data[key])
+        ):
+            _raise(403, f"skills write: {key} is server-owned review provenance.")
+
+    forge_owned = is_forge_skill({"doc_id": ctx.doc_id, "data": out}) or is_forge_skill(live_skill_doc or {})
+    if forge_owned and not (ctx.is_internal_forge or ctx.is_inbox_edit):
+        _raise(403, "Forge skills must be reviewed and changed through the Skills Inbox.")
+    if forge_owned and out.get("status") == "active":
+        _raise(403, "Forge activation requires an explicit Skills Inbox approval.")
 
     # ── Adjustment 1: schema validator hook ──────────────────────
     missing = [k for k in REQUIRED_TOP_LEVEL_KEYS if k not in out]

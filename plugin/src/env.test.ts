@@ -94,7 +94,7 @@ describe("resolveTenantId — network failure handling", () => {
     assert.equal(errorLines.length, 0, "no error-level output for network failures");
   });
 
-  test("tool-description fetch refuses redirects with the tenant key", async () => {
+  test("public tool-description fetch refuses redirects without a credential", async () => {
     globalThis.fetch = (async (input, init) => {
       calls.push({ url: String(input), init });
       return new Response(JSON.stringify({}), { status: 200 });
@@ -102,7 +102,7 @@ describe("resolveTenantId — network failure handling", () => {
     await fetchToolDescriptions();
     assert.equal(calls.length, 1);
     assert.equal(calls[0].init?.redirect, "error");
-    assert.equal((calls[0].init?.headers as Record<string, string>)["X-API-Key"], process.env.CAURA_API_KEY);
+    assert.equal(new Headers(calls[0].init?.headers).has("X-API-Key"), false);
   });
 
   test("passes an AbortSignal to fetch on every attempt (bounds per-attempt latency — CAURA-000)", async () => {

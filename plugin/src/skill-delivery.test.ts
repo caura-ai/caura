@@ -16,7 +16,7 @@ const originalHome = process.env.HOME;
 const home = mkdtempSync(join(tmpdir(), "caura-delivery-test-"));
 process.env.HOME = home;
 const { reconcileSkills } = await import("./reconcile-skills.js");
-const { apiCall } = await import("./transport.js");
+const { nodeApiCall: apiCall } = await import("./transport.js");
 // The existing zero-argument function is assignable to this optional-input
 // contract, so main compiles and fails behaviorally rather than at collection.
 const reconcile: (receiver?: { nodeId: string }) => ReturnType<typeof reconcileSkills> = reconcileSkills;

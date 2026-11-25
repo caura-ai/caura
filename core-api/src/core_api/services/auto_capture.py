@@ -22,6 +22,14 @@ So a write carrying one of those tags is, whatever else the caller asked for:
 
 Installed plugins send the tags and no new field, so recognising the tags is
 what covers them. A caller that tags a deliberate write this way only narrows it.
+
+The broker (caura-daemon) captures too: each tool call's output, redacted on
+the machine, through POST /memories/bulk with ``source: hook.post_tool_use``
+(``queueCapture``). An install credential's item carrying that source is
+stored ``scope_agent``, masked and stamped the same way, with its own
+``session_id`` as the conversation (``stamp_broker_capture``). It is not held:
+a batch's hold is decided once for the batch, which also carries the agent's
+deliberate saves.
 """
 
 from __future__ import annotations
@@ -83,5 +91,29 @@ def stamp_capture(data, session_id: str | None) -> bool:
         "source": "plugin",
         "trigger": trigger,
         "conversation": conversation_of(session_id),
+    }
+    return True
+
+
+# The source the broker's PostToolUse hook tags a capture with, and the session
+# key it names it under (caura-daemon ``queueCapture``, ``FormatMemoryMetadata``).
+BROKER_CAPTURE_SOURCE = "hook.post_tool_use"
+_BROKER_SESSION_KEY = "session_id"
+
+
+def stamp_broker_capture(metadata: dict | None) -> bool:
+    """Mark a broker item's ``metadata`` (already sanitised) if it is a capture.
+    Returns whether it is one; the caller stores it ``CAPTURED_VISIBILITY``,
+    since a bulk item has no visibility of its own.
+
+    Only for an install credential's batch: anyone else's metadata is theirs.
+    """
+    if not metadata or metadata.get("source") != BROKER_CAPTURE_SOURCE:
+        return False
+    session = metadata.get(_BROKER_SESSION_KEY)
+    metadata.setdefault(SYSTEM_NAMESPACE, {})[CAPTURE_KEY] = {
+        "source": "broker",
+        "trigger": "post_tool_use",
+        "conversation": conversation_of(session if isinstance(session, str) else None),
     }
     return True

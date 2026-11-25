@@ -240,7 +240,7 @@ describe("fetchKeystonesBlock", () => {
     const rules = [{ doc_id: "r1", data: { content: "Rule" } }];
     for (const body of [{ count: 1, items: rules }, { count: 1, rules, truncated: true }]) {
       installFetch(body);
-      const result = await keystones.fetchKeystonesPayload({ tenant_id: "t_keystones_test" });
+      const result = await keystones.fetchKeystonesPayload({ tenant_id: "t_keystones_test" }, undefined, "fixture-agent");
       assert.deepEqual(result, { count: 1, rules, truncated: "truncated" in body });
     }
   });

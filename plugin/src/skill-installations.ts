@@ -7,7 +7,7 @@ import { dirname, basename, isAbsolute, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { getPluginDir } from "./paths.js";
 import { CAURA_TENANT_ID } from "./env.js";
-import { apiCall } from "./transport.js";
+import { nodeApiCall } from "./transport.js";
 import { logError } from "./logger.js";
 
 const MAX_BYTES = 1024 * 1024;
@@ -347,7 +347,7 @@ export class SkillInstallations {
     try {
       // Include isolation requests in the same per-tick budget. A poison
       // report must not hold heartbeat behind 64 individual timeouts.
-      const result = await apiCall("POST", "/skills/installations", {
+      const result = await nodeApiCall("POST", "/skills/installations", {
         tenant_id: this.state.tenant_id, node_id: this.state.node_id,
         reporting_version: 1, events: batch.map((entry) => entry.event),
       }, undefined, AbortSignal.timeout(2000)) as Record<string, unknown>;

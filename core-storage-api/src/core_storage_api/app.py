@@ -38,6 +38,7 @@ configure_logging(
 )
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from core_storage_api.database.init import dispose_engines, get_engine, init_database
 from core_storage_api.database.migration_postconditions import MIGRATION_POSTCONDITIONS
@@ -332,6 +333,28 @@ def create_app() -> FastAPI:
         if not _raised_parsing_the_body(exc):
             raise exc
         return JSONResponse(status_code=422, content={"detail": "request body must be valid JSON"})
+
+    @app.exception_handler(DBAPIError)
+    async def _connection_lost_handler(request: Request, exc: DBAPIError) -> JSONResponse:
+        # An open database connection went away under the request, which is
+        # what ``connection_invalidated`` says: a Cloud Run outbound reset
+        # (``database.connection_loss``). A read is safe to repeat, so it
+        # answers 503 and core-api's GET retry repeats it. Every other method
+        # keeps its 500: core-api also repeats a 503 for PATCH, DELETE and
+        # idempotent POSTs, and a write whose COMMIT was in flight may have
+        # committed. A connection that could not be opened at all has had its
+        # retries already, and any other database error happens again, so both
+        # are re-raised to stay the 500 they were.
+        if request.method not in ("GET", "HEAD") or not exc.connection_invalidated:
+            raise exc
+        logger.warning(
+            "Database connection lost during %s %s; answered 503", request.method, request.url.path
+        )
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": "1"},
+            content={"detail": "database connection lost; retry"},
+        )
 
     # Order matters: Starlette executes middlewares in reverse registration
     # order (last added = outermost). Register the reader filter first, then the

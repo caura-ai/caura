@@ -25,6 +25,7 @@ _DESCRIPTION = (
 
 _SPEC = ToolSpec(
     name="caura_evolve",
+    title="Report outcome",
     description=_DESCRIPTION,
     handler=mcp_server.caura_evolve,
     plugin_exposed=True,

@@ -10,9 +10,11 @@ background, while reads go on serving the layout they have.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 from datetime import UTC, datetime, timedelta
 
+import numpy as np
 import pytest
 
 from core_api.services import memory_field
@@ -140,8 +142,8 @@ async def test_growth_short_of_a_quarter_keeps_the_layout(monkeypatch):
 
 
 async def test_the_growth_check_runs_once_per_interval(monkeypatch):
-    """Reading a tenant-wide count costs a signature scan, so a tenant's
-    growth is checked at most once every ``REFIT_CHECK_SECONDS``."""
+    """Counting what was written since the fit costs a storage read, so a
+    tenant's growth is checked at most once every ``REFIT_CHECK_SECONDS``."""
     storage = _Storage([_row(i) for i in range(8)])
     monkeypatch.setattr(memory_field, "get_storage_client", lambda: storage)
     person = {"tenant_id": TENANT, "include_scope_agent": True}
@@ -160,17 +162,102 @@ async def test_a_busy_growth_check_does_not_fail_the_read(monkeypatch):
     storage = _Storage([_row(i) for i in range(8)])
     monkeypatch.setattr(memory_field, "get_storage_client", lambda: storage)
     first = await memory_field._get_memory_field(SCOPE, limit=20000)
-    real = memory_field._signature
 
-    async def busy_for_the_tenant_wide_scope(scope):
-        if set(scope) == {"tenant_id"}:
-            raise memory_field.FieldBusyError
-        return await real(scope)
-
-    monkeypatch.setattr(memory_field, "_signature", busy_for_the_tenant_wide_scope)
+    storage.newer_busy = True
     memory_field.field_cache.clear()
     again = await memory_field._get_memory_field(SCOPE, limit=20000)
     assert again["layout_version"] == first["layout_version"]
+    assert any("newer_than" in body for body in storage.signature_bodies)
+
+
+async def test_every_signature_read_stops_at_the_newest_the_map_reads(monkeypatch):
+    """A map shows at most the newest ``FIELD_MAX_LIMIT`` memories, so no read
+    behind it, the change check, the fit's count or the growth check, scans a
+    tenant past them. A poll costs the same at a million memories as at
+    fifty thousand."""
+    monkeypatch.setattr(memory_field, "REFIT_CHECK_SECONDS", 0.0)
+    storage = _Storage([_row(i) for i in range(8)])
+    monkeypatch.setattr(memory_field, "get_storage_client", lambda: storage)
+    full = await memory_field._get_memory_field(SCOPE, limit=20000)
+
+    storage.rows[:0] = [_row(8, created_at=LATER)]
+    memory_field._signature_cache.clear()
+    await memory_field._get_memory_field(SCOPE, limit=20000, since=_newest(full))
+    assert any("newer_than" in body for body in storage.signature_bodies)
+    assert {body.get("window") for body in storage.signature_bodies} == {
+        memory_field.FIELD_MAX_LIMIT
+    }
+
+
+async def test_a_tenant_past_the_window_says_its_total_is_capped(monkeypatch):
+    """Past the newest ``FIELD_MAX_LIMIT``, ``total`` counts only those and
+    ``total_capped`` says there are more."""
+    monkeypatch.setattr(memory_field, "FIELD_MAX_LIMIT", 5)
+    storage = _Storage([_row(i) for i in range(5)])
+    monkeypatch.setattr(memory_field, "get_storage_client", lambda: storage)
+    full = await memory_field._get_memory_field(SCOPE, limit=5)
+    assert (full["total"], full["total_capped"]) == (5, False)
+
+    storage.rows[:0] = [_row(i, created_at=LATER) for i in (5, 6, 7)]
+    memory_field._signature_cache.clear()
+    delta = await memory_field._get_memory_field(SCOPE, limit=5, since=_newest(full))
+    assert {p["id"] for p in delta["points"]} == {"m-5", "m-6", "m-7"}
+    assert (delta["total"], delta["total_capped"]) == (5, True)
+    again = await memory_field._get_memory_field(SCOPE, limit=5)
+    assert len(again["points"]) == 5
+    assert (again["total"], again["total_capped"]) == (5, True)
+
+
+async def test_a_layout_past_the_window_refits_as_the_window_turns_over(monkeypatch):
+    """A tenant past the newest ``FIELD_MAX_LIMIT`` never grows inside them, so
+    its layout is refitted once a quarter of them were written after its fit."""
+    monkeypatch.setattr(memory_field, "FIELD_MAX_LIMIT", 8)
+    monkeypatch.setattr(memory_field, "REFIT_CHECK_SECONDS", 0.0)
+    monkeypatch.setattr(memory_field, "REFIT_MIN_NEW", 1)
+    storage = _Storage([_row(i) for i in range(12)])
+    monkeypatch.setattr(memory_field, "get_storage_client", lambda: storage)
+    first = (await memory_field._get_memory_field(SCOPE, limit=8))["layout_version"]
+
+    storage.rows[:0] = [_row(12, created_at=LATER)]  # 1 < 8 / 4
+    memory_field._signature_cache.clear()
+    short = await memory_field._get_memory_field(SCOPE, limit=8)
+    assert short["layout_version"] == first
+    assert not memory_field._fits
+
+    storage.rows[:0] = [_row(13, created_at=LATER)]  # 2 = 8 / 4
+    memory_field._signature_cache.clear()
+    during = await memory_field._get_memory_field(SCOPE, limit=8)
+    assert during["layout_version"] == first
+    async with asyncio.timeout(10):
+        await asyncio.gather(*memory_field._fits.values())
+    assert storage.model["model_version"] != first
+
+
+async def test_a_layout_that_counted_the_whole_tenant_is_measured_against_the_window(
+    monkeypatch,
+):
+    """A model saved before fits stopped at the newest ``FIELD_MAX_LIMIT``
+    counted every shared memory the tenant had. Against that count it would
+    wait for a quarter of the whole tenant, so it is measured against the
+    window too."""
+    monkeypatch.setattr(memory_field, "FIELD_MAX_LIMIT", 8)
+    monkeypatch.setattr(memory_field, "REFIT_CHECK_SECONDS", 0.0)
+    monkeypatch.setattr(memory_field, "REFIT_MIN_NEW", 1)
+    storage = _Storage([_row(i) for i in range(12)])
+    monkeypatch.setattr(memory_field, "get_storage_client", lambda: storage)
+    first = (await memory_field._get_memory_field(SCOPE, limit=8))["layout_version"]
+    older = memory_field.FieldModel.from_bytes(
+        base64.b64decode(storage.model["params_b64"])
+    )
+    older.fitted_total = np.array(1000.0)
+    storage.model["params_b64"] = base64.b64encode(older.to_bytes()).decode()
+    memory_field._reset_state()  # another process, which reads the saved model
+
+    storage.rows[:0] = [_row(i, created_at=LATER) for i in (12, 13)]  # 2 = 8 / 4
+    await memory_field._get_memory_field(SCOPE, limit=8)
+    async with asyncio.timeout(10):
+        await asyncio.gather(*memory_field._fits.values())
+    assert storage.model["model_version"] != first
 
 
 def _waiting(i: int, created_at: str) -> dict:

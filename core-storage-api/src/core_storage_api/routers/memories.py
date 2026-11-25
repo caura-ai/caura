@@ -35,6 +35,7 @@ from core_storage_api.routers._validation import (
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import (
     FIELD_PAGE_EMBEDDINGS,
+    FIELD_SIGNATURE_MAX_WINDOW,
     MISSING_PROVENANCE_PREDICATE_SQL,
     BulkValidationError,
     ConflictReviewConflictError,
@@ -520,16 +521,26 @@ async def agent_scope_probe(request: Request) -> dict:
 @router.post("/entity-overlap-candidates")
 async def find_entity_overlap_candidates(request: Request) -> list[dict]:
     body: dict = await request.json()
-    memories = await _svc.memory_find_entity_overlap_candidates(
-        memory_id=UUID(body["memory_id"]),
-        tenant_id=body["tenant_id"],
-        fleet_id=body.get("fleet_id"),
-        visibility=body.get("visibility", "scope_team"),
-        limit=body.get("limit", 8),
-        include_supersedes=bool(body.get("include_supersedes", False)),
-        # A54 — owner identity, applied only for the scope_agent tier.
-        agent_id=body.get("agent_id"),
-    )
+    try:
+        memories = await _svc.memory_find_entity_overlap_candidates(
+            memory_id=UUID(body["memory_id"]),
+            tenant_id=body["tenant_id"],
+            fleet_id=body.get("fleet_id"),
+            visibility=body.get("visibility", "scope_team"),
+            limit=body.get("limit", 8),
+            include_supersedes=bool(body.get("include_supersedes", False)),
+            # A54 — owner identity, applied only for the scope_agent tier.
+            agent_id=body.get("agent_id"),
+        )
+    except DBAPIError as exc:
+        # 57014 is query_canceled: the query's statement_timeout fired (see
+        # Settings.entity_overlap_statement_timeout_ms). 504, as scored search
+        # answers, so the caller reads a timeout rather than a crash.
+        if getattr(exc.orig, "sqlstate", None) == "57014":
+            raise HTTPException(
+                status_code=504, detail="entity overlap candidates exceeded their statement timeout"
+            ) from exc
+        raise
     # No vectors (L-189): contradiction detection never reads a candidate's.
     return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 
@@ -914,16 +925,27 @@ async def check_near_duplicates(request: Request) -> dict:
     lists separable here.
     """
     body: dict = await request.json()
-    rows = await _svc.memory_find_near_duplicate_pairs(
-        tenant_id=body["tenant_id"],
-        fleet_id=body.get("fleet_id"),
-        batch_size=_bounded_int(body, "batch_size", 100, 5000),
-        # This service-authenticated sweep must page the whole tenant, even
-        # past the public list offset cap. Batch size and fan-out stay bounded.
-        offset=_int_at_least(body, "offset", 0, 0),
-        threshold=body.get("threshold", 0.95),
-        neighbor_limit=_bounded_int(body, "neighbor_limit", 5, 100),
-    )
+    try:
+        rows = await _svc.memory_find_near_duplicate_pairs(
+            tenant_id=body["tenant_id"],
+            fleet_id=body.get("fleet_id"),
+            batch_size=_bounded_int(body, "batch_size", 100, 5000),
+            # This service-authenticated sweep must page the whole tenant, even
+            # past the public list offset cap. Batch size and fan-out stay bounded.
+            offset=_int_at_least(body, "offset", 0, 0),
+            threshold=body.get("threshold", 0.95),
+            neighbor_limit=_bounded_int(body, "neighbor_limit", 5, 100),
+        )
+    except DBAPIError as exc:
+        # 57014 is query_canceled: the batch's statement_timeout fired (see
+        # Settings.near_duplicates_statement_timeout_ms). 504, as scored search
+        # answers, so the crystallizer reads it as a batch too large to finish
+        # and retries the window smaller.
+        if getattr(exc.orig, "sqlstate", None) == "57014":
+            raise HTTPException(
+                status_code=504, detail="near-duplicate batch exceeded its statement timeout"
+            ) from exc
+        raise
 
     candidate_ids: list[str] = []
     seen: set[str] = set()
@@ -1868,13 +1890,24 @@ async def field_signature(request: Request) -> dict:
     Body: ``{tenant_id, caller_agent_id?, caller_tenant_id?, fleet_id?,
     include_scope_agent?}`` — the visibility arguments ``/list`` takes.
     Returns ``{count, embedded, newest, revision}`` over the rows the field
-    would place; ``revision`` moves on an edit.
+    would place; ``revision`` moves on an edit. Optional ``window`` (1-50000)
+    reads only the newest that many and adds ``more``, whether rows lie past
+    them; optional ``newer_than`` (ISO 8601 with a timezone) adds ``newer``,
+    the embedded rows among them written after it.
     """
     body: dict = await request.json()
     tenant_id = _require(body, "tenant_id")
     args = _field_scope_args(tenant_id, body)
+    window = _bounded_int(body, "window", 1, FIELD_SIGNATURE_MAX_WINDOW) if "window" in body else None
+    newer_than_raw = body.get("newer_than")
     try:
-        return await _svc.memory_field_signature(**args)
+        newer_than = datetime.fromisoformat(newer_than_raw) if newer_than_raw is not None else None
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"invalid newer_than: {exc}") from exc
+    if newer_than is not None and newer_than.tzinfo is None:
+        raise HTTPException(status_code=422, detail="newer_than must be timezone-aware")
+    try:
+        return await _svc.memory_field_signature(**args, window=window, newer_than=newer_than)
     except DBAPIError as exc:
         if getattr(exc.orig, "sqlstate", None) == "57014":
             logger.warning("Memory map signature exceeded its configured statement timeout")

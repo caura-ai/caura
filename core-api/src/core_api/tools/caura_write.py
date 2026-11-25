@@ -20,9 +20,20 @@ _DESCRIPTION = (
     "Unknown keys are rejected, not ignored: put your own under metadata."
 )
 
+# The directory surface's wording (``ToolSpec.directory_description``): what the
+# tool keeps, in the words people use, so a client that finds tools by search
+# matches "remember that..." or "save this decision". Then the default text.
+_DIRECTORY_DESCRIPTION = (
+    "Save to the team's shared memory: decisions, facts, outcomes, preferences and "
+    "project context worth keeping for later sessions and for teammates, such as "
+    '"remember that we chose X" or "note that Y did not work". '
+) + _DESCRIPTION
+
 _SPEC = ToolSpec(
     name="caura_write",
+    title="Write memories",
     description=_DESCRIPTION,
+    directory_description=_DIRECTORY_DESCRIPTION,
     handler=mcp_server.caura_write,
     plugin_exposed=True,
     trust_required=0,

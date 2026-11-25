@@ -35,6 +35,9 @@ async def test_exhaustion_parks_the_reference_without_deleting_it(monkeypatch, p
         yield session
 
     monkeypatch.setattr(router, "get_session", transaction)
+    # /claim asks for admission first; the tenant's budget is not this test's
+    # subject, so it admits.
+    monkeypatch.setattr(router, "_refusal", AsyncMock(return_value=(None, 0, None)))
     body = {"tenant_id": work.tenant_id}
     if path == "finish":
         body.update(
@@ -56,6 +59,7 @@ async def test_admission_deferral_does_not_exhaust_a_reference(monkeypatch, atte
         kind="extraction",
         generation=9,
         attempts=attempts,
+        deferrals=0,
         terminal_reason=None,
     )
     result = MagicMock()
@@ -90,4 +94,7 @@ async def test_admission_deferral_does_not_exhaust_a_reference(monkeypatch, atte
     params = statement.compile().params
     assert params["attempts"] == attempts - 1
     assert params["generation"] == 10
-    assert timedelta(seconds=3) in params.values()
+    # The first deferral in a row: at least the hint, within its 3-5s step.
+    assert params["deferrals"] == 1
+    [delay] = [value for value in params.values() if isinstance(value, timedelta)]
+    assert timedelta(seconds=3) <= delay <= timedelta(seconds=5)

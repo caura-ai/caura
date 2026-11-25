@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.7.0...collaboration-clients-v0.7.1) (2026-11-15)
+
+
+### Dependencies
+
+* bump opentelemetry-api to 1.45.2 for CVE-2026-126360 ([#2435](https://github.com/caura-ai/caura/issues/2435)) ([1053bf4](https://github.com/caura-ai/caura/commit/1053bf429e458c2631a42869254833ebcf72ec88))
+
 ## [0.7.0](https://github.com/caura-ai/caura/compare/collaboration-clients-v0.6.0...collaboration-clients-v0.7.0) (2026-11-09)
 
 

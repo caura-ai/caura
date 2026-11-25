@@ -331,6 +331,15 @@ DEFAULT_SETTINGS: dict = {
         # from this schema is rejected by ``_check_keys`` and so is unsettable
         # (the pm-0918-c-04 lesson).
         "contradiction_detection_enabled": None,
+        # The tenant's own ``contradiction_write_conflict_record``: whether the
+        # detector writes a ``memory_conflicts`` record for every confirmed
+        # conflict, for a person to review. ``None`` (the default) follows the
+        # deployment's setting. True records every conflict for this tenant on
+        # a deployment that records none; false records only what is always
+        # recorded (an unlinked loser, a dispute) on one that records all. It
+        # adds no LLM call: a record reuses the detector's verdict. Detection,
+        # and what it does to a memory's status, are unchanged either way.
+        "conflict_records_enabled": None,
     },
     "agents": {
         "require_agent_approval": None,
@@ -399,18 +408,8 @@ DEFAULT_SETTINGS: dict = {
         # A ``fail_on_critical`` key used to sit here and was read by nothing
         # (M-114): ``false`` promised that critical findings would reach the
         # inbox, and every such skill was quarantined all the same.
-        "sentinel": {
-            # When True, a Forge candidate that passes ALL six
-            # auto-gates AND carries a clean Sentinel scan
-            # (``scan.state='clean'``, ``critical=0``) is promoted
-            # straight to ``status='active'`` — skipping the HITL
-            # Inbox approve step. Default False keeps the human in
-            # the loop. Flipping this true means the tenant TRUSTS
-            # the Sentinel scanner as the sole gate before a skill
-            # goes live; dirty / quarantined / warn-only candidates
-            # still route to ``staged`` and require human review.
-            "auto_promote_clean": False,
-        },
+        # Reserved block for scanner settings; automatic activation is retired.
+        "sentinel": {},
         # Forge resident knobs. Phase 0 publishes the topic + stub
         # handler; Phase 1 lands the real worker that reads these.
         # ``min_cluster_size`` default 3 is the demo value (plan §5);
@@ -824,6 +823,12 @@ def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
 
     Recurses into nested dicts so sub-keys are also validated.
     """
+    if (
+        path == "skills_factory"
+        and isinstance(payload.get("sentinel"), dict)
+        and "auto_promote_clean" in payload["sentinel"]
+    ):
+        raise ValueError("Settings key 'skills_factory.sentinel.auto_promote_clean' is retired")
     unknown = set(payload) - set(schema)
     if unknown:
         prefix = f"{path}." if path else ""
@@ -836,7 +841,9 @@ def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
                 continue
             if not isinstance(v, dict):
                 raise ValueError(f"Settings key {full_key!r} must be an object, got {type(v).__name__}")
-            if schema_v:
+            # Retiring its last option must not turn Sentinel into a free-form
+            # map that accepts previously refused scanner settings.
+            if schema_v or full_key == "skills_factory.sentinel":
                 _check_keys(v, schema_v, path=f"{path}.{k}" if path else k)
 
 
@@ -900,13 +907,13 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "write.bulk_subject_batching": bool,
     "write.retraction_enabled": bool,
     "write.contradiction_detection_enabled": bool,
+    "write.conflict_records_enabled": bool,
     # Skill Factory SF-006 — type validators for the skills_factory namespace.
     "skills_factory.enabled": bool,
     "skills_factory.description_max_bytes": int,
     "skills_factory.body_max_bytes": int,
     "skills_factory.inbox_max_pending": int,
     "skills_factory.rejection_cooloff_days": int,
-    "skills_factory.sentinel.auto_promote_clean": bool,
     "skills_factory.forge.cron_interval_hours": int,
     "skills_factory.forge.min_cluster_size": int,
     "skills_factory.forge.min_distinct_agents": int,
@@ -1615,6 +1622,17 @@ class ResolvedConfig:
         val = self._ts.get("write", {}).get("contradiction_detection_enabled")
         return bool(val) if val is not None else True
 
+    @property
+    def conflict_records_enabled(self) -> bool:
+        """Does the detector record every confirmed conflict for this tenant?
+
+        The tenant's ``write.conflict_records_enabled`` where it set one,
+        otherwise the deployment's ``contradiction_write_conflict_record``.
+        An unlinked loser and a dispute are recorded either way.
+        """
+        val = self._ts.get("write", {}).get("conflict_records_enabled")
+        return bool(val) if val is not None else global_settings.contradiction_write_conflict_record
+
     # Agents
     @property
     def require_agent_approval(self) -> bool:
@@ -1858,6 +1876,7 @@ def _is_display_mask(value: object) -> bool:
 #: still in the tenant's row, and showing it would present a control that does
 #: nothing.
 _RETIRED_KEYS: tuple[tuple[str, ...], ...] = (
+    ("skills_factory", "sentinel", "auto_promote_clean"),
     ("skills_factory", "sentinel", "fail_on_critical"),
     ("skills_factory", "forge", "llm_tokens_per_run"),
     ("skills_factory", "openclaw_bridge"),

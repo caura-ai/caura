@@ -262,7 +262,8 @@ class _CoreApiLifecycleAdapter:
             # and a failure row does not count toward the dedup window.
             raise PermanentOpError(
                 f"insights skipped ({result['skipped_reason']}): no LLM provider answered, "
-                "so nothing was analysed or persisted; the next scheduled run tries again"
+                "so nothing was analysed or persisted; the next scheduled run tries again",
+                reason=result["skipped_reason"],
             )
 
         return len(result.get("insight_memory_ids", []))

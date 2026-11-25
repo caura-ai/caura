@@ -42,6 +42,72 @@ when to add or move an operation.
 | Heartbeat / fleet readiness | REST receives, plugin produces | Plugin is the natural producer (it knows the local node state). REST is the receiver. MCP doesn't need this — agents don't report their own runtime state. |
 | Server telemetry (`GET /telemetry`, `POST /telemetry/rotate`) | REST only | Operator transparency for the anonymous daily heartbeat ([telemetry.md](telemetry.md)): what this server would send, why it is off, and a fresh deployment id. An operator concern, not an agent one. |
 | Agent registration | OpenClaw plugin | Local-runtime concern. |
+| Claude connector directory tool set | MCP only (`caura_memory_read`, `caura_memory_update`, `caura_memory_delete`, `caura_doc_read`, `caura_doc_write`, `caura_doc_delete`, `caura_tune_get`) | The Claude connector directory requires that no tool mixes reads and writes. A connection the gateway marks `X-Caura-Tool-Surface: directory` is listed the first six in place of `caura_manage` and `caura_doc`, split by effect, and `caura_tune_get` for `caura_tune`'s no-field read, which `caura_tune` refuses there; each forwards to the original handler, so the gates are identical. Every other connection, and the OpenClaw plugin, keeps the twelve-tool set. See [MCP tool surfaces](#mcp-tool-surfaces). |
+
+## MCP tool surfaces
+
+The MCP server serves one of two tool sets per connection. Every tool carries a
+`title` and the `readOnlyHint` / `destructiveHint` annotations on both, and
+`openWorldHint: false`: every tool works inside the caller's tenant.
+
+- **default** — API-key agents, the OpenClaw plugin, and any connection the
+  gateway does not mark. The twelve tools listed in the README, unchanged.
+- **directory** — a Claude connector-directory connection (MCP OAuth through
+  the gateway, which sends `X-Caura-Tool-Surface: directory`). The header is
+  honored only on the gateway-verified path, like `X-Agent-ID`; a direct caller
+  always gets the default set. This set drops `caura_manage` and `caura_doc`,
+  which mix reads and writes, and adds seven tools that each cover one effect:
+
+  | Tool | Ops | Read-only | Destructive |
+  |------|-----|-----------|-------------|
+  | `caura_memory_read` | `read`, `lineage`, `read_baton` | yes | no |
+  | `caura_memory_update` | `update`, `transition`, `verify`, `unverify`, `send_correction`, `confirm_correction`, `accept_baton` | no | yes |
+  | `caura_memory_delete` | `delete`, `bulk_delete` | no | yes |
+  | `caura_doc_read` | `read`, `query`, `search`, `list_collections` | yes | no |
+  | `caura_doc_write` | (write) | no | yes |
+  | `caura_doc_delete` | (delete) | no | yes |
+  | `caura_tune_get` | (read the current profile) | yes | no |
+
+  On this surface `caura_tune` only writes: a call that sets nothing but
+  `agent_id` (which on the default surface returns the current profile) is
+  refused with `TOOL_NOT_ON_SURFACE` naming `caura_tune_get`.
+
+  Each forwards its arguments to `caura_manage` or `caura_doc`, so trust,
+  scope, fleet and plan checks are the same as calling the original op, and a
+  rate-limited op draws on the same budget under either name.
+
+  The directory set is an allowlist: a tool a deployment adds outside these
+  (the collaboration build's `peer`) is neither listed nor callable there, and
+  a call to it is refused with `TOOL_NOT_ON_SURFACE`.
+
+  Responses there leave out internal fields: `trace_id`, `tool_call_id`,
+  `score_parts`, `system_metadata`, `evidence.trace`, and write telemetry in
+  `metadata` (`_system`, timings, write mode, weight source and the like). The
+  content, ids, authorship and trust, status, weight, `metadata.summary`, the
+  `embedding_pending` / `enrichment_pending` flags and the caller's own metadata
+  stay.
+
+  List results there carry their rows once, under `items`. The default surface
+  also repeats them under the `results` alias for existing parsers, which a
+  directory client does not have, and the copy only doubled what reached its
+  model. `caura_recall` and `caura_write` are described there by what they hold
+  ("the team's shared memory: decisions, facts, outcomes…") and the questions
+  they answer, since Claude clients with many connectors find tools by searching
+  those descriptions.
+
+A directory connection is also served its own wording where the default text
+does not meet the directory's requirements: the server instructions say to
+follow keystone rules and to tell the user about a conflict with their request,
+rather than that the rules override user instructions, and leave out the
+usage-skill install step. The `caura_keystones` description only says what the
+tool returns, since the directory's tool descriptions describe and do not
+direct.
+`caura_recall` points read-by-id at `caura_memory_read`.
+
+A tool is callable exactly where it is listed. Calling `caura_manage` or
+`caura_doc` on a directory connection, or one of the six on a default one,
+answers `TOOL_NOT_ON_SURFACE` with the tool to use instead. `GET
+/tool-descriptions` and `plugin/tools.json` describe the default set.
 
 ## When to add an operation
 

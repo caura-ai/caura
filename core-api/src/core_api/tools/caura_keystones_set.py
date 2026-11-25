@@ -43,6 +43,7 @@ _DESCRIPTION = (
 
 _SPEC = ToolSpec(
     name="caura_keystones_set",
+    title="Set keystone rules",
     description=_DESCRIPTION,
     handler=mcp_server.caura_keystones_set,
     plugin_exposed=False,

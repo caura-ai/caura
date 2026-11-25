@@ -15,15 +15,10 @@ Plan §15 Phase 2 deliverable:
   "Sentinel scanner pre-screens; auto-gates evaluator promotes
    candidate → staged when all 6 gates pass."
 
-The companion pre-apply hook (``rescan_before_apply``) is also here:
-right before an auto-promotion skips review and goes ``candidate →
-active`` (M-91), we re-run the Sentinel scan against the *current* doc
-body. This catches the case where the lake state changed between
-propose-time and apply-time (e.g. a new prompt-injection marker appeared
-in a cited memory's content, and the scan would now flag it). The
-operator's approve in ``routes/skills_inbox`` runs the same rescan
-inline, because it also persists the full ``ScanResult`` and can lift a
-critical verdict with ``override_quarantine`` (L-213).
+The companion pre-apply scan helper (``rescan_before_apply``) remains
+available to callers. Activation itself requires the Inbox route, which
+rescans the current bytes, persists the full ``ScanResult`` and requires
+explicit attributable review. Staging never skips that review.
 
 External callable injection (mirrors Forge's pattern):
 
@@ -91,11 +86,8 @@ class PromotionAttempt:
     so the operator UI / audit log can show "promoted: N, held: M
     (with breakdown)" without a second query.
 
-    ``target_status`` records WHERE a promoted candidate landed:
-    ``'staged'`` (the normal HITL path — surfaces in the Inbox) or
-    ``'active'`` (auto-approved — skipped the human gate because the
-    tenant opted into ``auto_promote_clean`` and the Sentinel scan
-    was clean). ``None`` for held candidates.
+    ``target_status`` is ``'staged'`` for passing candidates, which must
+    await Inbox approval. It is ``None`` for held candidates.
     """
 
     doc_id: str
@@ -111,11 +103,7 @@ class PromoterRunResult:
     scanned: int
     promoted: int
     held: int
-    # Subset of ``promoted`` that went straight to ``active`` via
-    # ``auto_promote_clean`` (skipping the Inbox). ``promoted`` is the
-    # total; ``auto_approved`` is the auto-activated slice, so
-    # ``promoted - auto_approved`` is the count that landed in
-    # ``staged`` for human review.
+    # Kept for response compatibility; automatic activation is retired. Always zero.
     auto_approved: int = 0
     attempts: tuple[PromotionAttempt, ...] = field(default_factory=tuple)
 
@@ -199,43 +187,8 @@ def make_db_status_updater(*, expected_status: str) -> StatusUpdaterCallable:
 # ── Tick entry point ───────────────────────────────────────────────
 
 
-def _scan_warned(doc: dict) -> bool:
-    """True when the candidate's stamped scan counted any warning.
-
-    ``auto_promote_clean`` sends such a candidate to the inbox. The rescan
-    before activation is checked the same way, so a stamp that understates
-    its warnings activates nothing either.
-    """
-    scan = doc.get("scan") or {}
-    if not isinstance(scan, dict):
-        return True
-    try:
-        return int(scan.get("warn", 0) or 0) > 0
-    except (TypeError, ValueError):
-        return True
-
-
 def _scan_is_clean(doc: dict) -> bool:
-    """True iff the candidate's stamped Sentinel scan is fully clean
-    (``state='clean'`` AND no critical findings).
-
-    The candidate's ``data.scan`` is written at Forge-distill time
-    (``forge_service._distill_cluster`` runs ``scan_skill_doc`` and
-    stamps the result). A ``status='candidate'`` doc's scan reflects its
-    current content: the only path that mutates a candidate's content is
-    the Inbox ``edit`` endpoint, which re-runs the scan AND leaves the doc
-    in ``staged``. But it reflects the scanner that stamped it, and a
-    candidate minted before a scanner fix kept an old ``clean`` (M-91).
-    So this check is necessary, not sufficient: the auto-activate branch
-    also re-runs the scan (``rescan_before_apply``).
-
-    NOTE: auto-gate G5 already requires ``scan.state == 'clean'`` for
-    ``gates.promote`` to be True, so this check is partially redundant
-    with the gate. We re-assert it locally anyway so the
-    security-critical "only a clean scan auto-activates" invariant is
-    self-contained at the decision site and not load-bearing on an
-    unrelated gate that could be relaxed in a future refactor.
-    """
+    """Whether a stored scan is clean; this never authorizes activation."""
     scan = doc.get("scan") or {}
     if not isinstance(scan, dict):
         return False
@@ -269,39 +222,10 @@ async def promote_pending_candidates(
     ``org_settings.skills_factory.inbox_max_pending`` — beyond that,
     the Inbox is the relief valve).
 
-    ``auto_promote_clean`` (opt-in, from
-    ``org_settings.skills_factory.sentinel.auto_promote_clean``) routes
-    a candidate that passed ALL six auto-gates AND carries a clean
-    Sentinel scan straight to ``status='active'`` instead of
-    ``'staged'`` — skipping the HITL Inbox. It NEVER bypasses the
-    gates: a candidate that fails any gate is held exactly as before;
-    the flag only changes the DESTINATION of an already-passing
-    candidate. Candidates with a non-clean scan never reach the
-    promote branch (gate G5 holds them), so they can't be
-    auto-activated regardless of the flag.
-
-    A scan with only warnings is clean, so under this flag a skill whose text
-    carries a ``DESTRUCTIVE_COMMAND`` warning (``mkfs`` on a data volume,
-    ``dd`` for a swapfile, ``chmod 777`` on a directory, ``rm -rf`` below a
-    top-level directory) auto-activates, as one with an outbound-URL warning
-    always has. That is the owner's decision of 2026-10-05 (M-120): those lines
-    are routine in a runbook, and a tenant that wants every warning seen leaves
-    this flag off. ``dd`` or ``mkfs`` onto a disk warns whatever the disk, the
-    boot disk included, since the text cannot tell it from a data volume. A
-    root, home or system-directory wipe, ``chmod 777`` on one, pipe-to-shell
-    and a downloaded script that is run are critical and never reach
-    ``active`` this way.
-
-    The stamped scan answers for the scanner that wrote it, so a candidate
-    the flag would activate is scanned again first, under the tenant's size
-    caps (``body_max_bytes`` / ``description_max_bytes``); one the current
-    scanner does not pass goes to the inbox instead (M-91). Its stored
-    ``data.scan`` stays stale: the status flip is storage's status-only CAS
-    and writes nothing else, so its inbox card can still show ``clean``. The
-    log names the findings that held it back, and inbox approve rescans
-    before ``active``, so the stale stamp activates nothing.
-    TODO(M-120 follow-up): write the fresh scan with the flip once storage's
-    status CAS can carry it.
+    Every passing candidate lands ``staged`` for explicit review. The retired
+    ``auto_promote_clean`` argument remains accepted for older callers but has
+    no effect, including when cached settings still say True. Existing active
+    skills are outside this candidate query and are not changed.
     """
     now = now or datetime.now(UTC)
     sc = get_storage_client()
@@ -357,40 +281,8 @@ async def promote_pending_candidates(
             freshness_window_days=freshness_window_days,
         )
         if gates.promote:
-            # Destination: ``active`` when the tenant opted into
-            # auto-promotion AND the Sentinel scan found nothing at all;
-            # otherwise the normal HITL ``staged`` path. The candidate
-            # has already cleared all six gates by this point —
-            # ``auto_promote_clean`` only chooses where it lands, never
-            # whether it lands.
-            #
-            # Nothing at all, warnings included: M-120 keeps routine admin
-            # lines and URL patterns at warn so a person in the inbox can
-            # accept them, and on this path there is no person.
-            is_auto = auto_promote_clean and _scan_is_clean(doc) and not _scan_warned(doc)
-            if is_auto:
-                # M-91: a candidate minted before a scanner fix keeps its old
-                # ``clean`` stamp. Re-run the scan, as the inbox approve does,
-                # before anything skips human review.
-                verdict = await rescan_before_apply(
-                    doc, body_max_bytes=body_max_bytes, description_max_bytes=description_max_bytes
-                )
-                is_auto = verdict.allow and not verdict.findings
-                if not is_auto:
-                    # The doc keeps its stale ``clean`` stamp (the status flip
-                    # writes nothing else), so say here what held it back: the
-                    # critical and fatal findings when there are any, else the
-                    # warnings. The inbox approve rescans before ``active``, so
-                    # the stamp alone never activates it.
-                    blocking = {f.code for f in verdict.findings if f.severity == "critical" or f.fatal}
-                    held_by = blocking or {f.code for f in verdict.findings}
-                    logger.warning(
-                        "skill_promoter: doc %s held for review: the rescan is %s (%s)",
-                        doc_id,
-                        verdict.state,
-                        ", ".join(sorted(held_by)) or "fatal finding",
-                    )
-            target_status = "active" if is_auto else "staged"
+            # Quality gates determine admission to review, never activation.
+            target_status = "staged"
             try:
                 await status_updater(tenant_id, "skills", doc_id, target_status)
             except AlreadyTransitionedError:
@@ -414,8 +306,6 @@ async def promote_pending_candidates(
                 attempts.append(PromotionAttempt(doc_id=doc_id, promoted=False, gates=gates))
                 continue
             promoted += 1
-            if is_auto:
-                auto_approved += 1
             attempts.append(
                 PromotionAttempt(
                     doc_id=doc_id,
@@ -435,7 +325,7 @@ async def promote_pending_candidates(
     # gone with the direct-DB session.
     logger.info(
         "skill_promoter tick: tenant=%s fleet=%s scanned=%d promoted=%d "
-        "(auto_approved=%d → active, %d → staged) held=%d",
+        "(auto_approved=%d, %d → staged) held=%d",
         tenant_id,
         fleet_id,
         len(attempts),

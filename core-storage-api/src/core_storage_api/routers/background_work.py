@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import timedelta
+import random
+from datetime import datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -12,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 from sqlalchemy import case, delete, func, literal, select, text, true, update
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from common.models.background_work import (
     BackgroundModelBudget as Budget,
@@ -29,6 +31,24 @@ from core_storage_api.services.postgres_service import get_session
 router = APIRouter(prefix="/background-work", tags=["BackgroundWork"])
 logger = logging.getLogger(__name__)
 MAX_REPLAY_ATTEMPTS = 8
+
+# Consecutive scheduling deferrals of one item back off from 5s, doubling to a
+# 300s cap. Each delay is drawn from the upper half of its step, so a burst's
+# deferrals spread out while each step still starts where the last one ended.
+# A deferral used to wait exactly the caller's hint, one second for busy model
+# slots, and a contradiction check whose tenant stayed busy came back every
+# second or two, 301 times in 48 hours for one memory. 5s gives the calls that
+# hold the slots time to finish; the cap bounds how late a check runs once the
+# burst passes, and a tenant's deferred backlog to one replay per item per five
+# minutes. Deferrals still never exhaust: they are scheduling, not failure.
+DEFERRAL_BASE_SECONDS = 5
+DEFERRAL_CAP_SECONDS = 300
+
+
+def _deferral_delay(deferrals: int, hint: int) -> int:
+    """Seconds until an item deferred ``deferrals`` times in a row is due, at least ``hint``."""
+    step = min(DEFERRAL_CAP_SECONDS, DEFERRAL_BASE_SECONDS * 2 ** min(max(0, deferrals - 1), 16))
+    return max(hint, math.ceil(random.uniform(step / 2, step)))
 
 
 def _due_tenants_query(after_tenant: str | None, limit: int):
@@ -108,6 +128,61 @@ class Reserve(BaseModel):
     operation: str = Field(min_length=1, max_length=200)
 
 
+async def _refusal(
+    session: AsyncSession, tenant_id: str, now: datetime
+) -> tuple[dict | None, int, datetime | None]:
+    """The answer ``/reserve`` refuses with at ``now``, or ``None`` to admit.
+
+    Also returns the 60-second window's attempt count and its oldest admission,
+    which ``/reserve`` keeps on the tenant's budget row. Shared with
+    ``/admission`` so a check and a reservation cannot disagree on the rules.
+    """
+    # Count the last 60 seconds, not a wall-clock minute: adjacent bursts
+    # cannot get two windows' allowance. Released reservations still count as
+    # spent attempts. Active leases come from the same pass over the tenant's
+    # reservations, since this runs on every check as well as every reserve.
+    in_window = Reservation.admitted_at > now - timedelta(seconds=60)
+    recent, oldest, active = (
+        await session.execute(
+            select(
+                func.count().filter(in_window),
+                func.min(Reservation.admitted_at).filter(in_window),
+                func.count().filter(Reservation.released.is_(False), Reservation.expires_at > now),
+            ).where(Reservation.tenant_id == tenant_id)
+        )
+    ).one()
+    if recent >= settings.background_llm_attempts_per_minute:
+        window_start = oldest or now
+        retry_after = max(1, math.ceil((window_start + timedelta(seconds=60) - now).total_seconds()))
+        return {"allowed": False, "retry_after_seconds": retry_after}, recent, oldest
+    if active >= settings.background_llm_concurrency:
+        return {"allowed": False, "retry_after_seconds": 1, "reason": "tenant_slots_busy"}, recent, oldest
+    return None, recent, oldest
+
+
+class Admission(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tenant_id: Tenant
+
+
+@router.post("/admission")
+async def admission(request: Request) -> dict:
+    """Whether ``/reserve`` would admit an attempt for this tenant now.
+
+    Reserves nothing, so asking spends none of the allowance and holds no slot;
+    it takes no lock either, so the answer can be stale by the time a caller
+    reserves. For background work that does expensive reads before its first
+    model call: asking first lets it defer before those reads.
+    """
+    data = await request.json()
+    _validated(Admission, data)
+    tenant_id = _require(data, "tenant_id")
+    async with get_session() as session:
+        now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+        refusal, _, _ = await _refusal(session, tenant_id, now)
+    return refusal or {"allowed": True, "retry_after_seconds": 0}
+
+
 @router.post("/reserve")
 async def reserve(request: Request) -> dict:
     data = await request.json()
@@ -146,42 +221,12 @@ async def reserve(request: Request) -> dict:
             if replay.released:
                 return {"allowed": False, "retry_after_seconds": 60, "reason": "reservation_released"}
             return {"allowed": True, "retry_after_seconds": 0}
-        # Count the last 60 seconds, not a wall-clock minute: adjacent bursts
-        # cannot get two windows' allowance. The tenant row serializes count +
-        # insert, and released reservations still count as spent attempts.
-        recent, oldest = (
-            await session.execute(
-                select(
-                    func.count(),
-                    func.min(Reservation.admitted_at),
-                ).where(
-                    Reservation.tenant_id == tenant_id,
-                    Reservation.admitted_at > now - timedelta(seconds=60),
-                )
-            )
-        ).one()
+        # The tenant row serializes this count with the insert below.
+        refusal, recent, oldest = await _refusal(session, tenant_id, now)
         budget.used = recent
         budget.window_start = oldest or now
-        if recent >= settings.background_llm_attempts_per_minute:
-            return {
-                "allowed": False,
-                "retry_after_seconds": max(
-                    1, math.ceil((budget.window_start + timedelta(seconds=60) - now).total_seconds())
-                ),
-            }
-        active = (
-            await session.execute(
-                select(func.count())
-                .select_from(Reservation)
-                .where(
-                    Reservation.tenant_id == tenant_id,
-                    Reservation.released.is_(False),
-                    Reservation.expires_at > now,
-                )
-            )
-        ).scalar_one()
-        if active >= settings.background_llm_concurrency:
-            return {"allowed": False, "retry_after_seconds": 1, "reason": "tenant_slots_busy"}
+        if refusal is not None:
+            return refusal
         inserted = (
             await session.execute(
                 insert(Reservation)
@@ -249,24 +294,38 @@ async def defer(request: Request) -> dict:
         now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
         # One reference per memory/path, not one row per trigger. A generation
         # prevents completion of an older claim from deleting a newer deferral.
-        await session.execute(
-            insert(Work)
-            .values(
-                tenant_id=tenant_id,
-                kind=body.kind,
-                memory_id=body.memory_id,
-                available_at=now + timedelta(seconds=body.retry_after_seconds),
-                lease_until=now,
+        reopen = Work.terminal_reason.is_not(None)
+        deferrals = (
+            await session.execute(
+                insert(Work)
+                .values(
+                    tenant_id=tenant_id,
+                    kind=body.kind,
+                    memory_id=body.memory_id,
+                    available_at=now,
+                    lease_until=now,
+                    deferrals=1,
+                )
+                .on_conflict_do_update(
+                    index_elements=[Work.tenant_id, Work.kind, Work.memory_id],
+                    set_={
+                        "lease_until": now,
+                        "generation": Work.generation + 1,
+                        "terminal_reason": None,
+                        "attempts": case((reopen, 0), else_=Work.attempts),
+                        "deferrals": case((reopen, 1), else_=Work.deferrals + 1),
+                    },
+                )
+                .returning(Work.deferrals)
             )
-            .on_conflict_do_update(
-                index_elements=[Work.tenant_id, Work.kind, Work.memory_id],
-                set_={
-                    "available_at": now + timedelta(seconds=body.retry_after_seconds),
-                    "lease_until": now,
-                    "generation": Work.generation + 1,
-                    "terminal_reason": None,
-                    "attempts": case((Work.terminal_reason.is_not(None), 0), else_=Work.attempts),
-                },
+        ).scalar_one()
+        # A new trigger for a pending item is another deferral of it: it keeps
+        # the backoff rather than pulling the item back to the caller's hint.
+        await session.execute(
+            update(Work)
+            .where(Work.tenant_id == tenant_id, Work.kind == body.kind, Work.memory_id == body.memory_id)
+            .values(
+                available_at=now + timedelta(seconds=_deferral_delay(deferrals, body.retry_after_seconds))
             )
         )
     return {"queued": True}
@@ -285,6 +344,16 @@ async def claim(request: Request) -> dict:
     tenant_id = _require(data, "tenant_id")
     async with get_session() as session:
         now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+        # Every kind here is deferred work that calls a model. While the
+        # tenant's budget would refuse that call, a claimed item would only
+        # read its memory, meet the refusal and defer again, a few storage
+        # round trips per item per poll. Claiming nothing costs one query per
+        # poll instead, and the items keep their place: none is claimed, so
+        # none counts an attempt or a deferral. The cost is that an item which
+        # would not have needed a slot (an embedding still pending) waits too.
+        refusal, _, _ = await _refusal(session, tenant_id, now)
+        if refusal is not None:
+            return {"items": []}
         works = (
             (
                 await session.execute(
@@ -360,8 +429,10 @@ async def finish(request: Request) -> dict:
         attempts = max(0, work.attempts - 1) if body.deferred else work.attempts
         exhausted = body.retry and attempts >= MAX_REPLAY_ATTEMPTS
         if body.retry and not exhausted:
+            # A failure ends a run of deferrals; the next deferral starts over.
+            deferrals = work.deferrals + 1 if body.deferred else 0
             delay = (
-                body.retry_after_seconds
+                _deferral_delay(deferrals, body.retry_after_seconds)
                 if body.deferred
                 else max(body.retry_after_seconds, min(3600, 60 * 2 ** max(0, attempts - 1)))
             )
@@ -370,6 +441,7 @@ async def finish(request: Request) -> dict:
                 .where(*predicate)
                 .values(
                     attempts=attempts,
+                    deferrals=deferrals,
                     # Consume this completion exactly once: a repeated finish
                     # must not refund another failure or postpone work again.
                     generation=work.generation + 1,

@@ -19,10 +19,15 @@ OUTPUT = Path("plugin/tools.json")
 
 
 def build_payload() -> list[dict]:
-    """Compose the JSON payload exported to the plugin."""
-    from core_api.tools import REGISTRY, to_descriptor_json
+    """Compose the JSON payload exported to the plugin.
 
-    specs = sorted(REGISTRY.values(), key=lambda s: s.name)
+    The default tool surface only: the plugin is a default-surface client, and
+    the directory surface's split tools (``core_api.tools.Surface``) are
+    MCP-only, so the manifest does not carry them.
+    """
+    from core_api.tools import DEFAULT_SURFACE, specs_for_surface, to_descriptor_json
+
+    specs = sorted(specs_for_surface(DEFAULT_SURFACE), key=lambda s: s.name)
     return [to_descriptor_json(s) for s in specs]
 
 

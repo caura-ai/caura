@@ -9,16 +9,16 @@
 # lands in the image. Runtime activation is further gated by
 # docker-entrypoint.sh on DD_API_KEY.
 ARG DD_APM_ENABLED=false
-FROM datadog/serverless-init:1@sha256:6cb81a6eb0af744cbcda72047db3d1bd97ea5743d4e61dc7fe04a630b7b5100f AS dd-bin
+FROM datadog/serverless-init:1@sha256:b3e42ded76db9c506973132bac1f4af9db073215ba252b6fddd533f0977f5ab5 AS dd-bin
 # python:3.12-slim (3.12.15 on 2026-10-07) and uv are pinned by digest, as their
 # tags move (L-67); Dependabot's docker updates propose each new digest.
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS dd-apm-true
+FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS dd-apm-true
 COPY --from=dd-bin /datadog-init /dd/datadog-init
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS dd-apm-false
+FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS dd-apm-false
 RUN mkdir -p /dd
 FROM dd-apm-${DD_APM_ENABLED} AS dd-apm-src
 
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS builder
+FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS builder
 
 WORKDIR /app
 
@@ -45,7 +45,7 @@ COPY core-worker/src/ /app/core-worker/src/
 
 
 # ── Production image ──
-FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS runtime
+FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS runtime
 
 RUN useradd --create-home --shell /bin/bash appuser
 

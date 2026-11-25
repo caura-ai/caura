@@ -980,6 +980,15 @@ CRYSTALLIZER_HIGH_PII_COUNT = 10
 CRYSTALLIZER_MAX_BATCH_SIZE = 50  # max memories per crystallization batch
 CRYSTALLIZER_MIN_CLUSTER_SIZE = 3  # min memories in a cluster to trigger crystallization
 CRYSTALLIZER_DEDUP_BATCH_SIZE = 500  # memories per ANN batch during dedup scan
+# A batch that times out is retried at this size, and a window that times out
+# at this size is skipped for this run. Straight here rather than halving: the
+# batch that timed out in prod needed ~13x storage's 60s statement timeout
+# (770s, ~1.5s per row), and every halving step on the way down would cost
+# another timeout on the primary. 25 rows at that rate is ~40s.
+CRYSTALLIZER_DEDUP_RETRY_BATCH_SIZE = 25
+# Wall-clock budget for one dedup sweep. No batch starts after it is spent; the
+# rows swept so far are kept and the next run carries on from them.
+CRYSTALLIZER_DEDUP_SWEEP_BUDGET_SECONDS = 300.0
 CRYSTALLIZER_DEDUP_NEIGHBORS = 5  # top-K neighbors to check per memory
 CRYSTALLIZER_MAX_DEDUP_PAIRS = 1000  # safety valve: cap total near-dup pairs per run
 

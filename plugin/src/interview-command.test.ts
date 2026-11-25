@@ -95,7 +95,7 @@ describe("interview_request command handler", () => {
     await appendInterviewEvent({ role: "user", kind: "message", content: "secret window" });
 
     await __DEPLOY_INTERNALS__.processCommand({
-      id: "cmd-disabled",
+      id: "11111111-1111-4111-8111-000000000001",
       command: "interview_request",
       payload: { node_id: "node-uuid-1", since_seq: 0 },
     });
@@ -114,7 +114,7 @@ describe("interview_request command handler", () => {
 
   test("missing node_id reports failed", async () => {
     await __DEPLOY_INTERNALS__.processCommand({
-      id: "cmd-nonode",
+      id: "11111111-1111-4111-8111-000000000002",
       command: "interview_request",
       payload: { since_seq: 0 },
     });
@@ -125,7 +125,7 @@ describe("interview_request command handler", () => {
 
   test("empty buffer reports done with submitted:false and no submit call", async () => {
     await __DEPLOY_INTERNALS__.processCommand({
-      id: "cmd-empty",
+      id: "11111111-1111-4111-8111-000000000003",
       command: "interview_request",
       payload: { node_id: "node-uuid-1", since_seq: 0 },
     });
@@ -146,7 +146,7 @@ describe("interview_request command handler", () => {
     };
 
     await __DEPLOY_INTERNALS__.processCommand({
-      id: "cmd-happy",
+      id: "11111111-1111-4111-8111-000000000004",
       command: "interview_request",
       payload: { node_id: "node-uuid-1", since_seq: 0, template_id: "default-v1" },
     });
@@ -157,7 +157,7 @@ describe("interview_request command handler", () => {
     const sb = submit!.body!;
     assert.equal(sb.tenant_id, "t-test");
     assert.equal(sb.node_id, "node-uuid-1");
-    assert.equal(sb.command_id, "cmd-happy");
+    assert.equal(sb.command_id, "11111111-1111-4111-8111-000000000004");
     assert.equal(sb.cursor_from, 0);
     assert.equal(sb.cursor_to, 2);
     assert.equal((sb.events as unknown[]).length, 3);
@@ -180,7 +180,7 @@ describe("interview_request command handler", () => {
     submitResponse = { status: 200, body: { status: "committed", watermark: 3 } };
 
     await __DEPLOY_INTERNALS__.processCommand({
-      id: "cmd-cursor",
+      id: "11111111-1111-4111-8111-000000000005",
       command: "interview_request",
       payload: { node_id: "node-uuid-1", since_seq: 2 },
     });
@@ -198,7 +198,7 @@ describe("interview_request command handler", () => {
     submitResponse = { status: 500, body: { detail: "interview ingest failed" } };
 
     await __DEPLOY_INTERNALS__.processCommand({
-      id: "cmd-fail",
+      id: "11111111-1111-4111-8111-000000000006",
       command: "interview_request",
       payload: { node_id: "node-uuid-1", since_seq: 0 },
     });
@@ -219,7 +219,7 @@ describe("interview_request command handler", () => {
     submitResponse = { status: 200, body: { ok: true } };
 
     await __DEPLOY_INTERNALS__.processCommand({
-      id: "cmd-no-watermark",
+      id: "11111111-1111-4111-8111-000000000007",
       command: "interview_request",
       payload: { node_id: "node-uuid-1", since_seq: 0 },
     });

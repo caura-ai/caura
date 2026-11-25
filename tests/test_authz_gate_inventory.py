@@ -449,7 +449,6 @@ PLANE_GATE_ALLOWLIST: dict[str, str] = {
     # credential clears it. That is the same deployment caveat the plane gate
     # itself carries — standalone shares one key and ``X-Agent-ID`` is
     # caller-supplied, so there is no agent/tenant boundary there to protect.
-    "POST /api/v1/skills-inbox/{slug:path}/approve": "admin-only via _require_inbox_admin",
     "POST /api/v1/skills-inbox/{slug:path}/reject": "admin-only via _require_inbox_admin",
     "POST /api/v1/skills-inbox/{slug:path}/quarantine": "admin-only via _require_inbox_admin",
     "POST /api/v1/skills-inbox/{slug:path}/defer": "admin-only via _require_inbox_admin",

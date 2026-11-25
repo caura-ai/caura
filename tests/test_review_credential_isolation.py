@@ -212,6 +212,7 @@ def _review(
             "GH_TOKEN": GITHUB_KEY,
             "CAURA_AGENTS_KEY": CAURA_KEY,
             "GITHUB_STEP_SUMMARY": str(summary),
+            "GITHUB_OUTPUT": str(tmp_path / "github-output"),
         },
         capture_output=True,
         text=True,
@@ -303,6 +304,19 @@ def test_a_transport_that_cannot_start_shows_its_error_but_no_secret(tmp_path, l
     assert "transport unavailable" in posted
     assert KEY not in result.stdout + result.stderr + posted
     assert ("Address already in use" in result.stderr) is not leak
+
+
+@pytest.mark.parametrize(
+    "output, code",
+    [(json.dumps({"result": "Review: fine."}), 0), ("not json", 0), ("{}", 1)],
+    ids=["review", "invalid-output", "cli-failure"],
+)
+def test_every_comment_tells_the_workflow_one_was_posted(tmp_path, output, code):
+    # The workflow's last step comments only when this output is missing, so a run
+    # that already commented, review or failure notice, must never get a second one.
+    _, posted, _ = _review(tmp_path, output, code=code)
+    assert posted
+    assert (tmp_path / "github-output").read_text() == "posted=true\n"
 
 
 def test_safe_review_preserves_body_and_validates_telemetry(tmp_path):

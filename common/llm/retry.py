@@ -27,6 +27,7 @@ from uuid import uuid4
 
 from common.background_work import (
     BackgroundWorkDeferred,
+    check_background_admission,
     release_background_attempt,
     reserve_background_attempt,
 )
@@ -79,6 +80,43 @@ async def _release_background_reservation(reservation: dict) -> None:
         )
 
 
+def _parse_admission(decision: object) -> tuple[str, int] | None:
+    """``None`` if storage admits the attempt, else its ``(reason, delay)``.
+
+    Raises ``ValueError`` for an answer that is neither, and each caller
+    decides what that means: a reservation refuses, a check lets the call
+    through to the reservation.
+    """
+    if not isinstance(decision, dict) or type(decision.get("allowed")) is not bool:
+        raise ValueError("invalid reservation decision")
+    if decision["allowed"]:
+        return None
+    delay = decision.get("retry_after_seconds", 60)
+    if type(delay) is not int or not 1 <= delay <= 3600:
+        raise ValueError("invalid retry interval")
+    reason = (
+        decision["reason"]
+        if decision.get("reason") in {"tenant_slots_busy", "reservation_released"}
+        else "budget_exhausted"
+    )
+    return reason, delay
+
+
+def _deferred(scope, reason: str, delay: int, **extra) -> BackgroundWorkDeferred:
+    # Never include provider/storage bodies or raw exception tracebacks here.
+    logger.info(
+        "background model work deferred",
+        extra={
+            "reason": reason,
+            "tenant_id": scope.tenant_id,
+            "operation": scope.operation,
+            "retry_after_seconds": delay,
+            **extra,
+        },
+    )
+    return BackgroundWorkDeferred(reason, delay)
+
+
 async def _admit_background_attempt() -> dict | None:
     scope = current_scope()
     if scope is None or not scope.background:
@@ -96,39 +134,46 @@ async def _admit_background_attempt() -> dict | None:
                 ),
                 timeout=5,
             )
-            if (
-                not isinstance(decision, dict)
-                or type(decision.get("allowed")) is not bool
-            ):
-                raise ValueError("invalid reservation decision")
-            if decision["allowed"]:
+            refusal = _parse_admission(decision)
+            if refusal is None:
                 return reservation
-            delay = decision.get("retry_after_seconds", 60)
-            if type(delay) is not int or not 1 <= delay <= 3600:
-                raise ValueError("invalid retry interval")
-            reason = (
-                decision["reason"]
-                if decision.get("reason")
-                in {"tenant_slots_busy", "reservation_released"}
-                else "budget_exhausted"
-            )
+            reason, delay = refusal
         except asyncio.CancelledError:
             await _release_background_reservation(reservation)
             raise
         except Exception:
             await _release_background_reservation(reservation)
             reason, delay = "budget_unavailable", 60
-    # Never include provider/storage bodies or raw exception tracebacks here.
-    logger.info(
-        "background model work deferred",
-        extra={
-            "reason": reason,
-            "tenant_id": scope.tenant_id,
-            "operation": scope.operation,
-            "retry_after_seconds": delay,
-        },
-    )
-    raise BackgroundWorkDeferred(reason, delay) from None
+    raise _deferred(scope, reason, delay) from None
+
+
+async def require_background_admission() -> None:
+    """Defer now if a background model call would be refused now.
+
+    For work that reads storage before its first model call. Without this, the
+    contradiction checks ran their candidate queries, then met a full tenant
+    budget at the judge, deferred, and on replay ran the same queries again,
+    as often as once a second.
+
+    Asks without reserving, so it spends none of the tenant's allowance and
+    holds no slot. The model call still reserves, and can still be refused if
+    the slots fill in between. Fails open: outside a background scope, with no
+    checker registered, or when the check errors or answers nonsense, it
+    returns and leaves the decision to the reservation.
+    """
+    scope = current_scope()
+    if scope is None or not scope.background or not (scope.tenant_id or "").strip():
+        return
+    try:
+        refusal = _parse_admission(
+            await asyncio.wait_for(
+                check_background_admission(tenant_id=scope.tenant_id), timeout=2
+            )
+        )
+    except Exception:
+        return
+    if refusal is not None:
+        raise _deferred(scope, *refusal, stage="precheck")
 
 
 async def _run_reserved_attempt(

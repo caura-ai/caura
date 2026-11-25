@@ -47,6 +47,16 @@ EXPECTED_PLUGIN_EXPOSED = {
 # REST/MCP, agents do not.
 EXPECTED_MCP_ONLY = {
     "caura_keystones_set",
+    # The Claude connector-directory surface's narrowings of caura_manage and
+    # caura_doc (tests/test_tool_surfaces.py). The plugin keeps the originals.
+    "caura_memory_read",
+    "caura_memory_update",
+    "caura_memory_delete",
+    "caura_doc_read",
+    "caura_doc_write",
+    "caura_doc_delete",
+    # caura_tune's read form, split out on the directory surface.
+    "caura_tune_get",
 }
 
 EXPECTED_PLACEHOLDERS: set[str] = set()

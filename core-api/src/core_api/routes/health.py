@@ -25,7 +25,7 @@ from core_api.providers._platform import (
 from core_api.routes.plugin import _plugin_version
 from core_api.service_agent_ids import canonical_service_agent_id
 from core_api.services.agent_service import lookup_agent
-from core_api.tools import REGISTRY  # SoT registry — populated at import time
+from core_api.tools import DEFAULT_SURFACE, specs_for_surface  # SoT registry — populated at import time
 from core_api.version_compat import MIN_RECOMMENDED_PLUGIN_VERSION
 
 logger = logging.getLogger(__name__)
@@ -248,16 +248,21 @@ async def tool_descriptions(enriched: bool = False):
 
     The registry is the single source of truth — ``stm_only`` is
     derived from ``spec.plugin_exposed`` (inverted).
+
+    Describes the DEFAULT tool surface — the set API-key agents and the
+    OpenClaw plugin are served. The directory surface's split tools are MCP-only
+    and listed to directory connections by ``tools/list`` alone.
     """
+    specs = specs_for_surface(DEFAULT_SURFACE)
     if enriched:
         return {
             spec.name: {
                 "description": spec.description,
                 "stm_only": not spec.plugin_exposed,
             }
-            for spec in REGISTRY.values()
+            for spec in specs
         }
-    return {spec.name: spec.description for spec in REGISTRY.values()}
+    return {spec.name: spec.description for spec in specs}
 
 
 async def _probe_storage() -> tuple[str, bool]:

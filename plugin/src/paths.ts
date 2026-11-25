@@ -30,3 +30,13 @@ export function getSecretsPath(): string {
 export function getInstallStatePath(): string {
   return join(getPluginDir(), "install.json");
 }
+
+/** Private enrollment journal, separate from the legacy diagnostic install ID. */
+export function getInstallAuthorityPath(): string {
+  return join(getPluginDir(), ".installation-authority.json");
+}
+
+/** Bound agent keys and pending operations; never adopted by the legacy runtime. */
+export function getInstallAgentKeysPath(): string {
+  return join(getPluginDir(), ".installation-agent-keys.json");
+}

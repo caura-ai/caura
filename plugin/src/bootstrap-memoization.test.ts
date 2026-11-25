@@ -2,17 +2,14 @@
  * Tests for the process-level bootstrap memoization (CAURA-000).
  *
  * Pins the contract that ``CauraContextEngine.bootstrap()`` runs the
- * smoke test (write → search → delete) AT MOST ONCE per Node process,
+ * authenticated read-only probe AT MOST ONCE per Node process,
  * regardless of how many engine instances OpenClaw constructs. The
  * customer's goodclaw window logged 390 ``ContextEngine bootstrap``
  * events in 31.4h pre-fix (12/hr); post-fix expectation is 1 per process
  * lifetime (with retry-on-failure preserved).
  *
- * The tests mock ``globalThis.fetch`` and count "smoke-shaped" requests
- * (``POST /memories`` with the ``__smoke_test__`` marker in
- * ``metadata.tags``) — this
- * isolates the memoization contract from the rest of the smoke test's
- * internal mechanics (parseSearchItems, similarity threshold, etc.).
+ * The tests mock ``globalThis.fetch`` and count GET /whoami probes;
+ * every bootstrap request must be read-only.
  */
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -106,19 +103,9 @@ function restoreConsole(): void {
   console.error = originalError;
 }
 
-function countSmokeWrites(): number {
-  return calls.filter(
-    (c) =>
-      c.method === "POST" &&
-      c.url.includes("/memories") &&
-      !c.url.includes("/memories/") && // exclude DELETE /memories/{id}
-      // SAFE-01: the marker moved from a top-level ``tags`` key — which
-      // POST /memories never declared, and silently discarded — into
-      // ``metadata.tags``, the caller-owned bag that actually persists.
-      (c.body as { metadata?: { tags?: string[] } })?.metadata?.tags?.includes(
-        "__smoke_test__",
-      ) === true,
-  ).length;
+function countReadOnlyProbes(): number {
+  assert.ok(calls.every(c => c.method === "GET"), "bootstrap must never write");
+  return calls.filter(c => c.method === "GET" && c.url.endsWith("/whoami")).length;
 }
 
 describe("CauraContextEngine — process-level bootstrap memoization (CAURA-000)", () => {
@@ -136,7 +123,7 @@ describe("CauraContextEngine — process-level bootstrap memoization (CAURA-000)
     _resetBootstrapForTests();
   });
 
-  test("two engine instances share one smoke test (the headline fix)", async () => {
+  test("two engine instances share one read-only probe (the headline fix)", async () => {
     const engine1 = new CauraContextEngine({ sessionId: "session-a" });
     const engine2 = new CauraContextEngine({ sessionId: "session-b" });
 
@@ -144,20 +131,20 @@ describe("CauraContextEngine — process-level bootstrap memoization (CAURA-000)
     await engine2.bootstrap();
 
     assert.equal(
-      countSmokeWrites(),
+      countReadOnlyProbes(),
       1,
-      "expected exactly 1 smoke-test write across both engine instances " +
+      "expected exactly 1 read-only probe across both engine instances " +
         "(was: 2 pre-fix — every fresh engine ran its own smoke). " +
-        `Saw ${countSmokeWrites()} smoke writes in ${calls.length} total fetch calls.`,
+        `Saw ${countReadOnlyProbes()} probes in ${calls.length} total fetch calls.`,
     );
   });
 
-  test("ten concurrent engine instances share one smoke test (race-safe)", async () => {
+  test("ten concurrent engine instances share one read-only probe (race-safe)", async () => {
     // The ``if (!_x) _x = ...`` pattern is safe in Node's single-threaded
     // event loop because the first synchronous assignment wins and every
     // other concurrent caller sees the already-set promise. This test
     // pins that guarantee — a regression to per-instance state would
-    // race-trigger N smoke writes here.
+    // race-trigger N probes here.
     const engines = Array.from(
       { length: 10 },
       (_, i) => new CauraContextEngine({ sessionId: `session-${i}` }),
@@ -165,9 +152,9 @@ describe("CauraContextEngine — process-level bootstrap memoization (CAURA-000)
     await Promise.all(engines.map((e) => e.bootstrap()));
 
     assert.equal(
-      countSmokeWrites(),
+      countReadOnlyProbes(),
       1,
-      `expected 1 smoke write across 10 concurrent engines; saw ${countSmokeWrites()}`,
+      `expected 1 probe across 10 concurrent engines; saw ${countReadOnlyProbes()}`,
     );
   });
 
@@ -189,9 +176,9 @@ describe("CauraContextEngine — process-level bootstrap memoization (CAURA-000)
     );
   });
 
-  test("backend 500 on smoke write does NOT reject bootstrap (existing contract preserved)", async () => {
-    // ``_doBootstrap`` has an inner try/catch that swallows smoke-write
-    // failures via ``logErrorCritical("SMOKE TEST ERROR", ...)``. This
+  test("backend 500 on the probe does NOT reject bootstrap (existing contract preserved)", async () => {
+    // ``_doBootstrap`` has an inner try/catch that swallows probe
+    // failures via ``logErrorCritical("BOOTSTRAP PROBE ERROR", ...)``. This
     // was the pre-memoization behavior and we PRESERVE it: a sick
     // backend should not crash plugin lifecycle hooks. Pin this here so
     // a future "make bootstrap fail loud" refactor has to also update
@@ -201,8 +188,8 @@ describe("CauraContextEngine — process-level bootstrap memoization (CAURA-000)
       const url = String(input);
       const method = (init?.method ?? "GET").toUpperCase();
       calls.push({ url, method });
-      // EVERY smoke-related request returns 500 — write, search, delete
-      if (url.includes("/memories") || url.includes("/search")) {
+      // The read-only probe returns 500.
+      if (url.endsWith("/whoami")) {
         return new Response("backend unavailable", { status: 500 });
       }
       return new Response("{}", { status: 200 });

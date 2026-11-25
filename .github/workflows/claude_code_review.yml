@@ -200,6 +200,7 @@ jobs:
       # no pull request's code runs here. A ``ref: <head_ref>`` also failed
       # outright for a fork, whose branch does not exist here (.github#111).
       - name: Checkout base repo (trusted review script)
+        id: checkout
         if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -207,6 +208,7 @@ jobs:
           fetch-depth: 1
 
       - name: Install Claude CLI
+        id: install
         if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
         # A backstop for the script's own bound on each download, well inside the
         # job's 20 minutes, so a dead package mirror fails here and not the review.
@@ -217,6 +219,7 @@ jobs:
       # agent, which never received the diff (it tried `gh`, hit the headless
       # permission wall) and produced an empty result stamped "No issues found".
       - name: Review PR diff
+        id: review
         if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_CODE_REVIEW_API_KEY }}
@@ -229,6 +232,41 @@ jobs:
           # environment. Without it recall is a silent no-op and the review is unchanged.
           CAURA_AGENTS_KEY: ${{ secrets.CAURA_AGENTS_KEY }}
         run: bash .github/scripts/claude_pr_review.sh
+
+      # The review script comments on every outcome it reaches, failures included, and records
+      # that it did (steps.review.outputs.posted). This answers the rest, so an @claude never goes
+      # unanswered: a step before the review failed, the script stopped on an error it does not
+      # handle, or the job was cancelled. caura#2488's first @claude got no reply when the runner
+      # lost its network while installing the sandbox. Inline rather than a script, so it still
+      # runs when the checkout is what failed.
+      - name: Say the review did not run
+        if: >-
+          (failure() || cancelled())
+          && steps.auth.outputs.authorized == 'true'
+          && steps.pr.outputs.is_pr == 'true'
+          && steps.review.outputs.posted != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          JOB: ${{ job.status }}
+          CHECKOUT: ${{ steps.checkout.outcome }}
+          INSTALL: ${{ steps.install.outcome }}
+          REVIEW: ${{ steps.review.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$JOB" = cancelled ]; then
+            why="the job was cancelled"
+          elif [ "$CHECKOUT" = failure ]; then
+            why="checking out the review script failed"
+          elif [ "$INSTALL" = failure ]; then
+            why="installing the reviewer sandbox failed"
+          elif [ "$REVIEW" = failure ]; then
+            why="the review stopped on an error"
+          else
+            why="the job failed before the review ran"
+          fi
+          gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" >/dev/null -f body="⚠️ Claude Code review did not run: ${why}, so no review was produced. This is not a problem with this PR. Comment \`@claude\` to try again. [Job log](${RUN_URL})"
 
   # Runs on MERGE, and only on merge: extracts findings a maintainer DECLINED into the shared
   # code-review fleet so future reviews stop re-raising them. The write half of the loop; recall

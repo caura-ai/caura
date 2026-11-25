@@ -738,6 +738,9 @@ def _scored_search_row_filters(
 # Which rows of a field page ship their embedding (``memory_field_page``).
 FIELD_PAGE_EMBEDDINGS = frozenset({"all", "unplaced", "none"})
 
+# The most rows a windowed field signature reads: as many as a field shows.
+FIELD_SIGNATURE_MAX_WINDOW = 50_000
+
 # A memory row's version: PostgreSQL's ``xmin``, which every UPDATE of the row
 # changes and a physical replica reports unchanged. ``memories`` has no column
 # that moves exactly when the embedding does, so a saved field position names
@@ -4479,6 +4482,17 @@ class PostgresService:
         400 (ValueError) rather than a DB CHECK violation at flush. This records
         the classification only — the memory-row effect (``status`` /
         ``supersedes_id``) is applied separately and is unchanged.
+
+        A pair that already has a pending record, in either direction, gets that
+        record back instead of a second one. Each detection run de-duplicates its
+        own pairs, but the semantic and entity-overlap passes, and detection run
+        for each memory of a pair, all record it again. Review then refuses to
+        resolve any of them while another counts as applied ("Another verdict
+        still holds this pair"). Only a record that agrees on ``effect_applied``
+        absorbs one: a dispute says detection changed nothing, an applied verdict
+        says it did, and dismissal undoes a verdict only when its record says it
+        was applied. A reviewed record absorbs nothing, since detection applying
+        the verdict again is a new decision.
         """
         from common.models.memory_conflict import (
             ACTIONS,
@@ -4504,12 +4518,49 @@ class PostgresService:
             v = payload.get(key)
             return float(v) if v is not None else None
 
+        def _applied(metadata: object) -> bool | None:
+            # Review's reading: no metadata is an applied verdict. Provenance it
+            # cannot read matches nothing.
+            if metadata is not None and not isinstance(metadata, dict):
+                return None
+            return (metadata or {}).get("effect_applied") is not False
+
+        tenant_id = payload["tenant_id"]
+        new_id = UUID(str(payload["new_memory_id"]))
+        old_id = UUID(str(payload["old_memory_id"]))
+        applied = _applied(payload.get("metadata"))
         async with get_session() as session:
+            # Parents first, in the order review and deletion take them. Two
+            # detections recording one pair at once queue here; without it both
+            # read "no record" below and both insert.
+            await session.execute(_ordered_memory_lock_select([new_id, old_id], tenant_id))
+            held = (
+                await session.execute(
+                    select(MemoryConflict)
+                    .where(
+                        MemoryConflict.tenant_id == tenant_id,
+                        MemoryConflict.review_status == "pending",
+                        tuple_(MemoryConflict.new_memory_id, MemoryConflict.old_memory_id).in_(
+                            [(new_id, old_id), (old_id, new_id)]
+                        ),
+                    )
+                    .order_by(MemoryConflict.created_at, MemoryConflict.id)
+                )
+            ).scalars()
+            for existing in held:
+                if applied is not None and _applied(existing.metadata_) == applied:
+                    logger.info(
+                        "memory_conflicts: pair %s/%s is already pending as %s; not recorded again",
+                        new_id,
+                        old_id,
+                        existing.id,
+                    )
+                    return existing
             row = MemoryConflict(
-                tenant_id=payload["tenant_id"],
+                tenant_id=tenant_id,
                 fleet_id=payload.get("fleet_id"),
-                new_memory_id=UUID(str(payload["new_memory_id"])),
-                old_memory_id=UUID(str(payload["old_memory_id"])),
+                new_memory_id=new_id,
+                old_memory_id=old_id,
                 relationship=relationship,
                 relationship_confidence=_conf("relationship_confidence"),
                 diagnosis=diagnosis,
@@ -5917,7 +5968,18 @@ class PostgresService:
         Default ``False`` preserves the back-compat behaviour for every
         existing caller.
         """
+        from core_storage_api.config import settings as _overlap_settings
+
+        _statement_timeout_ms = _overlap_settings.entity_overlap_statement_timeout_ms
         async with get_session() as session:
+            if _statement_timeout_ms:
+                # SET LOCAL on this transaction, as scored search does, so a
+                # query whose caller has given up stops instead of holding a
+                # read-pool backend. The route maps the cancellation to 504.
+                # See Settings.entity_overlap_statement_timeout_ms.
+                await session.execute(
+                    select(func.set_config("statement_timeout", f"{_statement_timeout_ms}ms", True))
+                )
             # Scope the seed as well as the candidates: a foreign seed must
             # not reveal entity-name overlap or a supersedes chain.
             new_mel = MemoryEntityLink.__table__.alias("new_mel")
@@ -5969,6 +6031,23 @@ class PostgresService:
                 )
                 .where(
                     func.lower(other_ent.c.canonical_name).in_(select(new_entity_names)),
+                    # Where the plan starts rests on this. Without it, finding
+                    # the seed's names meant scanning every tenant's entities
+                    # (no index leads with the name), so on a large table the
+                    # planner walked this tenant's memories and all their links
+                    # instead: on 2026-11-18, 90k memories and 282k links for 31
+                    # matching rows, 23s on the read pool. With it, an index
+                    # leading with tenant_id (ix_entities_tenant_id, or
+                    # uq_entities_tenant_type_name_fleet where 001's is absent)
+                    # finds the names, and the plan starts from them.
+                    #
+                    # It drops no legitimate match: every writer of
+                    # memory_entity_links requires the memory and the entity to
+                    # share a tenant (_owned_link_endpoints, and the
+                    # entity-resolution insert's own tenant predicates), so a
+                    # link that crosses tenants is historical data, and one is
+                    # not a reason to call two memories related.
+                    other_ent.c.tenant_id == tenant_id,
                     Memory.tenant_id == tenant_id,
                     Memory.id != memory_id,
                     Memory.deleted_at.is_(None),
@@ -7024,13 +7103,48 @@ class PostgresService:
         is excluded until someone decides otherwise. Pairs are kept inside one
         fleet (``NULL`` pairs only with ``NULL``) because the nightly run passes
         no fleet and the crystal would otherwise be readable across fleets.
+
+        The batch is capped by ``statement_timeout``
+        (``Settings.near_duplicates_statement_timeout_ms``), so it stops once
+        its caller has given up instead of running on; the route answers 504.
         """
+        from core_storage_api.config import settings as _dedup_settings
+
         async with get_session() as session:
+            if _dedup_settings.near_duplicates_statement_timeout_ms:
+                await session.execute(
+                    select(
+                        func.set_config(
+                            "statement_timeout",
+                            f"{_dedup_settings.near_duplicates_statement_timeout_ms}ms",
+                            True,
+                        )
+                    )
+                )
             cand_scope, params = _scope_sql(tenant_id, fleet_id)
             nb_scope, _ = _scope_sql(tenant_id, fleet_id, table="n")
             # The threshold applies to each candidate's nearest neighbours,
             # outside the scan: Postgres never pushes a WHERE into a subquery
             # with a LIMIT. See ``_scan_past_other_tenants``.
+            #
+            # The neighbours come from two branches, one per kind of candidate
+            # fleet, and only one can return rows: ``n.fleet_id = c.fleet_id``
+            # matches nothing for a NULL fleet, and the NULL branch is gated on
+            # ``c.fleet_id IS NULL``. Each branch's fleet match is then a plain
+            # index condition on ``ix_memories_tenant_fleet``. The single
+            # ``n.fleet_id IS NOT DISTINCT FROM c.fleet_id`` this replaces is not
+            # indexable, and an ``OR`` of the two arms stays a filter under a
+            # plain index scan. So the nightly sweep, which passes no fleet, read
+            # every live shared row of the tenant for each candidate and dropped
+            # the other fleets' rows afterwards: ~0.57s per candidate on a
+            # 231k-row prod tenant, and a 500-row batch outran its statement
+            # timeout.
+            nb_live = f"""{nb_scope}
+                              AND n.embedding IS NOT NULL
+                              AND n.deleted_at IS NULL
+                              AND n.status = ANY(:live_statuses)
+                              AND n.visibility = ANY(:shared_visibilities)
+                              AND n.id != c.id"""
             await _scan_past_other_tenants(session)
             result = await session.execute(
                 text(f"""
@@ -7053,18 +7167,26 @@ class PostgresService:
                 LEFT JOIN LATERAL (
                     SELECT nearest.id, nearest.similarity
                     FROM (
-                        SELECT n.id AS id,
-                               1 - (n.embedding <=> c.embedding) AS similarity
-                        FROM memories n
-                        WHERE {nb_scope}
-                          AND n.embedding IS NOT NULL
-                          AND n.deleted_at IS NULL
-                          AND n.status = ANY(:live_statuses)
-                          AND n.visibility = ANY(:shared_visibilities)
-                          AND n.fleet_id IS NOT DISTINCT FROM c.fleet_id
-                          AND n.id != c.id
-                        ORDER BY n.embedding <=> c.embedding
-                        LIMIT :k
+                        (
+                            SELECT n.id AS id,
+                                   1 - (n.embedding <=> c.embedding) AS similarity
+                            FROM memories n
+                            WHERE {nb_live}
+                              AND n.fleet_id = c.fleet_id
+                            ORDER BY n.embedding <=> c.embedding
+                            LIMIT :k
+                        )
+                        UNION ALL
+                        (
+                            SELECT n.id AS id,
+                                   1 - (n.embedding <=> c.embedding) AS similarity
+                            FROM memories n
+                            WHERE {nb_live}
+                              AND c.fleet_id IS NULL
+                              AND n.fleet_id IS NULL
+                            ORDER BY n.embedding <=> c.embedding
+                            LIMIT :k
+                        )
                     ) nearest
                     WHERE nearest.similarity >= :threshold
                 ) nb ON TRUE
@@ -7497,6 +7619,19 @@ class PostgresService:
     #: within seconds, so a day of history is far more than dedupe needs.
     USAGE_BATCH_RETENTION_HOURS = 24
 
+    @staticmethod
+    def _in_key_order(rows: list[dict], dims: tuple[str, ...]) -> list[dict]:
+        """A flush's rows in their unique key's order, the same for every writer.
+
+        Several instances flush a tenant's same minute rows at once, and an
+        upserted row stays locked until its flush commits. Each in its own
+        order, two flushes could each wait on a row the other held, and
+        Postgres failed one with "deadlock detected" (prod, 2026-11).
+        ``astimezone(UTC)`` compares the instant asyncpg sends, whether
+        ``minute`` is naive or not.
+        """
+        return sorted(rows, key=lambda r: (r["minute"].astimezone(UTC), *(r[d] for d in dims)))
+
     async def usage_flush(
         self, tenant_id: str, batch_id: UUID, llm_rows: list[dict], value_rows: list[dict]
     ) -> bool:
@@ -7536,7 +7671,9 @@ class PostgresService:
                 return False
             # Every column named, none taken from the caller's keys: the row
             # dimensions are inserted, and only the counts are ever updated.
-            for r in llm_rows:
+            for r in self._in_key_order(
+                llm_rows, ("agent_id", "fleet_id", "operation", "kind", "provider", "model")
+            ):
                 llm = pg_insert(LlmUsageMinute).values(
                     minute=r["minute"],
                     tenant_id=tenant_id,
@@ -7574,7 +7711,7 @@ class PostgresService:
                         },
                     )
                 )
-            for r in value_rows:
+            for r in self._in_key_order(value_rows, ("agent_id", "fleet_id", "operation", "metric")):
                 val = pg_insert(ValueUsageMinute).values(
                     minute=r["minute"],
                     tenant_id=tenant_id,
@@ -9844,6 +9981,8 @@ class PostgresService:
         caller_tenant_id: str | None = None,
         fleet_id: str | None = None,
         include_scope_agent: bool = False,
+        window: int | None = None,
+        newer_than: datetime | None = None,
     ) -> dict:
         """Cheap change-detector for the field layout cache.
 
@@ -9854,6 +9993,13 @@ class PostgresService:
         a delete, a status flip or an edit moves at least one of the four, so
         core-api can serve a cached layout while all four hold. Recall
         counters are not tracked here; the cache TTL bounds their age.
+
+        ``window`` reads only the newest that many rows, newest first as the
+        field page reads them, and adds ``more``: whether rows lie past them.
+        A field never shows more than its window, so an edit past it need not
+        move the four, and the read costs the same for a tenant of any size.
+        Without one, every row is read. ``newer_than`` adds ``newer``: the
+        embedded rows written after it, within the window.
         """
         filters = self._field_scope_filters(
             tenant_id=tenant_id,
@@ -9884,14 +10030,41 @@ class PostgresService:
                 )
             ),
         )
-        stmt = select(
-            func.count(),
-            func.count().filter(Memory.embedding.isnot(None)),
-            func.max(
-                func.greatest(Memory.created_at, func.coalesce(Memory.status_changed_at, Memory.created_at))
-            ),
-            func.sum(func.hashtextextended(shown, literal_column("0"))),
-        ).where(*filters)
+        per_row = (
+            Memory.embedding.isnot(None).label("embedded"),
+            Memory.created_at.label("created_at"),
+            func.greatest(
+                Memory.created_at, func.coalesce(Memory.status_changed_at, Memory.created_at)
+            ).label("changed_at"),
+            func.hashtextextended(shown, literal_column("0")).label("shown"),
+        )
+        inside: ColumnElement[bool]
+        if window is None:
+            rows = select(*per_row).where(*filters).subquery()
+            inside = true()
+        else:
+            # One row past the window says whether more lie beyond it. The scan
+            # stops there: ``ix_memories_tenant_created_active`` holds this order.
+            newest_first = (Memory.created_at.desc(), Memory.id.desc())
+            rows = (
+                select(*per_row, func.row_number().over(order_by=newest_first).label("n"))
+                .where(*filters)
+                .order_by(*newest_first)
+                .limit(window + 1)
+                .subquery()
+            )
+            inside = rows.c.n <= window
+        measures: list[ColumnElement[Any]] = [
+            func.count().filter(inside),
+            func.count().filter(inside, rows.c.embedded),
+            func.max(rows.c.changed_at).filter(inside),
+            func.sum(rows.c.shown).filter(inside),
+        ]
+        if window is not None:
+            measures.append(func.count() > window)
+        if newer_than is not None:
+            measures.append(func.count().filter(inside, rows.c.embedded, rows.c.created_at > newer_than))
+        stmt = select(*measures)
         from core_storage_api.config import settings as _field_settings
 
         async with get_read_session() as session:
@@ -9902,13 +10075,18 @@ class PostgresService:
                     )
                 )
             )
-            count, embedded, newest, revision = (await session.execute(stmt)).one()
-        return {
+            count, embedded, newest, revision, *asked = (await session.execute(stmt)).one()
+        signature: dict = {
             "count": int(count or 0),
             "embedded": int(embedded or 0),
             "newest": newest.isoformat() if newest else None,
             "revision": str(revision) if revision is not None else None,
         }
+        if window is not None:
+            signature["more"] = bool(asked.pop(0))
+        if newer_than is not None:
+            signature["newer"] = int(asked.pop(0) or 0)
+        return signature
 
     async def memory_field_page(
         self,
@@ -11913,6 +12091,7 @@ class PostgresService:
         caller_agent_id: str | None = None,
         caller_tenant_id: str | None = None,
         caller_fleet_ids: Sequence[str] | None = None,
+        limit: int | None = None,
     ) -> tuple[list[Entity], list[Relation], bool]:
         """Return a tenant's entities and relations (optionally by fleet), and whether
         either was cut short.
@@ -11932,7 +12111,12 @@ class PostgresService:
         relations among them, come back and the third value is ``True``. The edge
         filter runs in SQL, so the relation cap counts only edges between kept
         nodes; the node ids travel as one array parameter, however many there are.
+
+        ``limit`` lowers the entity cap for one read and never raises it, so a
+        caller drawing fifty nodes does not load ten thousand. Past it the newest
+        come back and the third value is ``True``, as past the cap.
         """
+        entity_cap = GRAPH_MAX_ENTITIES if limit is None else min(limit, GRAPH_MAX_ENTITIES)
         async with get_session() as session:
             entity_stmt = (
                 select(Entity)
@@ -11957,10 +12141,10 @@ class PostgresService:
             else:
                 entity_stmt = entity_stmt.where(_entity_visible_to_tenant(tenant_id))
             entity_stmt = entity_stmt.order_by(Entity.created_at.desc(), Entity.id)
-            entity_stmt = entity_stmt.limit(GRAPH_MAX_ENTITIES + 1)
+            entity_stmt = entity_stmt.limit(entity_cap + 1)
             entities = list((await session.execute(entity_stmt)).scalars().all())
-            truncated = len(entities) > GRAPH_MAX_ENTITIES
-            entities = entities[:GRAPH_MAX_ENTITIES]
+            truncated = len(entities) > entity_cap
+            entities = entities[:entity_cap]
 
             node_ids = bindparam(
                 "node_ids", [e.id for e in entities], type_=postgresql.ARRAY(postgresql.UUID(as_uuid=True))
@@ -14014,6 +14198,8 @@ class PostgresService:
         system: bool = False,
         force: bool = False,
         expected_status: Sequence[str | None] | None = None,
+        expected_content_hash: str | None = None,
+        expected_updated_at: str | None = None,
         session: AsyncSession | None = None,
     ) -> Document:
         """INSERT ... ON CONFLICT DO UPDATE. Returns the upserted Document.
@@ -14042,6 +14228,8 @@ class PostgresService:
         status another writer set in between was silently replaced. The check
         is the write's own ``WHERE``, so nothing lands between them; a miss
         raises ``DocumentStatusChangedError`` and writes nothing.
+        Review writes may also bind the stored content hash and row timestamp;
+        these predicates require an existing document and share the UPDATE.
         """
         if collection.startswith("_") and not system:
             raise ValueError(f"Collection '{collection}' is system-managed; use the dedicated endpoint.")
@@ -14057,6 +14245,8 @@ class PostgresService:
                     system=system,
                     force=force,
                     expected_status=expected_status,
+                    expected_content_hash=expected_content_hash,
+                    expected_updated_at=expected_updated_at,
                     session=own,
                 )
         if not force:
@@ -14073,8 +14263,24 @@ class PostgresService:
         }
         allowed = [status for status in expected_status or () if status is not None]
         status_matches = Document.data["status"].astext.in_(allowed)
+        predicates = [status_matches] if expected_status is not None else []
+        if expected_content_hash is not None:
+            if not isinstance(expected_content_hash, str) or not expected_content_hash:
+                raise ValueError("expected_content_hash must be a non-empty string")
+            predicates.append(Document.data["content_hash"].astext == expected_content_hash)
+        if expected_updated_at is not None:
+            if not isinstance(expected_updated_at, str):
+                raise ValueError("expected_updated_at must be an ISO timestamp")
+            reviewed_at = datetime.fromisoformat(expected_updated_at)
+            if reviewed_at.tzinfo is None:
+                raise ValueError("expected_updated_at must include a timezone")
+            predicates.append(Document.updated_at == reviewed_at)
         stmt: Any
-        if expected_status is not None and None not in expected_status:
+        if (
+            expected_content_hash is not None
+            or expected_updated_at is not None
+            or (expected_status is not None and None not in expected_status)
+        ):
             # The document has to exist, so an upsert, which would insert it,
             # is the wrong statement.
             stmt = (
@@ -14083,7 +14289,7 @@ class PostgresService:
                     Document.tenant_id == tenant_id,
                     Document.collection == collection,
                     Document.doc_id == doc_id,
-                    status_matches,
+                    *predicates,
                 )
                 .values(**new_values)
                 .returning(Document)
@@ -17217,17 +17423,29 @@ class PostgresService:
         This is intentionally an aggregate rather than a capped row listing: a
         large fanout must not push an early failure out of the response and turn
         a partial outage into a green deployment probe.
+
+        ``failure_reasons`` counts each action's failures by the reason the op
+        named (``stats.reason``, from ``PermanentOpError(reason=...)``), so a
+        deployment probe can tell an upstream outage such as ``llm_unavailable``
+        from a broken pipeline. Failures that name none aren't in it, and other
+        statuses group under NULL, so a skip's ``recent_success`` can't split
+        them.
         """
+        failure_reason = case(
+            (LifecycleAudit.status == "failure", LifecycleAudit.stats["reason"].astext),
+            else_=None,
+        ).label("failure_reason")
         stmt = (
             select(
                 LifecycleAudit.action,
                 LifecycleAudit.status,
+                failure_reason,
                 func.count().label("row_count"),
                 func.max(LifecycleAudit.started_at).label("latest_started_at"),
                 func.max(LifecycleAudit.finished_at).label("latest_finished_at"),
             )
             .where(LifecycleAudit.started_at > func.now() - timedelta(hours=since_hours))
-            .group_by(LifecycleAudit.action, LifecycleAudit.status)
+            .group_by(LifecycleAudit.action, LifecycleAudit.status, failure_reason)
         )
         if triggered_by is not None:
             stmt = stmt.where(LifecycleAudit.triggered_by == triggered_by)
@@ -17238,19 +17456,23 @@ class PostgresService:
             rows = (await session.execute(stmt)).all()
 
         actions: dict[str, dict[str, Any]] = {}
-        for action, status, row_count, latest_started_at, latest_finished_at in rows:
+        for action, status, reason, row_count, latest_started_at, latest_finished_at in rows:
             summary = actions.setdefault(
                 action,
                 {
                     "total": 0,
                     "statuses": {},
+                    "failure_reasons": {},
                     "latest_started_at": None,
                     "latest_finished_at": None,
                 },
             )
             count = int(row_count)
             summary["total"] += count
-            summary["statuses"][status] = count
+            # A status now spans one group per failure reason, so add, don't assign.
+            summary["statuses"][status] = summary["statuses"].get(status, 0) + count
+            if reason is not None:
+                summary["failure_reasons"][reason] = summary["failure_reasons"].get(reason, 0) + count
             if summary["latest_started_at"] is None or latest_started_at > summary["latest_started_at"]:
                 summary["latest_started_at"] = latest_started_at
             if latest_finished_at is not None and (

@@ -27,6 +27,23 @@ clients; enforce the split in code review. Registration sets
 in ``_builders.py``."""
 
 
+Surface = Literal["default", "directory"]
+"""Which tool set a connection is served.
+
+- default   — every API-key agent, the OpenClaw plugin, and any request whose
+              surface was not set by the gateway. The set it has always been.
+- directory — a Claude connector-directory connection (MCP OAuth through the
+              gateway, which marks it ``X-Caura-Tool-Surface: directory``). The
+              directory requires that no tool mixes reads and writes, so this
+              set swaps the two op-dispatched tools that do (``caura_manage``,
+              ``caura_doc``) for narrower tools reaching the same handlers.
+"""
+
+DEFAULT_SURFACE: Surface = "default"
+DIRECTORY_SURFACE: Surface = "directory"
+ALL_SURFACES: tuple[Surface, ...] = (DEFAULT_SURFACE, DIRECTORY_SURFACE)
+
+
 ImplStatus = Literal["live", "reserved", "deprecated"]
 """
 - live       — handler does the real thing
@@ -88,6 +105,54 @@ class ToolSpec:
     error_codes: tuple[str, ...] = field(default_factory=tuple)
     """Codes this tool may emit in the unified error envelope."""
 
+    title: str = ""
+    """Human-readable name, published as the MCP tool ``title`` and as
+    ``annotations.title``. Required: ``__post_init__`` refuses an empty one."""
+
+    read_only: bool = False
+    """Published as ``readOnlyHint``. True only when no op of the tool changes
+    stored data. Bookkeeping a read leaves behind (usage meters, recall
+    counters, audit and read-receipt rows) does not count as a write here; a
+    row the caller can see change does. A tool with even one writing op is not
+    read-only, which is why the op-dispatched ``caura_manage`` and ``caura_doc``
+    are not."""
+
+    destructive: bool = True
+    """Published as ``destructiveHint``, and ignored (published False) when
+    ``read_only`` is set. True when the tool can change or remove data that
+    already exists rather than only adding to it. MCP's own default for a
+    non-read-only tool is true, so it is the default here too, and setting it
+    False needs a reason. ``destructive_hint`` is the resolved value."""
+
+    @property
+    def destructive_hint(self) -> bool:
+        return self.destructive and not self.read_only
+
+    surfaces: tuple[Surface, ...] = ALL_SURFACES
+    """The surfaces whose ``tools/list`` names this tool. A tool is callable
+    exactly where it is listed: ``call_tool`` refuses it elsewhere with
+    ``TOOL_NOT_ON_SURFACE``."""
+
+    directory_description: str | None = None
+    """The description served on the directory surface, when the default one
+    says something the Claude connector directory does not accept (telling the
+    model to set aside user instructions, to call a tool unprompted, or naming
+    a tool that surface does not list). ``None`` serves ``description`` there
+    too. The default surface, ``/tool-descriptions`` and the plugin manifest
+    always carry ``description``."""
+
+    directory_read_via: str | None = None
+    """For a tool that reads when called with no fields: the read-only tool the
+    directory surface serves that form through. There this tool is write-only,
+    and a call that sets nothing but ``agent_id`` is refused naming this one.
+    The default surface keeps the read form."""
+
+    delegate: str | None = None
+    """For a tool that narrows another one: the tool whose handler it calls.
+    Its ops must be a subset of the delegate's, and its handler forwards to the
+    delegate's handler and does nothing else (``test_tool_surfaces`` checks
+    both), so it inherits every gate the delegate applies."""
+
     def __post_init__(self) -> None:
         # Light invariants (full validation happens in _registry on import).
         if not self.name.startswith("caura_"):
@@ -96,3 +161,11 @@ class ToolSpec:
             raise ValueError(f"trust_required must be 0..3, got {self.trust_required} for {self.name}")
         if self.impl_status == "reserved" and self.plugin_exposed:
             raise ValueError(f"reserved tools must set plugin_exposed=False: {self.name}")
+        if not self.title.strip():
+            raise ValueError(f"Tool must declare a title: {self.name}")
+        if not self.surfaces or not set(self.surfaces) <= set(ALL_SURFACES):
+            raise ValueError(f"surfaces must be a non-empty subset of {ALL_SURFACES}: {self.name}")
+        if self.plugin_exposed and DEFAULT_SURFACE not in self.surfaces:
+            # The plugin is a default-surface client; exposing a tool there
+            # that the MCP default surface hides would split the two again.
+            raise ValueError(f"plugin_exposed tools must be on the default surface: {self.name}")

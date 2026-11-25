@@ -74,7 +74,18 @@ class PermanentOpError(RuntimeError):
     Prefer a plain raise when the op is cheap and idempotent. Suppressing a retry
     is only worth it where redelivery costs something real; for archive/purge a
     nack is nearly free, so the extra retry is better than the extra machinery.
+
+    Pass ``reason`` when the failure has a short, stable name, such as
+    ``llm_unavailable`` for an insights run no model provider answered (L-134).
+    The runner records it next to ``terminal`` as ``stats.reason``, and the
+    lifecycle audit summary counts each action's failures by it, so a deploy gate
+    can tell an upstream outage from a broken pipeline without parsing
+    ``error_message``.
     """
+
+    def __init__(self, *args: object, reason: str | None = None) -> None:
+        super().__init__(*args)
+        self.reason = reason
 
 
 class EventBus(ABC):

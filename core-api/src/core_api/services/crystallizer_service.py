@@ -36,6 +36,8 @@ from core_api.config import settings
 from core_api.constants import (
     CRYSTALLIZER_DEDUP_BATCH_SIZE,
     CRYSTALLIZER_DEDUP_NEIGHBORS,
+    CRYSTALLIZER_DEDUP_RETRY_BATCH_SIZE,
+    CRYSTALLIZER_DEDUP_SWEEP_BUDGET_SECONDS,
     CRYSTALLIZER_DEDUP_THRESHOLD,
     CRYSTALLIZER_HIGH_PENDING_PCT,
     CRYSTALLIZER_HIGH_PII_COUNT,
@@ -1175,6 +1177,16 @@ async def _check_near_duplicates(
     similarity, and the order pairs are discovered in. Storage returns pairs in
     the same order the loop visited them — candidate by candidate,
     nearest-neighbour first — so the cap still bites on exactly the same pairs.
+
+    A batch that runs out of time no longer ends the sweep. In prod one tenant's
+    first 500-row batch took 770s on the primary, past every 120s timeout in
+    front of it, so this raised before stamping anything, and the next night's
+    first batch timed out the same way (39 nights to 2026-11-18). A
+    timed-out batch is now retried at ``CRYSTALLIZER_DEDUP_RETRY_BATCH_SIZE``, a
+    window that times out even at that size is skipped for this run, and no
+    batch starts once ``CRYSTALLIZER_DEDUP_SWEEP_BUDGET_SECONDS`` is spent.
+    Whatever was swept is stamped as before, so the next run starts past it.
+    ``complete`` says whether this run reached the end of the unswept rows.
     """
     sc = get_storage_client()
 
@@ -1184,6 +1196,10 @@ async def _check_near_duplicates(
     # discarded. These are not stamped here; see the stamp below.
     paired_ids: set[str] = set()
     offset = 0
+    batch_size = CRYSTALLIZER_DEDUP_BATCH_SIZE
+    skipped_windows = 0
+    complete = False
+    deadline = time.monotonic() + CRYSTALLIZER_DEDUP_SWEEP_BUDGET_SECONDS
 
     if threshold is None:
         # Resolved here rather than passed down, because the hygiene checks are
@@ -1195,32 +1211,53 @@ async def _check_near_duplicates(
         cfg = await resolve_config(tenant_id)
         threshold = getattr(cfg, "crystallizer_dedup_threshold", CRYSTALLIZER_DEDUP_THRESHOLD)
 
-    while len(pairs) < CRYSTALLIZER_MAX_DEDUP_PAIRS:
-        batch = await sc.check_near_duplicates(
-            {
-                "tenant_id": tenant_id,
-                "fleet_id": fleet_id,
-                "batch_size": CRYSTALLIZER_DEDUP_BATCH_SIZE,
-                "offset": offset,
-                # Sent rather than left to the storage defaults so the sweep's
-                # tuning stays in core-api's constants, where reg-a72 will look
-                # for it, instead of being split across two services.
-                # A72 — per-tenant, defaulting to the constant. At 0.95 the
-                # sweep only catches near-verbatim copies, while the composites
-                # that actually crowd recall sit around 0.75-0.90 and pass
-                # underneath it. Lowering the floor is what makes this a
-                # crowding janitor rather than a copy detector — and it is
-                # opt-in because every extra pair the band admits is another
-                # LLM mergeability judgement.
-                "threshold": threshold,
-                "neighbor_limit": CRYSTALLIZER_DEDUP_NEIGHBORS,
-            }
-        )
+    while len(pairs) < CRYSTALLIZER_MAX_DEDUP_PAIRS and time.monotonic() < deadline:
+        try:
+            batch = await sc.check_near_duplicates(
+                {
+                    "tenant_id": tenant_id,
+                    "fleet_id": fleet_id,
+                    "batch_size": batch_size,
+                    "offset": offset,
+                    # Sent rather than left to the storage defaults so the sweep's
+                    # tuning stays in core-api's constants, where reg-a72 will look
+                    # for it, instead of being split across two services.
+                    # A72 — per-tenant, defaulting to the constant. At 0.95 the
+                    # sweep only catches near-verbatim copies, while the composites
+                    # that actually crowd recall sit around 0.75-0.90 and pass
+                    # underneath it. Lowering the floor is what makes this a
+                    # crowding janitor rather than a copy detector — and it is
+                    # opt-in because every extra pair the band admits is another
+                    # LLM mergeability judgement.
+                    "threshold": threshold,
+                    "neighbor_limit": CRYSTALLIZER_DEDUP_NEIGHBORS,
+                }
+            )
+        except (httpx.ReadTimeout, httpx.HTTPStatusError) as exc:
+            # A 504 is storage's statement timeout, or Cloud Run's request
+            # timeout in front of it; a ReadTimeout is ours. Anything else is
+            # not about the batch's size.
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code != 504:
+                raise
+            logger.warning(
+                "Crystallizer dedup batch of %d at offset %d timed out for tenant %s",
+                batch_size,
+                offset,
+                tenant_id,
+            )
+            if batch_size > CRYSTALLIZER_DEDUP_RETRY_BATCH_SIZE:
+                batch_size = CRYSTALLIZER_DEDUP_RETRY_BATCH_SIZE
+            else:
+                # Left unstamped, so the next run sweeps this window again.
+                skipped_windows += 1
+                offset += batch_size
+            continue
         # Every swept row, not just the ones that turned out to have a
         # duplicate — this is the stamp set, and the old loop appended here
         # before it knew whether the candidate had neighbours.
         candidate_ids = batch.get("candidate_ids", [])
         if not candidate_ids:
+            complete = skipped_windows == 0
             break
 
         checked_ids.extend(candidate_ids)
@@ -1232,7 +1269,18 @@ async def _check_near_duplicates(
             if pair_key not in pairs and len(pairs) < CRYSTALLIZER_MAX_DEDUP_PAIRS:
                 pairs[pair_key] = pair["similarity"]
 
-        offset += CRYSTALLIZER_DEDUP_BATCH_SIZE
+        offset += batch_size
+
+    # The pair cap ending the sweep is the old, expected stop; time is not.
+    if not complete and len(pairs) < CRYSTALLIZER_MAX_DEDUP_PAIRS:
+        logger.warning(
+            "Crystallizer dedup sweep for tenant %s is incomplete: %d rows swept, %d pairs, "
+            "%d window(s) skipped after timeouts; the next run continues",
+            tenant_id,
+            len(checked_ids),
+            len(pairs),
+            skipped_windows,
+        )
 
     # Stamp only the swept rows that turned out to have no duplicate. The stamp
     # takes a row out of every future sweep for good, and a row that IS in a
@@ -1254,6 +1302,7 @@ async def _check_near_duplicates(
         "pairs": pairs_list,
         "affected_ids": affected[:MAX_AFFECTED_IDS],
         "threshold": threshold,
+        "complete": complete,
     }
 
 

@@ -525,7 +525,13 @@ async def _run_action(
         # and "nothing more will happen, a human must act" is the whole point —
         # it has to be queryable, not just present in a log line. Mirrors how the
         # dedup gate above disambiguates two meanings of ``success`` via
-        # ``stats={"skipped": True}``.
+        # ``stats={"skipped": True}``. A reason the op names goes beside it, for
+        # the audit summary to count failures by.
+        failure_stats: dict[str, object] | None = None
+        if isinstance(exc, PermanentOpError):
+            failure_stats = {"terminal": True}
+            if exc.reason:
+                failure_stats["reason"] = exc.reason
         recorded = True
         try:
             failed_finalize = (
@@ -533,7 +539,7 @@ async def _run_action(
                     audit_id,
                     org_id=org_id,
                     status="failure",
-                    stats={"terminal": True} if permanent else None,
+                    stats=failure_stats,
                     error_message=str(exc)[:500],
                     claim_token=claim_token,
                 )

@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.29.0](https://github.com/caura-ai/caura/compare/plugin-v2.28.2...plugin-v2.29.0) (2026-11-15)
+
+
+### Features
+
+* **core-api:** MCP tool annotations and a directory tool surface ([#2441](https://github.com/caura-ai/caura/issues/2441)) ([a3952a8](https://github.com/caura-ai/caura/commit/a3952a880af0793e18d9ff345d43ae33259c208f))
+
 ## [2.28.2](https://github.com/caura-ai/caura/compare/plugin-v2.28.1...plugin-v2.28.2) (2026-11-08)
 
 

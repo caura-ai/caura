@@ -25,6 +25,8 @@ from datetime import datetime
 from typing import Any, NamedTuple
 from uuid import UUID
 
+import httpx
+
 from common.background_work import BackgroundWorkDeferred
 from common.constants import predicate_cluster
 from common.llm.untrusted import UNTRUSTED_DATA_RULE, data_block, quote_untrusted
@@ -34,7 +36,11 @@ from core_api.cache import cache_delete_if, cache_set_nx
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.constants import CONTRADICTED_STATUSES, SINGLE_VALUE_PREDICATES
-from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
+from core_api.providers._retry import (
+    call_with_fallback,
+    deliberate_fake_provider,
+    require_background_admission,
+)
 from core_api.schemas import ContradictionInfo
 from core_api.services.background_admission import FairGate, Permit
 from core_api.services.background_retry import defer_work
@@ -368,14 +374,20 @@ async def _record_conflicts(
 ) -> None:
     """Write the ``memory_conflicts`` records a detection loop owes, after its flush.
 
-    A55 1d records every confirmed pair when ``contradiction_write_conflict_record``
-    is on (off by default). An unlinked loser (M-34) is recorded whatever the flag:
-    its record is all that still names the memory that replaced it. ``unlinked`` is
-    drawn from ``pairs``, so no pair is written twice. A dispute (``_outranked``) is
-    recorded whatever the flag too: nothing else shows it, and the review queue is
-    where it is settled. ``by_author`` puts both authors' trust on each record.
+    A55 1d records every confirmed pair when the tenant's
+    ``conflict_records_enabled`` is on: its ``write.conflict_records_enabled``,
+    or the deployment's ``contradiction_write_conflict_record`` (off by default)
+    where it set none or no config was passed. An unlinked loser (M-34) is
+    recorded whatever the flag: its record is all that still names the memory
+    that replaced it. ``unlinked`` is drawn from ``pairs``, so no pair is written
+    twice. A dispute (``_outranked``) is recorded whatever the flag too: nothing
+    else shows it, and the review queue is where it is settled. ``by_author``
+    puts both authors' trust on each record.
     """
-    to_record = pairs if settings.contradiction_write_conflict_record else unlinked
+    record_all = getattr(tenant_config, "conflict_records_enabled", None)
+    if not isinstance(record_all, bool):
+        record_all = settings.contradiction_write_conflict_record
+    to_record = pairs if record_all else unlinked
     if not to_record and not disputed:
         return
     # Not a top-level import: the resolver's relationship module imports this one.
@@ -418,6 +430,30 @@ async def _acquire_detection_slot(tenant_id: str) -> tuple[Permit, int]:
     t0 = time.monotonic()
     permit = await _detection_gate().acquire(tenant_id)
     return permit, round((time.monotonic() - t0) * 1000)
+
+
+async def _require_judge_admission(tenant_id: str) -> None:
+    """Defer the run before its storage reads when the judge would get no model slot.
+
+    Both detectors query for candidates before the judge, and a judge refused by
+    the tenant's background budget (#2418) defers the whole run, whose replay
+    queries again. Checked first, a run the budget cannot serve costs one check.
+    Before this, a single memory's entity-overlap query ran 301 times in 48
+    hours on the read pool. A judge that makes no model call (``fake``,
+    ``none``) needs no slot and is not checked. See
+    ``require_background_admission`` for what the check can and cannot promise.
+    """
+    from core_api.services.organization_settings import resolve_config
+
+    try:
+        provider = _judge_provider(await resolve_config(tenant_id))
+    except Exception:
+        # Unknown judge: check anyway. The check fails open, so this costs at
+        # most one round trip.
+        provider = None
+    if provider in (ProviderName.FAKE, ProviderName.NONE):
+        return
+    await require_background_admission()
 
 
 # ---------------------------------------------------------------------------
@@ -879,6 +915,9 @@ async def detect_contradictions_async(
     abstentions = _JudgeAbstentions()
     abstentions_token = _judge_abstentions.set(abstentions)
     try:
+        # Before any storage read: a run the judge's budget cannot serve
+        # defers here rather than after its candidate search.
+        await _require_judge_admission(tenant_id)
         if new_memory is None:
             sc = get_storage_client()
             # ``read=False``: the row was committed moments ago and the read
@@ -1475,6 +1514,18 @@ statements' CLAIMS about those entities are mutually exclusive.
     prefixes) are additional context about that ONE subject, NOT
     evidence of different subjects.
 
+    The same entity is NOT yet a contradiction. One entity has many
+    slots, and two statements conflict only when they give different
+    values for the SAME slot. A slot is an attribute together with what
+    its value applies to: the part, variant, environment, region,
+    audience, category or period of the entity that the claim is about.
+    "The dashboard for the north region refreshes at 08:00" and "the
+    dashboard for the south region refreshes at 09:00" share an entity
+    and fill two slots; so do "draft A is due on the 4th" / "draft B is
+    due on the 18th", "retries after network failures: 4" / "retries
+    after checksum failures: 2", and "the primary contact is X" / "the
+    backup contact is Y". Step 4 asks you to name both slots.
+
   * If the two RESOLVED-ENTITIES blocks have a subject-role entity with
     DIFFERENT ``entity_id`` values, the subjects are different entity
     rows. same_subject MUST be false, regardless of surface name
@@ -1527,7 +1578,25 @@ Follow these steps in order:
          -> same_subject=false. Two distinct resolved entities that
          happen to share a canonical name; this is the
          ``same_name_distinct_subject`` non-conflict reason.
-4. Decide non_conflict_reason. Even when same_subject is true, certain
+4. Name slot_a and slot_b: for each statement, the attribute it gives a
+   value for, with what that value applies to (part, variant,
+   environment, region, audience, category, or a named period such as
+   "the 2026 edition" or "on weekends"). Leave the value itself out of
+   the slot name, and leave out the moment a value takes effect: "since
+   July", "from 1 October", "now", "starting next week" and "no longer"
+   are how an update is worded, not a different slot. Decide same_slot
+   by comparing the two slot NAMES, never the values: "the reminder goes
+   out on the 3rd" / "the reminder now goes out on the 5th" is ONE slot
+   (send day) with two values, so same_slot=true and the statements
+   contradict; "the reminder for staff goes out on the 3rd" / "the
+   reminder for contractors goes out on the 5th" is TWO slots, so
+   same_slot=false. same_slot is true when both statements give a value
+   for the same attribute of the same part of the subject. When same_slot is false the two
+   claims both hold: non_conflict_reason is "scope_mismatch" (the same
+   attribute of different parts, variants or periods) or
+   "list_valued_predicate" (different attributes, or one more value of
+   an attribute that holds several).
+5. Decide non_conflict_reason. Even when same_subject is true, certain
    shapes describe two claims that BOTH hold and so are NOT a
    contradiction. Pick at most one value; pick "none" when the two
    statements really do assert mutually exclusive states.
@@ -1554,8 +1623,9 @@ Follow these steps in order:
        with different tense / aspect / synonyms.
      - "none": none of the above; the two statements assert mutually
        exclusive states about the same subject at the same time frame.
-5. Decide contradicts:
+6. Decide contradicts:
    - If same_subject is false, contradicts MUST be false.
+   - If same_slot is false, contradicts MUST be false.
    - If non_conflict_reason is not "none", contradicts MUST be false.
    - Otherwise contradicts is true only when the two statements assert
      mutually exclusive states about that subject in the same time
@@ -1566,6 +1636,9 @@ Reply with ONLY a JSON object, no prose, no markdown fences:
 {{"subject_a": "<canonical name from RESOLVED ENTITIES for A>",
   "subject_b": "<canonical name from RESOLVED ENTITIES for B>",
   "same_subject": true/false,
+  "slot_a": "<attribute of A, with what it applies to>",
+  "slot_b": "<attribute of B, with what it applies to>",
+  "same_slot": true/false,
   "non_conflict_reason": "none|temporal_supersession|list_valued_predicate|refinement|scope_mismatch|same_name_distinct_subject|conditional_unrealized|event_restatement",
   "contradicts": true/false,
   "reason": "one short phrase referencing the resolved subjects and the conflict (or its absence)"}}
@@ -1848,49 +1921,231 @@ NEW statement:
 Candidate statements (judge each, by index):
 {candidates_block}
 
-For EACH candidate index decide, applying the rules in order:
-1. same_subject (bool): true ONLY when the candidate and the NEW statement refer
-   to the SAME real-world entity (exact name / known alias / role+name in
-   context / unambiguously resolved pronoun). false for two people sharing a
-   name, different companies/products/projects/teams, or any uncertainty.
+For EACH candidate index answer four questions, in this order:
+A. SAME THING? Do the candidate and the NEW statement describe the same
+   real-world thing? Yes for the same named entity (exact name, known alias
+   or abbreviation, role+name in context, unambiguously resolved pronoun),
+   and for a descriptive phrase and its abbreviation or paraphrase ("the
+   applicant tracking system used by recruiting" and "recruiting's ATS").
+   No when the two name different parts, variants, environments, regions,
+   audiences, time windows or categories of one thing ("the web pipeline" /
+   "the mobile pipeline"; "in staging" / "in production"; "draft A" /
+   "draft B"; "on weekdays" / "on weekends"; "billing contact" / "technical
+   contact"), for two people sharing a name, for different
+   companies/products/projects/teams, and under real uncertainty. No as
+   well when either statement is conditional or hypothetical ("if ...",
+   "would", "could", "might"): it describes a possibility, not the thing as
+   it is.
    The subject is what a statement is about, not the person or agent who
    recorded, changed or confirmed it.
-2. non_conflict_reason (exactly one): "none"; "temporal_supersession"
-   (BOTH statements are records of PAST events that stay true as history —
-   "hired in 2020" / "promoted in 2023"; NOT for current-state claims where
-   the newer statement changes the state, e.g. "lives in X" vs "lives in Y"
-   or "runs at 01:00" vs "runs at 03:00" — a state change is an update and
-   updates ARE contradictions, reason "none");
-   "list_valued_predicate" (a multi-valued predicate or two different attributes
-   that both hold); "refinement" (one is a more specific version of the other);
-   "scope_mismatch" (same subject under different implicit qualifiers — time
-   window / whole vs part / context; both hold); "same_name_distinct_subject"
-   (same surface name, plausibly different instances); "conditional_unrealized"
-   (one is hypothetical/irrealis); "event_restatement" (same event restated).
-3. contradicts (bool): true ONLY when same_subject is true AND
-   non_conflict_reason is "none" AND the two assert mutually exclusive states in
-   the same time frame. Updates / corrections about the same subject ARE
-   contradictions ("X lives in Tel Aviv" vs "X lives in Haifa").
+B. SAME SLOT? Do both give a value for the same single-valued attribute of
+   that thing (its owner, provider, tool, location, schedule, limit, duration,
+   version, status, or whether something is allowed)? A slot includes what
+   its value applies to: "the price of the basic plan" and "the price of
+   the premium plan" are two slots, as are "the timeout for uploads" and
+   "the timeout for downloads", "the owner" and "the deputy owner", "this
+   year's budget" and "last year's budget", a goal and a measured result.
+   No for two different attributes (where logs are stored / how long they
+   are kept), and for an attribute that naturally holds several values at
+   once: languages spoken or supported, managers in a matrix organisation,
+   parallel projects, a further item ("also", "in addition", "a second ...").
+C. DIFFERENT VALUE? Is the NEW statement's value different from the
+   candidate's: another value, or a negation ("no longer", "not ... anymore")?
+   Wording such as "now", "moved from X to Y", "changed", "switched", "raised
+   to", "extended to", "instead of" marks an update, and an update of the
+   same slot IS a contradiction.
+   No when the NEW statement adds to the candidate's value without replacing
+   it: the cause of what the candidate reports, an exception to it, a further
+   detail, or the history of how the candidate's value came about ("was cut
+   from 60 to 10 minutes" agrees with "is 10 minutes").
+D. CAN BOTH HOLD? Name the reason both statements can be true at once, or
+   "none" when the NEW value replaces the candidate's:
+   - "list_valued_predicate": the attribute naturally holds several values
+     at once (languages spoken or supported, managers in a matrix
+     organisation, parallel projects, a further item);
+   - "refinement": one value is a more specific version of the other ("Q3" /
+     "September 15"; "Europe" / "Munich");
+   - "scope_mismatch": the same subject under different implicit qualifiers
+     (whole / part, weekdays / weekends, separate past periods such as "from
+     2010 to 2014" / "from 2015 to 2018");
+   - "same_name_distinct_subject": the same surface name for plausibly
+     different instances (two runs of "the nightly build", two people called
+     "John" with nothing to tell them apart);
+   - "conditional_unrealized": either statement is conditional or
+     hypothetical ("if", "would", "could", "might");
+   - "event_restatement": the same event or value restated in another tense,
+     unit or synonym ("is acquiring" / "acquired", "was hired" / "joined");
+   - "temporal_supersession": BOTH statements are records of past events that
+     stay true as history ("hired in 2020" / "promoted in 2023"). NOT for a
+     current state the NEW statement changes ("status: planned" / "status:
+     shipped", "runs at 01:00" / "runs at 03:00"): that is an update, reason
+     "none".
+A candidate contradicts the NEW statement exactly when A, B and C are all yes
+and D is "none".
 
-Reply with ONLY a JSON object, no prose, no markdown fences, with exactly two
-keys. EVERY candidate index from 0 to N-1 must appear in exactly one of them:
-- "clean": array of every candidate index (integers) where contradicts is false.
-- "hits": object mapping each contradicting candidate index (as a STRING) to
-  its judgment with the three fields above.
-{{"clean": [1, 2, 4], "hits": {{"0": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true}}, "3": {{"same_subject": true, "non_conflict_reason": "none", "contradicts": true}}}}}}
-Calibration: in most batches FEW OR NO candidates contradict — an empty "hits"
-is the normal answer, not a failure to find something. Apply the three rules to
-every candidate independently, exactly as if you were judging that one pair on
-its own. A candidate goes in "hits" ONLY when all three rules pass decisively;
-uncertainty, partial overlap, related-but-compatible claims, or any applicable
-non_conflict_reason put it in "clean". Never add a hit because a batch "should"
-contain one. If NO candidate contradicts, "hits" is {{}} and "clean" lists every
-index.
+Reply with ONLY a JSON object, no prose, no markdown fences, with exactly one
+key, "checks": an object mapping EVERY candidate index from 0 to N-1 (as a
+STRING) to one of two values:
+- the string "-" when the candidate is plainly about something else;
+- otherwise an object with these keys, in this order:
+  "things": the candidate's thing, then the NEW statement's thing, as short
+     noun phrases, each with EVERY qualifier it carries (environment, region,
+     variant, audience, category, period), as "<candidate's> / <NEW's>";
+  "same_thing": your answer to A (true/false). false whenever the two things
+     differ in any qualifier;
+  "slots": the attribute each statement gives a value for, with what that
+     value applies to, as "<candidate's> / <NEW's>";
+  "one_value_only": true when the thing can have only ONE value in this slot
+     at a time (one owner, one address, one schedule, one limit); false when
+     it can have several (languages, skills, supported platforms, members,
+     features, managers in a matrix);
+  "same_slot": your answer to B. false when same_thing is false, whenever
+     the two slots differ in what they apply to, and when one_value_only is
+     false;
+  "different_value": your answer to C. false when same_slot is false;
+  "non_conflict_reason": your answer to D, one of the names above;
+  "change": "<candidate's value> -> <NEW statement's value>", each in the
+     words its own statement uses, or "" when nothing is replaced.
+Shape, for a batch where candidate <i> is an update and <k> a look-alike:
+{{"checks": {{"<i>": {{"things": "<thing> / <same thing>", "same_thing": true, "slots": "<attribute> / <same attribute>", "one_value_only": true, "same_slot": true, "different_value": true, "non_conflict_reason": "none", "change": "<old value> -> <new value>"}}, "<j>": "-", "<k>": {{"things": "<thing, qualifier 1> / <thing, qualifier 2>", "same_thing": false, "slots": "", "one_value_only": false, "same_slot": false, "different_value": false, "non_conflict_reason": "none", "change": ""}}}}}}
+Calibration: judge every candidate on its own, exactly as if it were the only
+one. Most candidates are merely related and fail a question, so a batch with
+no contradiction is common and is not a failure to find something; never
+pass a candidate because a batch "should" contain one. But a candidate that
+passes every question must be reported as such: a stale value left unmarked is as
+wrong as a true fact marked.
 """
 )
 
 
-def _expand_sparse_batch(obj: object, n: int) -> list[dict]:
+_VALUE_WORD = re.compile(r"[a-z0-9]+")
+_VALUE_NUMBER = re.compile(r"\d+")
+# Words that carry no value of their own, so "the rate limit" and "rate limit"
+# compare equal.
+_VALUE_FILLER = frozenset(
+    "a an and are as at be by for from in is it its of on or per the to was were with".split()  # noqa: SIM905
+)
+# Words whose arrival or removal is itself the change ("allowed" -> "not
+# allowed"), so a value that only adds one still differs.
+_VALUE_NEGATIONS = frozenset({"not", "no", "never", "none", "nor", "cannot", "without", "off", "disabled"})
+
+
+def _value_words(text: str) -> set[str]:
+    return {w for w in _VALUE_WORD.findall(text.lower()) if w not in _VALUE_FILLER}
+
+
+def _value_numbers(text: str) -> set[int]:
+    return {int(n) for n in _VALUE_NUMBER.findall(text)}
+
+
+def _value_stems(words: set[str]) -> set[str]:
+    # A five-letter prefix matches "retries" to "retried" and "acquired" to
+    # "acquiring", so a word in another tense or number counts as the same.
+    return {w[:5] for w in words}
+
+
+def _shares_a_word(value: set[str], text: str) -> bool:
+    return bool(_value_stems(value) & _value_stems(_value_words(text)))
+
+
+def _same_value(old: str, new: str) -> bool:
+    """True when one value only restates or narrows the other: the same
+    numbers in the same order, and one's words (in any tense) all within the
+    other's, as "Postgres" / "Postgres table" or "acquired last March" / "is
+    acquiring". A negation added or dropped ("allowed" / "not allowed") is a
+    change, and so are other numbers ("v1" / "v1.1")."""
+    if _VALUE_NUMBER.findall(old) != _VALUE_NUMBER.findall(new):
+        return False
+    old_words, new_words = _value_words(old), _value_words(new)
+    if (old_words ^ new_words) & _VALUE_NEGATIONS:
+        return False
+    old_stems, new_stems = _value_stems(old_words), _value_stems(new_words)
+    return old_stems <= new_stems or new_stems <= old_stems
+
+
+def _change_problems(change: str, new_text: str | None, candidate_text: str | None) -> list[str]:
+    """What is wrong with a checks entry's ``change`` ("<candidate's value> ->
+    <NEW statement's value>"), or [] when nothing is.
+
+    It must name both values, split by one arrow ("->" or "→"); they must
+    differ (``_same_value``); and each must come from its own statement: every
+    number in it appears in that statement, and it shares a word with it.
+
+    Replayed on staging's judge (Vertex gemini-3.1-flash-lite, 2026-11-25),
+    every reply that passed a real update gave its change this way (36 of 36),
+    while passed look-alikes gave "60 minutes -> 10 minutes" for a candidate
+    that says "10 minutes" (the 60 is the NEW statement's history, "was cut
+    from 60 to 10 minutes"), "absent -> present" for statements that use
+    neither word, "Postgres -> Postgres table", "acquired last March -> is
+    acquiring", and "silent timeout / emits export_duration_seconds" with no
+    arrow.
+    """
+    if not change.strip():
+        return ["change is empty"]
+    parts = change.replace("→", "->").split("->")
+    if len(parts) != 2:
+        return ["change doesn't give the two values as '<candidate's> -> <NEW's>'"]
+    if _same_value(parts[0], parts[1]):
+        return ["change keeps the candidate's value"]
+    problems: list[str] = []
+    for whose, value, text in (
+        ("candidate's", parts[0], candidate_text),
+        ("NEW statement's", parts[1], new_text),
+    ):
+        if text is None:
+            continue
+        if not _value_numbers(value) <= _value_numbers(text):
+            problems.append(f"the {whose} value has a number its statement lacks")
+        elif not _shares_a_word(_value_words(value), text):
+            problems.append(f"the {whose} value shares no word with its statement")
+    return problems
+
+
+def _checks_entry_unsupported(
+    entry: dict,
+    index: int,
+    new_text: str | None = None,
+    candidate_text: str | None = None,
+) -> bool:
+    """True when a checks entry's own fields don't support its three yes
+    answers, so they can't be trusted.
+
+    The prompt makes ``same_slot`` false "when one_value_only is false", and
+    ``change`` "" "when nothing is replaced"; it asks for each value of
+    ``change`` in its own statement's words. A reply that says the slot holds
+    several values, that names no change, or whose change isn't one between
+    the two statements (``_change_problems``) is as incoherent as the replies
+    Gate 1 and Gate 2 overrule. ``new_text`` and ``candidate_text`` are the
+    statements as the judge saw them; without them the values aren't checked
+    against the statements.
+
+    A key that is absent is no evidence either way, so only a stated opposite
+    fires: a provider answering without these keys is judged as before.
+    """
+    problems: list[str] = []
+    if "one_value_only" in entry and entry["one_value_only"] is not True:
+        problems.append("one_value_only is false")
+    change = entry.get("change")
+    if isinstance(change, str):
+        problems.extend(_change_problems(change, new_text, candidate_text))
+    if problems:
+        # WARNING, like the two gates: the model broke its own contract.
+        logger.warning(
+            "Contradiction batch judge answered yes to every check for candidate %d,"
+            " but %s; not a contradiction",
+            index,
+            "; ".join(problems),
+        )
+    return bool(problems)
+
+
+def _expand_sparse_batch(
+    obj: object,
+    n: int,
+    *,
+    new_text: str | None = None,
+    candidate_texts: Sequence[str] | None = None,
+) -> list[dict]:
     """Expand a batch judge reply into one raw judgment dict per candidate,
     aligned to input order (E4).
 
@@ -1908,9 +2163,48 @@ def _expand_sparse_batch(obj: object, n: int) -> list[dict]:
     Detection order matters: ``clean``/``hits`` keys mark the sparse shape;
     otherwise top-level index keys are read densely; anything else expands to
     the safe default for every candidate.
+
+    ``new_text`` and ``candidate_texts`` (aligned to the candidates) are the
+    statements as the judge saw them, so a "checks" entry's ``change`` can be
+    held to them (``_checks_entry_unsupported``).
     """
     if not isinstance(obj, dict):
         return [{"contradicts": False} for _ in range(n)]
+
+    checks = obj.get("checks")
+    if isinstance(checks, dict):
+        # The current contract: one entry per candidate, each verdict stated
+        # once. A candidate contradicts only when all three answers are the
+        # literal ``True``; "-" (about something else), a missing index and any
+        # malformed entry expand to the safe default.
+        out = []
+        for i in range(n):
+            entry = checks.get(str(i))
+            if entry is None:
+                entry = checks.get(i)  # tolerate int keys
+            passed = (
+                isinstance(entry, dict)
+                and all(entry.get(key) is True for key in ("same_thing", "same_slot", "different_value"))
+                and not _checks_entry_unsupported(
+                    entry,
+                    i,
+                    new_text,
+                    candidate_texts[i] if candidate_texts is not None and i < len(candidate_texts) else None,
+                )
+            )
+            # The reason is handed on as written, so ``_judge_contradiction``
+            # applies the same veto set (and the same A63 exception) as it does
+            # to a single-pair reply.
+            out.append(
+                {
+                    "same_subject": True,
+                    "non_conflict_reason": entry.get("non_conflict_reason", "none"),
+                    "contradicts": True,
+                }
+                if passed
+                else {"contradicts": False}
+            )
+        return out
 
     if "hits" in obj or "clean" in obj:
         hits_raw = obj.get("hits")
@@ -1946,16 +2240,15 @@ async def _llm_contradiction_check_batch(
     so the safety gates are identical to the per-candidate path. E4: the reply
     is sparse — see ``_expand_sparse_batch``."""
     provider_name = _judge_provider(tenant_config)
-    candidates_block = data_block(
-        "\n".join(f"[{i}] {quote_untrusted(c.get('content', '')[:500])}" for i, c in enumerate(candidates))
-    )
+    texts = [c.get("content", "")[:500] for c in candidates]
+    candidates_block = data_block("\n".join(f"[{i}] {quote_untrusted(t)}" for i, t in enumerate(texts)))
     prompt = BATCH_CONTRADICTION_PROMPT.format(
         new_content=data_block(new_content[:500]), candidates_block=candidates_block
     )
 
     async def _do_check(llm) -> list[dict]:
         raw = await llm.complete_json(prompt, **_judge_effort_kwargs())
-        return _expand_sparse_batch(raw, len(candidates))
+        return _expand_sparse_batch(raw, len(candidates), new_text=new_content[:500], candidate_texts=texts)
 
     return await call_with_fallback(
         primary_provider_name=provider_name,
@@ -2792,6 +3085,32 @@ def _rdf_pass_would_mark(new_memory: dict, other: dict, *, other_is_loser: bool)
     return other_value is not None and _rdf_object_key(value) != _rdf_object_key(other_value)
 
 
+def _entities_settle_subject(new_entities: list[dict], old_entities: list[dict]) -> bool:
+    """Whether the resolved rows tell the retraction judge if the two subjects
+    are the same thing.
+
+    They do in two cases. Both statements link the SAME subject row: one entity,
+    whatever the wording. Or every subject row is a person: two person rows are
+    two people, which is the same-name case (two "Priya") the entity-aware
+    prompt exists for.
+
+    Otherwise they do not. Extraction files one thing under two rows all the
+    time — a thing and one of its attributes ("support team" / "support
+    hours"), a name and its abbreviation, a possessive, even the same name in
+    another case — so two different non-person rows are not two different
+    things. Measured on the fleet benchmark's 501 pairs (2026-11-15): of the
+    content-route verdicts the entity-aware judge cleared on differing rows,
+    32 were real corrections and 8 were not.
+    """
+    new_subjects = [e for e in new_entities if e.get("role") == "subject"]
+    old_subjects = [e for e in old_entities if e.get("role") == "subject"]
+    if not new_subjects or not old_subjects:
+        return False
+    if {e.get("entity_id") for e in new_subjects} & {e.get("entity_id") for e in old_subjects}:
+        return True
+    return all(e.get("entity_type") == "person" for e in (*new_subjects, *old_subjects))
+
+
 async def _retraction_judge_clears(
     sc, winner: dict, loser: dict, tenant_config, *, tenant_id: str, memory_id, candidate_id
 ) -> float | None:
@@ -2873,9 +3192,23 @@ async def _retraction_judge_clears(
     # and a 10 s cut here cancelled a hanging primary before its retry or the
     # fallback provider could run.
     try:
-        verdict, confidence = await _llm_entity_aware_contradiction_check(
-            new_content, old_content, new_entities, old_entities, tenant_config
-        )
+        if _entities_settle_subject(new_entities, old_entities):
+            verdict, confidence = await _llm_entity_aware_contradiction_check(
+                new_content, old_content, new_entities, old_entities, tenant_config
+            )
+        else:
+            # The rows say nothing about whether the two subjects are one
+            # thing, and the entity-aware prompt would read "different
+            # entity_id" as "different subject" and clear the verdict on that
+            # alone. Judge the two statements themselves instead: the same one
+            # call, with the single-pair prompt.
+            logger.info(
+                "PATH_C_RETRACTION entities_do_not_settle_subject memory=%s candidate=%s "
+                "(judging the statements)",
+                memory_id,
+                candidate_id,
+            )
+            verdict, confidence = await _llm_contradiction_check(new_content, old_content, tenant_config)
     except BackgroundWorkDeferred:
         raise
     except Exception as e:
@@ -3303,6 +3636,9 @@ async def detect_contradictions_by_entities_async(
     abstentions = _JudgeAbstentions()
     abstentions_token = _judge_abstentions.set(abstentions)
     try:
+        # Before any storage read, as in Path A: a run the judge's budget
+        # cannot serve defers here rather than after the overlap query.
+        await _require_judge_admission(tenant_id)
         # The row is fetched BEFORE the lock is taken, unlike Path A. The lock
         # key carries a fingerprint of the content this run will examine (H-06)
         # and Path C — unlike Path A — is not handed that content by its
@@ -3387,19 +3723,37 @@ async def detect_contradictions_by_entities_async(
             concluded = True
             return
 
-        candidates = await sc.find_entity_overlap_candidates(
-            {
-                "memory_id": str(memory_id),
-                "tenant_id": tenant_id,
-                "fleet_id": fleet_id,
-                # Same visibility scoping as the semantic path above.
-                "visibility": new_memory.get("visibility", "scope_team"),
-                # A54 — pins the OWNER for the scope_agent tier. The tier alone
-                # matches any agent's private rows, so without this a writer can
-                # mark another agent's private memory conflicted.
-                "agent_id": new_memory.get("agent_id"),
-            }
-        )
+        try:
+            candidates = await sc.find_entity_overlap_candidates(
+                {
+                    "memory_id": str(memory_id),
+                    "tenant_id": tenant_id,
+                    "fleet_id": fleet_id,
+                    # Same visibility scoping as the semantic path above.
+                    "visibility": new_memory.get("visibility", "scope_team"),
+                    # A54 — pins the OWNER for the scope_agent tier. The tier alone
+                    # matches any agent's private rows, so without this a writer can
+                    # mark another agent's private memory conflicted.
+                    "agent_id": new_memory.get("agent_id"),
+                }
+            )
+        except (httpx.HTTPStatusError, httpx.TimeoutException) as exc:
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code != 504:
+                raise
+            # Storage caps this query (entity_overlap_statement_timeout_ms) and
+            # answers 504 when the cap fires, which it does by design when the
+            # read pool is loaded. That is a skipped check, not a defect: a
+            # WARNING instead of the ERROR traceback below. It is still
+            # recorded as unchecked in the ``finally``, and the lock is
+            # released so a later trigger can run the check.
+            logger.warning(
+                "PATH_C_DETECTION candidates_timeout memory=%s tenant=%s error=%s",
+                memory_id,
+                tenant_id,
+                type(exc).__name__,
+            )
+            failure, failure_tb = exc, traceback.format_exc()
+            return
         n_candidates = len(candidates) if candidates else 0
         # CAURA-132 diag — surface Path C invocation + initial candidate
         # count. The wet-test miss class (links=2/2, no contradiction)

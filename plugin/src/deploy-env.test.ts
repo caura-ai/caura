@@ -37,6 +37,13 @@ test("ordinary tuning keys still pass", () => {
   }
 });
 
+for (const key of ["CAURA_AUTH_MODE", "CAURA_MANUAL_AGENT_API_KEY", "CAURA_MANUAL_AGENT_ID", "CAURA_MANUAL_TENANT_ID"]) {
+  test(`explicit authority setting ${key} cannot be changed by remote deployment`, () => {
+    assert.equal(isRemoteEnvDenied(key), true, key);
+    assert.equal(isRemoteEnvDenied(key.toLowerCase()), true, key.toLowerCase());
+  });
+}
+
 test("keys outside the plugin prefix are not this rule's concern", () => {
   // hasPluginEnvPrefix already drops them before they reach .env.
   assert.equal(isRemoteEnvDenied("PATH_API_URL"), false);

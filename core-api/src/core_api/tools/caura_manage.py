@@ -9,7 +9,7 @@ from core_api import mcp_server
 
 from ._builders import mcp_register
 from ._registry import register
-from ._types import OpSpec, ToolSpec
+from ._types import DEFAULT_SURFACE, OpSpec, ToolSpec
 
 # Served to BOTH surfaces: MCP reads it from the registry, and the plugin gets
 # the same text via /tool-descriptions. The plugin has no dispatch for
@@ -37,6 +37,9 @@ _DESCRIPTION = (
 
 _SPEC = ToolSpec(
     name="caura_manage",
+    title="Manage memory",
+    # Off the directory surface: it mixes reads and writes (see _types.Surface).
+    surfaces=(DEFAULT_SURFACE,),
     description=_DESCRIPTION,
     handler=mcp_server.caura_manage,
     plugin_exposed=True,
@@ -136,6 +139,7 @@ _SPEC = ToolSpec(
         "PERMISSION_DENIED",
         "PLAN_LIMIT_READ_ONLY",
         "REQUEST_BUDGET_EXCEEDED",
+        "TOOL_NOT_ON_SURFACE",
         "UNAUTHORIZED",
         "UNAVAILABLE",
     ),

@@ -23,8 +23,10 @@ const tmpHome = mkdtempSync(join(tmpdir(), "transport-test-home-"));
 process.env.HOME = tmpHome;
 mkdirSync(join(tmpHome, ".openclaw", "plugins", FROZEN_PLUGIN_ID), { recursive: true });
 
-const { apiCall, parseSearchItems } = await import("./transport.js");
+const { apiCall: request, parseSearchItems } = await import("./transport.js");
+const apiCall: typeof request = (...args) => {args[5] ??= "fixture-agent"; return request(...args);};
 const { USER_AGENT } = await import("./user-agent.js");
+const { isNetworkClassError } = await import("./health.js");
 
 interface MockCall {
   url: string;
@@ -78,6 +80,12 @@ describe("apiCall — CAURA_API_PREFIX handling", () => {
     assert.deepEqual(result, [{ id: "r1" }]);
   });
 
+  for (const status of [500, 502, 503]) test(`HTTP ${status} reports a server error without echoing its body`, async () => {
+    globalThis.fetch = async () => new Response('backend detail mc_fixture_secret https://user:pass@example.test', {status});
+    await assert.rejects(apiCall("GET", "/memories"), (e: Error) => {
+      assert.equal(e.message, `Caura API ${status}: server error`); assert.equal(isNetworkClassError(e), true); return true;
+    });
+  });
   test("does not publish success metadata for failed responses", async () => {
     globalThis.fetch = (async () => new Response("unavailable", {
       status: 503, headers: { "X-Truncated": "true" },
@@ -88,6 +96,38 @@ describe("apiCall — CAURA_API_PREFIX handling", () => {
     assert.equal(notified, false);
   });
 
+  test("422 preserves bounded validation detail and redacts credentials", async () => {
+    const body = String.raw`invalid field mc_echoed_key mca_echoed_key mci_echoed_key mcx_echoed_key mco_echoed_key caura_echoed_key sk-echoed-key https://user:pass@example.test/path https:\/\/other:pass@example.test/path ` + 'x'.repeat(300);
+    globalThis.fetch = async () => new Response(body, {status: 422});
+    await assert.rejects(apiCall("POST", "/memories", {}), (e: Error) => {
+      assert.match(e.message, /invalid field/); assert.doesNotMatch(e.message, /mc[a-z]?_echoed|caura_echoed|sk-echoed|user:pass|example.test/);
+      assert.ok(e.message.length <= "Caura API 422: ".length + 200); return true;
+    });
+  });
+  for (const body of ['Field required in header', 'authorization field is required', 'cookie field is missing', 'headers were invalid',
+    JSON.stringify({detail: [{loc: ["header", "x-api-key"], msg: "Field required"}]})]) test(`422 keeps benign validation detail: ${body}`, async () => {
+    globalThis.fetch = async () => new Response(body, {status: 422});
+    await assert.rejects(apiCall("POST", "/memories", {}), (e: Error) => {assert.equal(e.message, `Caura API 422: ${body}`); return true;});
+  });
+  test("4xx request-header echoes are never included in diagnostics", async () => {
+    for (const body of [
+      '{"headers":{"X-API-Key":"fixture_sensitive"}}',
+      'X-API-Key fixture_sensitive',
+      'key=fixture_sensitive',
+      '["X-API-Key","fixture_sensitive"]',
+      '{"Authorization":"Bearer fixture_sensitive"}',
+      JSON.stringify({detail: JSON.stringify({headers: {"X-API-Key": "fixture_sensitive"}})})
+    ]) {
+      globalThis.fetch = async () => new Response(body, {status: 409});
+      await assert.rejects(apiCall("POST", "/memories", {}), /^Error: Caura API 409: request refused$/);
+    }
+  });
+  for (const status of [401, 403]) test(`HTTP ${status} drops response bodies and header echoes`, async () => {
+    globalThis.fetch = async () => new Response('X-API-Key: fixture_sensitive echo', {status});
+    await assert.rejects(apiCall("POST", "/memories", {}), new RegExp(`^Error: Caura API ${status}: request refused$`));
+    globalThis.fetch = async () => Response.json({detail: "agent_key_revoked", echoed: "fixture_sensitive"}, {status});
+    await assert.rejects(apiCall("POST", "/memories", {}), new RegExp(`^Error: Caura API ${status}: agent_key_revoked$`));
+  });
   test("rejects paths starting with CAURA_API_PREFIX", async () => {
     await assert.rejects(
       () => apiCall("POST", "/api/v1/search", {}),
@@ -181,171 +221,6 @@ describe("apiCall — extraHeaders (bulk X-Bulk-Attempt-Id support)", () => {
     assert.equal(headers["X-Bulk-Attempt-Id"], undefined);
     assert.ok(headers["X-API-Key"], "X-API-Key should still be sent");
     assert.equal(headers["User-Agent"], USER_AGENT);
-  });
-});
-
-describe("apiCall — rejected agent key fallback", () => {
-  beforeEach(() => {
-    originalFetch = globalThis.fetch;
-    calls = [];
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-  });
-
-  test("bounds fallback, preserves idempotency, and re-provisions on the next call", async () => {
-    let provisions = 0;
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
-      calls.push({ url, init });
-      if (url.endsWith("/admin/agent-keys/provision")) {
-        provisions++;
-        return new Response(
-          JSON.stringify({ raw_key: `agent-key-${provisions}`, key_prefix: "agent" }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
-      }
-      const key = (init?.headers as Record<string, string>)["X-API-Key"];
-      if (key === "agent-key-1") return new Response("rejected", { status: 401 });
-      if (key === "agent-key-2") {
-        return new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      assert.equal(key, process.env.CAURA_API_KEY);
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    }) as typeof fetch;
-
-    const body = {
-      agent_id: "bounded-retry-agent",
-      items: [{ content: "remember this" }],
-    };
-    const extraHeaders = { "X-Bulk-Attempt-Id": "attempt-fixed" };
-    const result = await apiCall(
-      "POST",
-      "/memories/bulk",
-      body,
-      undefined,
-      undefined,
-      undefined,
-      extraHeaders,
-    );
-    await apiCall(
-      "POST",
-      "/memories/bulk",
-      body,
-      undefined,
-      undefined,
-      undefined,
-      extraHeaders,
-    );
-
-    assert.equal((result as { ok: boolean }).ok, true);
-    assert.equal(typeof (result as { _latency_ms: unknown })._latency_ms, "number");
-    assert.equal(provisions, 2, "the later top-level call must replace the evicted key");
-    assert.ok(calls.every(call => call.init?.redirect === "error"), "provision, agent and fallback requests must all refuse redirects");
-    const resourceCalls = calls.filter((call) => call.url.endsWith("/memories/bulk"));
-    assert.deepEqual(
-      resourceCalls.map(
-        (call) => (call.init?.headers as Record<string, string>)["X-API-Key"],
-      ),
-      ["agent-key-1", process.env.CAURA_API_KEY, "agent-key-2"],
-    );
-    assert.deepEqual(
-      resourceCalls.map(
-        (call) => (call.init?.headers as Record<string, string>)["X-Bulk-Attempt-Id"],
-      ),
-      ["attempt-fixed", "attempt-fixed", "attempt-fixed"],
-    );
-  });
-});
-
-describe("apiCall — a revoked agent stops (L-79)", () => {
-  // A managed-platform server answers a revoked agent with this code, from
-  // the gateway on a request (401) and from the mint route on provisioning
-  // (403). Anything sent with the tenant key would still act as the agent.
-  const json = (status: number, payload: unknown) => new Response(JSON.stringify(payload), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-  const keyOf = (call: MockCall) => (call.init?.headers as Record<string, string>)["X-API-Key"];
-  const resourceKeys = () => calls.filter((call) => call.url.endsWith("/memories")).map(keyOf);
-  const provisions = () => calls.filter((call) => call.url.endsWith("/agent-keys/provision")).length;
-
-  beforeEach(() => {
-    originalFetch = globalThis.fetch;
-    calls = [];
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-  });
-
-  test("a revoked key is not retried with the tenant key, and the agent is not re-minted", async () => {
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
-      calls.push({ url, init });
-      if (url.endsWith("/agent-keys/provision")) {
-        const agent = (JSON.parse(String(init?.body)) as { agent_id: string }).agent_id;
-        return json(201, { raw_key: `${agent}-key`, key_prefix: "agent" });
-      }
-      if (keyOf({ url, init }) === "revoked-agent-key") {
-        return json(401, {
-          detail: "agent_key_revoked",
-          error: { code: "UNAUTHORIZED", message: "agent_key_revoked" },
-        });
-      }
-      return json(200, { ok: true });
-    }) as typeof fetch;
-
-    const body = { agent_id: "revoked-agent", content: "remember this" };
-    await assert.rejects(apiCall("POST", "/memories", body), /agent_key_revoked/);
-    await assert.rejects(apiCall("POST", "/memories", body), /agent_key_revoked/);
-    assert.deepEqual(resourceKeys(), ["revoked-agent-key"], "nothing goes out with the tenant key");
-    assert.equal(provisions(), 1, "the revoked agent is not minted a new key");
-
-    await apiCall("POST", "/memories", { agent_id: "other-agent", content: "and this" });
-    assert.deepEqual(resourceKeys(), ["revoked-agent-key", "other-agent-key"], "other agents carry on");
-  });
-
-  test("a refused mint sends nothing, and the agent is asked about again after its cooldown", async () => {
-    const realNow = Date.now;
-    let now = realNow();
-    let refuse = true;
-    Date.now = () => now;
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      const url = String(input);
-      calls.push({ url, init });
-      if (url.endsWith("/agent-keys/provision")) {
-        return refuse
-          ? json(403, { detail: "agent_key_revoked" })
-          : json(201, { raw_key: "returning-agent-key", key_prefix: "agent" });
-      }
-      return json(200, { ok: true });
-    }) as typeof fetch;
-
-    try {
-      const body = { agent_id: "returning-agent", content: "remember this" };
-      await assert.rejects(apiCall("POST", "/memories", body), /agent_key_revoked/);
-      now += 9 * 60_000;
-      await assert.rejects(apiCall("POST", "/memories", body), /agent_key_revoked/);
-      assert.equal(provisions(), 1, "the agent is not asked about again inside its cooldown");
-      assert.deepEqual(resourceKeys(), [], "nothing goes out with the tenant key");
-
-      // An admin issues the agent a key in the dashboard, which turns it back on.
-      refuse = false;
-      now += 2 * 60_000;
-      await apiCall("POST", "/memories", body);
-      assert.equal(provisions(), 2);
-      assert.deepEqual(resourceKeys(), ["returning-agent-key"]);
-    } finally {
-      Date.now = realNow;
-    }
   });
 });
 

@@ -32,6 +32,8 @@ async def upsert_document(request: Request) -> dict:
             # L-24 — the statuses this write may replace; ``app`` answers a
             # miss 409.
             expected_status=body.get("expected_status"),
+            expected_content_hash=body.get("expected_content_hash"),
+            expected_updated_at=body.get("expected_updated_at"),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

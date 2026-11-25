@@ -241,3 +241,22 @@ def _fake_async_return(value):
         return value
 
     return _fn
+
+
+async def test_recall_on_the_directory_surface_sends_each_row_once(
+    mcp_env, monkeypatch
+):
+    """``items`` only: the ``results`` alias repeated every row in the model's
+    context. The default surface keeps both keys."""
+    search_mock = mcp_env["service"]("search_memories")
+    search_mock.return_value = [_MemoryStub("m-1"), _MemoryStub("m-2")]
+    _wire_recall_deps(monkeypatch)
+    token = mcp_server._tool_surface_var.set(mcp_server._DIRECTORY_SURFACE)
+    try:
+        payload = parse_envelope(await mcp_server.caura_recall(query="pricing"))
+    finally:
+        mcp_server._tool_surface_var.reset(token)
+    assert "results" not in payload
+    assert [row["id"] for row in payload["items"]] == ["m-1", "m-2"]
+    payload = parse_envelope(await mcp_server.caura_recall(query="pricing"))
+    assert payload["results"] == payload["items"]

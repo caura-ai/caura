@@ -166,7 +166,15 @@ class MemoryFieldResponse(BaseModel):
         ),
     )
     computed_at: str
-    total: int = Field(description="Memories visible to the caller (points holds the newest `limit`).")
+    total: int = Field(
+        description=(
+            "Memories visible to the caller (points holds the newest `limit`), counted up to 50,000, "
+            "the most a map shows."
+        )
+    )
+    total_capped: bool = Field(
+        default=False, description="The caller sees more than 50,000 memories, so `total` is a lower bound."
+    )
     clusters: list[MemoryFieldCluster]
     points: list[MemoryFieldPoint]
     entities: list[MemoryFieldEntity] = Field(description="Entities linked from the returned points.")
@@ -667,8 +675,8 @@ class GraphResponse(BaseModel):
     truncated: bool = Field(
         description=(
             "True when the graph was larger than the server's caps (GRAPH_MAX_ENTITIES, "
-            "GRAPH_MAX_RELATIONS): the newest entities and the heaviest relations among "
-            "them were returned, not all of them."
+            "GRAPH_MAX_RELATIONS) or the request's limit: the newest entities and the "
+            "heaviest relations among them were returned, not all of them."
         ),
     )
 
@@ -703,6 +711,11 @@ class WriteSettings(BaseModel):
     contradiction_detection_enabled: bool | None = Field(
         description="Tenant switch for contradiction detection; null means on. False skips "
         "every detection path for the tenant, so no row is marked outdated/conflicted."
+    )
+    conflict_records_enabled: bool | None = Field(
+        description="Record every confirmed conflict for review (memory_conflicts); null "
+        "follows the deployment's CONTRADICTION_WRITE_CONFLICT_RECORD. An unlinked loser "
+        "and a dispute are recorded either way.",
     )
 
 

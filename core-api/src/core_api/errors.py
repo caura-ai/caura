@@ -171,6 +171,17 @@ AUTH_KEPT_PRIVATE_BY_POLICY = "KEPT_PRIVATE_BY_POLICY"
 REQUEST_BUDGET_EXCEEDED = "REQUEST_BUDGET_EXCEEDED"
 
 
+# ── Code for a tool called on a connection that does not list it ──────────
+#
+# The MCP server serves two tool sets (``core_api.tools.Surface``): the
+# default one, and the Claude connector-directory one, which replaces the two
+# op-dispatched tools that mix reads and writes with narrower tools. A tool is
+# callable exactly where ``tools/list`` names it; calling one elsewhere answers
+# this code, with a message naming the tool to use instead. MCP-only: REST has
+# no tool surfaces.
+TOOL_NOT_ON_SURFACE = "TOOL_NOT_ON_SURFACE"
+
+
 # ── Code for a deployment with no embedder (L-224) ────────────────────────
 #
 # With no embedding provider configured (no tenant key, no OPENAI_API_KEY, no

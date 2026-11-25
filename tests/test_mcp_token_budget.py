@@ -184,7 +184,21 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # way to read or accept it. Two names in the ``op`` roll-call, one sentence,
 # and the plugin-gap clause naming read_baton (the plugin renders the baton
 # itself). Ceiling 5884 -> 5945, raised by exactly the delta, leaving 0.
-CEILING_TOKENS = 5945
+#
+# 2026-11-15 (tool annotations): 6295 cl100k (+350), measured with tiktoken
+# from the fixture. Every tool now carries a ``title`` (as the tool's own
+# ``title`` and as ``annotations.title``) and ``readOnlyHint`` /
+# ``destructiveHint`` — what the Claude connector directory requires of every
+# tool, and what clients use to decide which calls need confirmation, so it is
+# served to every connection rather than only directory ones. No description or
+# parameter changed. About 60 of the +350 are the null ``idempotentHint`` /
+# ``openWorldHint`` keys the fixture's ``model_dump`` keeps and the wire omits;
+# measured without nulls the delta is +290. The title is sent twice because
+# clients differ in which one they read; dropping the top-level copy would save
+# roughly 5 tokens a tool. Ceiling 5945 -> 6295, raised by exactly the delta,
+# leaving 0. The directory surface's list (16 tools) is not under this gate:
+# this fixture is the default surface's.
+CEILING_TOKENS = 6295
 
 
 def _count(path: Path) -> int:

@@ -881,6 +881,12 @@ class CoreStorageClient:
     async def release_background_attempt(self, **payload) -> dict:
         return await self._post("/background-work/release", payload, idempotent=True)  # type: ignore[return-value]
 
+    async def check_background_admission(self, **payload) -> dict:
+        # Best effort: its caller ignores a failed check, so retrying a 5xx
+        # would only add load to a storage that is already struggling. Only a
+        # request that never left is retried (the ``_post`` default).
+        return await self._post("/background-work/admission", payload)  # type: ignore[return-value]
+
     async def defer_background_work(self, payload: dict) -> dict:
         return await self._post("/background-work/defer", payload, idempotent=True)  # type: ignore[return-value]
 
@@ -1806,12 +1812,13 @@ class CoreStorageClient:
         return result  # type: ignore[return-value]
 
     async def memory_field_signature(self, data: dict) -> dict:
-        """``{count, embedded, newest}`` over the rows the memory field would
-        place — the field layout cache's change-detector.
+        """``{count, embedded, newest, revision}`` over the rows the memory
+        field would place — the field layout cache's change-detector.
 
         ``data`` carries ``{tenant_id, caller_agent_id?, caller_tenant_id?,
         fleet_id?, include_scope_agent?}``, the visibility arguments of
-        ``list_memories_by_filters``.
+        ``list_memories_by_filters``, plus optional ``window`` (only the newest
+        that many rows; adds ``more``) and ``newer_than`` (adds ``newer``).
         """
         result = await self._post("/memories/field-signature", data, read=True)
         if result is None:
@@ -2380,10 +2387,13 @@ class CoreStorageClient:
         tenant_id: str,
         fleet_id: str | None = None,
         reader: dict | None = None,
+        limit: int | None = None,
     ) -> dict:
         params: dict[str, Any] = {"tenant_id": tenant_id, **_entity_reader_params(reader)}
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
+        if limit is not None:
+            params["limit"] = limit
         return await self._get("/entities/full-graph", **params) or {}
 
     async def list_entities(
@@ -2688,17 +2698,30 @@ class CoreStorageClient:
     # =====================================================================
 
     async def upsert_document(
-        self, data: dict, *, expected_status: Sequence[str | None] | None = None
+        self,
+        data: dict,
+        *,
+        expected_status: Sequence[str | None] | None = None,
+        expected_content_hash: str | None = None,
+        expected_updated_at: str | None = None,
     ) -> dict:
         """Write a whole document.
 
         ``expected_status`` (L-24) lists the ``data.status`` values the stored
         document may hold for the write to land, ``None`` among them meaning it
         may not exist yet. Otherwise storage writes nothing and this raises
-        ``DocumentStatusChangedError``. Without it the write replaces whatever
-        is stored.
+        ``DocumentStatusChangedError``. Optional content-hash and storage
+        timestamp predicates bind review writes to an existing version; a
+        mismatch also writes nothing. Without predicates the write replaces
+        whatever is stored.
         """
-        body = data if expected_status is None else {**data, "expected_status": list(expected_status)}
+        body = dict(data)
+        if expected_status is not None:
+            body["expected_status"] = list(expected_status)
+        if expected_content_hash is not None:
+            body["expected_content_hash"] = expected_content_hash
+        if expected_updated_at is not None:
+            body["expected_updated_at"] = expected_updated_at
         try:
             return await self._post("/documents", body)  # type: ignore[return-value]
         except httpx.HTTPStatusError as exc:

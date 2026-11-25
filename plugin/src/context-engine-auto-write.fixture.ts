@@ -87,7 +87,7 @@ try {
     tenant_id: "auto-write-fixture",
     agent_id: "writer",
     content: "An explicit memory write remains available.",
-  });
+  }, undefined, undefined, "writer");
   assert.equal(writes.length, enabled ? 5 : 1);
 } finally {
   await rm(runtimeRoot, { recursive: true, force: true });
