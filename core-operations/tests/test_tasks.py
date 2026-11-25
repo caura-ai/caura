@@ -160,6 +160,46 @@ async def test_purge_soft_deleted_tick_hits_correct_path(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
+async def test_keystone_fetch_purge_tick_hits_correct_path(monkeypatch: pytest.MonkeyPatch):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    response = _StubResponse(200, {"tenants": 3, "deleted": 12, "failed_tenants": 0})
+    async with _patch_client(monkeypatch, response=response) as stub:
+        await tasks.run_keystone_fetch_purge_tick()
+
+    assert len(stub.calls) == 1
+    url, headers = stub.calls[0]
+    assert url == "http://core-api/api/v1/internal/keystone-fetches/purge-expired"
+    assert headers == {"X-API-Key": "admin-key-xyz"}
+
+
+@pytest.mark.asyncio
+async def test_keystone_fetch_purge_tick_swallows_non_2xx(monkeypatch: pytest.MonkeyPatch):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    response = _StubResponse(503, "unavailable")
+    async with _patch_client(monkeypatch, response=response):
+        await tasks.run_keystone_fetch_purge_tick()
+
+
+@pytest.mark.asyncio
+async def test_keystone_fetch_purge_tick_warns_when_the_run_was_cut(monkeypatch, caplog):
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    body = {"tenants": 3, "deleted": 12, "failed_tenants": 0, "unfinished_tenants": 2}
+    caplog.set_level("INFO", logger=tasks.logger.name)
+    async with _patch_client(monkeypatch, response=_StubResponse(200, body)):
+        await tasks.run_keystone_fetch_purge_tick()
+
+    [record] = [r for r in caplog.records if r.getMessage() == "keystone fetch purge done"]
+    assert record.levelname == "WARNING"
+    assert record.unfinished_tenants == 2
+
+
+@pytest.mark.asyncio
 async def test_tick_swallows_non_2xx(monkeypatch: pytest.MonkeyPatch):
     """A non-2xx response must not raise — the scheduler retries on the
     next tick anyway, and re-raising would just produce duplicate

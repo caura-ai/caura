@@ -306,7 +306,8 @@ ADMIN_PLANE_ROUTERS = frozenset(
         "skills_inbox",
         "skill_delivery",
         "scheduler_lease",
-        # Internal, read-only matching uses the system-admin credential.
+        # Internal fetch matching and the daily purge use the system-admin
+        # credential.
         "keystone_fetches",
         # POST /telemetry/rotate resets the install's anonymous heartbeat
         # identity: an operator concern, refused to agent credentials.

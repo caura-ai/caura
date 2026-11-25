@@ -273,6 +273,60 @@ async def _run_rerun_sweep(path: str, label: str, *, swept: str, idle: str) -> N
     )
 
 
+async def run_keystone_fetch_purge_tick() -> None:
+    """POST ``/internal/keystone-fetches/purge-expired``.
+
+    core-api walks the tenants and deletes each one's fetch records past
+    retention. A non-2xx logs and returns; the next day's run catches up, as
+    it does for tenants a run reports failed or unfinished.
+    """
+    label = "keystone fetch purge"
+    url = f"{settings.core_api_url.rstrip('/')}/api/v1/internal/keystone-fetches/purge-expired"
+    headers: dict[str, str] = {}
+    if settings.core_api_admin_api_key:
+        headers["X-API-Key"] = settings.core_api_admin_api_key
+    else:
+        logger.warning("core-operations: CORE_API_ADMIN_API_KEY unset; the %s will be unauthorised", label)
+
+    timeout = httpx.Timeout(settings.core_api_http_timeout_s)
+    async with httpx.AsyncClient(timeout=timeout, auth=CoreApiIdentity()) as client:
+        try:
+            resp = await client.post(url, headers=headers)
+        except httpx.HTTPError:
+            logger.exception("%s POST failed", label, extra={"url": url})
+            return
+    if resp.status_code >= 400:
+        logger.error(
+            "%s returned non-2xx; will retry next run",
+            label,
+            extra={"status_code": resp.status_code, "body": resp.text[:500]},
+        )
+        return
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        logger.error("%s returned an unreadable 2xx", label, extra={"status_code": resp.status_code})
+        return
+    if body.get("failed_tenants"):
+        level = logger.error
+    elif body.get("unfinished_tenants"):
+        level = logger.warning
+    else:
+        level = logger.info
+    level(
+        "%s done",
+        label,
+        extra={
+            "tenants": body.get("tenants"),
+            "deleted": body.get("deleted"),
+            "failed_tenants": body.get("failed_tenants"),
+            "unfinished_tenants": body.get("unfinished_tenants"),
+        },
+    )
+
+
 async def run_archive_expired_tick() -> None:
     await _fire_fanout("archive-expired")
 

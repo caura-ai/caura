@@ -55,6 +55,9 @@ cron_ticks:
   - name: agent-digest-weekly
     cadence: weekly (configurable UTC weekday + hour)
     module: core_operations.app
+  - name: keystone-fetch-purge
+    cadence: daily (configurable UTC hour, default 07:00) — deletes keystone fetch records past their 90-day expiry, per active tenant
+    module: core_operations.app
   - name: lifecycle-reconcile
     cadence: hourly at half past (offset off the fanout hours it repairs)
     module: core_operations.app

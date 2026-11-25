@@ -76,6 +76,7 @@ def _storage() -> MagicMock:
     sc.match_keystone_fetches = AsyncMock(
         return_value={"results": [{"status": "no_matching_fetch"}]}
     )
+    sc.purge_expired_keystone_fetches = AsyncMock(return_value={"deleted": 0})
     return sc
 
 
@@ -530,3 +531,176 @@ async def test_storage_client_refuses_incomplete_or_invalid_results(results):
     client._post = AsyncMock(return_value={"results": results})
     with pytest.raises(ValueError):
         await client.match_keystone_fetches({"checks": [_check()]})
+
+
+# ── Daily purge of expired fetch records ────────────────────────────
+
+PURGE = "/api/v1/internal/keystone-fetches/purge-expired"
+
+
+def _active_tenants(monkeypatch, tenants):
+    import importlib
+
+    module = importlib.import_module("core_api.routes.keystone_fetches")
+
+    async def active():
+        return list(tenants)
+
+    monkeypatch.setattr(module, "list_active_tenant_ids", active)
+
+
+async def test_purge_walks_active_tenants_until_a_short_batch(match_http, monkeypatch):
+    http, sc, _ = match_http
+    _active_tenants(monkeypatch, ["tenant-a", "tenant-b"])
+    batches = {"tenant-a": [None, 3], "tenant-b": [0]}
+
+    async def purge(tenant_id, limit):
+        planned = batches[tenant_id].pop(0)
+        return {"deleted": limit if planned is None else planned}
+
+    sc.purge_expired_keystone_fetches.side_effect = purge
+    response = await http.post(PURGE)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["tenants"] == 2
+    assert body["failed_tenants"] == 0
+    first_limit = sc.purge_expired_keystone_fetches.await_args_list[0].args[1]
+    assert body["deleted"] == first_limit + 3
+    called = [c.args[0] for c in sc.purge_expired_keystone_fetches.await_args_list]
+    assert sorted(called) == ["tenant-a", "tenant-a", "tenant-b"]
+    assert batches == {"tenant-a": [], "tenant-b": []}
+
+
+async def test_purge_stops_at_ten_batches_for_one_tenant(match_http, monkeypatch):
+    http, sc, _ = match_http
+    _active_tenants(monkeypatch, ["tenant-a"])
+
+    async def always_full(tenant_id, limit):
+        return {"deleted": limit}
+
+    sc.purge_expired_keystone_fetches.side_effect = always_full
+    response = await http.post(PURGE)
+    assert response.status_code == 200, response.text
+    assert sc.purge_expired_keystone_fetches.await_count == 10
+
+
+async def test_purge_counts_a_failed_tenant_and_carries_on(match_http, monkeypatch):
+    http, sc, _ = match_http
+    _active_tenants(monkeypatch, ["tenant-a", "tenant-b"])
+
+    async def purge(tenant_id, limit):
+        if tenant_id == "tenant-a":
+            raise RuntimeError("storage unavailable")
+        return {"deleted": 2}
+
+    sc.purge_expired_keystone_fetches.side_effect = purge
+    response = await http.post(PURGE)
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "tenants": 2,
+        "deleted": 2,
+        "failed_tenants": 1,
+        "unfinished_tenants": 0,
+    }
+
+
+async def test_purge_answers_before_core_apis_request_budget(match_http, monkeypatch):
+    """A slow tenant must not turn the whole run into a 504 with no counts."""
+    from core_api.config import settings
+
+    http, sc, _ = match_http
+    monkeypatch.setattr(settings, "request_timeout_seconds", 0.5)
+    _active_tenants(monkeypatch, ["tenant-a", "tenant-b"])
+
+    async def purge(tenant_id, limit):
+        if tenant_id == "tenant-a":
+            await asyncio.Event().wait()
+        return {"deleted": 2}
+
+    sc.purge_expired_keystone_fetches.side_effect = purge
+    async with asyncio.timeout(5):
+        response = await http.post(PURGE)
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "tenants": 2,
+        "deleted": 2,
+        "failed_tenants": 0,
+        "unfinished_tenants": 1,
+    }
+
+
+async def test_purge_starts_no_tenant_after_its_deadline(match_http, monkeypatch):
+    from core_api.config import settings
+
+    module = importlib.import_module("core_api.routes.keystone_fetches")
+    http, sc, _ = match_http
+    monkeypatch.setattr(settings, "request_timeout_seconds", 0.5)
+    tenants = [f"tenant-{n}" for n in range(module.PURGE_CONCURRENCY + 2)]
+    _active_tenants(monkeypatch, tenants)
+
+    async def stalled(tenant_id, limit):
+        await asyncio.Event().wait()
+
+    sc.purge_expired_keystone_fetches.side_effect = stalled
+    async with asyncio.timeout(5):
+        response = await http.post(PURGE)
+    assert response.status_code == 200, response.text
+    assert response.json()["unfinished_tenants"] == len(tenants)
+    assert sc.purge_expired_keystone_fetches.await_count == module.PURGE_CONCURRENCY
+
+
+async def test_purge_shuffles_tenants_so_a_cut_run_misses_different_ones(
+    match_http, monkeypatch
+):
+    module = importlib.import_module("core_api.routes.keystone_fetches")
+    http, sc, _ = match_http
+    _active_tenants(monkeypatch, ["tenant-a", "tenant-b", "tenant-c"])
+    shuffled = []
+
+    def reverse(tenants):
+        tenants.reverse()
+        shuffled.append(list(tenants))
+
+    monkeypatch.setattr(module.random, "shuffle", reverse)
+    sc.purge_expired_keystone_fetches.return_value = {"deleted": 0}
+    response = await http.post(PURGE)
+    assert response.status_code == 200, response.text
+    assert shuffled == [["tenant-c", "tenant-b", "tenant-a"]]
+    called = [c.args[0] for c in sc.purge_expired_keystone_fetches.await_args_list]
+    assert called == ["tenant-c", "tenant-b", "tenant-a"]
+
+
+@pytest.mark.parametrize("kind", ["install", "agent", "org-admin", "tenant-key"])
+async def test_purge_is_not_an_install_agent_or_org_admin_surface(
+    match_http, monkeypatch, kind
+):
+    http, sc, auth = match_http
+    _active_tenants(monkeypatch, ["tenant-a"])
+    auth[0] = {
+        "install": _auth(),
+        "agent": _auth(
+            is_install_credential=False, agent_id=PRINCIPAL, agent_id_verified=True
+        ),
+        "org-admin": _auth(
+            is_install_credential=False, org_role="admin", is_person=True
+        ),
+        "tenant-key": _auth(
+            is_install_credential=False, credential_kind="user_api_key"
+        ),
+    }[kind]
+    response = await http.post(PURGE)
+    assert response.status_code == 403, response.text
+    sc.purge_expired_keystone_fetches.assert_not_awaited()
+
+
+async def test_storage_client_purge_is_one_tenant_scoped_bounded_request():
+    from core_api.clients.storage_client import CoreStorageClient
+
+    client = CoreStorageClient.__new__(CoreStorageClient)
+    client._post = AsyncMock(return_value={"deleted": 4})
+    result = await client.purge_expired_keystone_fetches("tenant-a", 1000)
+    assert result == {"deleted": 4}
+    client._post.assert_awaited_once()
+    path, body = client._post.await_args.args[:2]
+    assert path == "/keystone-fetches/purge-expired"
+    assert body == {"tenant_id": "tenant-a", "limit": 1000}

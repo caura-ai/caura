@@ -122,6 +122,10 @@ class Settings(BaseSettings):
     # gate further no-ops ticks where no non-insight memories landed since
     # the last run, so a once-a-day fire is plenty.
     lifecycle_insights_run_at_hour: int = 2
+    # Deletes keystone fetch records past their 90-day retention (core-api
+    # ``/internal/keystone-fetches/purge-expired``). 07:00 UTC, after the
+    # staggered lifecycle hours 01-06 that share the storage writer.
+    keystone_fetch_purge_run_at_hour: int = 7
     # Per-agent activity digest generation (CAURA-222 Phase 2). Opt-in per-org
     # (``agent_digest.enabled``, default off); a tenant that hasn't opted in
     # costs nothing, so a daily fire is safe.
@@ -154,6 +158,7 @@ class Settings(BaseSettings):
         "lifecycle_pipeline_run_at_hour",
         "lifecycle_entity_link_run_at_hour",
         "lifecycle_insights_run_at_hour",
+        "keystone_fetch_purge_run_at_hour",
         "agent_digest_run_at_hour",
         "agent_digest_weekly_run_at_hour",
         "embed_backfill_run_at_hour",

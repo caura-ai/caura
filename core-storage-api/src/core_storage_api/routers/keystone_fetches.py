@@ -44,3 +44,20 @@ async def match_fetches(request: Request) -> dict:
     # core-api groups the authorized admin batch by tenant. Storage never
     # executes a tenantless query, even for an internal service caller.
     return await keystone_fetches.match_fetches(tenant_id=tenant_id, checks=batch.checks)
+
+
+@router.post("/purge-expired")
+async def purge_expired(request: Request) -> dict:
+    """Delete one bounded batch of this tenant's records past retention."""
+    try:
+        body: dict = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="expected a JSON object")
+    tenant_id = _require(body, "tenant_id")
+    limit = body.get("limit", 1000)
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 10_000:
+        raise HTTPException(status_code=422, detail="limit must be an integer from 1 to 10000")
+    deleted = await keystone_fetches.purge_expired_fetches(tenant_id=tenant_id, limit=limit)
+    return {"deleted": deleted}
