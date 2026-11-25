@@ -1,7 +1,7 @@
 /** Shared POSIX-only private state primitives; no import-time I/O. */
 import {
-  closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync,
-  mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync,
+  closeSync, constants, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync,
+  mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync,
 } from "node:fs";
 import {randomUUID} from "node:crypto";
 import {homedir} from "node:os";
@@ -65,20 +65,45 @@ export function privateInstallState(getPath: () => string, fail: (code: string) 
     }
   }
 
-  function withLock<T>(action: () => Promise<T>, retainOnError: () => boolean = () => false): Promise<T> {
+  function blocks(operation: string): boolean {
+    let fd: number | undefined;
+    try {
+      const path = `${getPath()}.lock`, s = lstatSync(path);
+      if (!s.isFile() || s.isSymbolicLink() || s.nlink !== 1 || (s.mode & 0o777) !== 0o600 ||
+          s.size > 128 || (process.getuid && s.uid !== process.getuid())) fail("state_unsafe");
+      fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      if (fstatSync(fd).ino !== s.ino) fail("state_unsafe");
+      const marker = readFileSync(fd, "utf8");
+      return !marker || marker === operation; // Legacy empty locks cannot prove a durable acknowledgement.
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+      if (knownError(e)) throw e;
+      return fail("state_unsafe");
+    } finally {if (fd !== undefined) closeSync(fd);}
+  }
+
+  async function withLock<T>(action: (mark: (operation: string) => void) => Promise<T>, retainOnError: () => boolean = () => false): Promise<T> {
     privateDirectory(true);
     const path = `${getPath()}.lock`;
     let fd: number;
-    try { fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600); }
-    catch (e) { return fail((e as NodeJS.ErrnoException).code === "EEXIST" ? "locked" : "state_unwritable"); }
+    const deadline = performance.now() + 5000;
+    for (;;) {
+      try { fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600); break; }
+      catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") return fail("state_unwritable");
+        if (performance.now() >= deadline) return fail("locked");
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
     const inode = fstatSync(fd).ino;
     let failed = false;
-    return action().catch(e => { failed = true; throw e; }).finally(() => {
+    const mark = (operation: string) => {writeSync(fd, operation, 0, "utf8"); ftruncateSync(fd, Buffer.byteLength(operation)); fsyncSync(fd);};
+    return Promise.resolve().then(() => {mark("checking"); return action(mark);}).catch(e => { failed = true; throw e; }).finally(() => {
       closeSync(fd);
       // A hard crash intentionally leaves a lock for explicit operator recovery.
       if (!(failed && retainOnError()) && lstatSync(path).ino === inode) { rmSync(path); syncDirectory(path); }
     });
   }
 
-  return {read, save, withLock};
+  return {read, save, withLock, blocks};
 }

@@ -32,7 +32,7 @@ import {
   CAURA_TENANT_ID,
   CAURA_NODE_NAME,
   applyPluginConfig, getAuthMode,
-  ensureTenantId,
+  ensureTenantId, ensureStartupTenantId, reportAuthModeHold,
   fetchToolDescriptions,
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_INITIAL_DELAY_MS,
@@ -155,13 +155,11 @@ const cauraPlugin = {
     applyPluginConfig(api.pluginConfig);
 
     // Resolve tenant_id (with retry) and use result to gate heartbeat loop.
-    // Route through ensureTenantId() so the _tenantPromise cache is populated —
-    // without this, a concurrent ensureTenantId() caller (context-engine
-    // bootstrap, first tool invocation) would spawn a second independent
-    // resolution loop and duplicate every log line.
+    // Retry delays belong only to startup. Each attempt uses ensureTenantId's
+    // shared promise and cooldown, so lifecycle hooks never join the sleep.
     if (!sideEffectsBootstrapped) {
       sideEffectsBootstrapped = true;
-      ensureTenantId()
+      ensureStartupTenantId()
         .then((tid) => {
           if (tid && CAURA_NODE_NAME && getAuthMode() !== "manual") {
             setTimeout(() => {
@@ -174,7 +172,8 @@ const cauraPlugin = {
             console.warn("[caura] Heartbeat disabled — CAURA_NODE_NAME not set.");
           }
         })
-        .catch(() => {
+        .catch((e: unknown) => {
+          if (reportAuthModeHold(e)) return;
           // ensureTenantId throws when tenant_id can't be resolved.
           // The resolver itself already logged the reason (HTTP error,
           // network error, or missing field), so just emit the
@@ -186,6 +185,7 @@ const cauraPlugin = {
       fetchToolDescriptions()
         .then((ok) => {if (ok) markReachable();})
         .catch((e: unknown) => {
+          if (reportAuthModeHold(e)) return;
           // fetchToolDescriptions itself swallows errors internally (by
           // design — missing tool descriptions aren't fatal). This catch
           // handles any residual throw; treat as unknown rather than

@@ -53,6 +53,18 @@ function fixture() {
 function ok(r: any) {assert.equal(r.ok, true, r.code); assert.equal(r.matched, true); assert.deepEqual(r.identityHeaders, []);}
 function held(r: any) {assert.equal(r.ok, false); assert.match(r.code, /^runtime_auth_[a-z0-9_]+$/); assert.notEqual(r.code, "runtime_auth_unavailable");}
 
+for (const path of ["/documents/..", "/documents/%2e%2e", "/documents/%2E%2e", "/documents/%252e%252e",
+  "/documents/a/%2e%2e", "/documents/%2e%2e%2fadmin", "/documents//a", "/documents/%", "/documents/%GG"])
+  test(`document path refuses traversal or malformed segments: ${path}`, () => {
+    const f = fixture(); held(f.run({config: {mode: "standalone"}, expected: "standalone", request: {method: "GET", path}}));
+    assert.deepEqual(f.requests(), []);
+  });
+for (const path of ["/%61dmin/orgs", "/%66leet/heartbeat", "/%73kills/installable", "/%70lugin-manifest"])
+  test(`encoded route cannot acquire agent authority: ${path}`, () => {
+    const f = fixture(); held(f.run({config: {mode: "standalone"}, expected: "standalone", request: {method: "GET", path}}));
+    assert.deepEqual(f.requests(), []);
+  });
+
 test("setting names are fixed before remote guards and runtime adoption", () => {
   const f = fixture(), r = f.run({action: "settings"}); assert.equal(r.ok, true); assert.deepEqual(r.settings, SETTINGS);
 });

@@ -25,7 +25,7 @@ import {
   CAURA_FLEET_ID,
   CAURA_TENANT_ID,
   CAURA_AUTO_WRITE_TURNS, getAuthMode,
-  ensureTenantId, initializeRuntimeAuth,
+  ensureTenantId, initializeRuntimeAuth, reportAuthModeHold,
   RECALL_CACHE_TTL_MS,
   RECALL_TIMEOUT_MS,
   MIN_TURN_CONTENT_LENGTH,
@@ -767,7 +767,7 @@ export class CauraContextEngine {
     try {
       await initializeRuntimeAuth();
       if (getAuthMode() !== "manual") {await ensureTenantId(); await nodeApiCall("GET", "/whoami");}
-    } catch (e) {logErrorCritical("BOOTSTRAP PROBE ERROR", e);}
+    } catch (e) {if (!reportAuthModeHold(e)) logErrorCritical("BOOTSTRAP PROBE ERROR", e);}
     // No need to set a flag here — the resolved ``_processBootstrapPromise``
     // serves as the "done" signal; subsequent ``await``s are instant.
   }

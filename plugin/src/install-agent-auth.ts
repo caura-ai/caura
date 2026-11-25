@@ -1,5 +1,5 @@
 /** Installation-bound agent delegation; no import-time I/O. */
-import {randomUUID} from "node:crypto";
+import {createHash, randomUUID} from "node:crypto";
 import {EnrollmentError, readVerifiedInstallAuthority, requestInstallJson} from "./install-authority.js";
 import {getInstallAgentKeysPath} from "./paths.js";
 import {privateInstallState} from "./private-install-state.js";
@@ -7,7 +7,7 @@ import {isValidSafeId} from "./validation.js";
 
 export interface InstallAgentOptions {
   gateway: string; apiPrefix: string; orgId: string; tenantId: string;
-  installUuid: string; agentId: string; capabilities: string[]; renew?: boolean;
+  installUuid: string; agentId: string; capabilities: string[]; renew?: boolean; signal?: AbortSignal;
 }
 type Binding = {gateway: string; api_prefix: string; org_id: string; tenant_id: string;
   install_uuid: string; hostname: string};
@@ -20,6 +20,15 @@ export class InstallAgentError extends Error {}
 function fail(code: string): never {throw new InstallAgentError(`install_agent_${code}`);}
 const state = privateInstallState(getInstallAgentKeysPath, fail, e => e instanceof InstallAgentError);
 const flights = new Map<string, Promise<string>>();
+const liveChecks = new Map<string, {fingerprint: string; checkedAt: number}>();
+let authorityHash = "", liveVersion = 0;
+const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+/** Refusals cannot leave a successful check reusable, including a check still in flight. */
+export function invalidateInstallAgentKeys(): void {
+  liveVersion++;
+  // A refusal invalidates every reuse record; no credential hash or extra raw key is retained.
+  liveChecks.clear();
+}
 const uuid = (v: unknown): v is string => typeof v === "string" &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v);
 const secret = (v: unknown): v is string => typeof v === "string" && v.length > 0 &&
@@ -88,11 +97,15 @@ function save(cache: Cache, replaced?: () => void): void {
   state.save(cache, replaced);
 }
 function authorityFor(o: InstallAgentOptions) {
-  const j = readVerifiedInstallAuthority();
-  if (!j || !j.org_id || !j.tenant_id || !j.install_uuid || !j.install_credential) fail("authority_unavailable");
-  if (o.gateway !== j.gateway || o.apiPrefix !== j.api_prefix || o.orgId !== j.org_id ||
-      o.tenantId !== j.tenant_id || o.installUuid !== j.install_uuid) fail("scope_mismatch");
-  return j;
+  try {
+    const j = readVerifiedInstallAuthority();
+    if (!j || !j.org_id || !j.tenant_id || !j.install_uuid || !j.install_credential) fail("authority_unavailable");
+    if (o.gateway !== j.gateway || o.apiPrefix !== j.api_prefix || o.orgId !== j.org_id ||
+        o.tenantId !== j.tenant_id || o.installUuid !== j.install_uuid) fail("scope_mismatch");
+    const hash = digest(j);
+    if (hash !== authorityHash) {liveChecks.clear(); liveVersion++; authorityHash = hash;}
+    return j;
+  } catch (e) {liveChecks.clear(); liveVersion++; authorityHash = ""; throw e;}
 }
 function unchangedAuthority(o: InstallAgentOptions, previous: ReturnType<typeof authorityFor>): void {
   const current = authorityFor(o);
@@ -105,8 +118,38 @@ async function execute(o: InstallAgentOptions, rotate: boolean): Promise<string>
   const caps = capabilities(o.capabilities), j = authorityFor(o);
   const binding: Binding = {gateway: j.gateway, api_prefix: j.api_prefix, org_id: j.org_id!,
     tenant_id: j.tenant_id!, install_uuid: j.install_uuid!, hostname: j.hostname};
+  const currentAuthority = digest(j);
+  if (!rotate && !o.renew) {
+    o.signal?.throwIfAborted();
+    const cache = readCache(binding, j.expires_at), entry = Object.hasOwn(cache.entries, o.agentId) ? cache.entries[o.agentId] : undefined;
+    if (entry && entry.status !== "ready") fail("held");
+    if (entry) {
+      if (state.blocks(entry.operation.id)) fail("held");
+      const previous = checkedCredential(entry.credential, binding, o.agentId, caps, j.expires_at, false);
+      const agent = JSON.stringify([binding, o.agentId, caps]);
+      const fingerprint = digest([currentAuthority, entry]), checked = liveChecks.get(agent), version = liveVersion;
+      if (!checked || checked.fingerprint !== fingerprint || Date.now() - checked.checkedAt < 0 ||
+          Date.now() - checked.checkedAt >= 300_000) {
+        liveChecks.delete(agent);
+        const request = (path: string) => requestInstallJson(j, path, j.install_credential, undefined, o.signal);
+        const context = await request("/admin/agent-connect-context");
+        if (context.org_id !== binding.org_id || context.tenant_id !== binding.tenant_id ||
+            context.install_uuid !== binding.install_uuid || context.hostname !== binding.hostname) fail("scope_mismatch");
+        unchangedAuthority(o, j);
+        const live = checkedCredential(await request(`/admin/orgs/${encodeURIComponent(o.orgId)}/api-credentials/${encodeURIComponent(previous.id)}`),
+          binding, o.agentId, caps, j.expires_at, false);
+        if (live.id !== previous.id || live.expires_at !== previous.expires_at) fail("credential_changed");
+        unchangedAuthority(o, j); o.signal?.throwIfAborted();
+        if (JSON.stringify(readCache(binding, j.expires_at).entries[o.agentId]) !== JSON.stringify(entry)) fail("credential_changed");
+        if (version === liveVersion) liveChecks.set(agent, {fingerprint, checkedAt: Date.now()});
+      }
+      unchangedAuthority(o, j); o.signal?.throwIfAborted();
+      if (state.blocks(entry.operation.id)) fail("held");
+      return entry.key!;
+    }
+  }
   let uncertain = false;
-  return state.withLock(async () => {
+  return state.withLock(async mark => {
     unchangedAuthority(o, j);
     const cache = readCache(binding, j.expires_at);
     const entry = Object.hasOwn(cache.entries, o.agentId) ? cache.entries[o.agentId] : undefined;
@@ -141,6 +184,7 @@ async function execute(o: InstallAgentOptions, rotate: boolean): Promise<string>
       ...(previous ? {previous: {key: entry!.key!, credential: previous}} : {})}};
     // Before rename, no state or server mutation occurred. Afterwards, preserve the hold on error.
     save(cache, () => {uncertain = true;}); // Durable intent precedes the server side effect.
+    mark(operation.id); // A renamed ready file remains held until its directory sync and lock release.
     const label = `Plugin agent credential ${operation.id}`;
     const result = rotate ? await request(`${base}/${encodeURIComponent(previous!.id)}/rotate`, {label}) :
       await request(base, {kind: "agent_key", home_tenant_id: o.tenantId, home_agent_id: o.agentId,
@@ -164,6 +208,8 @@ function run(options: InstallAgentOptions, rotate: boolean): Promise<string> {
     key = JSON.stringify([rotate, o.gateway, o.apiPrefix, o.orgId, o.tenantId, o.installUuid,
       o.agentId, capabilities(o.capabilities), !!o.renew]);
   } catch {return Promise.reject(new InstallAgentError("install_agent_input_invalid"));}
+  // Warm callers with distinct deadlines must not inherit another caller's cancellation.
+  if (o.signal) key += randomUUID();
   const pending = flights.get(key);
   if (pending) return pending;
   const action = execute(o, rotate).catch(e => {
