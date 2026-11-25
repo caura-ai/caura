@@ -27,10 +27,11 @@ import { getOpenClawBaseDir, getPluginEnvPath } from "./paths.js";
 import {
   CAURA_API_URL,
   CAURA_API_KEY,
+  CAURA_AGENT_ID,
   CAURA_FLEET_ID,
   CAURA_TENANT_ID,
   CAURA_NODE_NAME,
-  applyPluginConfig,
+  applyPluginConfig, getAuthMode,
   ensureTenantId,
   fetchToolDescriptions,
   HEARTBEAT_INTERVAL_MS,
@@ -87,6 +88,7 @@ export { educateAgents, writeEducationFiles } from "./educate.js";
 async function searchMemories(
   query: string,
   limit: number,
+  agentId?: string,
 ): Promise<
   Array<{
     content: string;
@@ -104,7 +106,7 @@ async function searchMemories(
     const results = (await apiCall(
       "POST",
       "/search",
-      { tenant_id: tid, query, top_k: limit },
+      { tenant_id: tid, query, top_k: limit }, undefined, undefined, agentId,
     )) as Record<string, unknown> | Record<string, unknown>[];
     const arr = parseSearchItems(results);
     return arr.map((m: Record<string, unknown>) => ({
@@ -142,6 +144,7 @@ const cauraPlugin = {
       CAURA_AGENT_ID: { type: "string" },
       MEMCLAW_AGENT_ID: { type: "string" },  // legacy-name-ok: supported configuration alias for existing installs
       CAURA_AUTO_WRITE_TURNS: { type: ["boolean", "string"] },
+      ...Object.fromEntries(["CAURA_AUTH_MODE", "CAURA_MANUAL_AGENT_API_KEY", "CAURA_MANUAL_AGENT_ID", "CAURA_MANUAL_TENANT_ID"].map(k => [k, {type: "string"}])),
     },
     required: [] as string[],
   },
@@ -160,7 +163,7 @@ const cauraPlugin = {
       sideEffectsBootstrapped = true;
       ensureTenantId()
         .then((tid) => {
-          if (tid && CAURA_NODE_NAME) {
+          if (tid && CAURA_NODE_NAME && getAuthMode() !== "manual") {
             setTimeout(() => {
               // An interval that comes due while a tick still runs joins it
               // rather than starting a second one (sendHeartbeat, L-56).
@@ -181,7 +184,7 @@ const cauraPlugin = {
           );
         });
       fetchToolDescriptions()
-        .then(() => markReachable())
+        .then((ok) => {if (ok) markReachable();})
         .catch((e: unknown) => {
           // fetchToolDescriptions itself swallows errors internally (by
           // design — missing tool descriptions aren't fatal). This catch
@@ -574,6 +577,7 @@ const cauraPlugin = {
             return { backend: "memclaw" }; // legacy-name-ok: OpenClaw resolves this backend by the frozen plugin id
           },
           async getMemorySearchManager(_params: Record<string, unknown>) {
+            if (getAuthMode() === "manual") return {manager: null, error: "Manual mode is tools-only"};
             // Refuse to hand back a manager when we already know the backend
             // is unreachable or when required config is missing. The
             // `{manager: null, error}` shape is OpenClaw's typed unreachability
@@ -607,7 +611,7 @@ const cauraPlugin = {
               // openclaw/openclaw:extensions/memory-core/src/tools.ts) and
               // surfaces a structured "unavailable" result to the model.
               async search(query: string, opts?: { limit?: number }) {
-                return searchMemories(query, opts?.limit ?? 5);
+                return searchMemories(query, opts?.limit ?? 5, typeof _params.agentId === "string" ? _params.agentId : CAURA_AGENT_ID || undefined);
               },
               // readFile is not a Caura concept — memories are fetched by
               // id, not by path. Return an empty MemoryReadResult-shaped
@@ -658,7 +662,7 @@ const cauraPlugin = {
                 // probed. Cheap live check by attempting a tiny search; it
                 // updates the tracker as a side-effect via trackReachability.
                 try {
-                  await searchMemories("__caura_probe__", 1);
+                  await searchMemories("__caura_probe__", 1, typeof _params.agentId === "string" ? _params.agentId : CAURA_AGENT_ID || undefined);
                   return { ok: true };
                 } catch (e: unknown) {
                   const msg = String((e as { message?: unknown })?.message ?? e);

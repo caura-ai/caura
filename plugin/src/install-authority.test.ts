@@ -415,13 +415,13 @@ test("the reader exposes verified scope but withholds held and expired state", (
   }
 });
 
-test("current transport, agent-auth and heartbeat import graphs cannot read the new journal", () => {
+test("runtime reads verified authority without importing the operator CLI", () => {
   const visited = new Set<string>();
   function inspect(name: string) {
     if (visited.has(name)) return; visited.add(name);
-    assert.ok(!["install-authority.ts", "enroll-installation.ts"].includes(name), `${name} must stay operator-only in this change`);
+    assert.ok(name !== "enroll-installation.ts", `${name} must stay operator-only in this change`);
     const source = readFileSync(join(SRC, name), "utf8");
-    if (name !== "paths.ts") {
+    if (name !== "paths.ts" && name !== "install-authority.ts") {
       assert.ok(!source.includes(".installation-authority.json"), `${name} reads the enrollment journal`);
       assert.ok(!source.includes("getInstallAuthorityPath"), `${name} imports its new private path`);
     }
@@ -429,7 +429,7 @@ test("current transport, agent-auth and heartbeat import graphs cannot read the 
       const child = `${m[1]}.ts`; if (existsSync(join(SRC, child))) inspect(child);
     }
   }
-  for (const entry of ["transport.ts", "agent-auth.ts", "heartbeat.ts"]) inspect(entry);
+  for (const entry of ["transport.ts", "heartbeat.ts"]) inspect(entry);
   assert.ok(visited.size > 10, "inspect transitive runtime imports, not only the three entry files");
 });
 

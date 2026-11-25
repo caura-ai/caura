@@ -1,4 +1,4 @@
-/** Operator-only installation authority. No plugin runtime imports this module. */
+/** Verified installation authority and explicit operator enrollment. */
 import {existsSync} from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";

@@ -50,7 +50,7 @@ after(() => {
 });
 
 test("sends the key when explicitly opted in", async () => {
-  await apiCall("POST", "/search", { q: "x" });
+  await apiCall("POST", "/search", { q: "x" }, undefined, undefined, "fixture-agent");
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, "http://10.0.0.5:8000/api/v1/search");
   const headers = calls[0].init?.headers as Record<string, string>;

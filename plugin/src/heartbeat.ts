@@ -23,10 +23,10 @@ import { promisify } from "util";
 import { hostname, platform, release, networkInterfaces } from "os";
 import { getOpenClawBaseDir } from "./paths.js";
 
-import { apiCall } from "./transport.js";
+import { apiCall, nodeApiCall } from "./transport.js";
 import {
   CAURA_API_URL,
-  CAURA_API_PREFIX,
+  apiFetch, getAuthMode,
   CAURA_API_KEY,
   CAURA_TENANT_ID,
   CAURA_AUTO_WRITE_TURNS,
@@ -40,7 +40,6 @@ import {
   INTERVIEW_SUBMIT_TIMEOUT_MS,
   BUILD_TIMEOUT_MS,
   MAX_SOURCE_SIZE,
-  assertKeyTransportAllowed,
   ensureTenantId,
   readEnv,
 } from "./env.js";
@@ -48,7 +47,6 @@ import { readInterviewEvents, pruneInterviewBuffer } from "./interview-buffer.js
 import { syncTaskTrail } from "./task-trail.js";
 import { resolveAgentIdQuiet } from "./resolve-agent.js";
 import { PLUGIN_VERSION } from "./version.js";
-import { withUserAgent } from "./user-agent.js";
 import { CAURA_TOOLS } from "./tools.js";
 import {
   getPluginDir,
@@ -72,7 +70,7 @@ import {
   assertPromptLength,
 } from "./validation.js";
 import { logError } from "./logger.js";
-import { getDefaultAgentId, getInstallId } from "./install-id.js";
+import { getInstallId } from "./install-id.js";
 import { getDisplayName } from "./identity.js";
 import { reconcileSkills, type ReconcileSummary } from "./reconcile-skills.js";
 
@@ -470,6 +468,8 @@ let latestReconcile: ReconcileSummary | undefined;
 async function runHeartbeat(): Promise<void> {
   cleanupStaleBackups();
   verifyDeployPostRestart();
+  if (getAuthMode() === "manual") return;
+  await ensureTenantId();
   if (!CAURA_TENANT_ID || !CAURA_NODE_NAME) return;
 
   // Report the prior completed reconciliation; this tick first authenticates
@@ -554,7 +554,7 @@ async function runHeartbeat(): Promise<void> {
       const defaultModel = config?.agents?.defaults?.model?.primary;
       agents = [
         {
-          agentId: getDefaultAgentId(),
+          agentId: resolveAgentIdQuiet(),
           name: getDisplayName("main"),
           display_name: getDisplayName("main"),
           model: defaultModel || undefined,
@@ -695,7 +695,7 @@ async function runHeartbeat(): Promise<void> {
   };
 
   try {
-    const result = (await apiCall("POST", "/fleet/heartbeat", body)) as Record<string, any>;
+    const result = (await nodeApiCall("POST", "/fleet/heartbeat", body)) as Record<string, any>;
     if (result?.commands?.length) queueCommands(result.commands);
     latestReconcile = undefined;
     // A local label, previous response or failed heartbeat cannot authorize a
@@ -724,7 +724,7 @@ async function runHeartbeat(): Promise<void> {
   heartbeatCount++;
   if (heartbeatCount % 10 === 0 && CAURA_TENANT_ID) {
     try {
-      await apiCall("GET", "/whoami");
+      await nodeApiCall("GET", "/whoami");
       markReachable();
     } catch (e: unknown) {
       const msg = logError("heartbeat health check failed", e);
@@ -752,7 +752,7 @@ async function processCommand(cmd: {
     );
     // Still report rejection to server (encodeURIComponent is sufficient for URL safety)
     try {
-      await apiCall("POST", `/fleet/commands/${encodeURIComponent(cmd.id)}/result`, {
+      await nodeApiCall("POST", `/fleet/commands/${encodeURIComponent(cmd.id)}/result`, {
         status: "rejected",
         result: { error: `Signature verification failed: ${sigResult.reason}` },
       });
@@ -783,7 +783,7 @@ async function processCommand(cmd: {
       `path could forge it. Point CAURA_API_URL at https:// to use it.`;
     console.warn(`[caura] ${error}`);
     try {
-      await apiCall("POST", `/fleet/commands/${encodeURIComponent(cmd.id)}/result`, {
+      await nodeApiCall("POST", `/fleet/commands/${encodeURIComponent(cmd.id)}/result`, {
         status: "rejected",
         result: { error },
       });
@@ -829,7 +829,7 @@ async function processCommand(cmd: {
           "version.ts", "env.ts", "transport.ts", "validation.ts",
           "config.ts", "paths.ts", "logger.ts", "resolve-agent.ts",
           "tool-definitions.ts", "deploy.ts", "heartbeat.ts",
-          "educate.ts", "context-engine.ts", "agent-auth.ts",
+          "educate.ts", "context-engine.ts",
           "health.ts", "install-id.ts", "identity.ts",
           "install-authority.ts", "enroll-installation.ts",
           "private-install-state.ts", "install-agent-auth.ts",
@@ -852,7 +852,7 @@ async function processCommand(cmd: {
           // list without it bricks a fresh-ish deploy with TS2307.
           "interview-buffer.ts",
           // ``user-agent.ts`` — statically imported by ``transport.ts``,
-          // ``env.ts``, ``agent-auth.ts`` and this file. Same TS2307
+          // ``env.ts``, ``install-authority.ts`` and this file. Same TS2307
           // failure class as the two entries above if it is missing.
           "user-agent.ts",
           // These are also statically imported shipped modules. Keep the
@@ -878,29 +878,8 @@ async function processCommand(cmd: {
         let manifestVersion: string | undefined;
         let manifestContentHash: string | undefined;
         try {
-          const mUrl = new URL(
-            `${CAURA_API_PREFIX}/plugin-manifest`,
-            CAURA_API_URL,
-          ).toString();
-          // ``X-API-Key`` is required for the enterprise gateway's auth
-          // subrequest on ``/api/v1/*``. Without it, the manifest fetch
-          // 401s in production behind nginx and the deploy silently
-          // falls back to ``FALLBACK_SRC_FILES`` — defeating the whole
-          // point of having a manifest endpoint. The endpoint is
-          // unauthenticated in core-api itself (see plugin_manifest
-          // docstring), so sending the key is just to satisfy the
-          // gateway; the bootstrap-router alias path is the
-          // unauthenticated route for fresh installs.
-          const mHeaders: Record<string, string> = withUserAgent();
-          if (CAURA_API_KEY) {
-            assertKeyTransportAllowed();
-            mHeaders["X-API-Key"] = CAURA_API_KEY;
-          }
-          const mRes = await fetch(mUrl, {
-            headers: mHeaders,
-            redirect: "error",
-            signal: AbortSignal.timeout(10_000),
-          });
+          // The gateway has an exact public location; core-api also serves this without authentication.
+          const mRes = await apiFetch("none", "GET", "/plugin-manifest", {signal: AbortSignal.timeout(10_000)});
           if (mRes.ok) {
             const m = await mRes.json() as {
               version?: string;
@@ -944,7 +923,7 @@ async function processCommand(cmd: {
               `[caura] manifest fetched: target=v${manifestVersion || "?"} ` +
                 `src=${srcFiles.length} root=${rootFiles.length}`,
             );
-          } else if (mRes.status !== 404) {
+          } else {
             console.warn(
               `[caura] /plugin-manifest returned ${mRes.status}; using fallback file list`,
             );
@@ -1061,14 +1040,7 @@ async function processCommand(cmd: {
             const fetchController = new AbortController();
             const fetchTimeout = setTimeout(() => fetchController.abort(), 30_000);
             try {
-              const url = new URL(
-                `${CAURA_API_PREFIX}/plugin-source?file=${encodeURIComponent(name)}`,
-                CAURA_API_URL,
-              ).toString();
-              const res = await fetch(url, {
-                headers: withUserAgent(),
-                signal: fetchController.signal,
-              });
+              const res = await apiFetch("none", "GET", `/plugin-source?file=${encodeURIComponent(name)}`, {signal: fetchController.signal});
               if (res.ok) {
                 const text = await res.text();
                 if (text.length > 0 && text.length <= MAX_SOURCE_SIZE) {
@@ -1336,7 +1308,7 @@ async function processCommand(cmd: {
             // The server interviews the window synchronously (several
             // sequential LLM calls) — transport's 15s default aborts any
             // realistic window. Timeout still fails safe: no prune.
-          }, undefined, AbortSignal.timeout(INTERVIEW_SUBMIT_TIMEOUT_MS))) as {
+          }, undefined, AbortSignal.timeout(INTERVIEW_SUBMIT_TIMEOUT_MS), agentId)) as {
             status?: string;
             watermark?: number;
             memories_written?: number;
@@ -1394,7 +1366,7 @@ async function processCommand(cmd: {
   // backend ack'd-but-didn't-update). This saved an hour of wet-test
   // debugging on the CAURA-444 v2.3.0->v2.4.0 transition path.
   try {
-    await apiCall("POST", `/fleet/commands/${encodeURIComponent(cmd.id)}/result`, {
+    await nodeApiCall("POST", `/fleet/commands/${encodeURIComponent(cmd.id)}/result`, {
       status,
       result,
     });

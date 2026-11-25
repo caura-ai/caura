@@ -26,6 +26,27 @@
           "string"
         ],
         "description": "Automatic conversation capture, on by default, is limited to explicitly identified direct conversations. Group and unknown-session capture is refused; the automatic flush turn is disabled because its callback has no conversation identity. Turn summaries have a ten-attempt per-session limit and stay private to the agent. Set false (or 0, no, off) to disable capture; explicit memory tools keep working. A value here wins over the .env file. Heartbeats report the effective switch as metadata.auto_capture_enabled."
+      },
+      "CAURA_AUTH_MODE": {
+        "type": "string",
+        "enum": [
+          "managed",
+          "standalone",
+          "manual"
+        ],
+        "description": "Required explicit mode. Missing mode holds outbound calls; standalone is for OSS; manual is gateway-verified tools only."
+      },
+      "CAURA_MANUAL_AGENT_API_KEY": {
+        "type": "string",
+        "description": "Dedicated operator-supplied manual agent key; not the local RPC/HMAC key."
+      },
+      "CAURA_MANUAL_AGENT_ID": {
+        "type": "string",
+        "description": "Expected manual credential agent identity."
+      },
+      "CAURA_MANUAL_TENANT_ID": {
+        "type": "string",
+        "description": "Expected manual credential tenant identity."
       }
     },
     "required": []

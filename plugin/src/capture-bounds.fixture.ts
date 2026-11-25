@@ -66,7 +66,7 @@ if (mode === "blocked") {
   assert.equal(writes.length, 0, hook + " persisted a group or unknown-context conversation");
   await apiCall("POST", "/memories", {
     tenant_id: "auto-write-fixture", agent_id: "writer", content: "A deliberate memory write.",
-  });
+  }, undefined, undefined, "writer");
   assert.equal(writes.length, 1, "explicit memory writes remain available");
 } else if (mode === "interview-bounds") {
   const root = await mkdtemp(join(tmpdir(), "capture-interview-bounds-"));

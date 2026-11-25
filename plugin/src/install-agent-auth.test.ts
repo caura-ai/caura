@@ -320,16 +320,15 @@ test("explicit renewal uses canonical creation and persists its actual new expir
   assert.equal(f.mutations().length, 2); assert.ok(f.mutations().every(r => r.url === ORIGIN + BASE));
   assert.equal(f.read().entries["agent-a"].credential.expires_at, f.expiry);
 });
-test("broker import is inert and transitive runtime graphs cannot consume it or env.ts", () => {
+test("broker import is inert; runtime uses its API without adopting private state", () => {
   const f = fixture(); const r = f.run({}, "import"); assert.equal(r.result?.ok, true);
   assert.deepEqual(f.requests(), []); assert.equal(f.read(), null);
   const visited = new Set<string>();
   function inspect(name: string, runtime: boolean) {
     const tag = `${runtime}:${name}`; if (visited.has(tag)) return; visited.add(tag);
-    if (runtime) assert.notEqual(name, "install-agent-auth.ts", "B is not runtime activation");
-    else assert.notEqual(name, "env.ts", "broker must not discover tenant secrets");
+    if (!runtime) assert.notEqual(name, "env.ts", "broker must not discover tenant secrets");
     const source = readFileSync(join(SRC, name), "utf8");
-    if (runtime && name !== "paths.ts") {
+    if (runtime && name !== "paths.ts" && name !== "install-agent-auth.ts") {
       assert.ok(!source.includes(".installation-agent-keys.json"));
       assert.ok(!source.includes("getInstallAgentKeysPath"));
     }
@@ -337,6 +336,6 @@ test("broker import is inert and transitive runtime graphs cannot consume it or 
       const child = `${m[1]}.ts`; if (existsSync(join(SRC, child))) inspect(child, runtime);
     }
   }
-  for (const entry of ["index.ts", "transport.ts", "agent-auth.ts", "heartbeat.ts"]) inspect(entry, true);
+  for (const entry of ["index.ts", "transport.ts", "heartbeat.ts"]) inspect(entry, true);
   inspect("install-agent-auth.ts", false); assert.ok(visited.size > 10);
 });

@@ -1,10 +1,8 @@
 # Explicit plugin installation enrollment
 
-This command prepares private installation authority for later managed-mode
-support. It does not change the current plugin's agent provisioning, transport,
-heartbeat, agent IDs, fleet, node ownership or delivery grants. The running
-plugin does not read the journal in this version. Enrollment alone is not the
-complete compatible release; that remains the coordinated `plugin-v3.0.0`.
+The command explicitly prepares authority for managed mode. Runtime mode selection
+is required separately; see [upgrade instructions](plugin-upgrade.md). Enrollment
+never changes node ownership, agent identity or delivery grants automatically.
 
 Enrollment supports macOS and Linux on x64 or arm64 with POSIX permissions and
 durable directory writes. Windows and other platforms refuse immediately with
@@ -82,13 +80,10 @@ Missing endpoints and HTTP failures never choose a legacy endpoint or tenant
 credential. No fleet join/leave, host transfer, node rebind, key issuance or
 rotation, delivery-grant migration, cutoff, tag or release is performed here.
 
-## Preparatory installation-bound credential broker
+## Installation-bound credential broker
 
-`install-agent-auth` provides explicit callable resolution and owned rotation
-for a later managed runtime. Nothing in the current plugin imports it. Merely
-enrolling or having its cache on disk does not change current runtime behavior.
-The coordinated compatible release still requires runtime integration and
-operator-controlled migration instructions.
+Managed agent requests use `install-agent-auth` for bound resolution and owned
+rotation. Presence of a journal alone never selects managed mode.
 
 The broker requires verified, unexpired installation authority on the recorded
 host and a fresh `agent-connect-context` check. It uses only that installation's
@@ -126,13 +121,12 @@ cannot reconstruct a lost raw key, and zero matches cannot prove that a timed-ou
 write did not commit. There is no automatic replay, reset or recovery command.
 Server-side create idempotency remains a separate future contract decision.
 
-## Preparatory request authority selection
+## Request authority selection
 
-`runtime-auth` is an inert adapter for later integration. Import and construction
-perform no I/O; explicit initialization and authorization use supplied options,
-without reading environment settings. No current runtime imports it, and these
-settings do not switch current requests: `CAURA_AUTH_MODE`,
-`CAURA_MANUAL_AGENT_API_KEY`, `CAURA_MANUAL_AGENT_ID`, `CAURA_MANUAL_TENANT_ID`.
+`runtime-auth` selects explicit authority for outbound requests. Import and
+construction remain inert; initialization uses configured options. Settings are
+`CAURA_AUTH_MODE`, `CAURA_MANUAL_AGENT_API_KEY`, `CAURA_MANUAL_AGENT_ID`, and
+`CAURA_MANUAL_TENANT_ID`.
 Remote deployment cannot change any of them. Missing or blank mode reports
 `runtime_auth_mode_required`; unknown mode reports `runtime_auth_mode_invalid`.
 
@@ -143,5 +137,5 @@ Manual is tools-only, unavailable on OSS: a dedicated key must prove its configu
 tenant/agent through the API-v1 gateway's `/whoami`. Missing or mismatched gateway
 proof holds, and any manual 401/403 holds until an explicit restart/operator action.
 This adapter performs no enrollment, node migration, legacy-key revocation or
-cache adoption. Complete runtime integration and operator instructions still
-precede the coordinated compatible release.
+cache adoption. Read the upgrade instructions before rollout; mode selection and operator migration
+remain explicit.

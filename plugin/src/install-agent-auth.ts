@@ -1,4 +1,4 @@
-/** Explicit installation delegation only. No runtime imports this broker yet. */
+/** Installation-bound agent delegation; no import-time I/O. */
 import {randomUUID} from "node:crypto";
 import {EnrollmentError, readVerifiedInstallAuthority, requestInstallJson} from "./install-authority.js";
 import {getInstallAgentKeysPath} from "./paths.js";

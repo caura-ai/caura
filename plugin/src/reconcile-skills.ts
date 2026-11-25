@@ -14,7 +14,7 @@ import {
 import path, { join, resolve } from "path";
 import { createHash, randomUUID } from "node:crypto";
 
-import { apiCall } from "./transport.js";
+import { nodeApiCall } from "./transport.js";
 import { CAURA_TENANT_ID, readEnv } from "./env.js";
 import { getPluginDir, ensureExtraSkillDirs } from "./config.js";
 import { logError } from "./logger.js";
@@ -588,7 +588,7 @@ async function runReconcileSkills(receiver?: { nodeId: string }): Promise<Reconc
   let pruneAllowed = false;
   const heldSlugs = new Set<string>();
   try {
-    const resp = await apiCall("POST", "/skills/installable", {
+    const resp = await nodeApiCall("POST", "/skills/installable", {
       tenant_id: CAURA_TENANT_ID, node_id: receiver.nodeId, delivery_version: 1,
     }) as Record<string, unknown>;
     if (!resp || Array.isArray(resp) || resp.delivery_version !== 1 || resp.complete !== true
