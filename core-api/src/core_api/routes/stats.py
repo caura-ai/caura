@@ -37,7 +37,7 @@ async def _bounded_count(label: str, coro: Awaitable[int]) -> int:
 
 @router.get("/stats")
 async def public_stats() -> dict[str, int]:
-    """Minimal public counters for the landing page status bar."""
+    """Public counts of tenants, memories and agents."""
     sc = get_storage_client()
     # Run all three count queries concurrently — each is one round-trip
     # to core-storage. Each call is bounded by ``_bounded_count`` so a
