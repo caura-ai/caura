@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.56.7](https://github.com/caura-ai/caura/compare/backend-v3.56.6...backend-v3.56.7) (2026-11-25)
+
+
+### Documentation
+
+* **core-api:** describe the public stats endpoint without naming a consumer ([#2517](https://github.com/caura-ai/caura/issues/2517)) ([f232b02](https://github.com/caura-ai/caura/commit/f232b02477187f8e633d8ada1babc03f05bb5ae2))
+
 ## [3.56.6](https://github.com/caura-ai/caura/compare/backend-v3.56.5...backend-v3.56.6) (2026-11-25)
 
 
