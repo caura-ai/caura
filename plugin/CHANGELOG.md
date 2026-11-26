@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.29.1](https://github.com/caura-ai/caura/compare/plugin-v2.29.0...plugin-v2.29.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* **plugin:** ground personalized advice in recalled memories ([#2521](https://github.com/caura-ai/caura/issues/2521)) ([7c8bbb1](https://github.com/caura-ai/caura/commit/7c8bbb14a1c60bcf6e26f6df44c1be4d4cccb795))
+
 ## [2.29.0](https://github.com/caura-ai/caura/compare/plugin-v2.28.2...plugin-v2.29.0) (2026-11-15)
 
 

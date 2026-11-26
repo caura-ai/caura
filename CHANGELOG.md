@@ -10,6 +10,16 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.56.8](https://github.com/caura-ai/caura/compare/backend-v3.56.7...backend-v3.56.8) (2026-11-26)
+
+
+### Bug Fixes
+
+* **core-api:** rank subscription evidence for count questions ([#2522](https://github.com/caura-ai/caura/issues/2522)) ([716f0f0](https://github.com/caura-ai/caura/commit/716f0f0e9c23dfe5e1b6e6a798a2b057f3146821))
+* **fleet:** record who queues fleet commands and require an org admin for educate ([#2516](https://github.com/caura-ai/caura/issues/2516)) ([85519c7](https://github.com/caura-ai/caura/commit/85519c72a04c05dc4c67e45e4e86af9cffea2586))
+* **keystones:** purge expired fetch records daily ([#2519](https://github.com/caura-ai/caura/issues/2519)) ([70c3c0f](https://github.com/caura-ai/caura/commit/70c3c0f5395e488a68c56b7f1e48bd49a221dc2d))
+* **plugin:** ground personalized advice in recalled memories ([#2521](https://github.com/caura-ai/caura/issues/2521)) ([7c8bbb1](https://github.com/caura-ai/caura/commit/7c8bbb14a1c60bcf6e26f6df44c1be4d4cccb795))
+
 ## [3.56.7](https://github.com/caura-ai/caura/compare/backend-v3.56.6...backend-v3.56.7) (2026-11-25)
 
 
