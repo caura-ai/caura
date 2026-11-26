@@ -2708,7 +2708,7 @@
                 "type": "null"
               }
             ],
-            "description": "Restrict results to one status. When omitted, superseded memories are hidden: 'outdated' rows are excluded, and 'conflicted' rows are excluded unless they exactly match the query text. Their replacements are injected in their place. Pass an explicit status to bypass this and read the superseded rows directly.",
+            "description": "Restrict results to one status. When omitted, superseded and archived memories are hidden: 'outdated' and 'archived' rows are excluded, and 'conflicted' rows are excluded unless they exactly match the query text. Replacements for superseded rows are injected in their place. Pass an explicit status to bypass this and read those rows directly.",
             "title": "Status Filter"
           },
           "tenant_id": {
