@@ -54,6 +54,17 @@ def code_for_status(status: int) -> str:
     return STATUS_TO_CODE.get(status, f"HTTP_{status}")
 
 
+def upstream_status_is_retryable(status: int) -> bool:
+    """True for an upstream (storage-api etc.) status a caller can wait out: any 5xx, and 429.
+
+    ``app.upstream_http_error_handler`` answers these with a retryable 503. A
+    4xx is a bug in the request this service sent, so it stays a 500. Code that
+    catches an upstream error, and would otherwise turn it into a 500 of its
+    own, uses this to decide which errors to re-raise to that handler.
+    """
+    return status >= 500 or status == 429
+
+
 def make_error_payload(
     code: str,
     message: str,
