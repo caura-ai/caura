@@ -95,6 +95,7 @@ from core_operations.tasks import (
     run_entity_link_tick,
     run_insights_tick,
     run_interviewer_schedule_tick,
+    run_keystone_fetch_purge_tick,
     run_lifecycle_reconcile_tick,
     run_purge_soft_deleted_tick,
 )
@@ -236,6 +237,14 @@ def _register_scheduled_tasks() -> None:
         3600,
         run_enrichment_rerun_tick,
         delay_provider=lambda: seconds_until_next_utc_minute_past(15),
+    )
+    # Deletes keystone fetch records past retention, daily at its own hour,
+    # clear of the staggered lifecycle hours that share the storage writer.
+    scheduler.register(
+        "keystone-fetch-purge",
+        24 * 3600,
+        run_keystone_fetch_purge_tick,
+        delay_provider=_daily_at("keystone_fetch_purge_run_at_hour"),
     )
     # Interviewer Phase 1: hourly queue-only tick; per-tenant period_hours
     # gates actual command creation, so opted-out tenants pay zero cost.

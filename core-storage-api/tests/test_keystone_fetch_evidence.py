@@ -254,7 +254,7 @@ async def test_operator_purge_is_bounded_and_keeps_recent_records(client, bindin
     for i in range(3):
         await _record(client, binding, old + timedelta(minutes=i))
     await _record(client, binding, now)
-    assert await purge_expired_fetches(limit=1) == 1
+    assert await purge_expired_fetches(tenant_id=binding["tenant_id"], limit=1) == 1
     async with get_engine().connect() as connection:
         times = (
             (
@@ -275,4 +275,58 @@ async def test_operator_purge_rejects_an_unbounded_batch(limit):
     from core_storage_api.services.keystone_fetches import purge_expired_fetches
 
     with pytest.raises(ValueError):
-        await purge_expired_fetches(limit=limit)
+        await purge_expired_fetches(tenant_id="test-tenant-fetch-bounds", limit=limit)
+
+
+async def test_purge_route_removes_only_this_tenants_expired_records(client, binding):
+    """The route is bound to one tenant: another tenant's expired rows stay."""
+    from core_storage_api.database.init import get_engine
+
+    other = {**binding, "tenant_id": f"test-tenant-fetch-{uuid4().hex}"}
+    now = datetime.now(UTC)
+    old = now - timedelta(days=92)
+    try:
+        for i in range(2):
+            await _record(client, binding, old + timedelta(minutes=i))
+        await _record(client, binding, now)
+        await _record(client, other, old)
+
+        response = await client.post(
+            f"{BASE}/purge-expired", json={"tenant_id": binding["tenant_id"], "limit": 1000}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json() == {"deleted": 2}
+
+        async with get_engine().connect() as connection:
+            remaining = (
+                await connection.execute(
+                    text(
+                        "SELECT tenant_id, served_at FROM keystone_fetches WHERE tenant_id IN (:mine, :other)"
+                    ),
+                    {"mine": binding["tenant_id"], "other": other["tenant_id"]},
+                )
+            ).all()
+        assert sorted(row.tenant_id for row in remaining) == sorted(
+            [binding["tenant_id"], other["tenant_id"]]
+        )
+    finally:
+        async with get_engine().begin() as connection:
+            await connection.execute(
+                text("DELETE FROM keystone_fetches WHERE tenant_id=:tenant"),
+                {"tenant": other["tenant_id"]},
+            )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"limit": 10},
+        {"tenant_id": "test-tenant-fetch-bounds", "limit": 0},
+        {"tenant_id": "test-tenant-fetch-bounds", "limit": 10001},
+        {"tenant_id": "test-tenant-fetch-bounds", "limit": "all"},
+    ],
+)
+async def test_purge_route_requires_a_tenant_and_a_bounded_limit(client, body):
+    response = await client.post(f"{BASE}/purge-expired", json=body)
+    assert response.status_code == 422, response.text

@@ -123,8 +123,8 @@ async def match_fetches(*, tenant_id: str, checks: list[FetchCheck]) -> dict:
     return {"results": results}
 
 
-async def purge_expired_fetches(*, limit: int = 1000) -> int:
-    """One bounded operator-scheduled batch; no scheduler is enabled here."""
+async def purge_expired_fetches(*, tenant_id: str, limit: int = 1000) -> int:
+    """Delete one bounded batch of a tenant's records past retention."""
     if not 1 <= limit <= 10_000:
         raise ValueError("purge limit must be 1 to 10000")
     from sqlalchemy import delete
@@ -132,7 +132,7 @@ async def purge_expired_fetches(*, limit: int = 1000) -> int:
     cutoff = datetime.now(UTC) - timedelta(days=RETENTION_DAYS)
     victims = (
         select(KeystoneFetch.id)
-        .where(KeystoneFetch.served_at < cutoff)
+        .where(KeystoneFetch.tenant_id == tenant_id, KeystoneFetch.served_at < cutoff)
         .order_by(KeystoneFetch.served_at)
         .limit(limit)
         .with_for_update(skip_locked=True)

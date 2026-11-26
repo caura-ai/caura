@@ -3782,6 +3782,12 @@ class CoreStorageClient:
                 results[i] = result
         return {"results": results}
 
+    async def purge_expired_keystone_fetches(self, tenant_id: str, limit: int) -> dict:
+        """Delete one bounded batch of a tenant's fetch records past retention."""
+        return await self._post(  # type: ignore[return-value]
+            "/keystone-fetches/purge-expired", {"tenant_id": tenant_id, "limit": limit}
+        )
+
     async def create_audit_log(self, data: dict) -> dict:
         return await self._post("/audit-logs", data)  # type: ignore[return-value]
 

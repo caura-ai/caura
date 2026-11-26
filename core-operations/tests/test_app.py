@@ -42,6 +42,9 @@ _EXPECTED_JOBS = {
     # Enriches again the rows an LLM governance policy could not judge. Hourly
     # at quarter past, clear of the other hourly jobs.
     "enrichment-rerun",
+    # Deletes keystone fetch records past their 90-day retention, daily at
+    # its own hour, clear of the staggered lifecycle hours.
+    "keystone-fetch-purge",
 }
 
 
@@ -118,6 +121,7 @@ def test_entity_link_has_its_own_hour_and_does_not_follow_the_pipeline_knob(monk
         "lifecycle_pipeline_run_at_hour",
         "lifecycle_entity_link_run_at_hour",
         "lifecycle_insights_run_at_hour",
+        "keystone_fetch_purge_run_at_hour",
     ],
 )
 def test_config_rejects_out_of_range_hour(field):
@@ -185,3 +189,17 @@ def test_the_enrichment_rerun_runs_hourly_at_quarter_past(monkeypatch):
     task = next(t for t in fresh._tasks if t.name == "enrichment-rerun")
     assert task.interval_seconds == 3600
     assert abs(task.delay_provider() - seconds_until_next_utc_minute_past(15)) < 5
+
+
+def test_keystone_fetch_purge_runs_daily_at_its_own_hour(monkeypatch):
+    assert Settings().keystone_fetch_purge_run_at_hour == 7
+    monkeypatch.setattr(app.settings, "keystone_fetch_purge_run_at_hour", 9)
+    fresh = Scheduler()
+    monkeypatch.setattr(app, "scheduler", fresh)
+
+    app._register_scheduled_tasks()
+
+    task = next(t for t in fresh._tasks if t.name == "keystone-fetch-purge")
+    now = datetime.now(UTC)
+    assert task.interval_seconds == 24 * 3600
+    assert abs(task.delay_provider() - seconds_until_next_utc_hour(9, now=now)) < 5
