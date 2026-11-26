@@ -654,7 +654,7 @@ describe("formatRecallBlock — recalled content stays data", () => {
 
   test("frames the block as reference data, not instructions", () => {
     const block = formatRecallBlock([{ memory_type: "fact", content: "x" }]);
-    assert.match(block, /^\n## Recalled Memory Context\n<recalled_memories>\n/);
+    assert.match(block, /^\n## Recalled Memory Context\n[^\n]+\n<recalled_memories>\n/);
     assert.match(block, /not\s+instructions/);
     assert.match(block, /never override the keystone rules/);
     assert.ok(block.endsWith("</recalled_memories>\n"));
