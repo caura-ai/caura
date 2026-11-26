@@ -2,7 +2,7 @@
 import {afterEach, test} from "node:test";
 import assert from "node:assert/strict";
 import {spawnSync} from "node:child_process";
-import {existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from "node:fs";
+import {existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync} from "node:fs";
 import {hostname, tmpdir} from "node:os";
 import {dirname, join} from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
@@ -12,7 +12,7 @@ const DIST = dirname(fileURLToPath(import.meta.url)), SRC = join(DIST, "../src")
 const dirs: string[] = [];
 afterEach(() => {for (const p of dirs.splice(0)) rmSync(p, {recursive: true, force: true});});
 function fixture() {
-  const home = mkdtempSync(join(tmpdir(), "runtime-wiring-")); dirs.push(home);
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "runtime-wiring-"))); dirs.push(home);
   const dir = join(home, ".openclaw/plugins", FROZEN_PLUGIN_ID); mkdirSync(dir, {recursive: true, mode: 0o700});
   const authority = join(dir, ".installation-authority.json"), cache = join(dir, ".installation-agent-keys.json"), trace = join(home, "trace.jsonl");
   const expiry = new Date(Date.now() + 30 * 86400_000).toISOString(), preload = join(home, "preload.mjs");
@@ -42,7 +42,17 @@ function fixture() {
     const line = r.stdout.split("\n").find(s => s.startsWith("WIRING_RESULT:")); assert.ok(line, "runtime must return a bounded result");
     return {exit: r.status, ...JSON.parse(line.slice("WIRING_RESULT:".length))};
   }
-  return {run, calls, authority, cache, dir};
+  function readyCache(credentialExpiry = expiry) {
+    const entries = Object.fromEntries(["agent-a", "agent-b"].map((agent, i) => [agent, {status: "ready",
+      operation: {id: "44444444-4444-4444-8444-444444444444", kind: "create"}, key: "fixture_child_key",
+      credential: {id: i ? "33333333-3333-4333-8333-333333333333" : "22222222-2222-4222-8222-222222222222",
+        org_id: "org-a", kind: "agent_key", home_tenant_id: "tenant-a", home_agent_id: agent,
+        issuing_install_uuid: journal.install_uuid, source_tenant_ids: [], read_all_org_tenants: false,
+        capabilities: ["read", "write"], expires_at: credentialExpiry, revoked_at: null, bootstrap_allowed: false, fleet_id: null}}]));
+    writeFileSync(cache, JSON.stringify({schema_version: 1, binding: {gateway: ORIGIN, api_prefix: "/api/v1",
+      org_id: "org-a", tenant_id: "tenant-a", install_uuid: journal.install_uuid, hostname: hostname()}, entries}), {mode: 0o600});
+  }
+  return {run, calls, authority, cache, dir, readyCache};
 }
 const resources = (f: ReturnType<typeof fixture>) => f.calls().filter(r => !r.url.includes("/admin/"));
 function ok(r: any) {assert.equal(r.ok, true, r.code); assert.equal(r.exit, 0);}
@@ -56,6 +66,70 @@ test("manual bootstrap verifies only its configured agent, without an install pr
   const f = fixture(); ok(f.run({mode: "manual", action: "bootstrap"}));
   assert.equal(f.calls().length, 1); assert.equal(resources(f)[0].headers["x-api-key"], "fixture_manual_key");
 });
+
+for (const startFailure of ["network", "timeout", 503, 429])
+  test(`managed startup recovers after a bounded cooldown: ${startFailure}`, () => {
+    const f = fixture(); ok(f.run({action: "recover-start", plan: {startFailure}}));
+    const probe = resources(f).find(r => r.url.endsWith("/whoami")); assert.ok(probe);
+    assert.equal(probe.headers["x-api-key"], "fixture_install_key");
+    assert.ok(f.calls().every(r => !r.url.includes("/agent-keys/provision")));
+  });
+for (const startFailure of ["network", "timeout", 503, 429])
+  test(`managed boot retry starts heartbeat without restart: ${startFailure}`, () => {
+    const f = fixture(); ok(f.run({action: "register-recovery", plan: {startFailure, recoverBoot: true},
+      env: {CAURA_NODE_NAME: "fixture-node"}}));
+  });
+
+test("two warm agents on one node resolve concurrently", () => {
+  const f = fixture(); f.readyCache(); ok(f.run({action: "warm-broker", request: {concurrent: true}}));
+  assert.ok(f.calls().every(r => r.method !== "POST"));
+});
+for (const postInitFailure of ["network", 503, 429])
+  for (const register of [false, true])
+    test(`managed hooks fail fast with shared resolution; startup=${register}, failure=${postInitFailure}`, () => {
+      const f = fixture(); ok(f.run({action: "tenant-fast-failure", request: {register}, plan: {postInitFailure},
+        env: {CAURA_TENANT_ID: ""}}));
+    });
+for (const warm of [false, true])
+  for (const cancel of [false, true])
+    test(`same-agent signalled calls coalesce; warm=${warm}, cancel=${cancel}`, () => {
+      const f = fixture(); if (warm) f.readyCache();
+      ok(f.run({action: "signal-coalesce", request: {cancel}}));
+      assert.equal(f.calls().filter(r => r.method === "POST" && r.url.includes("/admin/")).length, warm ? 0 : 1);
+    });
+for (const event of ["reuse", "elapsed", 401, 403, "authority", "held", "expired-key"])
+  test(`five-minute ready-key window: ${event}`, () => {
+    const f = fixture(), expires_at = new Date(Date.now() + 60_000).toISOString();
+    f.readyCache(event === "expired-key" ? expires_at : undefined);
+    ok(f.run({action: "reuse-window", request: {event},
+      plan: event === "expired-key" ? {existing: {expires_at}} : {}}));
+  });
+for (const lock of ["fixture live mutation", "fixture killed mutation"])
+  test(`warm ready key remains usable beside ${lock}`, () => {
+    const f = fixture(); f.readyCache(); writeFileSync(f.cache + ".lock", lock, {mode: 0o600});
+    ok(f.run({action: "warm-broker"})); assert.equal(readFileSync(f.cache + ".lock", "utf8"), lock);
+    assert.ok(f.calls().every(r => r.method !== "POST"));
+  });
+test("a mutation waits for a legitimate writer to release the lock", () => {
+  const f = fixture(); ok(f.run({action: "wait-broker"})); assert.ok(!existsSync(f.cache + ".lock"));
+});
+for (const pauseWarm of ["context", "metadata"])
+  test(`recall abort reaches the warm ${pauseWarm} check`, () => {
+    const f = fixture(); f.readyCache(); ok(f.run({action: "abort-warm", plan: {pauseWarm}}));
+  });
+
+for (const mode of ["managed", "standalone", "manual"])
+  for (const op of ["read", "delete"])
+    for (const doc_id of ["forge/abc", "notes.md", "a b", "x:y"])
+      test(`document ${op} reaches server in ${mode}: ${doc_id}`, () => {
+        const f = fixture();
+        ok(f.run({mode, action: "tool", request: {tool: "caura_doc", params: {op, collection: "notes", doc_id}},
+          env: {CAURA_MANUAL_AGENT_ID: "agent-b"}, plan: {manualReply: {agent_id: "agent-b"},
+            response: {home_agent_id: "agent-b"}}}));
+        const calls = resources(f).filter(r => new URL(r.url).pathname.includes("/documents/"));
+        assert.equal(calls.length, 1); assert.equal(calls[0].method, op === "read" ? "GET" : "DELETE");
+        assert.equal(new URL(calls[0].url).pathname, "/api/v1/documents/" + encodeURIComponent(doc_id));
+      });
 test("managed runtime uses the bound child, never the legacy cache or tenant key", () => {
   const f = fixture(); ok(f.run()); assert.ok(resources(f).some(r => r.headers["x-api-key"] === "fixture_child_key"));
   assert.ok(f.calls().every(r => r.headers["x-api-key"] !== "fixture_tenant_key"));
@@ -129,6 +203,22 @@ test("manual assemble skips automatic requests and preserves backend reachabilit
   const f = fixture(), r = f.run({action: "assemble", mode: "manual"}); ok(r); assert.deepEqual(r.diagnostics, []);
   assert.equal(f.calls().length, 1); assert.ok(f.calls()[0].url.endsWith("/whoami"));
 });
+
+for (const mode of [undefined, "", "unknown"])
+  for (const reachability of ["unknown", "reachable", "unreachable"])
+    test(`startup names the held auth mode once: mode=${mode}, backend=${reachability}`, () => {
+      const f = fixture();
+      const r = f.run({action: "startup", request: {reachability}, env: {CAURA_AUTH_MODE: mode}});
+      ok(r);
+      assert.deepEqual(f.calls(), [], "a held mode must make no request");
+      assert.equal(r.diagnostics.length, 1,
+        "registration and bootstrap share one visible notice: " + r.diagnostics.join("; "));
+      const notice = r.diagnostics[0];
+      assert.match(notice, /CAURA_AUTH_MODE/);
+      assert.match(notice, /docs\/plugin-upgrade\.md/);
+      assert.match(notice, mode === "unknown" ? /runtime_auth_mode_invalid/ : /runtime_auth_mode_required/);
+      assert.doesNotMatch(notice, /Set CAURA_TENANT_ID|fixture prior outage/);
+    });
 
 for (const publicPath of ["/tool-descriptions", "/plugin-manifest", "/plugin-source"]) for (const status of [401, 403])
   test(`manual agent remains usable after public ${publicPath} HTTP${status}`, () => {

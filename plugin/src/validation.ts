@@ -170,6 +170,7 @@ export function verifyCommandSignature(
   requireSigned: boolean = false,
 ): { valid: boolean; reason?: string } {
   if (!secretKey) {
+    if (requireSigned) return { valid: false, reason: "strict_signing_without_key" };
     // No key configured — development/keyless mode.
     // Allow unsigned commands through, but reject if a signature IS present
     // (something is trying to look authenticated when we can't verify it).

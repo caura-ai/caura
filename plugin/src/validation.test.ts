@@ -70,6 +70,37 @@ function signedCommand(overrides: Partial<{ id: string; command: string; payload
 }
 
 describe("verifyCommandSignature", () => {
+  for (const signed of [false, true]) {
+    test(`keyless strict mode refuses ${signed ? "signed" : "unsigned"} commands`, () => {
+      const cmd = signed ? signedCommand() : { id: "keyless", command: "ping" };
+      assert.deepEqual(verifyCommandSignature(cmd, "", true), {
+        valid: false,
+        reason: "strict_signing_without_key",
+      });
+    });
+  }
+
+  test("keyless permissive mode retains its single warning and signature refusal", async () => {
+    // Isolate the process-wide warning latch from the other verifier tests.
+    const modulePath = "./validation.js?keyless-permissive-contract";
+    const { verifyCommandSignature: verify } = await import(modulePath);
+    const originalWarn = console.warn, warnings: string[] = [];
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+    try {
+      const cmd = { id: "keyless", command: "ping" };
+      for (let i = 0; i < 2; i++) {
+        assert.deepEqual(verify(cmd, "", false), { valid: true, reason: "no_secret_configured" });
+      }
+      assert.deepEqual(verify(signedCommand(), "", false), {
+        valid: false, reason: "no_secret_configured_but_signature_present",
+      });
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /accepting unsigned commands/);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
   test("keyless mode accepts unsigned commands", () => {
     const cmd = { id: "1", command: "ping" };
     const result = verifyCommandSignature(cmd, "");

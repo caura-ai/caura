@@ -1,6 +1,6 @@
 /** Explicit request authority; construction and import perform no I/O or environment reads. */
 import {EnrollmentError, readVerifiedInstallAuthority, requestInstallJson} from "./install-authority.js";
-import {InstallAgentError, resolveInstallAgentKey} from "./install-agent-auth.js";
+import {InstallAgentError, invalidateInstallAgentKeys, resolveInstallAgentKey} from "./install-agent-auth.js";
 import {isLoopbackHost, isValidSafeId} from "./validation.js";
 
 export const RUNTIME_AUTH_SETTINGS = Object.freeze({mode: "CAURA_AUTH_MODE",
@@ -14,6 +14,7 @@ export interface RuntimeAuthConfig {
 export interface AuthorityRequest {
   authority: "none" | "agent" | "install"; method: string; path: string; agentId?: string;
   extraHeaders?: Record<string, string>;
+  signal?: AbortSignal;
 }
 export interface AuthorizedRequest {headers: Record<string, string>; tenantId?: string; fleetId?: string | null;}
 export class RuntimeAuthError extends Error {}
@@ -37,13 +38,19 @@ function nodeRoute(method: string, path: string): boolean {
 }
 function checkedRequest(r: AuthorityRequest): Headers {
   if (!r || !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(r.method) ||
-      typeof r.path !== "string" || !/^\/(?:[\w-]+\/)*[\w-]+$/.test(r.path)) fail("request_invalid");
-  if (PUBLIC.has(r.path)) {
+      typeof r.path !== "string" || !/^\/(?:[\w.~\-]|%[0-9a-f]{2}|\/)+$/i.test(r.path)) fail("request_invalid");
+  let path = r.path;
+  for (let depth = 0;; depth++) {
+    if (path.slice(1).split("/").some(s => !s || s === "." || s === "..") || /[\\\x00-\x1f\x7f]/.test(path)) fail("request_invalid");
+    if (!/%[0-9a-f]{2}/i.test(path)) break;
+    if (depth >= 4) fail("request_invalid");
+    try {path = decodeURIComponent(path);} catch {return fail("request_invalid");}
+  }
+  if (PUBLIC.has(path)) {
     if (r.method !== "GET" || r.authority !== "none") fail("authority_mismatch");
-  } else if (nodeRoute(r.method, r.path)) {
+  } else if (nodeRoute(r.method, path)) {
     if (r.authority !== "install") fail("authority_mismatch");
-  } else if (r.authority !== "agent" || r.path.startsWith("/admin/") ||
-      r.path.startsWith("/fleet/") || r.path.startsWith("/skills/")) fail("authority_mismatch");
+  } else if (r.authority !== "agent" || /^\/(?:admin|fleet|skills)(?:\/|$)/.test(path)) fail("authority_mismatch");
   if (r.authority === "agent" && !isValidSafeId(r.agentId)) fail("agent_required");
   const headers = new Headers(r.extraHeaders);
   for (const key of headers.keys()) {
@@ -57,6 +64,7 @@ function checkedRequest(r: AuthorityRequest): Headers {
 export function createRuntimeAuth(config: RuntimeAuthConfig) {
   const c = Object.freeze({...config});
   let initialized: Promise<void> | undefined, manualHeld = false;
+  let retryAt = 0, startError: RuntimeAuthError | undefined;
   function mode(): "managed" | "standalone" | "manual" {
     if (c.mode === undefined || (typeof c.mode === "string" && !c.mode.trim())) fail("mode_required");
     if (c.mode !== "managed" && c.mode !== "standalone" && c.mode !== "manual") fail("mode_invalid");
@@ -107,8 +115,12 @@ export function createRuntimeAuth(config: RuntimeAuthConfig) {
   }
   function initialize(): Promise<void> {
     if (manualHeld) return Promise.reject(new RuntimeAuthError("runtime_auth_manual_held"));
-    // A failed initialization is not an automatic recovery or a new identity.
-    initialized ??= start().catch(e => {if (c.mode === "manual") manualHeld = true; throw normalized(e);});
+    if (!initialized && startError && Date.now() < retryAt) return Promise.reject(startError);
+    initialized ??= start().catch(e => {
+      initialized = undefined; startError = normalized(e); retryAt = Date.now() + 30_000;
+      if (c.mode === "manual" && /^runtime_auth_http_(401|403)$/.test(startError.message)) manualHeld = true;
+      throw startError;
+    });
     return initialized.then(() => {if (manualHeld) fail("manual_held");});
   }
   async function authorize(request: AuthorityRequest): Promise<AuthorizedRequest> {
@@ -127,7 +139,7 @@ export function createRuntimeAuth(config: RuntimeAuthConfig) {
           const j = request.authority === "install" ? await freshInstall() : localInstall();
           key = request.authority === "install" ? j.install_credential : await resolveInstallAgentKey({
             gateway: j.gateway, apiPrefix: j.api_prefix, orgId: j.org_id!, tenantId: j.tenant_id!,
-            installUuid: j.install_uuid!, agentId: request.agentId!, capabilities: ["read", "write"]});
+            installUuid: j.install_uuid!, agentId: request.agentId!, capabilities: ["read", "write"], signal: request.signal});
           unchanged(j); tenantId = j.tenant_id; fleetId = j.fleet_id;
         }
       }
@@ -136,7 +148,8 @@ export function createRuntimeAuth(config: RuntimeAuthConfig) {
       return {headers: Object.fromEntries(headers), tenantId, fleetId};
     } catch (e) {throw normalized(e);}
   }
-  function observeResponse(status: number): void {
+  function observeResponse(status: number, key?: string): void {
+    if (c.mode === "managed" && key && (status === 401 || status === 403)) invalidateInstallAgentKeys();
     if (c.mode === "manual" && (status === 401 || status === 403)) manualHeld = true;
   }
   return {initialize, authorize, observeResponse};

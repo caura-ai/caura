@@ -115,7 +115,18 @@ function auth() {
     manualTenantId: setting(RUNTIME_AUTH_SETTINGS.manualTenantId) as string | undefined,
     allowInsecureHttp: CAURA_ALLOW_INSECURE_HTTP});
 }
-export async function initializeRuntimeAuth(): Promise<void> {await auth().initialize();}
+let modeNoticeShown = false;
+export function reportAuthModeHold(error: unknown): boolean {
+  if (!(error instanceof RuntimeAuthError) || !/^runtime_auth_mode_(required|invalid)$/.test(error.message)) return false;
+  if (!modeNoticeShown) {
+    modeNoticeShown = true;
+    console.warn(`[caura] ${error.message}: outbound calls held. Set CAURA_AUTH_MODE (managed, standalone or manual); see docs/plugin-upgrade.md, then restart.`);
+  }
+  return true;
+}
+export async function initializeRuntimeAuth(): Promise<void> {
+  try {await auth().initialize();} catch (e) {reportAuthModeHold(e); throw e;}
+}
 /** All outbound calls choose authority before any credential is attached. */
 export async function apiFetch(authority: "none" | "agent" | "install", method: string,
   resource: string, init: RequestInit = {}, agentId?: string): Promise<Response> {
@@ -125,7 +136,7 @@ export async function apiFetch(authority: "none" | "agent" | "install", method: 
   if (getAuthMode() === "standalone" && CAURA_API_KEY) assertKeyTransportAllowed();
   const client = auth(); await client.initialize();
   const selected = await client.authorize({authority, method, path: url.pathname.slice(CAURA_API_PREFIX.length),
-    agentId, extraHeaders: Object.fromEntries(new Headers(init.headers))});
+    agentId, signal: init.signal ?? undefined, extraHeaders: Object.fromEntries(new Headers(init.headers))});
   if (CAURA_TENANT_ID && selected.tenantId && selected.tenantId !== CAURA_TENANT_ID)
     throw new RuntimeAuthError("runtime_auth_scope_mismatch");
   const headers = withUserAgent(init.headers instanceof Headers || Array.isArray(init.headers) ?
@@ -133,7 +144,7 @@ export async function apiFetch(authority: "none" | "agent" | "install", method: 
   if (selected.headers["x-api-key"]) headers["X-API-Key"] = selected.headers["x-api-key"];
   const res = await fetch(url, {...init, method, headers, redirect: "error",
     signal: init.signal ?? AbortSignal.timeout(10_000)});
-  if (authority !== "none") client.observeResponse(res.status);
+  if (authority !== "none") client.observeResponse(res.status, selected.headers["x-api-key"]);
   return res;
 }
 
@@ -289,11 +300,12 @@ export function assertKeyTransportAllowed(): void {
 const TENANT_RESOLVE_TIMEOUT_MS = 10_000;
 
 export async function resolveTenantId(): Promise<string> {
-  await initializeRuntimeAuth();
   if (getAuthMode() === "managed") {
+    await initializeRuntimeAuth();
     const selected = await auth().authorize({authority: "install", method: "GET", path: "/whoami"});
     return CAURA_TENANT_ID = selected.tenantId!;
   }
+  await initializeRuntimeAuth();
   if (getAuthMode() === "manual") return CAURA_TENANT_ID = setting(RUNTIME_AUTH_SETTINGS.manualTenantId) as string;
   if (CAURA_TENANT_ID) return CAURA_TENANT_ID;
   if (!CAURA_API_KEY) return "";
@@ -402,24 +414,37 @@ const TENANT_RESOLVE_FAILED =
 
 let _tenantPromise: Promise<string> | null = null;
 let _tenantFailedAt: number | null = null;
+let _tenantFailure: unknown;
 
 export async function ensureTenantId(): Promise<string> {
   await initializeRuntimeAuth();
   if (CAURA_TENANT_ID) return CAURA_TENANT_ID;
   if (!_tenantPromise) {
     if (_tenantFailedAt !== null && Date.now() - _tenantFailedAt < TENANT_FAILURE_COOLDOWN_MS) {
-      throw new Error(TENANT_RESOLVE_FAILED);
+      throw _tenantFailure ?? new Error(TENANT_RESOLVE_FAILED);
     }
-    _tenantPromise = resolveTenantId();
+    _tenantPromise = resolveTenantId().then(tid => {
+      if (!tid) throw new Error(TENANT_RESOLVE_FAILED);
+      _tenantFailedAt = null; _tenantFailure = undefined;
+      return tid;
+    }).catch(e => {
+      _tenantPromise = null; _tenantFailedAt = Date.now(); _tenantFailure = e;
+      throw e;
+    });
   }
-  const tid = await _tenantPromise;
-  if (!tid) {
-    _tenantPromise = null;
-    _tenantFailedAt = Date.now();
-    throw new Error(TENANT_RESOLVE_FAILED);
+  return _tenantPromise;
+}
+
+/** Background startup owns retry delays; lifecycle hooks share only individual attempts. */
+export async function ensureStartupTenantId(): Promise<string> {
+  for (let attempt = 0;; attempt++) {
+    try {return await ensureTenantId();}
+    catch (e) {
+      if (getAuthMode() !== "managed" || attempt >= 3 || !(e instanceof RuntimeAuthError) ||
+          !/^runtime_auth_(?:request_failed|http_(?:429|5\d\d))$/.test(e.message)) throw e;
+      await new Promise(resolve => setTimeout(resolve, TENANT_FAILURE_COOLDOWN_MS));
+    }
   }
-  _tenantFailedAt = null;
-  return tid;
 }
 
 // --- Tool descriptions ---

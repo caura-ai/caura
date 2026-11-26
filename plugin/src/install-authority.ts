@@ -78,10 +78,11 @@ function readJournal(): Journal | null {
   return j;
 }
 
-export async function requestInstallJson(j: Pick<Journal, "gateway" | "api_prefix">, path: string, key: string | undefined, body?: object): Promise<Record<string, unknown>> {
+export async function requestInstallJson(j: Pick<Journal, "gateway" | "api_prefix">, path: string, key: string | undefined, body?: object, signal?: AbortSignal): Promise<Record<string, unknown>> {
   try {
     const res = await fetch(`${j.gateway}${j.api_prefix}${path}`, {
-      method: body ? "POST" : "GET", redirect: "error", signal: AbortSignal.timeout(10_000),
+      method: body ? "POST" : "GET", redirect: "error",
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
       headers: withUserAgent({...body ? {"Content-Type": "application/json"} : {}, ...key ? {"X-API-Key": key} : {}}),
       body: body ? JSON.stringify(body) : undefined,
     });

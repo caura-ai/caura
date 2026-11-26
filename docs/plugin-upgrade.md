@@ -8,6 +8,7 @@ Every existing installation and every fresh `/install-plugin` install stops
 outbound calls until its operator sets `CAURA_AUTH_MODE`. Missing or blank mode
 reports `runtime_auth_mode_required`; unknown mode reports `runtime_auth_mode_invalid`.
 The installer does not choose a mode. Restart after changing authority settings.
+Set `CAURA_AUTH_MODE` in the plugin's `.env` or in its plugin config block, then restart.
 
 - `managed`: explicitly enroll through `enroll-installation`; verified installation
   authority handles node traffic and delegates bound agent keys for agent requests.

@@ -707,6 +707,7 @@ echo "API URL:          $CAURA_API_URL"
 echo "Fleet ID:         $CAURA_FLEET_ID"
 echo "API Key:          {api_key_preview}"
 echo ""
+echo "Outbound calls remain held until you set CAURA_AUTH_MODE: managed, standalone or manual. See docs/plugin-upgrade.md; then restart."
 echo "Next: restart your OpenClaw gateway to activate the plugin."
 echo "  Linux:  systemctl --user restart openclaw-gateway"
 echo '  macOS:  launchctl kickstart -k "gui/$(id -u)/ai.openclaw.gateway"'

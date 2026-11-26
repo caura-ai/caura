@@ -102,7 +102,16 @@ Rotation names the stored owned credential and never extends its deadline.
 State and each JSON response are capped at 64 KiB. Full or invalid state refuses
 instead of silently evicting pending operations.
 
-Read-only failures release `.installation-agent-keys.json.lock` without changing
+Ready keys use lockless atomic-cache reads and local binding/expiry checks. Live
+context and credential checks run outside the lock, with caller cancellation,
+and are reused in-process for up to five minutes. Authority changes and data
+responses of 401/403 invalidate that record. The gateway's existing claims cache
+can delay revocation refusal by up to five seconds. Writers wait at most five
+seconds for the mutation lock; they never delete another writer's lock.
+A matching operation marker (or a legacy empty lock) still holds an uncertain
+ready acknowledgement. Warm reads may use other already-acknowledged entries.
+
+Read-only failures in the mutation path release `.installation-agent-keys.json.lock` without changing
 the cache, so later calls can revalidate normally. A pending save that fails
 before replacing the cache also releases the lock and sends no mutation. After
 pending state replaces the cache, failures before durable ready acknowledgement
@@ -114,6 +123,10 @@ Once a valid mutation response arrives, its key is saved before rechecking local
 enrollment authority. An authority change still refuses to return the key, but
 does not discard the durable acknowledgement or retain the broker lock. Later
 use requires fresh enrollment authority, context and owned-credential checks.
+Only an interrupted mutation can leave the broker lock; warm reads take no lock.
+Stop all writers, check the server's operation/credential state with an admin,
+and clear only the stale lock when the outcome is known. Pending or uncertain
+operations still require support; deleting a lock is not permission to replay them.
 A hard crash can also leave a pending operation. Stop
 all broker callers and involve the operator/support before recovery; do not
 blindly delete the lock, journal, or pending entry to retry. A metadata listing
