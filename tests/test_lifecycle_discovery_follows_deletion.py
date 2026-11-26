@@ -19,6 +19,9 @@ from uuid import uuid4
 
 from sqlalchemy import text
 
+from core_api.clients.storage_client import get_storage_client
+from core_api.config import settings
+from core_api.services.lifecycle_audit import resolve_publisher_kwargs
 from core_api.services.organization_settings import invalidate_cache, update_settings
 from core_api.services.tenants import (
     list_active_tenant_ids,
@@ -132,6 +135,19 @@ async def test_purge_finds_a_tenant_on_a_short_retention_window():
 
     assert short in purgeable
     assert recent not in purgeable
+
+
+async def test_deployment_default_purges_an_org_with_no_retention_setting(monkeypatch):
+    """LIFECYCLE_MEMORY_RETENTION_DAYS reaches the purge for an org that never
+    wrote a setting, the case that depends on discovery using the one-day floor."""
+    monkeypatch.setattr(settings, "lifecycle_memory_retention_days", 1)
+    org = _tenant()
+    await _memory(org, deleted_days_ago=2)
+
+    assert org in await list_tenants_with_purgeable_memories()
+    kwargs = await resolve_publisher_kwargs("purge-soft-deleted", org)
+    assert kwargs == {"retention_days": 1}
+    assert await get_storage_client().purge_soft_deleted(org, None, **kwargs) == 1
 
 
 async def test_a_suppressed_tenant_is_still_purged():
