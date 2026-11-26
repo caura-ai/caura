@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.56.9](https://github.com/caura-ai/caura/compare/backend-v3.56.8...backend-v3.56.9) (2026-11-26)
+
+
+### Bug Fixes
+
+* **search:** answer a storage timeout with a retryable 503, not a 500 ([#2524](https://github.com/caura-ai/caura/issues/2524)) ([08120e9](https://github.com/caura-ai/caura/commit/08120e9f823c005d4964a014a14fdddeccb6c5a5))
+
 ## [3.56.8](https://github.com/caura-ai/caura/compare/backend-v3.56.7...backend-v3.56.8) (2026-11-26)
 
 
