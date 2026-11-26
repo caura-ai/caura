@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid4
 
+import httpx
 from fastapi import HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -99,6 +100,7 @@ from core_api.errors import (
     AUTH_FLEET_SCOPE_FORBIDDEN,
     AUTH_KEPT_PRIVATE_BY_POLICY,
     coded_detail,
+    upstream_status_is_retryable,
 )
 from core_api.request_bounds import TEXT_FIELD_CAPS, validate_write_fields
 from core_api.schemas import (
@@ -6474,12 +6476,26 @@ async def _search_memories_pipeline(
         from core_api.pipeline.step import StepOutcome
 
         failed_steps = [s for s in result.steps if s.outcome == StepOutcome.FAILED]
-        if failed_steps and failed_steps[-1].error:
+        error = failed_steps[-1].error if failed_steps else None
+        if error is not None:
             logger.error(
                 "Search pipeline step %r failed: %s",
                 failed_steps[-1],
-                failed_steps[-1].error,
+                error,
             )
+        # A storage 5xx or 429 is not a search bug, and a retry can succeed.
+        # The one production hit is the reader's 504 when the scored search
+        # reaches its statement timeout. Re-raised as itself, it reaches
+        # ``app.upstream_http_error_handler``, which answers REST with a
+        # retryable 503, and MCP ``caura_recall`` answers it with the upstream
+        # status's code. Turned into the 500 below, as it used to be, a search
+        # that timed out under load read as a crash, and ``/search`` logged it
+        # with ``error: false``: that route treats an ``HTTPException`` as an
+        # expected outcome.
+        if isinstance(error, httpx.HTTPStatusError) and upstream_status_is_retryable(
+            error.response.status_code
+        ):
+            raise error
         raise HTTPException(status_code=500, detail="Search pipeline failed unexpectedly")
 
     if diagnostic and diagnostic_ctx is not None:

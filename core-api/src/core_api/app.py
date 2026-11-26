@@ -1258,10 +1258,10 @@ async def upstream_http_error_handler(request: Request, exc: httpx.HTTPStatusErr
     raw ``HTTPStatusError``). ``response`` is a required, non-Optional field
     on ``HTTPStatusError``, so it's always present.
     """
-    from core_api.errors import code_for_status, make_error_payload
+    from core_api.errors import code_for_status, make_error_payload, upstream_status_is_retryable
 
     status = exc.response.status_code
-    if status < 500 and status != 429:
+    if not upstream_status_is_retryable(status):
         raise exc
 
     logger.warning(
