@@ -547,7 +547,13 @@ def _fts_guard_clause(query: str, ts_query: ColumnElement[Any]) -> ColumnElement
     return Memory.search_vector.op("@@")(ts_query) if query and query.strip() else false()
 
 
-def _successor_fts_clause(query: str, ts_query: ColumnElement[Any]) -> ColumnElement[bool]:
+def _successor_fts_clause(
+    query: str,
+    ts_query: ColumnElement[Any],
+    *,
+    tenant_id: str,
+    readable_tenant_ids: list[str] | None,
+) -> ColumnElement[bool]:
     """True when the row that superseded this one is ALSO a lexical match for the query.
 
     Path A marks the older row ``conflicted`` and points the newer row at it via
@@ -557,17 +563,37 @@ def _successor_fts_clause(query: str, ts_query: ColumnElement[Any]) -> ColumnEle
     the successor matches the same query just as well, the query is about the
     shared subject, not the old row, and surfacing the old row serves a stale claim
     next to its correction. ``false()`` for a blank query, like ``_fts_guard_clause``.
+
+    UNCORRELATED on purpose: ``(id, tenant_id) IN (superseded rows)``, not
+    ``EXISTS (... WHERE successor.supersedes_id = memories.id)``. The two select the
+    same rows, but a correlated subquery in a scan's filter is parallel-restricted,
+    so Postgres runs the whole scan in one process. The scored search's ingredients
+    CTE scores every row of the tenant, and the correlated form (#2373) took it
+    from a parallel plan to a serial one: on a tenant of ~240k memories, the same
+    ~4.2M buffer reads ran in 1.5 s with four workers and in about 6 s without
+    them. ``test_scored_search_row_filters_parallel_safe`` holds this.
+
+    ``supersedes_id IS NOT NULL`` keeps NULL out of the list, so ``NOT IN`` (the
+    carve-out negates this clause) cannot go NULL. The tenant bound changes no
+    result: the successor must share the row's tenant, and the row filters already
+    limit that to the caller's tenants. It keeps the list to those tenants instead
+    of every tenant's rows that match the query.
     """
     if not (query and query.strip()):
         return false()
     successor = aliased(Memory)
-    return exists().where(
-        successor.supersedes_id == Memory.id,
-        successor.tenant_id == Memory.tenant_id,
+    superseded = select(successor.supersedes_id, successor.tenant_id).where(
+        successor.supersedes_id.is_not(None),
+        (
+            successor.tenant_id.in_(readable_tenant_ids)
+            if readable_tenant_ids
+            else successor.tenant_id == tenant_id
+        ),
         successor.deleted_at.is_(None),
         successor.status.notin_(("outdated", "conflicted", QUARANTINED_MEMORY_STATUS)),
         successor.search_vector.op("@@")(ts_query),
     )
+    return tuple_(Memory.id, Memory.tenant_id).in_(superseded)
 
 
 def _scored_search_row_filters(
@@ -4857,7 +4883,9 @@ class PostgresService:
                 tenant_id=tenant_id,
                 readable_tenant_ids=readable_tenant_ids,
                 fts_guard=_fts_guard,
-                successor_fts=_successor_fts_clause(query, ts_query),
+                successor_fts=_successor_fts_clause(
+                    query, ts_query, tenant_id=tenant_id, readable_tenant_ids=readable_tenant_ids
+                ),
                 fleet_ids=fleet_ids,
                 strict_fleet_scoping=strict_fleet_scoping,
                 caller_agent_id=caller_agent_id,
@@ -5624,7 +5652,9 @@ class PostgresService:
             tenant_id=tenant_id,
             readable_tenant_ids=readable_tenant_ids,
             fts_guard=_fts_guard_clause(query, ts_query),
-            successor_fts=_successor_fts_clause(query, ts_query),
+            successor_fts=_successor_fts_clause(
+                query, ts_query, tenant_id=tenant_id, readable_tenant_ids=readable_tenant_ids
+            ),
             fleet_ids=fleet_ids,
             strict_fleet_scoping=strict_fleet_scoping,
             caller_agent_id=caller_agent_id,
@@ -5766,7 +5796,9 @@ class PostgresService:
                         and_(
                             Memory.status == "conflicted",
                             _fts_guard_clause(query, ts_query),
-                            ~_successor_fts_clause(query, ts_query),
+                            ~_successor_fts_clause(
+                                query, ts_query, tenant_id=tenant_id, readable_tenant_ids=readable_tenant_ids
+                            ),
                         ),
                     )
                 )
