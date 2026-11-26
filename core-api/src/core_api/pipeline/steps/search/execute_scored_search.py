@@ -8,6 +8,7 @@ response dicts back to SimpleNamespace rows for downstream steps.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections import OrderedDict
 from types import SimpleNamespace
@@ -20,6 +21,10 @@ from core_api.pipeline.step import StepOutcome, StepResult
 from core_api.schemas import EntityLinkOut
 from core_api.services.task_tracker import tracked_task
 from core_api.tasks import track_task
+
+_SUBSCRIPTION_COUNT_QUERY = re.compile(r"^\s*how many\s+(?:[\w-]+\s+){0,3}subscriptions?\b", re.IGNORECASE)
+_SUBSCRIPTION_TERMS = re.compile(r"\bsubscri(?:ptions?|b(?:e[drs]?|ers|ing))\b", re.IGNORECASE)
+_SUBSCRIPTION_MATCH_BONUS = 0.05
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +319,14 @@ class ExecuteScoredSearch:
                     data["tenant_id"],
                 )
             )
+
+        # Counts need evidence across sessions. A verb such as "subscribed" can
+        # be relevant even when the full-text query for "subscriptions" misses it.
+        if float(sp.get("fts_weight", 0.0)) > 0 and _SUBSCRIPTION_COUNT_QUERY.match(data["query"]):
+            for row in rows:
+                if _SUBSCRIPTION_TERMS.search(row.get("content") or ""):
+                    row["score"] = float(row.get("score") or 0.0) + _SUBSCRIPTION_MATCH_BONUS
+            rows.sort(key=lambda row: float(row.get("score") or 0.0), reverse=True)
 
         # Map response dicts to SimpleNamespace rows expected by downstream steps.
         grouped: OrderedDict[str, SimpleNamespace] = OrderedDict()
